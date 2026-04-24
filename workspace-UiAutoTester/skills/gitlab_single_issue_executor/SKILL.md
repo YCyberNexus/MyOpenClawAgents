@@ -1,10 +1,16 @@
 ---
 name: gitlab_single_issue_executor
-description: Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds.
+description: "[SKILL_VERSION=2026-04-24.1] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
+
+**SKILL_VERSION: 2026-04-24.1**
+
+The executor MUST include a `"skill_version": "2026-04-24.1"` field in its compact chat summary, and MUST write the same version string into the per-issue state file (`issue-<iid>.json.skill_version`). This lets the operator verify which version of the skill is actually loaded by each spawned session.
+
+---
 
 ## Purpose
 

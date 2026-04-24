@@ -1,10 +1,16 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output.
+description: "[SKILL_VERSION=2026-04-24.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
+
+**SKILL_VERSION: 2026-04-24.1**
+
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+
+---
 
 ## Concurrency Policy (READ FIRST — HARD RULE)
 
