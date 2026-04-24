@@ -198,6 +198,10 @@ Rules:
 2. The dispatcher should create the dedicated issue session if it does not exist.
 3. If the session already exists, resume that same session.
 4. The dispatcher must send the issue session a short executor command.
+5. **Strict serial execution.** The dispatcher MUST process at most one issue at any moment. It MUST spawn exactly one issue session, wait for that session to return a terminal reply, read the per-issue state file, and only then consider the next IID. Concurrent or batched spawning of multiple issue sessions is forbidden, even when the remaining quota is greater than one.
+6. **No parallel tool calls for issue execution.** When invoking `sessions_spawn` (or any equivalent spawn mechanism) for an issue, the dispatcher MUST issue that call alone in its tool-call batch. It MUST NOT place two or more issue spawns in the same parallel tool-call block. The next spawn may only be issued after the previous spawn's reply has been received and its per-issue state file has been re-read from disk.
+7. **Blocking wait semantics.** If the spawn mechanism supports background / no-wait / fire-and-forget modes, the dispatcher MUST NOT use them for issue sessions. It must use the synchronous, blocking form so that control only returns after the executor session has produced its terminal summary.
+8. **One active issue at a time in campaign state.** `active_issue_iid` must be set before spawning, and must be cleared (or replaced) only after the spawned session reports a terminal status and campaign state has been persisted. The dispatcher must never hold more than one `active_issue_iid` simultaneously.
 
 Recommended executor message:
 
@@ -266,13 +270,17 @@ On each scheduled wake-up:
 3. If `campaign_status = completed`, return immediately.
 4. Set `quota_completed_this_tick = 0`.
 5. Set tick start time.
-6. Repeatedly choose the next eligible issue while quota and time budget remain:
+6. Enter a **strictly serial** loop. While quota and time budget remain, do the following one IID at a time. Never run multiple IIDs in parallel, and never pre-spawn the next IID before the current one returns.
    - first choose the lowest-IID unfinished backlog item eligible for processing
    - if none exists, choose the next fresh IID beginning at `next_new_issue_iid`
-7. For the chosen IID:
+7. For the chosen IID (serial, blocking):
+   - set `active_issue_iid` in campaign state and persist
    - create or resume its dedicated issue session
-   - send `RUN_SINGLE_ISSUE_SESSION`
-   - read its per-issue state file afterward
+   - send `RUN_SINGLE_ISSUE_SESSION` in a **single** spawn call, issued alone in its tool-call batch
+   - block until that session returns its terminal reply
+   - read its per-issue state file from disk
+   - clear / update `active_issue_iid` and persist campaign state
+   - only now may the dispatcher consider the next IID
 8. If the per-issue state becomes terminal for the campaign step (`done`, `no_changes`, `failed`):
    - add the IID to terminal state collections
    - remove it from unfinished backlog

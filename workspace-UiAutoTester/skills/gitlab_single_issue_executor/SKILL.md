@@ -218,19 +218,69 @@ issue/<iid>-auto-fix
 
 If repository changes exist:
 1. checkout `issue/<iid>-auto-fix`
-2. commit changes
-3. push branch
-4. create merge request targeting `master`
-5. save MR metadata to disk
-6. update issue labels from `doing` to `pr`
-7. immediately update issue labels from `pr` to `done`
-8. write issue state as `done`
+2. stage changes with an explicit and exhaustive add step (see "Required Staging Rules" below)
+3. commit changes
+4. push branch
+5. create merge request targeting `master`
+6. save MR metadata to disk
+7. update issue labels from `doing` to `pr`
+8. immediately update issue labels from `pr` to `done`
+9. write issue state as `done`
 
 For this automation campaign, successful merge request creation is the terminal completion condition for the issue executor. The issue must not stay at `pr` for future scheduler retries.
 
 If no changes exist:
 - preserve logs
 - write issue state as `no_changes`
+
+### Required Staging Rules
+
+Every work branch pushed to GitLab MUST contain that run's execution evidence. The executor must not rely on Claude's own staging choices.
+
+Mandatory order:
+
+1. Finish writing all log artifacts BEFORE staging. At minimum these must exist on disk before `git add`:
+   - `${LOG_DIR}/prompt.txt`
+   - `${LOG_DIR}/claude_result.txt`
+   - `${LOG_DIR}/acpx_raw.log`
+   - `${LOG_DIR}/git_status.txt`
+   - `${LOG_DIR}/git_diff.patch`
+   - `${ISSUE_STATE_FILE}`
+2. Checkout the work branch `issue/<iid>-auto-fix` only after the above artifacts are written.
+3. Stage in two steps so logs cannot be missed:
+   ```bash
+   # a. all repository changes produced by Claude
+   git add -A
+
+   # b. force-add log + state artifacts even if gitignored
+   git add -f -- \
+     "openclaw_log/issue-${ISSUE_IID}/" \
+     "openclaw_state/issues/issue-${ISSUE_IID}.json"
+   ```
+4. Before committing, verify the staged tree actually contains the log artifacts:
+   ```bash
+   git diff --cached --name-only | grep -q "openclaw_log/issue-${ISSUE_IID}/claude_result.txt" \
+     || { echo "missing logs in staging"; exit 1; }
+   ```
+   If the check fails, do not push or create an MR. Mark the issue `blocked` with `block_reason="logs missing from work branch staging"`.
+5. Commit with a message including the issue IID, then push.
+
+### .gitignore Handling
+
+If the repository's `.gitignore` excludes `openclaw_log/` or `openclaw_state/`, the executor must still include this run's artifacts by using `git add -f` as shown above. Never modify the repository's `.gitignore` to achieve this.
+
+### Post-Push Verification
+
+After `git push`, the executor must confirm that the remote branch tip contains the log artifacts, for example:
+
+```bash
+git fetch origin "issue/${ISSUE_IID}-auto-fix"
+git ls-tree -r --name-only "origin/issue/${ISSUE_IID}-auto-fix" \
+  | grep -q "openclaw_log/issue-${ISSUE_IID}/claude_result.txt" \
+  || { echo "remote branch missing logs"; exit 1; }
+```
+
+If verification fails, mark the issue `blocked` rather than proceeding to MR creation.
 
 ---
 
