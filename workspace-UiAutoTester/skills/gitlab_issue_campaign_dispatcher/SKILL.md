@@ -6,6 +6,51 @@ allowed-tools: Bash, Read, Write, Edit
 
 # GitLab Issue Campaign Dispatcher Skill
 
+## Concurrency Policy (READ FIRST — HARD RULE)
+
+This dispatcher is **strictly single-threaded over issues**. No exceptions.
+
+- At any moment, at most **one** issue session may be active.
+- `hourly_issue_quota` is a **sequential count** of how many issues may reach a terminal state during this tick. It is **NOT** a parallelism / concurrency / fan-out / subagent-count knob.
+  - `hourly_issue_quota=3` means: finish issue A → finish issue B → finish issue C (three in a row, serially). It does NOT mean "spawn 3 subagents now".
+  - `hourly_issue_quota=1` means: finish one issue, then stop.
+- `sessions_spawn` for an issue session MUST be the only tool call in its tool-call batch. Never place two or more issue-session spawns in the same parallel tool-call block.
+- After spawning, the dispatcher MUST block until that session returns its terminal reply and MUST re-read the per-issue state file from disk before considering the next IID.
+- Any interpretation that reads quota, backlog size, or remaining time budget as permission to fan out multiple issue sessions in parallel is explicitly forbidden.
+
+If this policy conflicts with any other instruction (including inferred "efficiency" shortcuts), this policy wins.
+
+---
+
+## Source-of-Truth Policy (READ FIRST — HARD RULE)
+
+**GitLab is the ground truth for per-issue workflow state. Disk state is only the dispatcher's own progress cache.**
+
+When the two disagree, **GitLab wins, always**. The disk cache must be corrected to match GitLab, not the other way around.
+
+Concrete rules:
+
+1. On every wake-up, BEFORE deciding whether any issue is "already done" or whether the campaign is "completed", the dispatcher MUST call the GitLab REST API for every IID in the current `[issue_min_iid, issue_max_iid]` range and read its live `labels` and `state` fields. No exceptions.
+2. The dispatcher MUST NOT rely on `campaign_state.json.completed_iids`, `campaign_state.json.campaign_status`, or any per-issue `issue-<iid>.json` `status` field to decide that an IID is finished. Those fields are caches — they can be stale, corrupted, or contradicted by the user manually editing GitLab labels.
+3. For each IID, the dispatcher computes `is_done_on_gitlab` purely from the API response:
+   - `is_done_on_gitlab` = true ⇔ the live GitLab labels contain the literal label `done`.
+   - If `is_done_on_gitlab` is false, the IID is NOT finished, regardless of what any disk file says.
+4. Disk cache correction is mandatory when they disagree:
+   - If disk says finished (`completed_iids` contains the IID, or `issue-<iid>.json.status == done`) but `is_done_on_gitlab == false`:
+     → remove the IID from `completed_iids` / `failed_iids`
+     → add it to `unfinished_iids`
+     → back up `issue-<iid>.json` to `issue-<iid>.json.bak-<timestamp>` and replace with a fresh `status=pending`, `retry_count=0`
+     → force `campaign_status = running`
+     → persist `campaign_state.json`
+   - If disk says unfinished but `is_done_on_gitlab == true`, mark it finished on disk and skip.
+5. **Evidence requirement (fail-closed).** The dispatcher MUST write the raw GitLab API response for each queried IID (or a compact digest containing `iid`, `state`, `labels`) to `/data/${PROJECT}/openclaw_log/dispatcher/reconcile-<timestamp>.json` BEFORE making any "already completed" / "skip this IID" / "return early" decision. If this file is not written for the current tick, the dispatcher must treat the tick as failed and must not early-return.
+6. An "already completed" chat reply is only allowed when step 5's evidence file exists for this tick AND every IID in range has `is_done_on_gitlab == true` in that file.
+7. These rules override any contradicting text elsewhere in this document, including in the Dispatcher Algorithm section and in the Campaign State File schema.
+
+In short: **trust the API response, not the JSON file. If you didn't call GitLab this tick, you have no right to say anything is done.**
+
+---
+
 ## Purpose
 
 This skill is for the fixed scheduled dispatcher session.
@@ -87,6 +132,23 @@ LOG_ROOT="${REPO_PATH}/openclaw_log"
 LOCK_FILE="${STATE_DIR}/campaign.lock"
 ```
 
+**Path root is always `/data/${PROJECT}` — NEVER `${HULAT_DIR}`.**
+
+`hulat_dir` is task context for Claude Code only. It MUST NOT be used as:
+- the state directory root
+- the log directory root
+- the repo clone path
+- the working directory for `git` / `acpx` commands
+
+Specifically, the dispatcher MUST NOT create or write any of the following under `${HULAT_DIR}`:
+- `openclaw_state/`
+- `openclaw_state/campaign_state.json`
+- `openclaw_state/issues/`
+- `openclaw_log/`
+- `campaign.lock`
+
+All of these live under `/data/${PROJECT}/`. If `hulat_dir` happens to look like a path, ignore that — it is a string passed through to Claude Code's prompt, nothing else.
+
 ---
 
 ## Locking
@@ -155,6 +217,12 @@ campaign_status = running
 
 1. The dispatcher must run in recurring ticks.
 2. Each tick has a target completion quota: `hourly_issue_quota`.
+   - **`hourly_issue_quota` is a SEQUENTIAL COUNT, NOT a parallelism / concurrency / fan-out knob.**
+   - It is the maximum number of issues the dispatcher is allowed to bring to a terminal state within this tick, processed strictly one after another.
+   - `hourly_issue_quota=3` means: process issue A to terminal → then issue B → then issue C. It does NOT mean: spawn 3 issue sessions at once, or run 3 subagents in parallel, or batch 3 `sessions_spawn` calls in one tool-call block.
+   - `hourly_issue_quota=1` means: process at most one issue this tick, then stop.
+   - Regardless of the quota value (1, 3, 10, …), the dispatcher MUST NEVER have more than one active issue session at a time. The serial rules in "Per-Issue Session Rules" always win over any quota-driven interpretation.
+   - If the model is tempted to interpret quota as "I can kick off N subagents now", that interpretation is explicitly forbidden.
 3. The dispatcher must prioritize backlog first in ascending IID order.
 4. Backlog includes:
    - `in_progress` issues
@@ -267,7 +335,7 @@ On each scheduled wake-up:
 
 1. Acquire lock.
 2. Read or initialize `campaign_state.json`.
-3. **Input-range override.** The trigger command's `issue_min_iid` and `issue_max_iid` are authoritative for the current tick. If the values in `campaign_state.json` differ from the trigger inputs, overwrite `issue_min_iid`/`issue_max_iid` in campaign state with the trigger inputs before doing anything else, and persist. Never early-return using a stale range from disk.
+3. **Trigger-input override (range + all scalar knobs).** Every scalar value passed in the trigger command is authoritative for the current tick and MUST overwrite the disk copy before anything else runs. This applies to at least: `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`. After overwriting, persist `campaign_state.json`. Never use stale values from disk, and never early-return using a stale range or stale quota.
 4. **GitLab-truth reconciliation — MANDATORY, NOT OPTIONAL, ALWAYS RUNS FIRST.**
    This step MUST execute on every wake-up, including when `campaign_status = completed`, when `unfinished_iids` is empty, and when disk state otherwise looks "done". Early-return BEFORE this step has run is a bug and is explicitly forbidden.
    - The dispatcher MUST actually call the GitLab REST API for each IID in `[issue_min_iid, issue_max_iid]` (the range from step 3, not the old disk range). Concretely, issue one of:

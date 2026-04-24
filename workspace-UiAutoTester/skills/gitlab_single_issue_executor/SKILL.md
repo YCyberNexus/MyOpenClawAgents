@@ -78,6 +78,16 @@ REMOTE_URL="${GITLAB_ADDRESS}/${GROUP}/${PROJECT}.git"
 AUTHED_REMOTE_URL="$(echo "${REMOTE_URL}" | sed "s#://#://oauth2:${GITLAB_TOKEN}@#")"
 ```
 
+**Path root is always `/data/${PROJECT}` — NEVER `${HULAT_DIR}`.**
+
+`hulat_dir` is task context for Claude Code only. The executor MUST NOT:
+- clone the repo into `${HULAT_DIR}`
+- write `openclaw_log/` or `openclaw_state/` anywhere under `${HULAT_DIR}`
+- `cd` into `${HULAT_DIR}` for git / acpx commands
+- treat `${HULAT_DIR}` as the repo path
+
+All state/log paths are derived from `/data/${PROJECT}/`. `hulat_dir` is only a string embedded into the Claude Code prompt (see "Claude Code Execution Contract") so that the downstream Claude run knows where the hulat materials live inside the repo workspace. It is not a directory the executor itself writes into.
+
 ---
 
 ## Local Preparation
