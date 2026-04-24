@@ -267,13 +267,24 @@ On each scheduled wake-up:
 
 1. Acquire lock.
 2. Read or initialize `campaign_state.json`.
-3. If `campaign_status = completed`, return immediately.
-4. Set `quota_completed_this_tick = 0`.
-5. Set tick start time.
-6. Enter a **strictly serial** loop. While quota and time budget remain, do the following one IID at a time. Never run multiple IIDs in parallel, and never pre-spawn the next IID before the current one returns.
+3. **GitLab-truth reconciliation (always runs, even when `campaign_status = completed`).**
+   Disk state is the authoritative source for dispatcher progress, but the user may have manually re-opened issues in GitLab (for example by flipping labels from `done` back to `todo`/`doing`, or reopening closed issues). The dispatcher MUST reconcile before deciding whether there is work to do:
+   - For every IID in `[issue_min_iid, issue_max_iid]`, query GitLab for its current labels and open/closed state.
+   - An IID is considered **re-opened by the user** if its GitLab labels no longer contain `done` (and do not contain `failed`/`blocked` that the dispatcher itself set), or the issue has been reopened, or it currently carries `todo`/`doing`.
+   - For each re-opened IID:
+     - remove it from `completed_iids` / `failed_iids` if present
+     - add it to `unfinished_iids` if not already there
+     - delete or reset its per-issue state file at `/data/<project>/openclaw_state/issues/issue-<iid>.json` so the executor treats it as a fresh run (preserve the old file by renaming to `issue-<iid>.json.bak-<timestamp>` before reset)
+     - reset `retry_count` to 0 for that IID
+   - If any IID was re-opened, set `campaign_status = running` and persist `campaign_state.json` before continuing.
+   - Record the reconciliation outcome (list of re-opened IIDs) in the dispatcher log, not in chat.
+4. If, after reconciliation, `campaign_status = completed` AND there are no re-opened IIDs AND `unfinished_iids` is empty AND all IIDs in range are in `completed_iids`/`failed_iids`, return immediately with a compact "already completed" summary.
+5. Set `quota_completed_this_tick = 0`.
+6. Set tick start time.
+7. Enter a **strictly serial** loop. While quota and time budget remain, do the following one IID at a time. Never run multiple IIDs in parallel, and never pre-spawn the next IID before the current one returns.
    - first choose the lowest-IID unfinished backlog item eligible for processing
    - if none exists, choose the next fresh IID beginning at `next_new_issue_iid`
-7. For the chosen IID (serial, blocking):
+8. For the chosen IID (serial, blocking):
    - set `active_issue_iid` in campaign state and persist
    - create or resume its dedicated issue session
    - send `RUN_SINGLE_ISSUE_SESSION` in a **single** spawn call, issued alone in its tool-call batch
@@ -281,19 +292,19 @@ On each scheduled wake-up:
    - read its per-issue state file from disk
    - clear / update `active_issue_iid` and persist campaign state
    - only now may the dispatcher consider the next IID
-8. If the per-issue state becomes terminal for the campaign step (`done`, `no_changes`, `failed`):
+9. If the per-issue state becomes terminal for the campaign step (`done`, `no_changes`, `failed`):
    - add the IID to terminal state collections
    - remove it from unfinished backlog
    - increment `quota_completed_this_tick`
-9. If the issue remains `blocked`:
-   - keep it in backlog
-   - do not increment completed quota
-   - continue with later eligible issues if policy permits
-10. If the issue remains `in_progress` and the current tick ends, keep it as active backlog for the next wake-up.
-11. Update `next_new_issue_iid` whenever fresh issues are introduced.
-12. If all issues from `issue_min_iid` through `issue_max_iid` are terminal, set `campaign_status = completed`.
-13. Persist `campaign_state.json`.
-14. Return only a compact dispatcher summary.
+10. If the issue remains `blocked`:
+    - keep it in backlog
+    - do not increment completed quota
+    - continue with later eligible issues if policy permits
+11. If the issue remains `in_progress` and the current tick ends, keep it as active backlog for the next wake-up.
+12. Update `next_new_issue_iid` whenever fresh issues are introduced.
+13. If all issues from `issue_min_iid` through `issue_max_iid` are terminal, set `campaign_status = completed`.
+14. Persist `campaign_state.json`.
+15. Return only a compact dispatcher summary.
 
 ---
 
