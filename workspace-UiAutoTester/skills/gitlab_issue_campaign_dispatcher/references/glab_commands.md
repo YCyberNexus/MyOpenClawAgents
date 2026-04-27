@@ -2,9 +2,11 @@
 
 The dispatcher is allowed only the commands listed below. Anything else — `curl`, `wget`, Python HTTP libraries, alternate `glab` subcommands — is forbidden by the GitLab Access Policy in `SKILL.md`.
 
-## Authentication
+## Authentication and host
 
-Done once per tick by `scripts/glab_auth.sh`. After it runs, treat `${GITLAB_HOST}` (the value it printed) as available.
+The host is **pinned at deployment time** in `<workspace>/config/gitlab.env`. `scripts/glab_auth.sh` reads that pin, verifies the trigger's `gitlab_address` matches, refreshes the token via `glab auth login`, and prints `${GITLAB_HOST}`.
+
+The dispatcher MUST source `${GITLAB_HOST}` from `scripts/glab_auth.sh` only. It MUST NEVER re-derive the host from `${GITLAB_ADDRESS}` (no inline `sed`, no `awk`, no manual stripping of scheme/trailing slash).
 
 ## D1 — Read one issue
 

@@ -2,9 +2,13 @@
 
 The executor is allowed only the commands listed here. Any other approach to talking to GitLab — `curl`, `wget`, Python HTTP libraries, alternate `glab` subcommands not in this table, modifying `.gitlab-ci.yml` to bypass `glab` — is forbidden by the GitLab Access Policy in `SKILL.md`.
 
-## Authentication
+## Authentication and host
 
-Done once per session by `scripts/glab_auth.sh`. After it runs, the agent should also export:
+The host is **pinned at deployment time** in `<workspace>/config/gitlab.env`. `scripts/glab_auth.sh` reads that pin, verifies the trigger's `gitlab_address` matches, refreshes the token via `glab auth login`, and prints `${GITLAB_HOST}`.
+
+The executor MUST source `${GITLAB_HOST}` from `scripts/glab_auth.sh` only. It MUST NEVER re-derive the host from `${GITLAB_ADDRESS}` (no inline `sed`, no `awk`, no manual stripping of scheme/trailing slash).
+
+After `glab_auth.sh` runs, the agent should also export the URI-encoded project handle:
 
 ```bash
 PROJECT_FULL="${GROUP}/${PROJECT}"

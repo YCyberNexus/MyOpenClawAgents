@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-24.5] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-24.6] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-24.5**
+**SKILL_VERSION: 2026-04-24.6**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.5` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.6` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -92,6 +92,18 @@ Forbidden — never used to talk to GitLab:
 If the dispatcher cannot accomplish something with the listed glab commands, mark the affected IID `blocked` with `block_reason="dispatcher needs unsupported glab op: <description>"` and stop. Do NOT fall back to curl.
 
 If `glab auth status` fails after `scripts/glab_auth.sh`, abort the tick — do NOT silently switch to curl.
+
+### GitLab host is pinned at deployment time
+
+The GitLab host (and protocol) the dispatcher talks to is **pinned in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every tick. See `<workspace>/config/README.md` for the rationale.
+
+Implications:
+
+- The dispatcher MUST read the host from `scripts/glab_auth.sh`, never re-derive it inline from `${GITLAB_ADDRESS}`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
+- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` will refuse to run if the trigger's host does not match `config/gitlab.env`, and exits non-zero. The dispatcher MUST treat that as a tick-level failure and abort.
+- `gitlab_token` from the trigger is used to refresh `glab auth login` against the pinned host every tick (token rotation works), but the host itself never changes from a trigger input.
+
+If `config/gitlab.env` is missing or malformed (`scripts/glab_auth.sh` exits 10/11/12), the deployment is incomplete: abort the tick with a one-line summary and surface the operator-facing error.
 
 ---
 
@@ -219,7 +231,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-24.5",
+  "skill_version": "2026-04-24.6",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

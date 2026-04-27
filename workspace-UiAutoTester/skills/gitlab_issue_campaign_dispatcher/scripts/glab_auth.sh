@@ -1,32 +1,79 @@
 #!/usr/bin/env bash
-# glab_auth.sh — bootstrap glab CLI authentication from trigger inputs.
+# glab_auth.sh — load the pinned GitLab host from workspace config, verify
+# the trigger's gitlab_address matches, then refresh glab's stored token.
 #
-# Required env vars:
-#   GITLAB_ADDRESS   e.g. http://gitlab-b.pxsemic.tech:30000
-#   GITLAB_TOKEN     personal/group access token
+# Required env vars (from trigger):
+#   GITLAB_ADDRESS   verification value, e.g. http://gitlab-b.pxsemic.tech:30000
+#   GITLAB_TOKEN     personal/group access token (may rotate per tick)
 #
-# On success, prints the resolved GITLAB_HOST to stdout (the agent should
-# capture it: GITLAB_HOST=$(bash scripts/glab_auth.sh)).
-# On failure, exits non-zero. The dispatcher MUST NOT fall back to curl.
+# Required deployment file:
+#   <workspace>/config/gitlab.env  (must define GITLAB_HOST and GITLAB_API_PROTOCOL)
+#
+# On success:
+#   - prints the pinned GITLAB_HOST to stdout
+#   - exports GITLAB_HOST and GITLAB_API_PROTOCOL into the calling shell IF
+#     this script is sourced (recommended pattern below)
+#
+# On failure: exits non-zero. The dispatcher MUST mark the affected work
+# blocked / abort the tick — it MUST NOT fall back to curl or to re-deriving
+# the host from GITLAB_ADDRESS.
+#
+# Recommended caller pattern (so exports survive):
+#   GITLAB_HOST="$(bash skills/.../scripts/glab_auth.sh)"
+#   export GITLAB_HOST
 
 set -euo pipefail
 
-: "${GITLAB_ADDRESS:?GITLAB_ADDRESS must be set}"
-: "${GITLAB_TOKEN:?GITLAB_TOKEN must be set}"
+: "${GITLAB_ADDRESS:?GITLAB_ADDRESS must be set (trigger input)}"
+: "${GITLAB_TOKEN:?GITLAB_TOKEN must be set (trigger input)}"
 
-GITLAB_HOST="$(echo "${GITLAB_ADDRESS}" | sed -E 's#^https?://##; s#/$##')"
+# Resolve workspace root from this script's location:
+#   <workspace>/skills/<name>/scripts/glab_auth.sh -> ../../..
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+PIN_FILE="${WORKSPACE_ROOT}/config/gitlab.env"
 
-if echo "${GITLAB_ADDRESS}" | grep -qE '^https://'; then
-  PROTO=https
-else
-  PROTO=http
+if [ ! -f "${PIN_FILE}" ]; then
+  echo "glab_auth: missing pin file ${PIN_FILE}; deployment incomplete" >&2
+  exit 10
 fi
 
+# shellcheck disable=SC1090
+source "${PIN_FILE}"
+
+if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
+  echo "glab_auth: ${PIN_FILE} must define GITLAB_HOST and GITLAB_API_PROTOCOL" >&2
+  exit 11
+fi
+
+case "${GITLAB_API_PROTOCOL}" in
+  http|https) ;;
+  *)
+    echo "glab_auth: GITLAB_API_PROTOCOL must be http or https, got '${GITLAB_API_PROTOCOL}'" >&2
+    exit 12
+    ;;
+esac
+
+# Verify the trigger's GITLAB_ADDRESS resolves to the same host.
+TRIGGER_HOST="$(echo "${GITLAB_ADDRESS}" | sed -E 's#^https?://##; s#/$##')"
+TRIGGER_PROTO=http
+if echo "${GITLAB_ADDRESS}" | grep -qE '^https://'; then
+  TRIGGER_PROTO=https
+fi
+
+if [ "${TRIGGER_HOST}" != "${GITLAB_HOST}" ] || [ "${TRIGGER_PROTO}" != "${GITLAB_API_PROTOCOL}" ]; then
+  echo "glab_auth: trigger gitlab_address (${TRIGGER_PROTO}://${TRIGGER_HOST}) does not match deployment pin (${GITLAB_API_PROTOCOL}://${GITLAB_HOST})" >&2
+  echo "Refusing to switch hosts. Fix the trigger or update ${PIN_FILE}." >&2
+  exit 13
+fi
+
+# Refresh glab's stored token against the pinned host.
 glab auth login \
   --hostname "${GITLAB_HOST}" \
   --token "${GITLAB_TOKEN}" \
-  --api-protocol "${PROTO}" >/dev/null
+  --api-protocol "${GITLAB_API_PROTOCOL}" >/dev/null
 
 glab auth status --hostname "${GITLAB_HOST}" >/dev/null
 
+export GITLAB_HOST GITLAB_API_PROTOCOL
 echo "${GITLAB_HOST}"

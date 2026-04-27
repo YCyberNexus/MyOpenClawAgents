@@ -86,6 +86,23 @@ Examples:
 - `issue-px_ifp_hulat-1`
 - `issue-px_ifp_hulat-2`
 
+## Deployment Pin: GitLab Host
+
+The GitLab host this agent talks to is pinned at deployment time, NOT derived from trigger inputs on every tick. The pin lives at:
+
+```
+<workspace>/config/gitlab.env
+```
+
+Required fields:
+
+- `GITLAB_HOST` — value passed to `glab --hostname`. Examples: `gitlab.com`, `gitlab-b.pxsemic.tech:30000`.
+- `GITLAB_API_PROTOCOL` — `http` or `https` (must match what the GitLab server actually serves).
+
+The trigger's `gitlab_address` is verified against this pin on every tick. A mismatch is treated as a hard error (the affected operation is blocked / the tick aborts) — the agent will NEVER silently switch hosts. The trigger's `gitlab_token` is forwarded to `glab auth login` against the pinned host on every tick, so token rotation continues to work.
+
+See `<workspace>/config/README.md` for setup steps and rationale.
+
 ## Disk State Layout
 
 - campaign state:

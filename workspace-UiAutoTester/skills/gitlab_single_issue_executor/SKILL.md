@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-24.5] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-24.6] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-24.5**
+**SKILL_VERSION: 2026-04-24.6**
 
-The executor MUST include `"skill_version": "2026-04-24.5"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-24.6"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -114,6 +114,22 @@ Forbidden — never used to talk to GitLab:
 If a required operation is not in the allowed list, mark the issue `blocked` with `block_reason="executor needs unsupported glab op: <description>"` and stop. Do NOT fall back to curl.
 
 If `glab auth status` fails after `scripts/glab_auth.sh`, mark the issue `blocked` with `block_reason="glab auth failed"` and stop.
+
+### GitLab host is pinned at deployment time
+
+The GitLab host (and protocol) the executor talks to is **pinned in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every run. See `<workspace>/config/README.md` for the rationale.
+
+Implications:
+
+- The executor MUST read the host from `scripts/glab_auth.sh`, never re-derive it inline from `${GITLAB_ADDRESS}`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
+- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` will refuse to run if the trigger's host does not match `config/gitlab.env`, and exits non-zero. Map the exit codes to per-issue state as follows:
+  - exit 10 (pin file missing) → `status=blocked`, `block_reason="deployment incomplete: config/gitlab.env missing"`
+  - exit 11 (pin file fields missing) → `status=blocked`, `block_reason="deployment incomplete: config/gitlab.env malformed"`
+  - exit 12 (bad protocol value) → `status=blocked`, `block_reason="deployment incomplete: GITLAB_API_PROTOCOL invalid"`
+  - exit 13 (trigger does not match pin) → `status=blocked`, `block_reason="trigger gitlab_address does not match deployed config/gitlab.env"`
+- `gitlab_token` from the trigger is used to refresh `glab auth login` against the pinned host every run; token rotation works, but the host itself never changes from a trigger input.
+
+The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is also constructed from the trigger's `GITLAB_ADDRESS`. That is acceptable because `clone_or_pull.sh` is a single, well-tested code path that does not parse host/protocol — it just passes the original URL straight to `git clone` / `git remote set-url`. Do NOT add separate host parsing in any other script.
 
 ---
 
@@ -223,7 +239,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.5",
+  "skill_version": "2026-04-24.6",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -234,7 +250,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.5",
+  "skill_version": "2026-04-24.6",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,
