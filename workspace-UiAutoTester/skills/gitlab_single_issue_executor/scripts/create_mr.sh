@@ -21,7 +21,15 @@ set -euo pipefail
 
 DESC_FILE="${LOG_DIR}/mr_description.md"
 if [ ! -f "${DESC_FILE}" ]; then
+  # The leading "Closes #${ISSUE_IID}" is GitLab's native closing keyword.
+  # When this MR is merged, GitLab itself closes issue #${ISSUE_IID}
+  # automatically (provided the project setting "Automatically close
+  # referenced merge requests" is left enabled — it is on by default).
+  # The executor does NOT close the issue itself; the `done` label and
+  # MR creation are separate signals from issue closure.
   cat > "${DESC_FILE}" <<EOF
+Closes #${ISSUE_IID}
+
 Auto-generated MR for issue #${ISSUE_IID}.
 
 Execution evidence (logs, prompts, raw acpx output) is preserved on the

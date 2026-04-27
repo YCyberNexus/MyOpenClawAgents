@@ -45,3 +45,29 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 2. **Never call `glab mr merge`.** The merge request stays open for human review.
 3. **No full-set label overwrite.** Always use add+remove of single labels (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, etc.) the user may have added.
 4. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
+
+## Issue closure vs `done` label
+
+These are two SEPARATE signals. The executor only controls the first; the second is GitLab's job.
+
+| Signal              | Who sets it                         | When                                              | Means                                  |
+| ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
+| `done` label        | the executor (this skill)           | immediately after `create_mr.sh` returns          | "the agent finished its half of the work" |
+| issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "a human reviewed, approved, and merged" |
+
+GitLab's native auto-close is triggered by the **closing keyword in the MR description**. `scripts/create_mr.sh` writes the description starting with:
+
+```
+Closes #${ISSUE_IID}
+```
+
+When the MR merges, GitLab parses that line and closes the linked issue automatically. No agent action is required.
+
+**Prerequisites on the GitLab project** (these are GitLab defaults; only worry about them if someone disabled them):
+
+- Project → Settings → Merge requests → "Automatically close referenced merge requests" is enabled.
+- The MR's target branch is the project's default branch (`master` in this workspace), which is the only case GitLab auto-closes for. Auto-close does NOT fire on MRs into non-default branches.
+
+**The executor MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the executor's job ends at `done`.
+
+**Approve vs merge.** GitLab's auto-close fires on **merge**, not approve. If your team uses "approve must precede merge", the practical effect is "issue closes after approve+merge", which is what you want. There is no agent-side support for "close on approve only" — that would require webhook plumbing outside this skill.
