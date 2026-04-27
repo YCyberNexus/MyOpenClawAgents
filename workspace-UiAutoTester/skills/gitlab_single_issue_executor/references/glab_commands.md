@@ -25,6 +25,19 @@ glab api --hostname "${GITLAB_HOST}" \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}"
 ```
 
+## E1b — Read the target issue's notes (comments)
+
+Used in **continue mode** so the executor can pick up reviewer-supplied supplemental steps. Reviewers leave the supplemental instructions as a comment on the issue before flipping the label from `done` to `continue`; this command reads those comments. See `references/continue_mode.md` for the reviewer contract.
+
+```bash
+glab api --hostname "${GITLAB_HOST}" --paginate \
+  "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at"
+```
+
+The response is a JSON array of note objects. The executor cares about non-system notes (`.system == false`); each has `body`, `author.username`, `created_at`. The executor concatenates these into the Claude Code prompt verbatim, in chronological order.
+
+In fresh mode, fetching notes is optional — the original description is the source of truth. In continue mode, fetching notes is **mandatory**.
+
 ## E2 — List project labels
 
 Used by `scripts/ensure_labels.sh` to detect missing workflow labels.

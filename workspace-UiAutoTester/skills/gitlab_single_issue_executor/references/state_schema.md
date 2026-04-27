@@ -28,6 +28,7 @@ Path: `${ISSUE_STATE_FILE}` (i.e. `/data/openclaw_work/${PROJECT}/openclaw_state
 | `status`               | string (enum)   | See "Possible status values" below.                              |
 | `mode`                 | string (enum)   | `"fresh"` (default) or `"continue"`. Set in Step 6 of the executor algorithm. |
 | `mode_downgraded_from` | string \| null  | Non-null only when the executor was asked for `continue` mode but `prepare_branch.sh` had to fall back to fresh because no remote branch existed. Value is the originally requested mode (`"continue"`). Lets the operator audit unexpected fresh runs. |
+| `mode_continue_no_comments` | bool          | Set true (continue mode only) when `build_prompt.sh` reports the issue had zero reviewer comments. The executor still runs — this is just an audit signal that the reviewer flipped the label without leaving guidance. Default false / absent. |
 | `retry_count`          | int             | How many times this issue has entered `blocked`.                 |
 | `block_reason`         | string \| null  | Human-readable reason; required when `status=blocked` or `failed`. |
 | `work_branch`          | string \| null  | Set after `prepare_branch.sh` runs.                              |

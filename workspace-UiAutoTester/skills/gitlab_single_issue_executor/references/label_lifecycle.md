@@ -10,7 +10,7 @@ The executor ensures these seven labels exist via `scripts/ensure_labels.sh`:
 - `done`
 - `blocked`
 - `failed`
-- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and the executor restarts the resolution flow against the existing work branch.
+- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and the executor restarts the resolution flow against the existing work branch. **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
 
 ## Transition diagram
 

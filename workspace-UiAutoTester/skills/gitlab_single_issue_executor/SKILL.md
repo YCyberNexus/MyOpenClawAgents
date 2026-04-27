@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-24.9] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-24.10] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-24.9**
+**SKILL_VERSION: 2026-04-24.10**
 
-The executor MUST include `"skill_version": "2026-04-24.9"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-24.10"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -17,6 +17,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/env_paths.sh` — populates path variables (SOURCE it).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/clone_or_pull.sh` — clone or update `${REPO_PATH}`.
+- `scripts/build_prompt.sh` — build `${LOG_DIR}/prompt.txt` from the live issue + (continue mode) reviewer comments, per the templates documented in `references/continue_mode.md`.
 - `scripts/prepare_branch.sh` — clean working tree, create `${WORK_BRANCH}` from clean integration branch.
 - `scripts/ensure_labels.sh` — make sure the six workflow labels exist.
 - `scripts/set_issue_label.sh` — add or remove a single label (used for every transition).
@@ -28,6 +29,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `references/state_schema.md` — `issue-<iid>.json` schema and update cadence.
 - `references/glab_commands.md` — exhaustive list of allowed `glab` invocations.
 - `references/label_lifecycle.md` — label transitions and how to perform them.
+- `references/continue_mode.md` — reviewer contract for the `continue` label and the prompt template the executor builds in continue mode.
 
 When in doubt about a path / schema / command / transition, READ the matching reference file. Do NOT reconstruct content from memory.
 
@@ -185,7 +187,7 @@ If continue-mode prep fails for any reason (remote branch corrupted, fetch error
 
 This is the ONLY way the executor is allowed to invoke Claude Code. It is governed by the No-Fallback Policy above — when this contract fails, the executor stops; it does NOT switch invocation modes or LLMs.
 
-- Build the prompt at `${LOG_DIR}/prompt.txt` with: target issue body, `hulat_dir` reference, instruction to "work only on this issue, modify content under `${REPO_PATH}`, do not ask the user, summarize briefly when done".
+- Build the prompt at `${LOG_DIR}/prompt.txt` by running `scripts/build_prompt.sh`. The script generates the canonical layout (issue title + description + working env + rules) for both modes, and additionally appends reviewer comments in continue mode. Do NOT hand-write `prompt.txt` — that risks omitting the comments section in continue mode and silently losing the reviewer's supplemental steps. See `references/continue_mode.md` for the exact template.
 - Run synchronously, one-shot, with `${REPO_PATH}` as the working directory:
   ```bash
   cd "${REPO_PATH}"
@@ -244,7 +246,10 @@ Run once per session for `${ISSUE_IID}`.
    The remove step is idempotent — safe even if the source label was absent.
 6. **Initialize / refresh per-issue state.** Per `references/state_schema.md`: write `status=in_progress`, `mode="${ISSUE_MODE}"`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
 7. **Prepare work branch.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_branch.sh`. The script prints two lines: the actual mode it executed (`fresh` or `continue`) and the work branch name. If `ISSUE_MODE=continue` was requested but the script downgraded to `fresh` because no remote branch existed, record this in the per-issue state as `mode="fresh"` and add `mode_downgraded_from="continue"` so the operator can audit the case. Write `work_branch=${WORK_BRANCH}` into `${ISSUE_STATE_FILE}`.
-8. **Run Claude Code** as per the execution contract above. On failure follow the retryable / non-recoverable rules. In `ISSUE_MODE=continue`, the prompt MUST instruct Claude to first review the existing diff between the work branch and the integration branch, then continue / correct the work, rather than starting from scratch.
+8. **Build the prompt and run Claude Code.**
+   1. Build the prompt: `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this script also calls glab E1b to fetch issue notes and embeds them in the prompt.
+   2. Capture the script's stderr; record `mode_continue_no_comments=true` in `${ISSUE_STATE_FILE}` if the script reported `CONTINUE_MODE_NO_COMMENTS=true`. (Operator audit signal — the executor does NOT block on this.)
+   3. Run acpx exactly as in the Claude Code Execution Contract. On failure follow the retryable / non-recoverable rules. The executor MUST NOT extract specific commands from the reviewer comments and run them itself in bash — the comments are for Claude Code, not for the executor.
 9. **Stage + guard.**
    ```bash
    bash scripts/stage_and_guard.sh
@@ -266,7 +271,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.9",
+  "skill_version": "2026-04-24.10",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -277,7 +282,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.9",
+  "skill_version": "2026-04-24.10",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,
