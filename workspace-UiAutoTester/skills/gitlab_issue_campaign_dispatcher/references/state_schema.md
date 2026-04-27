@@ -59,6 +59,7 @@ Path: `${ISSUE_STATE_DIR}/issue-<iid>.json`
   "iid": 9,
   "session": "issue-px_ifp_hulat_test-9",
   "status": "blocked",
+  "mode": "continue",
   "retry_count": 2,
   "last_attempt_tick": 12,
   "next_retry_tick": 13,
@@ -66,10 +67,12 @@ Path: `${ISSUE_STATE_DIR}/issue-<iid>.json`
   "work_branch": null,
   "commit_sha": null,
   "merge_request_url": null,
-  "skill_version": "2026-04-24.4",
+  "skill_version": "2026-04-24.9",
   "updated_at": "2026-04-24T10:00:00Z"
 }
 ```
+
+`mode` is set to `"continue"` when reconciliation observed the `continue` label on this IID; the dispatcher then includes `issue_mode=continue` in the trigger sent to the executor session. Default is `"fresh"`.
 
 ### Possible `status` values
 

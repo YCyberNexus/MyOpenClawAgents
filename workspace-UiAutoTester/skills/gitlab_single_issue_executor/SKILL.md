@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-24.8] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-24.9] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-24.8**
+**SKILL_VERSION: 2026-04-24.9**
 
-The executor MUST include `"skill_version": "2026-04-24.8"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-24.9"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -157,8 +157,27 @@ Optional:
 
 - `blocked_retry_limit`
 - `gitlab_address` — pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; the executor never derives it from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. The remote URL passed to `git clone` is also built from the pin, not from this field.
+- `issue_mode` — `fresh` (default) or `continue`. Set by the dispatcher based on reconciliation. If `continue`, the executor reuses the existing `issue/<iid>-auto-fix` remote branch (or falls back to fresh if no remote branch exists) and starts the resolution flow from there. See `## Continue Mode` below.
 
 `hulat_dir` is a string passed through to the Claude Code prompt. The executor itself never `cd`s into it or writes there. See `references/paths.md`.
+
+---
+
+## Continue Mode
+
+The `continue` label is human-applied by reviewers. They set it on an issue whose MR was created and labeled `done` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.) and the previous result is incomplete or wrong. When the dispatcher's reconciliation sees `continue` on an issue, it re-enqueues the IID and spawns the executor with `issue_mode=continue`.
+
+In continue mode the executor:
+
+- Detects the mode from the trigger field `issue_mode=continue`. As a backstop, it also re-derives the mode from labels at Step 3 of the algorithm: if the live labels include `continue`, treat as continue mode regardless of the trigger field.
+- Transitions the issue label from `continue` to `doing` (instead of `todo` to `doing`). See `references/label_lifecycle.md`.
+- Calls `scripts/prepare_branch.sh` with `ISSUE_MODE=continue`. The script reuses the existing remote `issue/<iid>-auto-fix` branch — checks it out, hard-resets to `origin/<work-branch>`, cleans the working tree. If the remote branch does not exist (rare — the previous run somehow didn't push), the script downgrades to fresh mode.
+- Builds the Claude Code prompt with an explicit "this is a resumption — review the existing diff between this branch and master, then continue / correct the work" instruction. See "Claude Code Execution Contract" below.
+- All later steps (stage + guard, commit, push, post-push verify, MR creation, label transitions) are identical to fresh mode.
+
+The executor MUST NOT delete the remote work branch in continue mode. Cleanliness guards (`stage_and_guard.sh`, `post_push_verify.sh`) still apply — agent artifacts are still forbidden in the staged tree and the remote branch.
+
+If continue-mode prep fails for any reason (remote branch corrupted, fetch error, etc.), follow the No-Fallback Policy: mark `status=blocked` with an accurate `block_reason`, do NOT silently fall back to fresh mode (the script already does that ONLY for the specific case of "remote branch does not exist", which is the documented downgrade path).
 
 ---
 
@@ -214,12 +233,18 @@ Run once per session for `${ISSUE_IID}`.
    - `PROJECT=<project> ISSUE_IID=<iid> source scripts/env_paths.sh`
    - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`; export `PROJECT_FULL`, `PROJECT_URI`. If auth fails, mark `blocked` with `block_reason="glab auth failed"` and stop.
 2. **Sync repo.** `bash scripts/clone_or_pull.sh`.
-3. **Read the target issue.** Use command E1 from `references/glab_commands.md`. Capture title, description, current labels into shell variables; `ISSUE_TITLE` is the short form for commit / MR title.
-4. **Ensure labels exist.** `bash scripts/ensure_labels.sh`.
-5. **Transition `todo → doing`.** Use `scripts/set_issue_label.sh remove todo`, then `... add doing`. (Idempotent — safe even if `todo` was absent.)
-6. **Initialize / refresh per-issue state.** Per `references/state_schema.md`: write `status=in_progress`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
-7. **Prepare work branch.** `bash scripts/prepare_branch.sh`. Write `work_branch=${WORK_BRANCH}` into `${ISSUE_STATE_FILE}`.
-8. **Run Claude Code** as per the execution contract above. On failure follow the retryable / non-recoverable rules.
+3. **Read the target issue + resolve mode.** Use command E1 from `references/glab_commands.md`. Capture title, description, and current labels. `ISSUE_TITLE` is the short form for commit / MR title. **Resolve `ISSUE_MODE`:**
+   - if the trigger field `issue_mode=continue` was supplied, OR live labels include `continue` → `ISSUE_MODE=continue`
+   - else → `ISSUE_MODE=fresh`
+   Export `ISSUE_MODE` so subsequent scripts see it.
+4. **Ensure labels exist.** `bash scripts/ensure_labels.sh`. (This now ensures the `continue` label exists too.)
+5. **Transition entry label → `doing`.** Use `scripts/set_issue_label.sh`:
+   - `ISSUE_MODE=fresh`: `remove todo`, then `add doing`
+   - `ISSUE_MODE=continue`: `remove continue`, then `add doing`
+   The remove step is idempotent — safe even if the source label was absent.
+6. **Initialize / refresh per-issue state.** Per `references/state_schema.md`: write `status=in_progress`, `mode="${ISSUE_MODE}"`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
+7. **Prepare work branch.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_branch.sh`. The script prints two lines: the actual mode it executed (`fresh` or `continue`) and the work branch name. If `ISSUE_MODE=continue` was requested but the script downgraded to `fresh` because no remote branch existed, record this in the per-issue state as `mode="fresh"` and add `mode_downgraded_from="continue"` so the operator can audit the case. Write `work_branch=${WORK_BRANCH}` into `${ISSUE_STATE_FILE}`.
+8. **Run Claude Code** as per the execution contract above. On failure follow the retryable / non-recoverable rules. In `ISSUE_MODE=continue`, the prompt MUST instruct Claude to first review the existing diff between the work branch and the integration branch, then continue / correct the work, rather than starting from scratch.
 9. **Stage + guard.**
    ```bash
    bash scripts/stage_and_guard.sh
@@ -241,7 +266,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.8",
+  "skill_version": "2026-04-24.9",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -252,7 +277,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.8",
+  "skill_version": "2026-04-24.9",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

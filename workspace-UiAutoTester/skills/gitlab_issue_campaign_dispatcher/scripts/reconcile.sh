@@ -13,14 +13,29 @@
 #
 # Output:
 #   Prints the absolute path of the evidence file to stdout.
-#   Evidence file is a JSON array of objects:
-#     [
-#       {"iid": 1, "state": "opened", "labels": ["todo"],   "title": "...", "is_done_on_gitlab": false, "user_reopened": true},
-#       {"iid": 2, "state": "opened", "labels": ["done"],   "title": "...", "is_done_on_gitlab": true,  "user_reopened": false},
-#       {"iid": 3, "state": null,     "labels": null,       "title": null,  "is_done_on_gitlab": false, "user_reopened": false, "missing": true},
-#       ...
-#     ]
-#   Missing/404 issues are recorded with "missing": true.
+#   Evidence file is a JSON array of objects with these fields per IID:
+#     {
+#       "iid":               <integer>,
+#       "state":             "opened" | "closed" | null,
+#       "labels":            [...] | null,
+#       "title":             "..."  | null,
+#       "is_done_on_gitlab": bool,   # labels include literal "done"
+#       "user_reopened":     bool,   # neither "done" nor "failed" in labels
+#       "needs_continue":    bool,   # labels include literal "continue"
+#       "missing":           bool    # GET returned non-OK (treat as not done)
+#     }
+#
+# Semantics for the dispatcher (consumed in Source-of-Truth Policy):
+#   - `is_done_on_gitlab == true` AND no `needs_continue` → finished, skip
+#   - `needs_continue == true`                            → re-enqueue; the
+#         executor will re-run the resolution flow against the existing
+#         work branch (or build one from master if none exists)
+#   - `user_reopened == true`                             → re-enqueue from
+#         scratch (label was reverted to todo / doing)
+#
+# `needs_continue` and `user_reopened` are not mutually exclusive. If both
+# are true, treat the IID as continue mode (existing branch reuse) — the
+# human reviewer asked for a re-run, not a wipe.
 
 set -euo pipefail
 
@@ -36,20 +51,24 @@ first=1
 for iid in $(seq "${MIN_IID}" "${MAX_IID}"); do
   if body="$(glab api --hostname "${GITLAB_HOST}" "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null)"; then
     digest="$(echo "${body}" | jq -c --argjson iid "${iid}" '
+      . as $issue |
+      ($issue.labels // []) as $labels |
       {
         iid: $iid,
-        state: .state,
-        labels: (.labels // []),
-        title: .title,
-        is_done_on_gitlab: ((.labels // []) | index("done") != null),
+        state: $issue.state,
+        labels: $labels,
+        title: $issue.title,
+        is_done_on_gitlab: ($labels | index("done") != null),
         user_reopened: (
-          ((.labels // []) | index("done") == null) and
-          ((.labels // []) | index("failed") == null)
+          ($labels | index("done") == null) and
+          ($labels | index("failed") == null) and
+          ($labels | index("continue") == null)
         ),
+        needs_continue: ($labels | index("continue") != null),
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, is_done_on_gitlab:false, user_reopened:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, is_done_on_gitlab:false, user_reopened:false, needs_continue:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

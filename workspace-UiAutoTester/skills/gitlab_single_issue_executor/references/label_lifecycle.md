@@ -2,7 +2,7 @@
 
 ## Required project labels
 
-The executor ensures these six labels exist via `scripts/ensure_labels.sh`:
+The executor ensures these seven labels exist via `scripts/ensure_labels.sh`:
 
 - `todo`
 - `doing`
@@ -10,6 +10,7 @@ The executor ensures these six labels exist via `scripts/ensure_labels.sh`:
 - `done`
 - `blocked`
 - `failed`
+- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and the executor restarts the resolution flow against the existing work branch.
 
 ## Transition diagram
 
@@ -24,6 +25,15 @@ The executor ensures these six labels exist via `scripts/ensure_labels.sh`:
                 │
                 ▼
               failed   (retry exhausted, terminal)
+
+
+   done ──► continue  (HUMAN review action; agent never does this)
+              │
+              ▼
+            doing      (executor in continue mode, on next tick)
+              │
+              ▼
+            pr ──► done   (or blocked / failed as usual)
 ```
 
 ## Concrete transitions and how to perform them
@@ -32,12 +42,14 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 
 | From       | To         | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `todo`     | `doing`    | executor begins work on a new issue                  | `set_issue_label.sh remove todo` ; `set_issue_label.sh add doing`     |
+| `todo`     | `doing`    | executor begins work in fresh mode                   | `set_issue_label.sh remove todo` ; `set_issue_label.sh add doing`     |
+| `continue` | `doing`    | executor begins work in continue mode (resume run)   | `set_issue_label.sh remove continue` ; `set_issue_label.sh add doing` |
 | `doing`    | `pr`       | branch pushed, MR successfully created               | `set_issue_label.sh remove doing` ; `set_issue_label.sh add pr`       |
 | `pr`       | `done`     | immediately after MR creation succeeds (terminal)    | `set_issue_label.sh remove pr` ; `set_issue_label.sh add done`        |
 | `doing`    | `blocked`  | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
 | `blocked`  | `doing`    | retry begins on a later tick                         | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
 | `blocked`  | `failed`   | `retry_count > blocked_retry_limit`                  | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
+| `done`     | `continue` | **human reviewer** notices the prior run was incomplete and wants the agent to re-run on the existing branch | manual on the GitLab UI; the executor does NOT make this transition itself |
 
 ## Important rules
 

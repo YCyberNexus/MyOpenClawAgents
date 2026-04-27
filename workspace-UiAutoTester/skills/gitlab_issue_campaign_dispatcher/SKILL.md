@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-24.8] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-24.9] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-24.8**
+**SKILL_VERSION: 2026-04-24.9**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.8` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.9` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -115,20 +115,23 @@ Concrete rules:
 
 1. On every wake-up, BEFORE any "already done" / "already completed" / "skip this IID" / "early return" decision, run `scripts/reconcile.sh` for the full `[issue_min_iid, issue_max_iid]` range. The script writes `${DISPATCHER_LOG_DIR}/reconcile-<ts>.json`. **No evidence file = reconciliation didn't happen = the tick is failed; do not early-return.**
 2. The dispatcher MUST NOT use `campaign_state.json.completed_iids`, `campaign_state.json.campaign_status`, or any per-issue `issue-<iid>.json.status` to decide an IID is finished. Those are caches.
-3. Ground truth per IID comes from the evidence file:
+3. Ground truth per IID comes from the evidence file. Three signals:
    - `is_done_on_gitlab` ⇔ live GitLab labels contain literal `done`.
-   - `user_reopened` ⇔ neither `done` nor `failed` is present in live labels.
+   - `needs_continue` ⇔ live GitLab labels contain literal `continue`. This is set by a human reviewer who has noticed that a previous "done" was incorrect (Claude Code returned but didn't actually finish the work) and wants the agent to resume on the existing work branch.
+   - `user_reopened` ⇔ none of `done`, `failed`, `continue` are present in live labels (the issue was bounced back to `todo` / `doing` from scratch).
 4. **Disk cache correction is mandatory** when they disagree:
-   - If disk says finished but `is_done_on_gitlab == false`:
+   - If `needs_continue == true`:
      - remove IID from `completed_iids` / `failed_iids`
      - add to `unfinished_iids`
      - rename `${ISSUE_STATE_DIR}/issue-<iid>.json` to `issue-<iid>.json.bak-<ts>`
-     - write a fresh per-issue file with `status=pending`, `retry_count=0`
+     - write a fresh per-issue file with `status=pending`, `retry_count=0`, `mode="continue"`
      - clear any `active_issue_iid` referencing this IID
      - force `campaign_status = running`
      - persist `campaign_state.json`
-   - If disk says unfinished but `is_done_on_gitlab == true`, mark it finished on disk and skip.
-5. An "already completed" reply is allowed only when the evidence file from this tick exists AND every IID in range has `is_done_on_gitlab == true` in it.
+   - Else if disk says finished but `is_done_on_gitlab == false` (i.e. `user_reopened == true`):
+     - same as above, but the per-issue file gets `mode="fresh"` (default)
+   - If disk says unfinished but `is_done_on_gitlab == true` (and `needs_continue == false`), mark it finished on disk and skip.
+5. An "already completed" reply is allowed only when the evidence file from this tick exists AND every IID in range has `is_done_on_gitlab == true` AND `needs_continue == false` in it.
 
 In short: **trust the evidence file, not the JSON cache. If you didn't run `reconcile.sh` this tick, you have no right to say anything is done.**
 
@@ -196,7 +199,7 @@ Run on every scheduled wake-up.
 6. **Strictly serial loop.** While quota and time budget remain:
    1. Pick the lowest-IID eligible backlog item, else the next fresh IID from `next_new_issue_iid`.
    2. Set `active_issue_iid` and persist.
-   3. Spawn (or resume) the dedicated session and send `RUN_SINGLE_ISSUE_SESSION` in a SINGLE blocking spawn call.
+   3. Spawn (or resume) the dedicated session and send `RUN_SINGLE_ISSUE_SESSION` in a SINGLE blocking spawn call. If the per-issue state file has `mode="continue"` (set by reconciliation in Step 3 above), include `issue_mode=continue` in the trigger payload so the executor knows to reuse the existing work branch. Default is `issue_mode=fresh`.
    4. After the session returns, re-read `${ISSUE_STATE_DIR}/issue-<iid>.json` from disk.
    5. If terminal (`done` / `no_changes` / `failed`): update the corresponding list, increment `quota_completed_this_tick`.
    6. If `blocked`: keep in backlog; skip and continue.
@@ -231,7 +234,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-24.8",
+  "skill_version": "2026-04-24.9",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

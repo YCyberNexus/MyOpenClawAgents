@@ -6,13 +6,20 @@
 #   GITLAB_HOST    from glab_auth.sh
 #   PROJECT_URI    URI-encoded "${GROUP}/${PROJECT}"
 #
-# Workflow labels: todo doing pr done blocked failed
+# Workflow labels: todo doing pr done blocked failed continue
+#
+# `continue` is a human-applied review label. Reviewers set it on an issue
+# whose MR was created and labeled `done` by the agent, but where the
+# Claude Code run actually didn't finish (env error, partial edits, etc.).
+# When the dispatcher's reconciliation sees `continue` on an issue, it
+# re-enqueues the IID and the executor restarts the resolution flow on
+# the existing work branch (or creates one from master if none exists).
 
 set -euo pipefail
 
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}"
 
-REQUIRED_LABELS=(todo doing pr done blocked failed)
+REQUIRED_LABELS=(todo doing pr done blocked failed continue)
 
 existing="$(
   glab api --hostname "${GITLAB_HOST}" --paginate \
