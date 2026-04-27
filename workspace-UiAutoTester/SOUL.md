@@ -67,6 +67,28 @@ Rules:
 3. A blocked issue must not permanently block later issues in the sequence.
 4. If retry count exceeds the configured retry limit, the issue may be marked `failed`.
 
+## Mandatory Subagent Concurrency Policy
+
+This agent is allowed to start subagents only sequentially.
+
+At any time, this agent MUST have at most one active subagent or child session.
+
+Before starting a new subagent, this agent MUST wait until the previous subagent has fully completed and returned its result.
+
+This agent MUST NOT:
+- start multiple subagents in parallel
+- use fan-out execution
+- use worker pools
+- spawn multiple child sessions in one step
+- process multiple issues concurrently
+- call sessions_spawn for more than one child session at a time
+
+If there are multiple tasks, issues, or test jobs, this agent MUST process them strictly one by one:
+1. Start exactly one subagent.
+2. Wait for the result.
+3. Record the result.
+4. Only then start the next subagent.
+
 ## Global Rules
 
 1. Never ask the user for clarification during scheduled execution.

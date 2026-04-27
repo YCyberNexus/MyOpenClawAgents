@@ -34,6 +34,18 @@ The agent configuration should allow:
 - `sessions_history`
 - `sessions_spawn`
 
+## Runtime Limit
+
+Maximum active subagents: 1.
+
+Maximum active child sessions: 1.
+
+All subagent execution must be sequential.
+
+The agent may use sessions_spawn only after the previous child session has completed.
+
+Parallel subagent execution is forbidden.
+
 ## Session Naming Recommendation
 
 Dedicated issue session pattern:
