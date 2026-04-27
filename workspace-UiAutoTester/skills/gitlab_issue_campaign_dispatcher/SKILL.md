@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-24.4] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-24.5] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-24.4**
+**SKILL_VERSION: 2026-04-24.5**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.4` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.5` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -23,6 +23,44 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `references/glab_commands.md` — exhaustive list of allowed `glab` invocations.
 
 When in doubt about a path / schema / command, READ the matching reference file. Do NOT reconstruct content from memory.
+
+---
+
+## No-Fallback Policy (READ FIRST — HARD RULE)
+
+**The dispatcher MUST follow the prescribed method exactly. When the prescribed method fails, the dispatcher fails the affected unit of work and stops — it does NOT improvise an alternative approach.**
+
+This rule overrides any default model behavior that says "try another way", "be helpful", "complete the task one way or another", or "the user wants this to succeed". For this skill, **a clean controlled failure is strictly better than an unsupervised alternative attempt**.
+
+### Concrete prohibitions
+
+1. If a script in `scripts/` exits non-zero, the dispatcher MUST NOT:
+   - rewrite the script's logic inline in bash
+   - skip the script and "do the same thing manually"
+   - try a "simpler" or "different" command that "should work"
+2. If `glab` cannot do something, the dispatcher MUST NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library. (Also covered by GitLab Access Policy below — listed here for emphasis.)
+3. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass the lock (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops).
+4. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT:
+   - run executor logic inline in the dispatcher session
+   - spawn a non-dedicated session as a substitute
+   - retry by spawning a different session name
+   The IID is marked `blocked` with an accurate `block_reason`, the dispatcher continues to the next IID per Blocked Skip-and-Retry rules.
+5. If a required input is missing or malformed, the dispatcher MUST abort the tick with a short summary. It MUST NOT guess defaults beyond those explicitly listed in `references/trigger_command.md`.
+6. If a step listed in the Dispatcher Algorithm produces an unexpected result, the dispatcher MUST stop the affected IID (or the tick), record the failure on disk, and return. It MUST NOT invent a recovery path that is not in this SKILL.
+
+### What the dispatcher does on failure
+
+- Per-IID failure → mark that IID `blocked` (retryable) or `failed` (non-recoverable / retry-exhausted) per Blocked Skip-and-Retry rules; persist; continue with later IIDs.
+- Tick-level failure (lock, auth, reconciliation evidence missing, etc.) → return a one-line failure summary; do not early-return as "completed".
+
+### What "improvising" looks like (forbidden examples)
+
+- "`scripts/reconcile.sh` failed, let me write a quick Python loop instead." — forbidden.
+- "`glab mr create` returned an error, let me try `git push` with the `merge_request.create` push option." — forbidden.
+- "`acpx claude exec` errored, let me try `claude` directly / `acpx claude command` / a smaller prompt." — forbidden (executor-side rule, listed here so the dispatcher recognizes it from the executor's reply).
+- "The trigger is missing `branch=`, let me default to `master`." — forbidden; abort the tick.
+
+If you find yourself reaching for a tool, command, or workflow that is not explicitly listed in this SKILL, in `scripts/`, or in `references/`, that is the signal to stop and fail — not the signal to try harder.
 
 ---
 
@@ -181,7 +219,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-24.4",
+  "skill_version": "2026-04-24.5",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,
