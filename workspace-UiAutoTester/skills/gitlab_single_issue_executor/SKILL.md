@@ -1,325 +1,157 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-24.1] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-24.4] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-24.1**
+**SKILL_VERSION: 2026-04-24.4**
 
-The executor MUST include a `"skill_version": "2026-04-24.1"` field in its compact chat summary, and MUST write the same version string into the per-issue state file (`issue-<iid>.json.skill_version`). This lets the operator verify which version of the skill is actually loaded by each spawned session.
+The executor MUST include `"skill_version": "2026-04-24.4"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+
+## Companion files
+
+This SKILL is intentionally short. Detailed bash and fixed reference data live in sibling folders:
+
+- `scripts/env_paths.sh` — populates path variables (SOURCE it).
+- `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
+- `scripts/clone_or_pull.sh` — clone or update `${REPO_PATH}`.
+- `scripts/prepare_branch.sh` — clean working tree, create `${WORK_BRANCH}` from clean integration branch.
+- `scripts/ensure_labels.sh` — make sure the six workflow labels exist.
+- `scripts/set_issue_label.sh` — add or remove a single label (used for every transition).
+- `scripts/stage_and_guard.sh` — `git add -A` + leak guard; prints `STAGED_OK` or `NO_CHANGES`.
+- `scripts/commit_and_push.sh` — commit + push the work branch.
+- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts.
+- `scripts/create_mr.sh` — create the MR via `glab mr create` and print its URL.
+- `references/paths.md` — full path layout and required artifacts.
+- `references/state_schema.md` — `issue-<iid>.json` schema and update cadence.
+- `references/glab_commands.md` — exhaustive list of allowed `glab` invocations.
+- `references/label_lifecycle.md` — label transitions and how to perform them.
+
+When in doubt about a path / schema / command / transition, READ the matching reference file. Do NOT reconstruct content from memory.
 
 ---
 
-## Purpose
+## Single-Issue Rule (READ FIRST — HARD RULE)
 
-This skill is for a dedicated issue session.
-One dedicated session must execute only one GitLab issue.
+**One dedicated session executes exactly ONE issue, ever.**
 
-It must:
-1. clone or pull `<gitlab-address>/<group>/<project>` branch `<branch>` into `/data/<project>/`
-2. read the single target issue `<issue_iid>`
-3. ensure repository labels `todo`, `doing`, `pr`, `done`, `blocked`, and `failed` exist
-4. set that issue label to `doing`
-5. use the issue description plus `hulat_dir` as Claude Code task context and invoke Claude Code through `acpx`
-6. save logs to `/data/<project>/openclaw_log/issue-<iid>/`
-7. commit and push changes if any
-8. create a merge request targeting `master` without merging
-9. immediately label the issue `done` after merge request creation succeeds
-10. update per-issue state on disk
-11. mark retryable runtime/environment problems as `blocked`
-12. mark exhausted retries or non-recoverable cases as `failed`
+- Never reuse an executor session for a different IID. The session name `issue-<project>-<iid>` is bound to that IID for life.
+- All scripts assume `${ISSUE_IID}` is fixed for the session. Changing it mid-session is a bug.
+
+---
+
+## GitLab Access Policy (READ FIRST — HARD RULE)
+
+The executor MUST access GitLab exclusively through the `glab` CLI, via the scripts in `scripts/` and the commands documented in `references/glab_commands.md`.
+
+Forbidden — never used to talk to GitLab:
+
+- `curl`, `wget`, `http`, `httpie`
+- Any HTTP library in any language (`requests`, `urllib`, `python-gitlab`, `@gitbeaker/*`, etc.)
+- `glab mr merge` (under any circumstances — MRs stay open)
+- Full-set label overwrite (`-f labels=...`) for transitions — wipes manually added labels. Use `set_issue_label.sh` instead.
+- Any `glab` subcommand or flag not listed in `references/glab_commands.md`.
+
+If a required operation is not in the allowed list, mark the issue `blocked` with `block_reason="executor needs unsupported glab op: <description>"` and stop. Do NOT fall back to curl.
+
+If `glab auth status` fails after `scripts/glab_auth.sh`, mark the issue `blocked` with `block_reason="glab auth failed"` and stop.
+
+---
+
+## Repo Cleanliness Policy (READ FIRST — HARD RULE)
+
+The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues.
+
+- All agent-owned files live under `${WORK_ROOT} = /data/openclaw_work/${PROJECT}/`, OUTSIDE the repo working tree. See `references/paths.md`.
+- `scripts/prepare_branch.sh` enforces a pristine working tree before branching (reset + clean -fdx).
+- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/` or `openclaw_state/` path appears in the staged tree.
+- `scripts/post_push_verify.sh` aborts with exit 4 if the remote branch contains any such path.
+
+If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open an MR.
 
 ---
 
 ## Inputs
 
-Required inputs:
-- `gitlab_address`
-- `group`
-- `project`
-- `branch`
-- `hulat_dir`
-- `gitlab_token`
-- `issue_iid`
-- `non_interactive`
+Required from the trigger command (`RUN_SINGLE_ISSUE_SESSION`):
 
-Optional inputs:
+- `gitlab_address`, `group`, `project`, `branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `non_interactive=true`
+
+Optional:
+
 - `blocked_retry_limit`
 
-Expected values:
-- `non_interactive=true`
-
----
-
-## Trigger Command
-
-The dedicated issue session should receive:
-
-```text
-RUN_SINGLE_ISSUE_SESSION
-gitlab_address=<gitlab-address>
-group=<group>
-project=<project>
-branch=<branch>
-hulat_dir=<hulat_dir>
-gitlab_token=<token>
-issue_iid=<iid>
-non_interactive=true
-blocked_retry_limit=<limit>
-```
-
----
-
-## Paths
-
-```bash
-REPO_PATH="/data/${PROJECT}"
-LOG_DIR="${REPO_PATH}/openclaw_log/issue-${ISSUE_IID}"
-STATE_DIR="${REPO_PATH}/openclaw_state"
-ISSUE_STATE_DIR="${STATE_DIR}/issues"
-ISSUE_STATE_FILE="${ISSUE_STATE_DIR}/issue-${ISSUE_IID}.json"
-REMOTE_URL="${GITLAB_ADDRESS}/${GROUP}/${PROJECT}.git"
-AUTHED_REMOTE_URL="$(echo "${REMOTE_URL}" | sed "s#://#://oauth2:${GITLAB_TOKEN}@#")"
-```
-
-**Path root is always `/data/${PROJECT}` — NEVER `${HULAT_DIR}`.**
-
-`hulat_dir` is task context for Claude Code only. The executor MUST NOT:
-- clone the repo into `${HULAT_DIR}`
-- write `openclaw_log/` or `openclaw_state/` anywhere under `${HULAT_DIR}`
-- `cd` into `${HULAT_DIR}` for git / acpx commands
-- treat `${HULAT_DIR}` as the repo path
-
-All state/log paths are derived from `/data/${PROJECT}/`. `hulat_dir` is only a string embedded into the Claude Code prompt (see "Claude Code Execution Contract") so that the downstream Claude run knows where the hulat materials live inside the repo workspace. It is not a directory the executor itself writes into.
-
----
-
-## Local Preparation
-
-```bash
-mkdir -p /data "${LOG_DIR}" "${ISSUE_STATE_DIR}"
-```
-
-If the repository does not exist locally:
-
-```bash
-git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
-```
-
-If it already exists:
-
-```bash
-cd "${REPO_PATH}"
-git remote set-url origin "${AUTHED_REMOTE_URL}"
-git fetch origin
-git checkout "${BRANCH}"
-git pull origin "${BRANCH}"
-```
-
----
-
-## Resolve Project ID
-
-Use the GitLab project API and fail if the project ID is empty or `null`.
-
----
-
-## Read Issue
-
-Read issue `<issue_iid>` and extract:
-- title
-- description
-- labels
-
----
-
-## Ensure Labels
-
-Required labels:
-- `todo`
-- `doing`
-- `pr`
-- `done`
-- `blocked`
-- `failed`
-
-Create missing labels when necessary.
-
----
-
-## Per-Issue State File
-
-Persist the issue state to:
-
-```text
-/data/<project>/openclaw_state/issues/issue-<iid>.json
-```
-
-Recommended schema:
-
-```json
-{
-  "iid": 14,
-  "session": "issue-px_ifp_hulat-14",
-  "status": "in_progress",
-  "retry_count": 1,
-  "block_reason": null,
-  "work_branch": null,
-  "commit_sha": null,
-  "merge_request_url": null,
-  "updated_at": "2026-04-23T10:00:00Z"
-}
-```
-
-Update this file at every major step.
+`hulat_dir` is a string passed through to the Claude Code prompt. The executor itself never `cd`s into it or writes there. See `references/paths.md`.
 
 ---
 
 ## Claude Code Execution Contract
 
-Build a prompt file under the issue log directory.
-
-The prompt must instruct Claude Code to:
-- work only on the target issue
-- modify repository content under `/data/<project>`
-- avoid asking the user questions
-- finish directly and summarize changes briefly
-
-Write at least:
-- `prompt.txt`
-- `claude_result.txt`
-- `acpx_raw.log`
-
-Invoke Claude Code through `acpx`.
-
-If Claude execution fails:
-- preserve logs
-- classify the problem
-- if retryable, write issue state as `blocked`
-- if not retryable or retry limit is exceeded, write issue state as `failed`
-- do not lose the dedicated session mapping
-
-Typical retryable blocked examples:
-- runtime/library mismatch
-- transient environment/tool startup failure
-- temporary credential or remote connectivity issue
-
-Typical non-recoverable or exhausted examples:
-- repeated deterministic repository corruption not auto-fixable
-- retry count exceeded configured limit
+- Build the prompt at `${LOG_DIR}/prompt.txt` with: target issue body, `hulat_dir` reference, instruction to "work only on this issue, modify content under `${REPO_PATH}`, do not ask the user, summarize briefly when done".
+- Run synchronously, one-shot, with `${REPO_PATH}` as the working directory:
+  ```bash
+  cd "${REPO_PATH}"
+  acpx claude exec -f "${LOG_DIR}/prompt.txt" \
+    1>"${LOG_DIR}/claude_result.txt" \
+    2>"${LOG_DIR}/acpx_raw.log"
+  ```
+- Forbidden: `-s` (persistent session), `--no-wait`, `acpx claude command`. Wait for the command to complete before continuing.
+- Claude must write only inside `${REPO_PATH}`. It MUST NOT write into `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else.
+- If the command fails:
+  - retryable (runtime/library mismatch, transient env, transient credential / connectivity): `status=blocked`, set `block_reason`, exit cleanly
+  - non-recoverable or `retry_count > blocked_retry_limit`: `status=failed`
 
 ---
 
-## Git Evidence
+## Executor Algorithm
 
-After Claude execution, save:
-- `git_status.txt`
-- `git_diff.patch`
+Run once per session for `${ISSUE_IID}`.
 
----
-
-## Work Branch
-
-Use one work branch per issue:
-
-```text
-issue/<iid>-auto-fix
-```
-
----
-
-## Commit, Push, and MR Creation
-
-If repository changes exist:
-1. checkout `issue/<iid>-auto-fix`
-2. stage changes with an explicit and exhaustive add step (see "Required Staging Rules" below)
-3. commit changes
-4. push branch
-5. create merge request targeting `master`
-6. save MR metadata to disk
-7. update issue labels from `doing` to `pr`
-8. immediately update issue labels from `pr` to `done`
-9. write issue state as `done`
-
-For this automation campaign, successful merge request creation is the terminal completion condition for the issue executor. The issue must not stay at `pr` for future scheduler retries.
-
-If no changes exist:
-- preserve logs
-- write issue state as `no_changes`
-
-### Required Staging Rules
-
-Every work branch pushed to GitLab MUST contain that run's execution evidence. The executor must not rely on Claude's own staging choices.
-
-Mandatory order:
-
-1. Finish writing all log artifacts BEFORE staging. At minimum these must exist on disk before `git add`:
-   - `${LOG_DIR}/prompt.txt`
-   - `${LOG_DIR}/claude_result.txt`
-   - `${LOG_DIR}/acpx_raw.log`
-   - `${LOG_DIR}/git_status.txt`
-   - `${LOG_DIR}/git_diff.patch`
-   - `${ISSUE_STATE_FILE}`
-2. Checkout the work branch `issue/<iid>-auto-fix` only after the above artifacts are written.
-3. Stage in two steps so logs cannot be missed:
+1. **Bootstrap.**
+   - `PROJECT=<project> ISSUE_IID=<iid> source scripts/env_paths.sh`
+   - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`; export `PROJECT_FULL`, `PROJECT_URI`. If auth fails, mark `blocked` with `block_reason="glab auth failed"` and stop.
+2. **Sync repo.** `bash scripts/clone_or_pull.sh`.
+3. **Read the target issue.** Use command E1 from `references/glab_commands.md`. Capture title, description, current labels into shell variables; `ISSUE_TITLE` is the short form for commit / MR title.
+4. **Ensure labels exist.** `bash scripts/ensure_labels.sh`.
+5. **Transition `todo → doing`.** Use `scripts/set_issue_label.sh remove todo`, then `... add doing`. (Idempotent — safe even if `todo` was absent.)
+6. **Initialize / refresh per-issue state.** Per `references/state_schema.md`: write `status=in_progress`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
+7. **Prepare work branch.** `bash scripts/prepare_branch.sh`. Write `work_branch=${WORK_BRANCH}` into `${ISSUE_STATE_FILE}`.
+8. **Run Claude Code** as per the execution contract above. On failure follow the retryable / non-recoverable rules.
+9. **Stage + guard.**
    ```bash
-   # a. all repository changes produced by Claude
-   git add -A
-
-   # b. force-add log + state artifacts even if gitignored
-   git add -f -- \
-     "openclaw_log/issue-${ISSUE_IID}/" \
-     "openclaw_state/issues/issue-${ISSUE_IID}.json"
+   bash scripts/stage_and_guard.sh
    ```
-4. Before committing, verify the staged tree actually contains the log artifacts:
-   ```bash
-   git diff --cached --name-only | grep -q "openclaw_log/issue-${ISSUE_IID}/claude_result.txt" \
-     || { echo "missing logs in staging"; exit 1; }
-   ```
-   If the check fails, do not push or create an MR. Mark the issue `blocked` with `block_reason="logs missing from work branch staging"`.
-5. Commit with a message including the issue IID, then push.
-
-### .gitignore Handling
-
-If the repository's `.gitignore` excludes `openclaw_log/` or `openclaw_state/`, the executor must still include this run's artifacts by using `git add -f` as shown above. Never modify the repository's `.gitignore` to achieve this.
-
-### Post-Push Verification
-
-After `git push`, the executor must confirm that the remote branch tip contains the log artifacts, for example:
-
-```bash
-git fetch origin "issue/${ISSUE_IID}-auto-fix"
-git ls-tree -r --name-only "origin/issue/${ISSUE_IID}-auto-fix" \
-  | grep -q "openclaw_log/issue-${ISSUE_IID}/claude_result.txt" \
-  || { echo "remote branch missing logs"; exit 1; }
-```
-
-If verification fails, mark the issue `blocked` rather than proceeding to MR creation.
-
----
-
-## Label Transition Rules
-
-Suggested label transitions:
-- `todo` -> `doing`
-- `doing` -> `pr`
-- `pr` -> `done` immediately after successful merge request creation
-- `doing` -> `blocked` for retryable blocked issues
-- `blocked` -> `doing` when retry starts
-- `blocked` -> `failed` when retries are exhausted
-
-Preserve unrelated labels whenever possible.
+   - Exit 3 → leak detected. Mark `status=blocked`, `block_reason="agent artifacts leaked into repo working tree"`, stop.
+   - `NO_CHANGES` → `status=no_changes`, keep logs, stop. Do NOT push.
+   - `STAGED_OK` → continue.
+10. **Commit + push.** `ISSUE_TITLE="..." bash scripts/commit_and_push.sh` (prints commit SHA). Write `commit_sha` into the state file.
+11. **Post-push verify.** `bash scripts/post_push_verify.sh`. Exit 4 → mark `status=blocked`, `block_reason="remote branch polluted with agent artifacts"`, stop.
+12. **Create MR.** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into the state file.
+13. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`: remove `doing` add `pr`; immediately remove `pr` add `done`. The issue must NOT be left at `pr`.
+14. **Finalize.** Write `status=done` and `updated_at` to `${ISSUE_STATE_FILE}`. Return the compact chat summary.
 
 ---
 
 ## Chat Output Policy
 
-Return only a compact issue summary, such as:
+Return a single compact JSON summary. Examples:
 
 ```json
 {
+  "skill_version": "2026-04-24.4",
+  "iid": 14,
+  "status": "done",
+  "work_branch": "issue/14-auto-fix",
+  "commit_sha": "abc1234...",
+  "merge_request_url": "http://gitlab.example.com/..."
+}
+```
+
+```json
+{
+  "skill_version": "2026-04-24.4",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,
@@ -327,15 +159,4 @@ Return only a compact issue summary, such as:
 }
 ```
 
-or:
-
-```json
-{
-  "iid": 14,
-  "status": "done",
-  "work_branch": "issue/14-auto-fix",
-  "merge_request_url": "http://gitlab.example.com/..."
-}
-```
-
-Never paste full logs or full diffs into chat.
+Never paste full logs, full diffs, or long issue bodies into chat. Detailed evidence stays under `${LOG_DIR}`.
