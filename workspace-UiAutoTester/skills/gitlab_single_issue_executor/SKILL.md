@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-24.6] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-24.7] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-24.6**
+**SKILL_VERSION: 2026-04-24.7**
 
-The executor MUST include `"skill_version": "2026-04-24.6"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-24.7"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -150,11 +150,12 @@ If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open 
 
 Required from the trigger command (`RUN_SINGLE_ISSUE_SESSION`):
 
-- `gitlab_address`, `group`, `project`, `branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `non_interactive=true`
+- `group`, `project`, `branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `non_interactive=true`
 
 Optional:
 
 - `blocked_retry_limit`
+- `gitlab_address` — pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; the executor never derives it from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. The remote URL passed to `git clone` is also built from the pin, not from this field.
 
 `hulat_dir` is a string passed through to the Claude Code prompt. The executor itself never `cd`s into it or writes there. See `references/paths.md`.
 
@@ -239,7 +240,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.6",
+  "skill_version": "2026-04-24.7",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -250,7 +251,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.6",
+  "skill_version": "2026-04-24.7",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

@@ -3,8 +3,13 @@
 # the trigger's gitlab_address matches, then refresh glab's stored token.
 #
 # Required env vars (from trigger):
-#   GITLAB_ADDRESS   verification value, e.g. http://gitlab-b.pxsemic.tech:30000
 #   GITLAB_TOKEN     personal/group access token (may rotate per tick)
+#
+# Optional env vars (from trigger):
+#   GITLAB_ADDRESS   verification value, e.g. http://gitlab-b.pxsemic.tech:30000.
+#                    If set, MUST resolve to the same host+protocol as the
+#                    deployment pin or the script aborts. If unset, the pin
+#                    is used as-is with no cross-check.
 #
 # Required deployment file:
 #   <workspace>/config/gitlab.env  (must define GITLAB_HOST and GITLAB_API_PROTOCOL)
@@ -25,7 +30,6 @@
 
 set -euo pipefail
 
-: "${GITLAB_ADDRESS:?GITLAB_ADDRESS must be set (trigger input)}"
 : "${GITLAB_TOKEN:?GITLAB_TOKEN must be set (trigger input)}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -53,16 +57,18 @@ case "${GITLAB_API_PROTOCOL}" in
     ;;
 esac
 
-TRIGGER_HOST="$(echo "${GITLAB_ADDRESS}" | sed -E 's#^https?://##; s#/$##')"
-TRIGGER_PROTO=http
-if echo "${GITLAB_ADDRESS}" | grep -qE '^https://'; then
-  TRIGGER_PROTO=https
-fi
+if [ -n "${GITLAB_ADDRESS:-}" ]; then
+  TRIGGER_HOST="$(echo "${GITLAB_ADDRESS}" | sed -E 's#^https?://##; s#/$##')"
+  TRIGGER_PROTO=http
+  if echo "${GITLAB_ADDRESS}" | grep -qE '^https://'; then
+    TRIGGER_PROTO=https
+  fi
 
-if [ "${TRIGGER_HOST}" != "${GITLAB_HOST}" ] || [ "${TRIGGER_PROTO}" != "${GITLAB_API_PROTOCOL}" ]; then
-  echo "glab_auth: trigger gitlab_address (${TRIGGER_PROTO}://${TRIGGER_HOST}) does not match deployment pin (${GITLAB_API_PROTOCOL}://${GITLAB_HOST})" >&2
-  echo "Refusing to switch hosts. Fix the trigger or update ${PIN_FILE}." >&2
-  exit 13
+  if [ "${TRIGGER_HOST}" != "${GITLAB_HOST}" ] || [ "${TRIGGER_PROTO}" != "${GITLAB_API_PROTOCOL}" ]; then
+    echo "glab_auth: trigger gitlab_address (${TRIGGER_PROTO}://${TRIGGER_HOST}) does not match deployment pin (${GITLAB_API_PROTOCOL}://${GITLAB_HOST})" >&2
+    echo "Refusing to switch hosts. Fix the trigger or update ${PIN_FILE}." >&2
+    exit 13
+  fi
 fi
 
 glab auth login \

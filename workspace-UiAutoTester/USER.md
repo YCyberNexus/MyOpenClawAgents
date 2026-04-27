@@ -8,7 +8,6 @@ Send the same dispatcher command every time:
 
 ```text
 RUN_SCHEDULED_ISSUE_CAMPAIGN
-gitlab_address=<gitlab-address>
 group=<group>
 project=<project>
 branch=<branch>
@@ -25,6 +24,8 @@ session_mode=per_issue
 scheduling_mode=quota_carryover
 blocked_policy=skip_and_retry
 ```
+
+`gitlab_address` is no longer required in the trigger. The GitLab host is pinned at `<workspace>/config/gitlab.env` on the runner; the agent uses that as the single source of truth. If you do include `gitlab_address` for legacy reasons, it is treated as a verification value — the agent aborts the tick if it disagrees with the deployment pin, and never silently switches hosts.
 
 ## Expected Behavior
 
