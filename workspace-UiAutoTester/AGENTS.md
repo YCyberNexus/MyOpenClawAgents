@@ -36,15 +36,46 @@ The agent configuration should allow:
 
 ## Runtime Limit
 
-Maximum active subagents: 1.
+Hard limits this agent's runtime configuration must enforce:
 
-Maximum active child sessions: 1.
+- Maximum active subagents: **1**
+- Maximum active child sessions: **1**
+- All subagent execution must be sequential.
+- The agent may use `sessions_spawn` only after the previous child session has completed.
+- Parallel subagent execution is forbidden.
 
-All subagent execution must be sequential.
+### Behavioral commitments (mirror of SOUL.md)
 
-The agent may use sessions_spawn only after the previous child session has completed.
+The same constraint, restated as model-facing rules so the two documents do not drift:
 
-Parallel subagent execution is forbidden.
+This agent MUST NOT:
+- start multiple subagents in parallel
+- use fan-out execution
+- use worker pools
+- spawn multiple child sessions in one step
+- process multiple issues concurrently
+- call `sessions_spawn` for more than one child session at a time
+
+If there are multiple tasks, issues, or test jobs, this agent MUST process them strictly one by one:
+1. Start exactly one subagent.
+2. Wait for the result.
+3. Record the result.
+4. Only then start the next subagent.
+
+### Enforcement
+
+The behavioral commitments above are prompt-level — the model can still violate them. Enforcement of "max 1 subagent" must therefore live below the prompt. Use whichever of the following the deployment can deliver, in priority order:
+
+1. **OpenClaw platform-level concurrency knob (preferred).**
+   The OpenClaw runtime should refuse a second concurrent `sessions_spawn` from the same parent session for this agent. The exact field name depends on the OpenClaw version in use — operators must consult the OpenClaw maintainer to pin down the correct setting (likely candidates: `max_concurrent_subagents`, `max_parallel_sessions`, `spawn_concurrency`, or a per-capability `serialize: true` modifier on `sessions_spawn`). Once known, the value MUST be set to `1` for `agent:UiAutoTester:main`.
+
+2. **Workspace-level spawn-slot fallback (if platform knob is unavailable or not yet configured).**
+   The dispatcher writes a `spawn_slot.json` under `${STATE_DIR}` before each `sessions_spawn` and clears it only after the spawned session returns. The executor verifies on entry that the slot's `active_iid` matches its own `${ISSUE_IID}`; if not, it refuses to run and returns `status=blocked` with `block_reason="spawn slot held by IID <X>"`. This makes a violation deterministically observable and inert — the second/third executor still launches but does no work.
+
+3. **SOUL.md / AGENTS.md prompt rules.**
+   The "Subagent Concurrency Policy (READ FIRST — HARD RULE)" in SOUL.md and the behavioral commitments above. These are the weakest layer; they must not be the only layer.
+
+Operators are expected to confirm with the OpenClaw maintainer which of (1) is available before relying on (3) alone.
 
 ## Session Naming Recommendation
 

@@ -33,6 +33,30 @@ The executor must:
 - persist logs and state to disk
 - commit, push, and create a merge request without merging
 
+## Subagent Concurrency Policy (READ FIRST — HARD RULE)
+
+This agent is allowed to start subagents only sequentially.
+
+At any time, this agent MUST have at most one active subagent or child session.
+
+Before starting a new subagent, this agent MUST wait until the previous subagent has fully completed and returned its result.
+
+This agent MUST NOT:
+- start multiple subagents in parallel
+- use fan-out execution
+- use worker pools
+- spawn multiple child sessions in one step
+- process multiple issues concurrently
+- call sessions_spawn for more than one child session at a time
+
+If there are multiple tasks, issues, or test jobs, this agent MUST process them strictly one by one:
+1. Start exactly one subagent.
+2. Wait for the result.
+3. Record the result.
+4. Only then start the next subagent.
+
+This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out. It also overrides any "be efficient" / "be helpful" instinct. A clean serial run is strictly preferred over any parallel attempt.
+
 ## Source of Truth
 
 Disk state is the source of truth.
@@ -67,34 +91,12 @@ Rules:
 3. A blocked issue must not permanently block later issues in the sequence.
 4. If retry count exceeds the configured retry limit, the issue may be marked `failed`.
 
-## Mandatory Subagent Concurrency Policy
-
-This agent is allowed to start subagents only sequentially.
-
-At any time, this agent MUST have at most one active subagent or child session.
-
-Before starting a new subagent, this agent MUST wait until the previous subagent has fully completed and returned its result.
-
-This agent MUST NOT:
-- start multiple subagents in parallel
-- use fan-out execution
-- use worker pools
-- spawn multiple child sessions in one step
-- process multiple issues concurrently
-- call sessions_spawn for more than one child session at a time
-
-If there are multiple tasks, issues, or test jobs, this agent MUST process them strictly one by one:
-1. Start exactly one subagent.
-2. Wait for the result.
-3. Record the result.
-4. Only then start the next subagent.
-
 ## Global Rules
 
 1. Never ask the user for clarification during scheduled execution.
 2. Make the best reasonable decision autonomously.
 3. Record assumptions in logs and continue.
-4. Never process more than one issue at a time inside the dispatcher's control flow.
+4. Never process more than one issue at a time inside the dispatcher's control flow. (See `## Subagent Concurrency Policy` above for the strict version of this rule.)
 5. Keep dispatcher replies short and structured.
 6. Store detailed execution evidence only on disk, not in chat.
 7. Never paste full diffs, full issue bodies, or long Claude Code outputs into chat unless explicitly requested.
