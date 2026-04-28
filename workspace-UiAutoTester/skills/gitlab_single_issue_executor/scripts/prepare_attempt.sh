@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # prepare_attempt.sh — create the per-attempt git worktree, base it on the
-# right starting point, set up the _hulat symlink, and write the
-# .git/info/exclude for the worktree.
+# right starting point, set up the _hulat symlink, copy Claude Code's
+# local runtime config, and write the .git/info/exclude for the worktree.
 #
 # Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
@@ -100,10 +100,20 @@ mkdir -p "${ATTEMPT_DIR}"
 git worktree add -b "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 
 # Set up _hulat symlink inside the worktree (zero-cost shared read-only
-# config). Also exclude it from git via .git/info/exclude (worktree's
-# own git dir, not the main repo's).
+# config), and copy Claude Code's local runtime config into the cwd used
+# by acpx. Both are local-only and excluded via the worktree's own
+# .git/info/exclude.
 cd "${WORKTREE_DIR}"
 ln -sfn "${HULAT_DIR}" "_hulat"
+
+CLAUDE_CONFIG_SRC="${HULAT_DIR}/ifp-hulat/.claude"
+CLAUDE_CONFIG_DST="${WORKTREE_DIR}/.claude"
+if [ ! -d "${CLAUDE_CONFIG_SRC}" ]; then
+  echo "prepare_attempt: required Claude Code config directory missing: ${CLAUDE_CONFIG_SRC}" >&2
+  exit 6
+fi
+rm -rf "${CLAUDE_CONFIG_DST}"
+cp -a "${CLAUDE_CONFIG_SRC}" "${CLAUDE_CONFIG_DST}"
 
 # .git in a worktree is a file pointing to ../../.git/worktrees/<name>;
 # `git rev-parse --git-path info/exclude` resolves to the right place.
@@ -112,6 +122,7 @@ mkdir -p "$(dirname "${EXCLUDE_FILE}")"
 {
   echo "# managed by prepare_attempt.sh"
   echo "/_hulat"
+  echo "/.claude"
 } > "${EXCLUDE_FILE}"
 
 echo "${ACTUAL_MODE}"

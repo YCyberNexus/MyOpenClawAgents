@@ -123,6 +123,7 @@ See `<workspace>/config/README.md` for setup steps and rationale.
                 attempt-001/
                     worktree/                 ← Claude Code's cwd (git worktree)
                         _hulat → <hulat_dir>  (symlink, .git/info/exclude'd)
+                        .claude/              (copy of <hulat_dir>/ifp-hulat/.claude, .git/info/exclude'd)
                     log/
                     attempt_state.json
                     summary.md
@@ -132,4 +133,4 @@ See `<workspace>/config/README.md` for setup steps and rationale.
 
 The previous flat layout (`/data/<project>/openclaw_state/issues/issue-<iid>.json`, `/data/<project>/openclaw_log/issue-<iid>/`) is gone. All per-issue artifacts now live under `/data/openclaw_work/<project>/issues/issue-<iid>/` and are isolated **per attempt**: every retry creates a new `attempt-NNN/` directory with its own worktree, log, state, and summary.
 
-`hulat_dir` is shared across all issues / attempts via a symlink — it is read-only configuration, never copied.
+`hulat_dir` is shared across all issues / attempts via a symlink and remains read-only. The only copied Hulat material is Claude Code runtime config: each attempt copies `<hulat_dir>/ifp-hulat/.claude` to its worktree root as local-only `.claude/`, excluded from git and never pushed.

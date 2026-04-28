@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-28.3] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-28.4] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-28.3**
+**SKILL_VERSION: 2026-04-28.4**
 
-The executor MUST include `"skill_version": "2026-04-28.3"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-28.4"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -17,13 +17,13 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/env_paths.sh` — populates issue-level AND attempt-level path variables (SOURCE it; auto-resolves the next attempt number).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/clone_or_pull.sh` — keep the main repo's refs current (no working-tree edits; worktrees do that).
-- `scripts/prepare_attempt.sh` — create the per-attempt git worktree, set up the `_hulat` symlink, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
+- `scripts/prepare_attempt.sh` — create the per-attempt git worktree, set up the `_hulat` symlink, copy local `.claude` runtime config, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
 - `scripts/build_prompt.sh` — build `${LOG_DIR}/prompt.txt` from the live issue + (continue mode) past-attempt summaries + reviewer comments. See `references/continue_mode.md` for the template.
 - `scripts/ensure_labels.sh` — make sure the seven workflow labels exist.
 - `scripts/set_issue_label.sh` — add or remove a single label (used for every transition).
-- `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `_hulat`).
+- `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `_hulat`, `.claude`).
 - `scripts/commit_and_push.sh` — commit and FORCE-push the per-attempt local branch to the SINGLE remote `${WORK_BRANCH}` (Strategy A).
-- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts and no `_hulat`.
+- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts, no `_hulat`, and no `.claude`.
 - `scripts/create_mr.sh` — fresh mode: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one (Strategy A). Continue mode: close the existing open MR (without merging) and create a fresh one that references the closed predecessor — each continue cycle leaves a visible MR trail in GitLab.
 - `scripts/summarize_attempt.sh` — write `${SUMMARY_FILE}` and post it as a GitLab issue note so future continue-mode runs can read what past attempts did.
 - `references/paths.md` — full path layout and required artifacts.
@@ -144,12 +144,13 @@ The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is also constructed from the 
 
 ## Repo Cleanliness Policy (READ FIRST — HARD RULE)
 
-The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues, no `_hulat` symlink.
+The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues, no `_hulat` symlink, no local `.claude` runtime config.
 
 - All agent-owned files live under `${ATTEMPT_DIR}` (= `${ISSUE_ROOT}/attempts/attempt-NNN/`), OUTSIDE the worktree. See `references/paths.md`.
 - `${WORKTREE_DIR}` is the only directory the executor allows Claude Code to modify. It is a real `git worktree` of `${REPO_PATH}` — `git add -A` here only sees repo-tracked content.
 - `_hulat` is a symlink inside `${WORKTREE_DIR}` pointing at `${HULAT_DIR}` for read-only config access. `scripts/prepare_attempt.sh` adds `/_hulat` to `.git/info/exclude` for the worktree.
-- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/`, `openclaw_state/`, or `_hulat` path appears in the staged tree.
+- `.claude` is copied from `${HULAT_DIR}/ifp-hulat/.claude` into `${WORKTREE_DIR}/.claude` before `acpx claude exec`, because Claude Code requires this local runtime config. `scripts/prepare_attempt.sh` adds `/.claude` to `.git/info/exclude` for the worktree. If the source directory is missing, preparation fails instead of invoking Claude Code without required config.
+- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/`, `openclaw_state/`, `_hulat`, or `.claude` path appears in the staged tree.
 - `scripts/post_push_verify.sh` aborts with exit 4 if the remote branch contains any such path.
 
 If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open an MR.
@@ -216,7 +217,7 @@ This is the ONLY way the executor is allowed to invoke Claude Code. It is govern
   - any persistent / streaming acpx mode — forbidden
   - calling `claude` directly without acpx — forbidden
   - any non-Claude LLM CLI as a substitute (`openai`, `gemini`, `ollama`, etc.) — forbidden
-- Claude must write only inside `${WORKTREE_DIR}`. It MUST NOT write into `${REPO_PATH}` (the main repo's working tree), `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else. Reading from `${WORKTREE_DIR}/_hulat` (the symlink) is fine; writing through that symlink is forbidden.
+- Claude must write only inside `${WORKTREE_DIR}`. It MUST NOT write into `${REPO_PATH}` (the main repo's working tree), `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else. Reading from `${WORKTREE_DIR}/_hulat` (the symlink) is fine; writing through that symlink is forbidden. `${WORKTREE_DIR}/.claude` is local runtime config copied before invocation; Claude must not modify it or include it in issue output.
 
 ### What to do when this contract fails
 
@@ -242,7 +243,7 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.3, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.4, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 5 env vars exported:**
 
@@ -315,7 +316,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 6. **Initialize per-attempt state and refresh per-issue state.** Per `references/state_schema.md`:
    - `${ATTEMPT_STATE_FILE}` (new) — write `iid`, `attempt_number`, `attempt_started_at`, `mode_requested=${ISSUE_MODE}`, `skill_version`. Other fields filled in as the algorithm progresses.
    - `${ISSUE_STATE_FILE}` — write/update `status=in_progress`, `mode="${ISSUE_MODE}"`, `attempts_total=${ATTEMPT_NUMBER}`, `latest_attempt_number=${ATTEMPT_NUMBER}`, `latest_attempt_dir=${ATTEMPT_DIR}`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
-7. **Prepare the per-attempt worktree.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
+7. **Prepare the per-attempt worktree.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script creates `${WORKTREE_DIR}`, links `${WORKTREE_DIR}/_hulat`, copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude`, and excludes both local-only paths from git. It prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
 8. **Build the prompt and run Claude Code.**
    1. `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments".
    2. Capture stderr — record `no_reviewer_comments` and `prior_attempt_count` into `${ATTEMPT_STATE_FILE}`.
@@ -354,7 +355,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.3",
+  "skill_version": "2026-04-28.4",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -365,7 +366,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.3",
+  "skill_version": "2026-04-28.4",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

@@ -20,6 +20,7 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
                 attempt-001/
                     worktree/                             ← Claude Code's cwd
                         _hulat → ${HULAT_DIR}             (symlink, .git/info/exclude'd)
+                        .claude/                          (copy of ${HULAT_DIR}/ifp-hulat/.claude, .git/info/exclude'd)
                         ...repo files...
                     log/
                         prompt.txt
@@ -62,11 +63,12 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 ## Hard rules
 
 1. `REPO_PATH`'s **working tree** is never edited. The agent uses `git worktree add` to spin off a separate working tree (`${WORKTREE_DIR}`) per attempt.
-2. All agent-owned files (logs, prompts, state, summaries) live under `${ISSUE_ROOT}`. None of them go inside `${WORKTREE_DIR}` — that directory is reserved for repo content. The leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) enforce this.
-3. **`hulat_dir` is shared, read-only, single source.** Each attempt creates a symlink at `${WORKTREE_DIR}/_hulat` pointing to `${HULAT_DIR}`. `_hulat` is excluded from the worktree's git via `.git/info/exclude` and explicitly rejected by both leak guards. Do NOT copy hulat content into the worktree, do NOT modify anything under `${HULAT_DIR}` from inside an attempt.
-4. Per-attempt isolation is **physical** — each attempt has its own worktree, its own logs, its own summary. Past attempts are preserved on disk for audit; never delete them.
-5. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
-6. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
+2. All agent-owned files (logs, prompts, state, summaries) live under `${ISSUE_ROOT}`. None of them go inside `${WORKTREE_DIR}`. The only local-only non-repo content allowed in the worktree is the `_hulat` symlink and `.claude` runtime config described below; leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) keep both out of commits.
+3. **`hulat_dir` is shared, read-only, single source.** Each attempt creates a symlink at `${WORKTREE_DIR}/_hulat` pointing to `${HULAT_DIR}`. `_hulat` is excluded from the worktree's git via `.git/info/exclude` and explicitly rejected by both leak guards. Do NOT modify anything under `${HULAT_DIR}` from inside an attempt.
+4. Claude Code runtime config is the only copied Hulat material: `${HULAT_DIR}/ifp-hulat/.claude` is copied to `${WORKTREE_DIR}/.claude` before `acpx` runs. `.claude` is local-only, excluded from git, and rejected by both leak guards.
+5. Per-attempt isolation is **physical** — each attempt has its own worktree, its own logs, its own summary. Past attempts are preserved on disk for audit; never delete them.
+6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
+7. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
 
 ## Required artifacts in `${LOG_DIR}`
 

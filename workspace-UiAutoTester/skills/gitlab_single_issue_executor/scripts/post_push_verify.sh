@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # post_push_verify.sh — confirm the remote ${WORK_BRANCH} contains only
-# repo code, no agent artifacts and no _hulat symlink. If verification
-# fails the executor must mark the issue blocked and skip MR creation.
+# repo code, no agent artifacts, no _hulat symlink, and no local Claude
+# Code config. If verification fails the executor must mark the issue
+# blocked and skip MR creation.
 #
 # Required env vars:
 #   WORKTREE_DIR    git worktree (cwd; works because the worktree shares
@@ -25,7 +26,7 @@ git fetch origin "${WORK_BRANCH}"
 
 POLLUTED="$(
   git ls-tree -r --name-only "origin/${WORK_BRANCH}" \
-    | grep -E '^(openclaw_log/|openclaw_state/|_hulat(/|$))' || true
+    | grep -E '^(openclaw_log/|openclaw_state/|_hulat(/|$)|\.claude(/|$))' || true
 )"
 
 if [ -n "${POLLUTED}" ]; then

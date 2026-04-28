@@ -136,6 +136,7 @@ EOF
 # Working environment
 - Worktree (your cwd):        ${WORKTREE_DIR}
 - Hulat materials (symlink):  ${WORKTREE_DIR}/_hulat → ${HULAT_DIR}
+- Claude runtime config:      ${WORKTREE_DIR}/.claude (copied from ${HULAT_DIR}/ifp-hulat/.claude; local-only)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
@@ -145,6 +146,7 @@ EOF
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`hulat-spec-issue${ISSUE_IID}/\` at the worktree root. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the worktree.
 - Read configuration from ${WORKTREE_DIR}/_hulat (the symlink); do not modify hulat materials — they are shared, read-only.
+- Treat ${WORKTREE_DIR}/.claude as local Claude Code runtime config. Do not modify it or include it in issue output.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
 EOF
