@@ -111,6 +111,18 @@ glab mr create \
 glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.web_url'
 ```
 
+## E10 — Close (without merging) an existing MR
+
+Used by `scripts/create_mr.sh` in continue mode to close the previous attempt's MR before creating a fresh one. Closing is NOT merging — the integration branch is unaffected; the closed MR remains in GitLab as historical record.
+
+```bash
+glab mr close <mr_iid> --repo "${PROJECT_FULL}"
+```
+
+`<mr_iid>` is the per-project MR IID (the integer in `merge_requests/<N>`). Get it via E6 (`.[0].iid`).
+
+The executor MUST NEVER call `glab mr merge`. Closing (E10) is allowed as part of the continue-mode MR rotation; merging is not.
+
 ## E9 — Post a note (comment) on the issue
 
 Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it.
