@@ -7,6 +7,7 @@ RUN_SCHEDULED_ISSUE_CAMPAIGN
 group=<group>
 project=<project>
 branch=<branch>
+dev_branch=<dev_branch>
 hulat_dir=<hulat_dir>
 gitlab_token=<token>
 issue_min_iid=<min_iid>
@@ -29,7 +30,8 @@ Older triggers may also include `gitlab_address=...`. That is still accepted —
 | ----------------------- | --------------------------------------------------------------------- |
 | `group`                 | GitLab group slug                                                     |
 | `project`               | GitLab project slug                                                   |
-| `branch`                | Default integration branch (typically `master`)                       |
+| `branch`                | **Integration / target branch** (typically `master`). MRs are opened against this branch; spec accumulation happens here. |
+| `dev_branch`            | **Clean baseline branch** (typically `dev`). Fresh-mode worktrees are checked out from `origin/${dev_branch}` so Claude Code starts from a clean tree without past spec accumulation. If the project does not maintain a separate clean baseline, set `dev_branch=<same-as-branch>` to fall back to single-branch behavior. |
 | `hulat_dir`             | String passed through to Claude Code prompt. **Not a working dir.**   |
 | `gitlab_token`          | Token used by `glab auth login` against the deployment-pinned host    |
 | `issue_min_iid`         | Integer, inclusive                                                    |

@@ -6,12 +6,16 @@
 #
 # Required env vars:
 #   REPO_PATH               from env_paths.sh
-#   BRANCH                  default branch (typically "master")
+#   BRANCH                  integration / target branch (typically "master")
 #   GROUP                   from trigger
 #   PROJECT                 from trigger
 #   GITLAB_TOKEN            from trigger
 #   GITLAB_HOST             from glab_auth.sh (deployment pin)
 #   GITLAB_API_PROTOCOL     from glab_auth.sh (deployment pin)
+#
+# DEV_BRANCH is consulted by prepare_attempt.sh, not here. `git fetch
+# --prune origin` retrieves all branches, so DEV_BRANCH refs are
+# available without a separate fetch.
 
 set -euo pipefail
 

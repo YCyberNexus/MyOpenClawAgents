@@ -10,13 +10,22 @@
 # local branch, so each attempt uses a unique local branch name.
 #
 # Modes (env var ISSUE_MODE):
-#   fresh     — base attempt on origin/${BRANCH}; the previous attempts'
-#               work is intentionally discarded (Claude redoes from scratch)
+#   fresh     — base attempt on origin/${DEV_BRANCH} (clean baseline,
+#               no past spec accumulation visible to Claude). The
+#               previous attempts' work is intentionally discarded.
 #   continue  — base attempt on origin/${WORK_BRANCH} if it exists, else
-#               downgrade to fresh
+#               downgrade to fresh (and use origin/${DEV_BRANCH})
+#
+# Why DEV_BRANCH and not BRANCH for fresh mode:
+#   BRANCH is the integration target (e.g. master) and accumulates every
+#   completed issue's spec output. Checking out from BRANCH would expose
+#   Claude to past issues' files in the worktree, polluting context and
+#   inviting accidental edits. DEV_BRANCH is a clean baseline (no spec
+#   output) so each fresh attempt starts from zero. PRs still target
+#   BRANCH — only the source baseline changes.
 #
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
-#   REPO_PATH, BRANCH, ISSUE_IID, ISSUE_MODE,
+#   REPO_PATH, BRANCH, DEV_BRANCH, ISSUE_IID, ISSUE_MODE,
 #   ATTEMPT_DIR, WORKTREE_DIR, ATTEMPT_NUMBER_PADDED,
 #   WORK_BRANCH, LOCAL_ATTEMPT_BRANCH, HULAT_DIR
 #
@@ -26,7 +35,7 @@
 
 set -euo pipefail
 
-: "${REPO_PATH:?}" "${BRANCH:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
+: "${REPO_PATH:?}" "${BRANCH:?}" "${DEV_BRANCH:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
   "${ATTEMPT_DIR:?}" "${WORKTREE_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
   "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}" "${HULAT_DIR:?}"
 
@@ -44,15 +53,25 @@ cd "${REPO_PATH}"
 git fetch --prune origin
 
 # Resolve the actual base ref.
-BASE_REF="origin/${BRANCH}"
+# Fresh mode bases on DEV_BRANCH (clean baseline). Continue mode tries
+# WORK_BRANCH first; if missing, downgrade to fresh on DEV_BRANCH.
+BASE_REF="origin/${DEV_BRANCH}"
 ACTUAL_MODE="${ISSUE_MODE}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
   if git ls-remote --exit-code --heads origin "${WORK_BRANCH}" >/dev/null 2>&1; then
     BASE_REF="origin/${WORK_BRANCH}"
   else
     ACTUAL_MODE=fresh
-    BASE_REF="origin/${BRANCH}"
+    BASE_REF="origin/${DEV_BRANCH}"
   fi
+fi
+
+# Sanity check the resolved BASE_REF actually exists. If DEV_BRANCH is
+# missing on the remote, fail loudly — there is no further fallback.
+if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
+  echo "prepare_attempt: base ref ${BASE_REF} does not exist on origin" >&2
+  echo "Check that --dev_branch=${DEV_BRANCH} is correct and the branch exists on the remote." >&2
+  exit 5
 fi
 
 # If WORKTREE_DIR happens to exist (interrupted prior run), nuke it so

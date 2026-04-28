@@ -13,7 +13,7 @@
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
-#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, HULAT_DIR
+#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH, HULAT_DIR
 #
 # Output:
 #   Writes ${LOG_DIR}/prompt.txt and prints its absolute path on stdout.
@@ -27,7 +27,7 @@ set -euo pipefail
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" \
-  "${BRANCH:?}" "${HULAT_DIR:?}"
+  "${BRANCH:?}" "${DEV_BRANCH:?}" "${HULAT_DIR:?}"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -100,7 +100,10 @@ EOF
     cat <<EOF
 You are working on GitLab issue #${ISSUE_IID}. Implement the change
 requested in the issue description. You are running inside a fresh git
-worktree at ${WORKTREE_DIR}, branched from \`origin/${BRANCH}\`.
+worktree at ${WORKTREE_DIR}, branched from \`origin/${DEV_BRANCH}\`
+(the clean baseline). The integration branch \`${BRANCH}\` already
+contains spec output from previously completed issues, but you should
+NOT see that here — your worktree starts clean.
 
 EOF
   fi
@@ -130,10 +133,12 @@ EOF
 - Worktree (your cwd):        ${WORKTREE_DIR}
 - Hulat materials (symlink):  ${WORKTREE_DIR}/_hulat → ${HULAT_DIR}
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
-- Integration branch:         ${BRANCH}
+- Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
+- Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
 # Rules
 - Work only on this issue.
+- **Output isolation.** Place all spec / report / artifact output for this issue under \`hulat-spec-issue${ISSUE_IID}/\` at the worktree root. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the worktree.
 - Read configuration from ${WORKTREE_DIR}/_hulat (the symlink); do not modify hulat materials — they are shared, read-only.
 - Do not ask the user any questions. Make the best reasonable decisions.

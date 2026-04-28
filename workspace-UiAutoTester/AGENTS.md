@@ -2,6 +2,8 @@
 
 This workspace implements a quota-carryover GitLab issue campaign with blocked skip-and-retry.
 
+The repo follows a **two-branch model**: a clean baseline branch (typically `dev`, passed as `dev_branch=`) from which fresh worktrees are checked out, and an integration branch (typically `master`, passed as `branch=`) that accumulates spec output via merge requests. Each issue's spec output is required to live under `hulat-spec-issue<iid>/` at the worktree root, so MRs into `master` never collide on file paths.
+
 ## Agent Identity
 
 - Agent name: `UiAutoTester`

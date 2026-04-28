@@ -66,6 +66,7 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 3. **`hulat_dir` is shared, read-only, single source.** Each attempt creates a symlink at `${WORKTREE_DIR}/_hulat` pointing to `${HULAT_DIR}`. `_hulat` is excluded from the worktree's git via `.git/info/exclude` and explicitly rejected by both leak guards. Do NOT copy hulat content into the worktree, do NOT modify anything under `${HULAT_DIR}` from inside an attempt.
 4. Per-attempt isolation is **physical** — each attempt has its own worktree, its own logs, its own summary. Past attempts are preserved on disk for audit; never delete them.
 5. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
+6. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
 
 ## Required artifacts in `${LOG_DIR}`
 
