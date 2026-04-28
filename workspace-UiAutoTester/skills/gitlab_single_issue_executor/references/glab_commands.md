@@ -21,7 +21,7 @@ export GITLAB_HOST PROJECT_FULL PROJECT_URI
 Used to fetch title, description, and current labels.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" \
+glab api \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}"
 ```
 
@@ -30,7 +30,7 @@ glab api --hostname "${GITLAB_HOST}" \
 Used in **continue mode** so the executor can pick up reviewer-supplied supplemental steps. Reviewers leave the supplemental instructions as a comment on the issue before flipping the label from `done` to `continue`; this command reads those comments. See `references/continue_mode.md` for the reviewer contract.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --paginate \
+glab api --paginate \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at"
 ```
 
@@ -43,7 +43,7 @@ In fresh mode, fetching notes is optional — the original description is the so
 Used by `scripts/ensure_labels.sh` to detect missing workflow labels.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --paginate \
+glab api --paginate \
   "projects/${PROJECT_URI}/labels?per_page=100"
 ```
 
@@ -52,7 +52,7 @@ glab api --hostname "${GITLAB_HOST}" --paginate \
 Used by `scripts/ensure_labels.sh`. Run once per missing name.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --method POST \
+glab api --method POST \
   "projects/${PROJECT_URI}/labels" \
   -f "name=${LABEL_NAME}" -f "color=#808080"
 ```
@@ -62,7 +62,7 @@ glab api --hostname "${GITLAB_HOST}" --method POST \
 Wrapped by `scripts/set_issue_label.sh add <label>`.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --method PUT \
+glab api --method PUT \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
   -f "add_labels=${LABEL}"
 ```
@@ -72,7 +72,7 @@ glab api --hostname "${GITLAB_HOST}" --method PUT \
 Wrapped by `scripts/set_issue_label.sh remove <label>`.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --method PUT \
+glab api --method PUT \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
   -f "remove_labels=${LABEL}"
 ```
@@ -128,7 +128,7 @@ The executor MUST NEVER call `glab mr merge`. Closing (E10) is allowed as part o
 Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --method POST \
+glab api --method POST \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes" \
   -F "body=@${SUMMARY_FILE}"
 ```

@@ -90,7 +90,7 @@ fi
   echo "<!-- /uiautotester:attempt-summary -->"
 } > "${SUMMARY_FILE}"
 
-glab api --hostname "${GITLAB_HOST}" --method POST \
+glab api --method POST \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes" \
   -F "body=@${SUMMARY_FILE}" >/dev/null
 

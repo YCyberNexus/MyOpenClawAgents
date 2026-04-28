@@ -26,6 +26,15 @@
 # Recommended caller pattern (so exports survive):
 #   GITLAB_HOST="$(bash skills/.../scripts/glab_auth.sh)"
 #   export GITLAB_HOST
+#
+# IMPORTANT (2026-04-25.6+):
+#   After this script runs, all subsequent `glab api` calls MUST rely on
+#   the GITLAB_HOST env var (which glab natively respects) and MUST NOT
+#   pass --hostname themselves. Passing --hostname with a "host:port"
+#   value confuses glab's URL resolution for some subcommands and caused
+#   the agent to spin trying alternative invocations (env var, -R flag,
+#   different config keys, etc.). The single allowed convention is:
+#   set GITLAB_HOST once via this script, then drop --hostname everywhere.
 
 set -euo pipefail
 

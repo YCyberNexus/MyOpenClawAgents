@@ -13,7 +13,7 @@ The dispatcher MUST source `${GITLAB_HOST}` from `scripts/glab_auth.sh` only. It
 Used for ad-hoc lookups. The bulk reconciliation in `scripts/reconcile.sh` already calls this for the entire IID range.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" \
+glab api \
   "projects/$(printf %s "${GROUP}/${PROJECT}" | jq -sRr @uri)/issues/${IID}"
 ```
 
@@ -24,7 +24,7 @@ Response is the raw issue JSON. Parse with `jq` to read `.state` and `.labels`.
 Useful only for debugging. The dispatcher's normal flow does not need this; range iteration in `reconcile.sh` is preferred because it produces the evidence file.
 
 ```bash
-glab api --hostname "${GITLAB_HOST}" --paginate \
+glab api --paginate \
   "projects/$(printf %s "${GROUP}/${PROJECT}" | jq -sRr @uri)/issues?per_page=100&scope=all"
 ```
 

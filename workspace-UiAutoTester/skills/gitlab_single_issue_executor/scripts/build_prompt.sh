@@ -41,7 +41,7 @@ mkdir -p "${LOG_DIR}"
 PROMPT_FILE="${LOG_DIR}/prompt.txt"
 
 # 1. Issue body.
-ISSUE_JSON="$(glab api --hostname "${GITLAB_HOST}" \
+ISSUE_JSON="$(glab api \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}")"
 ISSUE_TITLE="$(echo "${ISSUE_JSON}" | jq -r '.title // ""')"
 ISSUE_DESC="$(echo "${ISSUE_JSON}" | jq -r '.description // ""')"
@@ -53,7 +53,7 @@ NO_REVIEWER_COMMENTS=true
 PRIOR_ATTEMPT_COUNT=0
 
 if [ "${ISSUE_MODE}" = "continue" ]; then
-  NOTES_JSON="$(glab api --hostname "${GITLAB_HOST}" --paginate \
+  NOTES_JSON="$(glab api --paginate \
     "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at")"
 
   # Split notes:

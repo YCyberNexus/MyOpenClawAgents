@@ -35,7 +35,7 @@ case "${OP}" in
     ;;
 esac
 
-glab api --hostname "${GITLAB_HOST}" --method PUT \
+glab api --method PUT \
   "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
   -f "${FIELD}=${LABEL}" >/dev/null
 

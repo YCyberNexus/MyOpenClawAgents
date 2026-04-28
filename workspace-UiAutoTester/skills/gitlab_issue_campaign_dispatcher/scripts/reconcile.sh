@@ -49,7 +49,7 @@ PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
 echo "[" > "${OUT_FILE}"
 first=1
 for iid in $(seq "${MIN_IID}" "${MAX_IID}"); do
-  if body="$(glab api --hostname "${GITLAB_HOST}" "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null)"; then
+  if body="$(glab api "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null)"; then
     digest="$(echo "${body}" | jq -c --argjson iid "${iid}" '
       . as $issue |
       ($issue.labels // []) as $labels |
