@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-28.2] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-28.3] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-28.2**
+**SKILL_VERSION: 2026-04-28.3**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.2` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.3` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -178,7 +178,7 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.2, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.3, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 3 env vars exported:**
 
@@ -257,7 +257,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
       - `issue_mode=continue` if the per-issue state has `mode="continue"`; otherwise `issue_mode=fresh` (default)
 
    Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source created an empty `attempt-NNN/` directory. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution.
-   4. After the session returns, re-read `${ISSUE_STATE_DIR}/issue-<iid>.json` from disk.
+   4. After the session returns, re-read `$(issue_state_file_for <iid>)` (`${ISSUES_ROOT}/issue-<iid>/state.json`) from disk.
    5. If terminal (`done` / `no_changes` / `failed`): update the corresponding list, increment `quota_completed_this_tick`.
    6. If `blocked`: keep in backlog; skip and continue.
    7. If `in_progress` and tick budget exhausted: keep as backlog for next tick.
@@ -291,7 +291,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-28.2",
+  "skill_version": "2026-04-28.3",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

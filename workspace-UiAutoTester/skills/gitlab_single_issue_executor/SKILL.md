@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-28.2] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-28.3] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-28.2**
+**SKILL_VERSION: 2026-04-28.3**
 
-The executor MUST include `"skill_version": "2026-04-28.2"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-28.3"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -58,12 +58,13 @@ This rule overrides any default model behavior that says "try another way", "be 
    - re-run acpx with a tweaked working directory or a different `${HULAT_DIR}` value
    The exact and ONLY allowed invocation is the one in "Claude Code Execution Contract" below. If it fails, mark the issue `blocked` (retryable) or `failed` (non-recoverable / retry-exhausted) with an accurate `block_reason`, preserve all logs under `${LOG_DIR}`, and return.
 3. If `glab` cannot do something, the executor MUST NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library. (Also covered by GitLab Access Policy.)
-4. If `git push` is rejected (non-fast-forward, hook rejection, auth, etc.), the executor MUST NOT:
-   - `git push --force` / `--force-with-lease`
+4. If `git push` is rejected (non-fast-forward, hook rejection, auth, etc.), the executor MUST NOT improvise a manual recovery:
+   - do not run any extra `git push --force` / `--force-with-lease` outside `scripts/commit_and_push.sh`
    - rewrite history with `git rebase` / `git reset --hard` and re-push
    - push to a different branch name
    Mark the issue `blocked` with the rejection reason verbatim and stop.
-5. If `prepare_branch.sh` cannot produce a clean working tree, the executor MUST NOT manually `rm -rf` parts of the repo or skip the clean step. Mark the issue `blocked` with `block_reason="working tree could not be cleaned: <reason>"` and stop.
+   The only allowed force update is the documented Strategy A push performed by `scripts/commit_and_push.sh` itself.
+5. If `prepare_attempt.sh` cannot produce a clean worktree, the executor MUST NOT manually `rm -rf` parts of the repo or skip the clean step. Mark the issue `blocked` with `block_reason="worktree could not be prepared: <reason>"` and stop.
 6. If `stage_and_guard.sh` exits 3 (artifact leak), the executor MUST NOT manually `git rm` the leaked paths and re-run staging. The leak indicates a prior bug that must be investigated; mark `blocked` with `block_reason="agent artifacts leaked into repo working tree"` and stop.
 7. If `post_push_verify.sh` exits 4 (remote polluted), the executor MUST NOT manually `git push --delete` and rebuild. Mark `blocked` with `block_reason="remote branch polluted with agent artifacts"` and stop.
 8. If `create_mr.sh` fails, the executor MUST NOT create the MR through the GitLab web UI scrape, through `git push --push-option=merge_request.create`, or by manually crafting an HTTP request. Mark `blocked` and stop.
@@ -241,7 +242,7 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.2, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.3, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 5 env vars exported:**
 
@@ -341,7 +342,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
     - In `ISSUE_MODE=continue`: closes any existing open MR for `${WORK_BRANCH}` (without merging), then creates a fresh MR. The new MR's description includes `Supersedes !<old_mr_iid>` so reviewers can trace which previous MR this run replaces.
     - The MR description always starts with `Closes #${ISSUE_IID}` so GitLab auto-closes the issue when whichever MR is current is eventually merged.
 13. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`. The executor does NOT close the issue itself.
-14. **Summarize the attempt.** `ATTEMPT_STATUS=done COMMIT_SHA=... MERGE_REQUEST_URL=... bash scripts/summarize_attempt.sh`. This writes `${SUMMARY_FILE}` and posts the same content as a GitLab issue note (E9) marked with `<!-- uiautotester:attempt-summary v1 attempt=${ATTEMPT_NUMBER_PADDED} -->`. Set `summary_posted_to_issue=true` in `${ATTEMPT_STATE_FILE}`.
+14. **Summarize the attempt.** `ATTEMPT_STATUS=done COMMIT_SHA=... MERGE_REQUEST_URL=... bash scripts/summarize_attempt.sh`. This writes `${SUMMARY_FILE}` and posts the same content as a GitLab issue note (E9) marked with `<!-- uiautotester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->`. Set `summary_posted_to_issue=true` in `${ATTEMPT_STATE_FILE}`.
     For non-`done` terminal statuses (`no_changes`, `blocked`, `failed`), Step 14 still runs — pass the appropriate `ATTEMPT_STATUS` and `BLOCK_REASON`. The summary is always posted, even on failure paths, so future continue-mode runs and reviewers can see what happened.
 15. **Finalize.** Write the terminal `status` and `updated_at` to BOTH `${ATTEMPT_STATE_FILE}` (with `attempt_finished_at`) and `${ISSUE_STATE_FILE}`. Return the compact chat summary.
 
@@ -353,7 +354,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.2",
+  "skill_version": "2026-04-28.3",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -364,7 +365,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.2",
+  "skill_version": "2026-04-28.3",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,
