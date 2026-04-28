@@ -61,17 +61,17 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
   #   everything else (non-system) → reviewer comments
   PAST_ATTEMPTS_BLOCK="$(echo "${NOTES_JSON}" | jq -r '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-summary ")) | .body ]
+          | select(.body | test("<!-- uiautotester:attempt-summary v[0-9]+ ")) | .body ]
     | if length == 0 then "" else (join("\n\n")) end
   ')"
   PRIOR_ATTEMPT_COUNT="$(echo "${NOTES_JSON}" | jq -r '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-summary ")) ] | length
+          | select(.body | test("<!-- uiautotester:attempt-summary v[0-9]+ ")) ] | length
   ')"
 
   REVIEWER_BLOCK="$(echo "${NOTES_JSON}" | jq -r '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-summary ") | not) | .body ]
+          | select(.body | test("<!-- uiautotester:attempt-summary v[0-9]+ ") | not) | .body ]
     | if length == 0 then "" else (join("\n---\n")) end
   ')"
 
