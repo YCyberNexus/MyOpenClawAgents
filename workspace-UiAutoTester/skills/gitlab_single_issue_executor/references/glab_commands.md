@@ -4,16 +4,14 @@ The executor is allowed only the commands listed here. Any other approach to tal
 
 ## Authentication and host
 
-The host is **pinned at deployment time** in `<workspace>/config/gitlab.env`. `scripts/glab_auth.sh` reads that pin, verifies the trigger's `gitlab_address` matches, refreshes the token via `glab auth login`, and prints `${GITLAB_HOST}`.
+The host is **pinned at deployment time** in `<workspace>/config/gitlab.env`. `scripts/env_paths.sh` calls `scripts/glab_auth.sh`, which reads that pin, verifies the trigger's `gitlab_address` matches, refreshes the token via `glab auth login`, and prints `${GITLAB_HOST}`.
 
-The executor MUST source `${GITLAB_HOST}` from `scripts/glab_auth.sh` only. It MUST NEVER re-derive the host from `${GITLAB_ADDRESS}` (no inline `sed`, no `awk`, no manual stripping of scheme/trailing slash).
+The executor MUST get `${GITLAB_HOST}`, `${PROJECT_FULL}`, and `${PROJECT_URI}` through `scripts/env_paths.sh`. It MUST NEVER re-derive the host from `${GITLAB_ADDRESS}` or hand-export derived project vars in later tool calls.
 
-After `glab_auth.sh` runs, the agent should also export the URI-encoded project handle:
+Every script in this skill sources `env_paths.sh` at startup. The model only needs to provide the minimum trigger env vars in the same Bash tool call:
 
 ```bash
-PROJECT_FULL="${GROUP}/${PROJECT}"
-PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
-export GITLAB_HOST PROJECT_FULL PROJECT_URI
+PROJECT=<project> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N> GROUP=<group> GITLAB_TOKEN=<token> bash scripts/<script>.sh
 ```
 
 ## E1 — Read the target issue

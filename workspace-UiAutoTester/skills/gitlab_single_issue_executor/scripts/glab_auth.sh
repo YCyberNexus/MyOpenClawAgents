@@ -23,10 +23,11 @@
 # GITLAB_ADDRESS, per the No-Fallback Policy in SKILL.md.
 #
 # Recommended caller pattern:
-#   GITLAB_HOST="$(bash scripts/glab_auth.sh)"
-#   PROJECT_FULL="${GROUP}/${PROJECT}"
-#   PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
-#   export GITLAB_HOST PROJECT_FULL PROJECT_URI
+#   source scripts/env_paths.sh
+#
+# env_paths.sh calls this script, exports GITLAB_HOST / GITLAB_API_PROTOCOL,
+# and computes PROJECT_FULL / PROJECT_URI for the current shell. Do not call
+# this script separately and then hand-export derived project vars.
 #
 # IMPORTANT (2026-04-25.6+):
 #   After this script runs, all subsequent `glab api` calls MUST rely on
@@ -35,7 +36,7 @@
 #   value confuses glab's URL resolution for some subcommands and caused
 #   the agent to spin trying alternative invocations (env var, -R flag,
 #   different config keys, etc.). The single allowed convention is:
-#   set GITLAB_HOST once via this script, then drop --hostname everywhere.
+#   set GITLAB_HOST once via env_paths.sh, then drop --hostname everywhere.
 
 set -euo pipefail
 

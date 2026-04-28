@@ -16,16 +16,17 @@
 #
 # On success:
 #   - prints the pinned GITLAB_HOST to stdout
-#   - exports GITLAB_HOST and GITLAB_API_PROTOCOL into the calling shell IF
-#     this script is sourced (recommended pattern below)
 #
 # On failure: exits non-zero. The dispatcher MUST mark the affected work
 # blocked / abort the tick — it MUST NOT fall back to curl or to re-deriving
 # the host from GITLAB_ADDRESS.
 #
-# Recommended caller pattern (so exports survive):
-#   GITLAB_HOST="$(bash skills/.../scripts/glab_auth.sh)"
-#   export GITLAB_HOST
+# Recommended caller pattern:
+#   source scripts/env_paths.sh
+#
+# env_paths.sh calls this script, exports GITLAB_HOST / GITLAB_API_PROTOCOL,
+# and computes PROJECT_FULL / PROJECT_URI for the current shell. Do not call
+# this script separately and then hand-export derived project vars.
 #
 # IMPORTANT (2026-04-25.6+):
 #   After this script runs, all subsequent `glab api` calls MUST rely on
@@ -34,7 +35,7 @@
 #   value confuses glab's URL resolution for some subcommands and caused
 #   the agent to spin trying alternative invocations (env var, -R flag,
 #   different config keys, etc.). The single allowed convention is:
-#   set GITLAB_HOST once via this script, then drop --hostname everywhere.
+#   set GITLAB_HOST once via env_paths.sh, then drop --hostname everywhere.
 
 set -euo pipefail
 

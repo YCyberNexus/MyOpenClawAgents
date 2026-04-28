@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-28.1] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-28.2] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-28.1**
+**SKILL_VERSION: 2026-04-28.2**
 
-The executor MUST include `"skill_version": "2026-04-28.1"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-28.2"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -241,7 +241,7 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.1, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.2, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 5 env vars exported:**
 
@@ -292,12 +292,15 @@ Note: at Step 8 (acpx) the algorithm explicitly switches cwd to `${WORKTREE_DIR}
 
 Run once per session for `${ISSUE_IID}`. Every run produces a brand-new attempt directory.
 
+When a step below says `bash scripts/X.sh`, that is shorthand for the script action. In an actual OpenClaw Bash tool call, prefix the command with the minimum env vars from the Per-Exec Env Contract plus any script-specific vars in the same exec. Never rely on exports from a previous Bash tool call.
+
 1. **Bootstrap.**
    - `cd ${SKILL_DIR}` — see "Working Directory" above; mandatory before any relative `scripts/...` invocation.
    - Verify the trigger supplied `attempt_number=<N>`. If missing, mark the issue `blocked` with `block_reason="trigger missing attempt_number"` and stop. (The dispatcher must call `allocate_attempt.sh` before every spawn — see dispatcher SKILL.)
-   - `PROJECT=<project> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N> source scripts/env_paths.sh`
-     This resolves both issue-level and attempt-level paths and creates the `attempt-${N}/` skeleton. `env_paths.sh` is now idempotent — re-sourcing it in the same session reuses the same directory because `ATTEMPT_NUMBER` is fixed by the trigger.
-   - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`; export `PROJECT_FULL`, `PROJECT_URI`. If auth fails, mark the attempt and the issue `blocked` with `block_reason="glab auth failed"` and stop.
+   - If doing an explicit bootstrap check in the current shell, use the full minimum env contract:
+     `PROJECT=<project> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N> GROUP=<group> GITLAB_TOKEN=<token> source scripts/env_paths.sh`
+     This resolves both issue-level and attempt-level paths, authenticates glab, computes `PROJECT_FULL` / `PROJECT_URI`, and creates the `attempt-${N}/` skeleton.
+   - Do NOT call `scripts/glab_auth.sh` separately after `env_paths.sh`, and do NOT manually export `PROJECT_FULL` or `PROJECT_URI`. Every later `bash scripts/...` command is a fresh shell and must receive the minimum env vars from the Per-Exec Env Contract; the target script will source `env_paths.sh` itself.
 2. **Sync the main repo.** `bash scripts/clone_or_pull.sh`. This only fetches refs and prunes stale worktrees; it does NOT switch branches in the main repo.
 3. **Read the target issue + resolve mode.** Use command E1 from `references/glab_commands.md`. Capture title, description, current labels. `ISSUE_TITLE` is the short form for commit / MR title. Resolve `ISSUE_MODE`:
    - if the trigger field `issue_mode=continue` was supplied, OR live labels include `continue` → `ISSUE_MODE=continue`
@@ -350,7 +353,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.1",
+  "skill_version": "2026-04-28.2",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -361,7 +364,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.1",
+  "skill_version": "2026-04-28.2",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-28.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-28.2] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-28.1**
+**SKILL_VERSION: 2026-04-28.2**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.2` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -178,7 +178,7 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.1, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.2, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 3 env vars exported:**
 
@@ -223,17 +223,21 @@ After this, every subsequent `bash scripts/X.sh` and `source scripts/X.sh` invoc
 
 Run on every scheduled wake-up.
 
+When a step below says `bash scripts/X.sh`, that is shorthand for the script action. In an actual OpenClaw Bash tool call, prefix the command with the minimum env vars from the Per-Exec Env Contract plus any script-specific vars in the same exec. Never rely on exports from a previous Bash tool call.
+
 1. **Bootstrap.**
    - `cd ${SKILL_DIR}` — see "Working Directory" above; this is mandatory before any relative `scripts/...` invocation.
-   - `PROJECT=<project> source scripts/env_paths.sh`
+   - If doing an explicit bootstrap check in the current shell, use the full minimum env contract:
+     `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> source scripts/env_paths.sh`
+     This authenticates glab and computes `PROJECT_FULL` / `PROJECT_URI`.
    - Acquire the flock above.
-   - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`. If this fails, abort the tick.
+   - Do NOT call `scripts/glab_auth.sh` separately after `env_paths.sh`, and do NOT manually export `PROJECT_FULL` or `PROJECT_URI`. Every later `bash scripts/...` command is a fresh shell and must receive the minimum env vars from the Per-Exec Env Contract; the target script will source `env_paths.sh` itself. If `env_paths.sh` / glab auth fails, abort the tick.
 2. **Load + override campaign state.**
    - Read `${CAMPAIGN_STATE_FILE}`, or initialize using fresh-init values from `references/state_schema.md` if absent.
    - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks` with the trigger values.
    - Persist.
 3. **Reconcile against GitLab — MANDATORY, ALWAYS RUNS.**
-   - `MIN_IID=...; MAX_IID=...; PROJECT_FULL="${GROUP}/${PROJECT}"; bash scripts/reconcile.sh` (env-driven; see Source-of-Truth Policy).
+   - `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> MIN_IID=... MAX_IID=... bash scripts/reconcile.sh` (self-bootstrapping; see Source-of-Truth Policy).
    - Apply disk cache correction per the policy above.
    - Record the evidence file path into `campaign_state.json.last_reconcile_evidence`.
 4. **Early-return only if allowed.** Permitted iff:
@@ -287,7 +291,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-28.1",
+  "skill_version": "2026-04-28.2",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,
