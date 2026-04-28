@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-25.6] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-25.7] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-25.6**
+**SKILL_VERSION: 2026-04-25.7**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-25.6` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-25.7` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -176,11 +176,29 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 ---
 
+## Working Directory (READ BEFORE Step 1 — HARD RULE)
+
+All `scripts/...` and `references/...` paths in this SKILL are **relative to this skill's own directory** (the directory containing this SKILL.md, e.g. `<workspace>/skills/gitlab_issue_campaign_dispatcher/`).
+
+Before issuing ANY `bash scripts/...` command, the dispatcher MUST `cd` into the skill directory in the same shell session. Otherwise relative paths like `scripts/env_paths.sh` resolve against whatever cwd OpenClaw started the session in (often the user home, NOT the skill dir), and the very first invocation fails with "no such file or directory".
+
+The skill directory's absolute path is known to the agent at load time (the same path SKILL.md was read from). Bootstrap snippet, run ONCE per session before anything else:
+
+```bash
+SKILL_DIR="<absolute path of this SKILL.md's parent>"   # e.g. /home/claw/.openclaw/workspace-UiAutoTester/skills/gitlab_issue_campaign_dispatcher
+cd "${SKILL_DIR}"
+```
+
+After this, every subsequent `bash scripts/X.sh` and `source scripts/X.sh` invocation in the algorithm below resolves correctly. Do NOT attempt to invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` or `ls`. The single allowed convention is: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
+
+---
+
 ## Dispatcher Algorithm
 
 Run on every scheduled wake-up.
 
 1. **Bootstrap.**
+   - `cd ${SKILL_DIR}` — see "Working Directory" above; this is mandatory before any relative `scripts/...` invocation.
    - `PROJECT=<project> source scripts/env_paths.sh`
    - Acquire the flock above.
    - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`. If this fails, abort the tick.
@@ -243,7 +261,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-25.6",
+  "skill_version": "2026-04-25.7",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

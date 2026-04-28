@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-25.6] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-25.7] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-25.6**
+**SKILL_VERSION: 2026-04-25.7**
 
-The executor MUST include `"skill_version": "2026-04-25.6"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-25.7"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -239,11 +239,31 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ---
 
+## Working Directory (READ BEFORE Step 1 — HARD RULE)
+
+All `scripts/...` and `references/...` paths in this SKILL are **relative to this skill's own directory** (the directory containing this SKILL.md, e.g. `<workspace>/skills/gitlab_single_issue_executor/`).
+
+Before issuing ANY `bash scripts/...` command, the executor MUST `cd` into the skill directory in the same shell session. Otherwise relative paths like `scripts/env_paths.sh` resolve against whatever cwd OpenClaw started the session in (often the user home, NOT the skill dir), and the first invocation fails with "no such file or directory".
+
+The skill directory's absolute path is known to the agent at load time (the same path SKILL.md was read from). Bootstrap snippet, run ONCE per session before anything else:
+
+```bash
+SKILL_DIR="<absolute path of this SKILL.md's parent>"   # e.g. /home/claw/.openclaw/workspace-UiAutoTester/skills/gitlab_single_issue_executor
+cd "${SKILL_DIR}"
+```
+
+After this, every subsequent `bash scripts/X.sh` and `source scripts/X.sh` invocation resolves correctly. Do NOT attempt to invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` or `ls`. The single allowed convention is: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
+
+Note: at Step 8 (acpx) the algorithm explicitly switches cwd to `${WORKTREE_DIR}` for the Claude Code invocation. After acpx returns, switch back to `${SKILL_DIR}` (or use absolute paths to scripts) so the remaining `bash scripts/...` commands continue to work. The path-conscious order is documented in each step below.
+
+---
+
 ## Executor Algorithm
 
 Run once per session for `${ISSUE_IID}`. Every run produces a brand-new attempt directory.
 
 1. **Bootstrap.**
+   - `cd ${SKILL_DIR}` — see "Working Directory" above; mandatory before any relative `scripts/...` invocation.
    - Verify the trigger supplied `attempt_number=<N>`. If missing, mark the issue `blocked` with `block_reason="trigger missing attempt_number"` and stop. (The dispatcher must call `allocate_attempt.sh` before every spawn — see dispatcher SKILL.)
    - `PROJECT=<project> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N> source scripts/env_paths.sh`
      This resolves both issue-level and attempt-level paths and creates the `attempt-${N}/` skeleton. `env_paths.sh` is now idempotent — re-sourcing it in the same session reuses the same directory because `ATTEMPT_NUMBER` is fixed by the trigger.
@@ -265,12 +285,13 @@ Run once per session for `${ISSUE_IID}`. Every run produces a brand-new attempt 
 8. **Build the prompt and run Claude Code.**
    1. `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments".
    2. Capture stderr — record `no_reviewer_comments` and `prior_attempt_count` into `${ATTEMPT_STATE_FILE}`.
-   3. Run acpx per the Claude Code Execution Contract, with `${WORKTREE_DIR}` as cwd:
+   3. Run acpx per the Claude Code Execution Contract, with `${WORKTREE_DIR}` as cwd, then return to `${SKILL_DIR}` so subsequent relative `scripts/...` invocations still work:
       ```bash
       cd "${WORKTREE_DIR}"
       acpx claude exec -f "${LOG_DIR}/prompt.txt" \
         1>"${LOG_DIR}/claude_result.txt" \
         2>"${LOG_DIR}/acpx_raw.log"
+      cd "${SKILL_DIR}"
       ```
       On failure follow the retryable / non-recoverable rules. The executor MUST NOT extract specific commands from reviewer comments and run them itself — those are for Claude Code.
 9. **Stage + guard.**
@@ -299,7 +320,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-25.6",
+  "skill_version": "2026-04-25.7",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -310,7 +331,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-25.6",
+  "skill_version": "2026-04-25.7",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,
