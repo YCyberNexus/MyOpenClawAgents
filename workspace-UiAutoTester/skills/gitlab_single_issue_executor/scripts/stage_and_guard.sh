@@ -20,6 +20,10 @@
 
 set -euo pipefail
 
+# __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
+# Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
+
 : "${WORKTREE_DIR:?}" "${LOG_DIR:?}"
 
 cd "${WORKTREE_DIR}"

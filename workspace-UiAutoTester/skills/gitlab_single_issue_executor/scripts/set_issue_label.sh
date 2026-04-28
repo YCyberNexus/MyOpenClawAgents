@@ -16,6 +16,10 @@
 
 set -euo pipefail
 
+# __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
+# Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
+
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}" "${ISSUE_IID:?}"
 
 if [ "$#" -ne 2 ]; then

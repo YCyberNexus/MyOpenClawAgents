@@ -1,48 +1,30 @@
 #!/usr/bin/env bash
-# env_paths.sh (dispatcher) — populate dispatcher-level path variables.
+# env_paths.sh (dispatcher) — bootstrap ALL dispatcher env in one place:
+# paths + glab auth + PROJECT_FULL/PROJECT_URI.
 #
-# As of SKILL_VERSION 2026-04-25.1, the disk layout is:
+# As of SKILL_VERSION 2026-04-28.1 this script is the SINGLE bootstrap
+# entry point for every other script in this skill. Each subsequent
+# script `source`s this file at its top so every fresh Bash exec gets
+# a fully-populated environment without the caller re-exporting by hand.
 #
-#   /data/${PROJECT}/                              ← main git repo (host of worktrees)
-#   /data/openclaw_work/${PROJECT}/
-#       openclaw_state/
-#           campaign_state.json                    (this dispatcher's only state file)
-#           campaign.lock
-#       openclaw_log/
-#           dispatcher/                            (reconcile-<ts>.json)
-#       issues/
-#           issue-<iid>/                           (executor-owned per-issue tree, see executor env_paths.sh)
+# Required input env vars (caller exports these — typically from trigger):
+#   PROJECT          project slug
+#   GROUP            GitLab group slug
+#   GITLAB_TOKEN     GitLab access token
 #
-# Per-issue state files no longer live at the dispatcher level. They are
-# inside `issues/issue-<iid>/state.json`. The dispatcher reads them via
-# the path it computes here (ISSUE_ROOT / ISSUE_STATE_FILE_FOR_IID).
+# Outputs (exported into the calling shell):
+#   path vars: REPO_PATH, WORK_ROOT, STATE_DIR, CAMPAIGN_STATE_FILE,
+#              LOG_ROOT, DISPATCHER_LOG_DIR, ISSUES_ROOT, LOCK_FILE
+#   glab vars: GITLAB_HOST, GITLAB_API_PROTOCOL
+#   project vars: PROJECT_FULL, PROJECT_URI
 #
-# Usage (must be SOURCED):
-#   PROJECT=px_ifp_hulat_test source scripts/env_paths.sh
-#
-# Required input:
-#   PROJECT     project slug from the trigger command
-#
-# Exports:
-#   REPO_PATH               main git repo, hosts worktrees
-#   WORK_ROOT               agent scratch root, OUTSIDE the repo
-#   STATE_DIR               dispatcher-level state dir (campaign-only)
-#   CAMPAIGN_STATE_FILE     campaign_state.json
-#   LOG_ROOT                log subtree root
-#   DISPATCHER_LOG_DIR      reconcile-<ts>.json files
-#   ISSUES_ROOT             where executor puts issues/issue-<iid>/...
-#   LOCK_FILE               flock target
-#
-# Helper function exported:
-#   issue_state_file_for <iid>     → echoes /data/.../issues/issue-<iid>/state.json
+# Helper function: issue_state_file_for <iid>
 
 set -euo pipefail
 
-if [ -z "${PROJECT:-}" ]; then
-  echo "env_paths.sh: PROJECT must be set before sourcing" >&2
-  return 2 2>/dev/null || exit 2
-fi
+: "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
 
+# ─── 1. Path layout ──────────────────────────────────────────────────
 export REPO_PATH="/data/${PROJECT}"
 export WORK_ROOT="/data/openclaw_work/${PROJECT}"
 export STATE_DIR="${WORK_ROOT}/openclaw_state"
@@ -63,3 +45,22 @@ issue_state_file_for() {
   echo "${ISSUES_ROOT}/issue-${iid}/state.json"
 }
 export -f issue_state_file_for
+
+# ─── 2. glab auth (idempotent) ──────────────────────────────────────
+if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
+  : "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set to bootstrap glab}"
+  __ENV_PATHS_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  GITLAB_HOST="$(bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh")"
+  export GITLAB_HOST
+  unset __ENV_PATHS_SH_DIR
+fi
+
+# ─── 3. Project handle ──────────────────────────────────────────────
+if [ -z "${PROJECT_FULL:-}" ]; then
+  : "${GROUP:?env_paths.sh: GROUP must be set to compute PROJECT_FULL}"
+  export PROJECT_FULL="${GROUP}/${PROJECT}"
+fi
+if [ -z "${PROJECT_URI:-}" ]; then
+  PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
+  export PROJECT_URI
+fi

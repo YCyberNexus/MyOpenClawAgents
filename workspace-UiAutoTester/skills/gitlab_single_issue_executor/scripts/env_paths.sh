@@ -1,66 +1,43 @@
 #!/usr/bin/env bash
-# env_paths.sh (executor) — populate executor path variables, including
-# the per-attempt variables for this run.
+# env_paths.sh (executor) — bootstrap ALL executor env in one place:
+# paths + glab auth + PROJECT_FULL/PROJECT_URI.
 #
-# Layout (SKILL_VERSION 2026-04-25.1+):
+# As of SKILL_VERSION 2026-04-28.1 this script is the SINGLE bootstrap
+# entry point for every other script in this skill. Each subsequent
+# script `source`s this file at its top (via `source
+# "$(dirname "${BASH_SOURCE[0]}")/env_paths.sh"`), so every fresh bash
+# exec gets a fully-populated environment without the caller having to
+# re-export everything by hand.
 #
-#   /data/${PROJECT}/                                ← main git repo
-#   /data/openclaw_work/${PROJECT}/
-#       issues/
-#           issue-<iid>/
-#               state.json                           ← per-issue state (cross-attempt)
-#               attempts/
-#                   attempt-001/
-#                       worktree/                    ← Claude Code's cwd
-#                       log/
-#                       attempt_state.json
-#                       summary.md
-#                   attempt-002/
-#                       ...
+# Why: OpenClaw runs each Bash tool call in a brand-new shell. Exports
+# made in one call do NOT survive to the next. Before this change, the
+# agent would call env_paths.sh + glab_auth.sh once, then a later
+# `bash scripts/ensure_labels.sh` would fail because GITLAB_HOST and
+# PROJECT_URI were no longer in env. Now each script self-bootstraps.
 #
-# Usage (must be SOURCED):
-#   PROJECT=<p> ISSUE_IID=<n> source scripts/env_paths.sh
+# Required input env vars (the caller — the model — must export these
+# in every bash exec; they all come straight from the trigger):
+#   PROJECT          project slug
+#   ISSUE_IID        integer issue IID
+#   ATTEMPT_NUMBER   integer attempt number (allocated by dispatcher)
+#   GROUP            GitLab group slug
+#   GITLAB_TOKEN     GitLab access token
 #
-# Required input:
-#   ATTEMPT_NUMBER     The attempt number for THIS run. As of SKILL_VERSION
-#                      2026-04-25.3, env_paths.sh NO LONGER auto-allocates.
-#                      The dispatcher must allocate the number once via
-#                      `dispatcher/scripts/allocate_attempt.sh` and pass it
-#                      to the executor via the `attempt_number=<N>` trigger
-#                      field. This prevents one logical resolution from
-#                      producing multiple empty attempt-NNN/ directories
-#                      when the executor session is cold-restarted or
-#                      env_paths.sh is sourced more than once.
-#
-# Exports (issue-level):
-#   REPO_PATH                main git repo
-#   WORK_ROOT                agent scratch root
-#   ISSUE_ROOT               ${WORK_ROOT}/issues/issue-<iid>
-#   ISSUE_STATE_FILE         ${ISSUE_ROOT}/state.json
-#   ATTEMPTS_DIR             ${ISSUE_ROOT}/attempts
-#   WORK_BRANCH              "issue/<iid>-auto-fix" (the SINGLE remote branch — strategy A)
-#
-# Exports (attempt-level — only after attempt number is resolved):
-#   ATTEMPT_NUMBER           integer, zero-padded for paths
-#   ATTEMPT_NUMBER_PADDED    e.g. "001"
-#   ATTEMPT_DIR              ${ATTEMPTS_DIR}/attempt-${ATTEMPT_NUMBER_PADDED}
-#   WORKTREE_DIR             ${ATTEMPT_DIR}/worktree
-#   LOG_DIR                  ${ATTEMPT_DIR}/log
-#   ATTEMPT_STATE_FILE       ${ATTEMPT_DIR}/attempt_state.json
-#   SUMMARY_FILE             ${ATTEMPT_DIR}/summary.md
-#   LOCAL_ATTEMPT_BRANCH     "issue/<iid>-auto-fix-att${PADDED}" (per-attempt local branch)
+# Outputs (exported into the calling shell):
+#   path vars: REPO_PATH, WORK_ROOT, ISSUE_ROOT, ISSUE_STATE_FILE,
+#              ATTEMPTS_DIR, WORK_BRANCH, ATTEMPT_NUMBER_PADDED,
+#              ATTEMPT_DIR, WORKTREE_DIR, LOG_DIR, ATTEMPT_STATE_FILE,
+#              SUMMARY_FILE, LOCAL_ATTEMPT_BRANCH
+#   glab vars: GITLAB_HOST, GITLAB_API_PROTOCOL
+#   project vars: PROJECT_FULL, PROJECT_URI
 
 set -euo pipefail
 
-if [ -z "${PROJECT:-}" ]; then
-  echo "env_paths.sh: PROJECT must be set before sourcing" >&2
-  return 2 2>/dev/null || exit 2
-fi
-if [ -z "${ISSUE_IID:-}" ]; then
-  echo "env_paths.sh: ISSUE_IID must be set before sourcing" >&2
-  return 2 2>/dev/null || exit 2
-fi
+: "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
+: "${ISSUE_IID:?env_paths.sh: ISSUE_IID must be set (trigger)}"
+: "${ATTEMPT_NUMBER:?env_paths.sh: ATTEMPT_NUMBER must be set (trigger; dispatcher allocates via allocate_attempt.sh)}"
 
+# ─── 1. Path layout ──────────────────────────────────────────────────
 export REPO_PATH="/data/${PROJECT}"
 export WORK_ROOT="/data/openclaw_work/${PROJECT}"
 export ISSUE_ROOT="${WORK_ROOT}/issues/issue-${ISSUE_IID}"
@@ -70,16 +47,6 @@ export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
 mkdir -p "${ISSUE_ROOT}" "${ATTEMPTS_DIR}"
 
-# ATTEMPT_NUMBER must be supplied by the dispatcher trigger. Auto-derivation
-# is intentionally forbidden — see the comment block at the top of this file.
-if [ -z "${ATTEMPT_NUMBER:-}" ]; then
-  echo "env_paths.sh: ATTEMPT_NUMBER is required (must be supplied by dispatcher" >&2
-  echo "via the executor trigger field 'attempt_number=<N>'). Refusing to" >&2
-  echo "auto-allocate — that caused the empty-attempt-dir bug in older versions." >&2
-  return 2 2>/dev/null || exit 2
-fi
-
-# Zero-pad to 3 digits.
 export ATTEMPT_NUMBER_PADDED
 ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
 
@@ -91,3 +58,25 @@ export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
 export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
 mkdir -p "${ATTEMPT_DIR}" "${LOG_DIR}"
+
+# ─── 2. glab auth (idempotent) ──────────────────────────────────────
+# If GITLAB_HOST is already in env (e.g. parent shell already ran this),
+# skip — glab_auth.sh just re-runs `glab auth login` which is fast but
+# we save the latency.
+if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
+  : "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set to bootstrap glab}"
+  __ENV_PATHS_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  GITLAB_HOST="$(bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh")"
+  export GITLAB_HOST
+  unset __ENV_PATHS_SH_DIR
+fi
+
+# ─── 3. Project handle ──────────────────────────────────────────────
+if [ -z "${PROJECT_FULL:-}" ]; then
+  : "${GROUP:?env_paths.sh: GROUP must be set to compute PROJECT_FULL}"
+  export PROJECT_FULL="${GROUP}/${PROJECT}"
+fi
+if [ -z "${PROJECT_URI:-}" ]; then
+  PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
+  export PROJECT_URI
+fi
