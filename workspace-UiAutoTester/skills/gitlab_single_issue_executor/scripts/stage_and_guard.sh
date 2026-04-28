@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# stage_and_guard.sh — stage Claude's repo changes and guard against agent
-# artifacts leaking into the work branch.
+# stage_and_guard.sh — stage Claude's repo changes inside the per-attempt
+# worktree and guard against agent artifacts (or _hulat symlink) leaking
+# into the work branch.
 #
 # Required env vars:
-#   REPO_PATH    git working tree (set by env_paths.sh)
-#   LOG_DIR      where to write evidence files (under WORK_ROOT)
+#   WORKTREE_DIR    git worktree (set by env_paths.sh)
+#   LOG_DIR         where to write evidence files (under ATTEMPT_DIR)
 #
 # Exit codes:
 #   0   normal staging completed; check stdout marker
-#   3   agent artifacts leaked into the repo; caller must mark issue blocked
+#   3   agent artifacts leaked into the worktree; caller must mark issue blocked
 #
 # Stdout markers (one of these is printed):
 #   STAGED_OK       there are staged changes ready to commit
@@ -19,16 +20,17 @@
 
 set -euo pipefail
 
-: "${REPO_PATH:?}" "${LOG_DIR:?}"
+: "${WORKTREE_DIR:?}" "${LOG_DIR:?}"
 
-cd "${REPO_PATH}"
+cd "${WORKTREE_DIR}"
 
 git status --porcelain > "${LOG_DIR}/git_status.txt"
 git diff > "${LOG_DIR}/git_diff.patch"
 
 git add -A
 
-LEAKED="$(git diff --cached --name-only | grep -E '^(openclaw_log/|openclaw_state/)' || true)"
+LEAKED="$(git diff --cached --name-only \
+  | grep -E '^(openclaw_log/|openclaw_state/|_hulat(/|$))' || true)"
 if [ -n "${LEAKED}" ]; then
   echo "AGENT_ARTIFACTS_LEAKED" >&2
   echo "${LEAKED}" >&2

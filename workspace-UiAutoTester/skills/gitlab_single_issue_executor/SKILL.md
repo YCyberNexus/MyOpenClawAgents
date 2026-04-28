@@ -1,30 +1,31 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-24.10] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-25.1] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-24.10**
+**SKILL_VERSION: 2026-04-25.1**
 
-The executor MUST include `"skill_version": "2026-04-24.10"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-25.1"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
 This SKILL is intentionally short. Detailed bash and fixed reference data live in sibling folders:
 
-- `scripts/env_paths.sh` — populates path variables (SOURCE it).
+- `scripts/env_paths.sh` — populates issue-level AND attempt-level path variables (SOURCE it; auto-resolves the next attempt number).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
-- `scripts/clone_or_pull.sh` — clone or update `${REPO_PATH}`.
-- `scripts/build_prompt.sh` — build `${LOG_DIR}/prompt.txt` from the live issue + (continue mode) reviewer comments, per the templates documented in `references/continue_mode.md`.
-- `scripts/prepare_branch.sh` — clean working tree, create `${WORK_BRANCH}` from clean integration branch.
-- `scripts/ensure_labels.sh` — make sure the six workflow labels exist.
+- `scripts/clone_or_pull.sh` — keep the main repo's refs current (no working-tree edits; worktrees do that).
+- `scripts/prepare_attempt.sh` — create the per-attempt git worktree, set up the `_hulat` symlink, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
+- `scripts/build_prompt.sh` — build `${LOG_DIR}/prompt.txt` from the live issue + (continue mode) past-attempt summaries + reviewer comments. See `references/continue_mode.md` for the template.
+- `scripts/ensure_labels.sh` — make sure the seven workflow labels exist.
 - `scripts/set_issue_label.sh` — add or remove a single label (used for every transition).
-- `scripts/stage_and_guard.sh` — `git add -A` + leak guard; prints `STAGED_OK` or `NO_CHANGES`.
-- `scripts/commit_and_push.sh` — commit + push the work branch.
-- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts.
-- `scripts/create_mr.sh` — create the MR via `glab mr create` and print its URL.
+- `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `_hulat`).
+- `scripts/commit_and_push.sh` — commit and FORCE-push the per-attempt local branch to the SINGLE remote `${WORK_BRANCH}` (Strategy A).
+- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts and no `_hulat`.
+- `scripts/create_mr.sh` — Strategy A: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one.
+- `scripts/summarize_attempt.sh` — write `${SUMMARY_FILE}` and post it as a GitLab issue note so future continue-mode runs can read what past attempts did.
 - `references/paths.md` — full path layout and required artifacts.
 - `references/state_schema.md` — `issue-<iid>.json` schema and update cadence.
 - `references/glab_commands.md` — exhaustive list of allowed `glab` invocations.
@@ -138,11 +139,12 @@ The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is also constructed from the 
 
 ## Repo Cleanliness Policy (READ FIRST — HARD RULE)
 
-The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues.
+The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues, no `_hulat` symlink.
 
-- All agent-owned files live under `${WORK_ROOT} = /data/openclaw_work/${PROJECT}/`, OUTSIDE the repo working tree. See `references/paths.md`.
-- `scripts/prepare_branch.sh` enforces a pristine working tree before branching (reset + clean -fdx).
-- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/` or `openclaw_state/` path appears in the staged tree.
+- All agent-owned files live under `${ATTEMPT_DIR}` (= `${ISSUE_ROOT}/attempts/attempt-NNN/`), OUTSIDE the worktree. See `references/paths.md`.
+- `${WORKTREE_DIR}` is the only directory the executor allows Claude Code to modify. It is a real `git worktree` of `${REPO_PATH}` — `git add -A` here only sees repo-tracked content.
+- `_hulat` is a symlink inside `${WORKTREE_DIR}` pointing at `${HULAT_DIR}` for read-only config access. `scripts/prepare_attempt.sh` adds `/_hulat` to `.git/info/exclude` for the worktree.
+- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/`, `openclaw_state/`, or `_hulat` path appears in the staged tree.
 - `scripts/post_push_verify.sh` aborts with exit 4 if the remote branch contains any such path.
 
 If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open an MR.
@@ -167,19 +169,20 @@ Optional:
 
 ## Continue Mode
 
-The `continue` label is human-applied by reviewers. They set it on an issue whose MR was created and labeled `done` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.) and the previous result is incomplete or wrong. When the dispatcher's reconciliation sees `continue` on an issue, it re-enqueues the IID and spawns the executor with `issue_mode=continue`.
+The `continue` label is human-applied by reviewers. They set it on an issue whose MR was created and labeled `done` by the agent, but where the actual Claude Code run did not finish or was incorrect. When the dispatcher's reconciliation sees `continue` on an issue, it re-enqueues the IID and spawns the executor with `issue_mode=continue`.
 
 In continue mode the executor:
 
-- Detects the mode from the trigger field `issue_mode=continue`. As a backstop, it also re-derives the mode from labels at Step 3 of the algorithm: if the live labels include `continue`, treat as continue mode regardless of the trigger field.
+- Detects the mode from the trigger field `issue_mode=continue`. As a backstop, it re-derives the mode at Step 3 of the algorithm from live labels: if labels include `continue`, treat as continue mode regardless of the trigger field.
 - Transitions the issue label from `continue` to `doing` (instead of `todo` to `doing`). See `references/label_lifecycle.md`.
-- Calls `scripts/prepare_branch.sh` with `ISSUE_MODE=continue`. The script reuses the existing remote `issue/<iid>-auto-fix` branch — checks it out, hard-resets to `origin/<work-branch>`, cleans the working tree. If the remote branch does not exist (rare — the previous run somehow didn't push), the script downgrades to fresh mode.
-- Builds the Claude Code prompt with an explicit "this is a resumption — review the existing diff between this branch and master, then continue / correct the work" instruction. See "Claude Code Execution Contract" below.
-- All later steps (stage + guard, commit, push, post-push verify, MR creation, label transitions) are identical to fresh mode.
+- Allocates a NEW attempt directory `attempt-NNN` (numbers are monotonically increasing — past attempts are preserved on disk). Calls `scripts/prepare_attempt.sh` with `ISSUE_MODE=continue`. The script bases the new worktree on `origin/${WORK_BRANCH}` (the existing work-in-progress branch from the prior attempt). If `${WORK_BRANCH}` does not exist on the remote, the script downgrades to fresh mode and records `mode_downgraded_from="continue"`.
+- Builds the Claude Code prompt with the live issue body + ALL past `uiautotester:attempt-summary` notes + ALL non-summary reviewer comments. See `references/continue_mode.md`.
+- After the attempt finishes, `scripts/summarize_attempt.sh` posts a new summary comment to the issue so future continue-mode runs can see what this attempt did.
+- All later steps (stage + guard, commit, force-push, post-push verify, MR creation, label transitions) are otherwise identical to fresh mode.
 
-The executor MUST NOT delete the remote work branch in continue mode. Cleanliness guards (`stage_and_guard.sh`, `post_push_verify.sh`) still apply — agent artifacts are still forbidden in the staged tree and the remote branch.
+The executor MUST NOT delete the remote work branch in continue mode, and MUST NOT delete past attempt directories on disk. Cleanliness guards (`stage_and_guard.sh`, `post_push_verify.sh`) still apply.
 
-If continue-mode prep fails for any reason (remote branch corrupted, fetch error, etc.), follow the No-Fallback Policy: mark `status=blocked` with an accurate `block_reason`, do NOT silently fall back to fresh mode (the script already does that ONLY for the specific case of "remote branch does not exist", which is the documented downgrade path).
+If continue-mode prep fails for any reason other than "remote branch does not exist" (corrupt fetch, conflicting worktree, etc.), follow the No-Fallback Policy: mark `status=blocked` with an accurate `block_reason`, do NOT silently fall back to fresh mode. The remote-branch-missing downgrade is the only documented exception.
 
 ---
 
@@ -187,10 +190,10 @@ If continue-mode prep fails for any reason (remote branch corrupted, fetch error
 
 This is the ONLY way the executor is allowed to invoke Claude Code. It is governed by the No-Fallback Policy above — when this contract fails, the executor stops; it does NOT switch invocation modes or LLMs.
 
-- Build the prompt at `${LOG_DIR}/prompt.txt` by running `scripts/build_prompt.sh`. The script generates the canonical layout (issue title + description + working env + rules) for both modes, and additionally appends reviewer comments in continue mode. Do NOT hand-write `prompt.txt` — that risks omitting the comments section in continue mode and silently losing the reviewer's supplemental steps. See `references/continue_mode.md` for the exact template.
-- Run synchronously, one-shot, with `${REPO_PATH}` as the working directory:
+- Build the prompt at `${LOG_DIR}/prompt.txt` by running `scripts/build_prompt.sh`. The script generates the canonical layout (issue title + description + working env + rules) for both modes, and additionally appends past-attempt summaries + reviewer comments in continue mode. Do NOT hand-write `prompt.txt` — that risks omitting comments and past summaries and silently losing context. See `references/continue_mode.md` for the exact template.
+- Run synchronously, one-shot, with `${WORKTREE_DIR}` as the working directory (NOT `${REPO_PATH}` — Claude must operate inside the per-attempt worktree, not the main repo):
   ```bash
-  cd "${REPO_PATH}"
+  cd "${WORKTREE_DIR}"
   acpx claude exec -f "${LOG_DIR}/prompt.txt" \
     1>"${LOG_DIR}/claude_result.txt" \
     2>"${LOG_DIR}/acpx_raw.log"
@@ -203,7 +206,7 @@ This is the ONLY way the executor is allowed to invoke Claude Code. It is govern
   - any persistent / streaming acpx mode — forbidden
   - calling `claude` directly without acpx — forbidden
   - any non-Claude LLM CLI as a substitute (`openai`, `gemini`, `ollama`, etc.) — forbidden
-- Claude must write only inside `${REPO_PATH}`. It MUST NOT write into `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else.
+- Claude must write only inside `${WORKTREE_DIR}`. It MUST NOT write into `${REPO_PATH}` (the main repo's working tree), `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else. Reading from `${WORKTREE_DIR}/_hulat` (the symlink) is fine; writing through that symlink is forbidden.
 
 ### What to do when this contract fails
 
@@ -229,39 +232,51 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Executor Algorithm
 
-Run once per session for `${ISSUE_IID}`.
+Run once per session for `${ISSUE_IID}`. Every run produces a brand-new attempt directory.
 
 1. **Bootstrap.**
    - `PROJECT=<project> ISSUE_IID=<iid> source scripts/env_paths.sh`
-   - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`; export `PROJECT_FULL`, `PROJECT_URI`. If auth fails, mark `blocked` with `block_reason="glab auth failed"` and stop.
-2. **Sync repo.** `bash scripts/clone_or_pull.sh`.
-3. **Read the target issue + resolve mode.** Use command E1 from `references/glab_commands.md`. Capture title, description, and current labels. `ISSUE_TITLE` is the short form for commit / MR title. **Resolve `ISSUE_MODE`:**
+     This resolves both issue-level and attempt-level paths and creates the next `attempt-NNN/` skeleton.
+   - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`; export `PROJECT_FULL`, `PROJECT_URI`. If auth fails, mark the attempt and the issue `blocked` with `block_reason="glab auth failed"` and stop.
+2. **Sync the main repo.** `bash scripts/clone_or_pull.sh`. This only fetches refs and prunes stale worktrees; it does NOT switch branches in the main repo.
+3. **Read the target issue + resolve mode.** Use command E1 from `references/glab_commands.md`. Capture title, description, current labels. `ISSUE_TITLE` is the short form for commit / MR title. Resolve `ISSUE_MODE`:
    - if the trigger field `issue_mode=continue` was supplied, OR live labels include `continue` → `ISSUE_MODE=continue`
    - else → `ISSUE_MODE=fresh`
-   Export `ISSUE_MODE` so subsequent scripts see it.
-4. **Ensure labels exist.** `bash scripts/ensure_labels.sh`. (This now ensures the `continue` label exists too.)
+   Export `ISSUE_MODE`.
+4. **Ensure labels exist.** `bash scripts/ensure_labels.sh`. (Includes `continue`.)
 5. **Transition entry label → `doing`.** Use `scripts/set_issue_label.sh`:
    - `ISSUE_MODE=fresh`: `remove todo`, then `add doing`
    - `ISSUE_MODE=continue`: `remove continue`, then `add doing`
-   The remove step is idempotent — safe even if the source label was absent.
-6. **Initialize / refresh per-issue state.** Per `references/state_schema.md`: write `status=in_progress`, `mode="${ISSUE_MODE}"`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
-7. **Prepare work branch.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_branch.sh`. The script prints two lines: the actual mode it executed (`fresh` or `continue`) and the work branch name. If `ISSUE_MODE=continue` was requested but the script downgraded to `fresh` because no remote branch existed, record this in the per-issue state as `mode="fresh"` and add `mode_downgraded_from="continue"` so the operator can audit the case. Write `work_branch=${WORK_BRANCH}` into `${ISSUE_STATE_FILE}`.
+   Remove is idempotent.
+6. **Initialize per-attempt state and refresh per-issue state.** Per `references/state_schema.md`:
+   - `${ATTEMPT_STATE_FILE}` (new) — write `iid`, `attempt_number`, `attempt_started_at`, `mode_requested=${ISSUE_MODE}`, `skill_version`. Other fields filled in as the algorithm progresses.
+   - `${ISSUE_STATE_FILE}` — write/update `status=in_progress`, `mode="${ISSUE_MODE}"`, `attempts_total=${ATTEMPT_NUMBER}`, `latest_attempt_number=${ATTEMPT_NUMBER}`, `latest_attempt_dir=${ATTEMPT_DIR}`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
+7. **Prepare the per-attempt worktree.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
 8. **Build the prompt and run Claude Code.**
-   1. Build the prompt: `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this script also calls glab E1b to fetch issue notes and embeds them in the prompt.
-   2. Capture the script's stderr; record `mode_continue_no_comments=true` in `${ISSUE_STATE_FILE}` if the script reported `CONTINUE_MODE_NO_COMMENTS=true`. (Operator audit signal — the executor does NOT block on this.)
-   3. Run acpx exactly as in the Claude Code Execution Contract. On failure follow the retryable / non-recoverable rules. The executor MUST NOT extract specific commands from the reviewer comments and run them itself in bash — the comments are for Claude Code, not for the executor.
+   1. `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments".
+   2. Capture stderr — record `no_reviewer_comments` and `prior_attempt_count` into `${ATTEMPT_STATE_FILE}`.
+   3. Run acpx per the Claude Code Execution Contract, with `${WORKTREE_DIR}` as cwd:
+      ```bash
+      cd "${WORKTREE_DIR}"
+      acpx claude exec -f "${LOG_DIR}/prompt.txt" \
+        1>"${LOG_DIR}/claude_result.txt" \
+        2>"${LOG_DIR}/acpx_raw.log"
+      ```
+      On failure follow the retryable / non-recoverable rules. The executor MUST NOT extract specific commands from reviewer comments and run them itself — those are for Claude Code.
 9. **Stage + guard.**
    ```bash
    bash scripts/stage_and_guard.sh
    ```
-   - Exit 3 → leak detected. Mark `status=blocked`, `block_reason="agent artifacts leaked into repo working tree"`, stop.
-   - `NO_CHANGES` → `status=no_changes`, keep logs, stop. Do NOT push.
+   - Exit 3 → leak. `status=blocked`, `block_reason="agent artifacts leaked into worktree"`, run summarize_attempt then stop.
+   - `NO_CHANGES` → `status=no_changes`, run summarize_attempt then stop. No push, no MR.
    - `STAGED_OK` → continue.
-10. **Commit + push.** `ISSUE_TITLE="..." bash scripts/commit_and_push.sh` (prints commit SHA). Write `commit_sha` into the state file.
-11. **Post-push verify.** `bash scripts/post_push_verify.sh`. Exit 4 → mark `status=blocked`, `block_reason="remote branch polluted with agent artifacts"`, stop.
-12. **Create MR.** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into the state file. The MR description auto-generated by the script starts with `Closes #${ISSUE_IID}` — when a human later merges this MR, GitLab itself closes the issue. The executor does NOT close the issue. See `references/label_lifecycle.md` § "Issue closure vs `done` label".
-13. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`: remove `doing` add `pr`; immediately remove `pr` add `done`. The issue must NOT be left at `pr`. The issue's `state` (opened/closed) is GitLab's job, not the executor's.
-14. **Finalize.** Write `status=done` and `updated_at` to `${ISSUE_STATE_FILE}`. Return the compact chat summary.
+10. **Commit + force-push (Strategy A).** `ISSUE_TITLE="..." bash scripts/commit_and_push.sh` (prints commit SHA). Write `commit_sha` into both the per-attempt and per-issue state files.
+11. **Post-push verify.** `bash scripts/post_push_verify.sh`. Exit 4 → `status=blocked`, `block_reason="remote branch polluted with agent artifacts"`, summarize then stop.
+12. **Ensure MR exists.** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into both state files. The script reuses the existing open MR for `${WORK_BRANCH}` if any, else creates one (Strategy A — single MR per issue). The MR description starts with `Closes #${ISSUE_IID}` so GitLab auto-closes the issue on merge.
+13. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`. The executor does NOT close the issue itself.
+14. **Summarize the attempt.** `ATTEMPT_STATUS=done COMMIT_SHA=... MERGE_REQUEST_URL=... bash scripts/summarize_attempt.sh`. This writes `${SUMMARY_FILE}` and posts the same content as a GitLab issue note (E9) marked with `<!-- uiautotester:attempt-summary v1 attempt=${ATTEMPT_NUMBER_PADDED} -->`. Set `summary_posted_to_issue=true` in `${ATTEMPT_STATE_FILE}`.
+    For non-`done` terminal statuses (`no_changes`, `blocked`, `failed`), Step 14 still runs — pass the appropriate `ATTEMPT_STATUS` and `BLOCK_REASON`. The summary is always posted, even on failure paths, so future continue-mode runs and reviewers can see what happened.
+15. **Finalize.** Write the terminal `status` and `updated_at` to BOTH `${ATTEMPT_STATE_FILE}` (with `attempt_finished_at`) and `${ISSUE_STATE_FILE}`. Return the compact chat summary.
 
 ---
 
@@ -271,7 +286,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.10",
+  "skill_version": "2026-04-25.1",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -282,7 +297,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-24.10",
+  "skill_version": "2026-04-25.1",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

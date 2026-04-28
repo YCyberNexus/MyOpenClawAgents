@@ -77,9 +77,23 @@ glab api --hostname "${GITLAB_HOST}" --method PUT \
   -f "remove_labels=${LABEL}"
 ```
 
-## E6 — Create a merge request
+## E6 — Look up an existing open MR for the work branch
 
-Wrapped by `scripts/create_mr.sh`.
+Used by `scripts/create_mr.sh` to detect "MR already exists for this branch" before creating a new one (Strategy A — single MR per issue).
+
+```bash
+glab mr list \
+  --repo "${PROJECT_FULL}" \
+  --source-branch "${WORK_BRANCH}" \
+  --state opened \
+  --output json
+```
+
+Returns a JSON array. Use `jq -r 'if length > 0 then .[0].web_url else "" end'` to extract the URL.
+
+## E7 — Create a merge request
+
+Wrapped by `scripts/create_mr.sh`. Only call this when E6 returned empty.
 
 ```bash
 glab mr create \
@@ -91,11 +105,23 @@ glab mr create \
   --yes
 ```
 
-## E7 — Look up the MR URL after creation
+## E8 — Look up the MR URL after creation
 
 ```bash
 glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.web_url'
 ```
+
+## E9 — Post a note (comment) on the issue
+
+Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it.
+
+```bash
+glab api --hostname "${GITLAB_HOST}" --method POST \
+  "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes" \
+  -F "body=@${SUMMARY_FILE}"
+```
+
+The `-F body=@<file>` form uploads the file contents as the form field, which avoids quoting issues for large multiline summaries.
 
 ## What is FORBIDDEN
 

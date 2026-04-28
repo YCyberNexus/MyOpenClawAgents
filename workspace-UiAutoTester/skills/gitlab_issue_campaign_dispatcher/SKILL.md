@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-24.10] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-25.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-24.10**
+**SKILL_VERSION: 2026-04-25.1**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-24.10` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-25.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -123,13 +123,12 @@ Concrete rules:
    - If `needs_continue == true`:
      - remove IID from `completed_iids` / `failed_iids`
      - add to `unfinished_iids`
-     - rename `${ISSUE_STATE_DIR}/issue-<iid>.json` to `issue-<iid>.json.bak-<ts>`
-     - write a fresh per-issue file with `status=pending`, `retry_count=0`, `mode="continue"`
+     - update the per-issue state file (`$(issue_state_file_for <iid>)` → `${ISSUES_ROOT}/issue-<iid>/state.json`): write `status=pending`, `mode="continue"`, leave `attempts_total` untouched (the executor increments it next attempt). Do NOT delete the existing `attempts/` subtree — historical attempts must be preserved for audit.
      - clear any `active_issue_iid` referencing this IID
      - force `campaign_status = running`
      - persist `campaign_state.json`
    - Else if disk says finished but `is_done_on_gitlab == false` (i.e. `user_reopened == true`):
-     - same as above, but the per-issue file gets `mode="fresh"` (default)
+     - same as above, but the per-issue state gets `mode="fresh"` (default)
    - If disk says unfinished but `is_done_on_gitlab == true` (and `needs_continue == false`), mark it finished on disk and skip.
 5. An "already completed" reply is allowed only when the evidence file from this tick exists AND every IID in range has `is_done_on_gitlab == true` AND `needs_continue == false` in it.
 
@@ -234,7 +233,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-24.10",
+  "skill_version": "2026-04-25.1",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

@@ -1,29 +1,27 @@
 #!/usr/bin/env bash
-# post_push_verify.sh — confirm the remote work branch contains only repo
-# code, no agent artifacts. If verification fails the executor must mark the
-# issue blocked and skip MR creation.
+# post_push_verify.sh — confirm the remote ${WORK_BRANCH} contains only
+# repo code, no agent artifacts and no _hulat symlink. If verification
+# fails the executor must mark the issue blocked and skip MR creation.
 #
 # Required env vars:
-#   REPO_PATH      git working tree
-#   WORK_BRANCH    "issue/<iid>-auto-fix"
+#   WORKTREE_DIR    git worktree (cwd; works because the worktree shares
+#                   the main repo's refs)
+#   WORK_BRANCH     "issue/<iid>-auto-fix"
 #
 # Exit codes:
-#   0   remote is clean; safe to create MR
+#   0   remote is clean; safe to create / keep MR
 #   4   remote contains agent artifacts; caller must mark issue blocked
-#
-# Stdout: REMOTE_CLEAN on success
-# Stderr: REMOTE_POLLUTED + offending paths on failure
 
 set -euo pipefail
 
-: "${REPO_PATH:?}" "${WORK_BRANCH:?}"
+: "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}"
 
-cd "${REPO_PATH}"
+cd "${WORKTREE_DIR}"
 git fetch origin "${WORK_BRANCH}"
 
 POLLUTED="$(
   git ls-tree -r --name-only "origin/${WORK_BRANCH}" \
-    | grep -E '^(openclaw_log/|openclaw_state/)' || true
+    | grep -E '^(openclaw_log/|openclaw_state/|_hulat(/|$))' || true
 )"
 
 if [ -n "${POLLUTED}" ]; then

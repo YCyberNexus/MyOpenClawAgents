@@ -1,10 +1,10 @@
 # State File Schemas (Dispatcher)
 
-Disk state is a **cache**, not the source of truth. GitLab is the source of truth (see Source-of-Truth Policy in `SKILL.md`). These files exist for progress tracking and resumption only.
+Disk state is a **cache**, not source of truth. GitLab is the source of truth (see Source-of-Truth Policy in `SKILL.md`). These files exist for progress tracking and resumption only.
 
 ## campaign_state.json
 
-Path: `${CAMPAIGN_STATE_FILE}` (i.e. `/data/openclaw_work/${PROJECT}/openclaw_state/campaign_state.json`)
+Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state.json`)
 
 ```json
 {
@@ -24,9 +24,9 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `/data/openclaw_work/${PROJECT}/openclaw_st
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-04-24.4",
-  "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260424T100501Z.json",
-  "updated_at": "2026-04-24T10:05:30Z"
+  "skill_version": "2026-04-25.1",
+  "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260425T100501Z.json",
+  "updated_at": "2026-04-25T10:05:30Z"
 }
 ```
 
@@ -48,37 +48,22 @@ campaign_status       = running
 - `running`
 - `completed`
 
-`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` in the evidence file.
+`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` AND `needs_continue == false` in the evidence file.
 
-## issue-<iid>.json
+## issue-<iid>/state.json (per-issue, owned by executor)
 
-Path: `${ISSUE_STATE_DIR}/issue-<iid>.json`
+Path: `${ISSUES_ROOT}/issue-<iid>/state.json` (use `issue_state_file_for` helper)
 
-```json
-{
-  "iid": 9,
-  "session": "issue-px_ifp_hulat_test-9",
-  "status": "blocked",
-  "mode": "continue",
-  "retry_count": 2,
-  "last_attempt_tick": 12,
-  "next_retry_tick": 13,
-  "block_reason": "Claude Code runtime requires GLIBC 2.29+",
-  "work_branch": null,
-  "commit_sha": null,
-  "merge_request_url": null,
-  "skill_version": "2026-04-24.9",
-  "updated_at": "2026-04-24T10:00:00Z"
-}
-```
+This file is written and updated by the executor; the dispatcher only **reads** it (after a spawned executor session returns) and only **mutates** it during reconciliation when re-enqueuing an IID.
 
-`mode` is set to `"continue"` when reconciliation observed the `continue` label on this IID; the dispatcher then includes `issue_mode=continue` in the trigger sent to the executor session. Default is `"fresh"`.
+The full schema lives in the executor SKILL's `references/state_schema.md`. From the dispatcher's perspective the relevant fields are:
 
-### Possible `status` values
+| Field             | Read by dispatcher? | Notes                                               |
+| ----------------- | ------------------- | --------------------------------------------------- |
+| `iid`             | yes                 | sanity                                              |
+| `status`          | yes                 | `pending` / `in_progress` / `blocked` / `failed` / `done` / `no_changes` |
+| `mode`            | dispatcher writes   | `fresh` (default) or `continue`                     |
+| `attempts_total`  | yes                 | informational                                       |
+| `block_reason`    | yes (for chat)      | only when `status=blocked` / `failed`               |
 
-- `pending`     — not yet attempted this campaign
-- `in_progress` — executor session is currently running
-- `blocked`     — retryable failure; will be retried after `blocked_cooldown_ticks`
-- `failed`      — non-recoverable or retry-exhausted
-- `done`        — MR successfully created (terminal)
-- `no_changes`  — Claude produced no diff (terminal)
+Note: per-issue state previously lived at `${STATE_DIR}/issues/issue-<iid>.json`. That path is **gone** as of SKILL_VERSION 2026-04-25.1. The new path is `${ISSUES_ROOT}/issue-<iid>/state.json`. Old files, if any, should be migrated by the operator (the agent does not auto-migrate).

@@ -103,11 +103,31 @@ The trigger's `gitlab_address` is verified against this pin on every tick. A mis
 
 See `<workspace>/config/README.md` for setup steps and rationale.
 
-## Disk State Layout
+## Disk State Layout (SKILL_VERSION 2026-04-25.1+)
 
-- campaign state:
-  - `/data/<project>/openclaw_state/campaign_state.json`
-- issue state:
-  - `/data/<project>/openclaw_state/issues/issue-<iid>.json`
-- logs:
-  - `/data/<project>/openclaw_log/issue-<iid>/`
+```
+/data/<project>/                              ← main git repo (host of worktrees)
+/data/openclaw_work/<project>/
+    openclaw_state/
+        campaign_state.json                   ← campaign-level cache
+        campaign.lock
+    openclaw_log/
+        dispatcher/
+            reconcile-<ts>.json
+    issues/
+        issue-<iid>/
+            state.json                        ← cross-attempt per-issue state
+            attempts/
+                attempt-001/
+                    worktree/                 ← Claude Code's cwd (git worktree)
+                        _hulat → <hulat_dir>  (symlink, .git/info/exclude'd)
+                    log/
+                    attempt_state.json
+                    summary.md
+                attempt-002/
+                    ...
+```
+
+The previous flat layout (`/data/<project>/openclaw_state/issues/issue-<iid>.json`, `/data/<project>/openclaw_log/issue-<iid>/`) is gone. All per-issue artifacts now live under `/data/openclaw_work/<project>/issues/issue-<iid>/` and are isolated **per attempt**: every retry creates a new `attempt-NNN/` directory with its own worktree, log, state, and summary.
+
+`hulat_dir` is shared across all issues / attempts via a symlink — it is read-only configuration, never copied.
