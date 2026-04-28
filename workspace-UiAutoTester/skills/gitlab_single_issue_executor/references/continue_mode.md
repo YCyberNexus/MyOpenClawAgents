@@ -31,9 +31,9 @@ In continue mode the executor:
 5. Runs `acpx claude exec -f` exactly as in fresh mode. Same No-Fallback Policy applies.
 6. After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- uiautotester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
 7. **MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
-   - looks up any open MR currently pointing at `${WORK_BRANCH}` (E6)
-   - closes it without merging (E10) — the integration branch is untouched, the closed MR remains in GitLab as historical record
-   - creates a fresh MR for the new attempt with description that begins `Closes #<iid>` and includes `Supersedes !<old_mr_iid>` so reviewers can trace the chain
+   - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
+   - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
+   - creates a fresh MR for the new attempt with description that begins `Closes #<iid>` and includes `Supersedes !<old_mr_iid>` references so reviewers can trace the chain
    This means each continue cycle produces a distinct MR in GitLab. Reviewers see one MR per attempt. Only the latest MR is open; older ones are closed but still visible.
 
 The executor does NOT try to extract specific commands out of reviewer comments and run them itself in bash. The comments are passed to Claude Code, and Claude Code is what actually runs them — through its normal tool use, exactly like in a fresh run.

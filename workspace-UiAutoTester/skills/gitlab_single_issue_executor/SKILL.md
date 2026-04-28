@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-28.4] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-28.5] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-28.4**
+**SKILL_VERSION: 2026-04-28.5**
 
-The executor MUST include `"skill_version": "2026-04-28.4"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-28.5"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -24,7 +24,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `_hulat`, `.claude`).
 - `scripts/commit_and_push.sh` — commit and FORCE-push the per-attempt local branch to the SINGLE remote `${WORK_BRANCH}` (Strategy A).
 - `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts, no `_hulat`, and no `.claude`.
-- `scripts/create_mr.sh` — fresh mode: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one (Strategy A). Continue mode: close the existing open MR (without merging) and create a fresh one that references the closed predecessor — each continue cycle leaves a visible MR trail in GitLab.
+- `scripts/create_mr.sh` — fresh mode: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one (Strategy A). Continue mode: close all existing open MRs for `${WORK_BRANCH}` (without merging) and create a fresh one that references the closed predecessor(s) — each continue cycle leaves a visible MR trail in GitLab.
 - `scripts/summarize_attempt.sh` — write `${SUMMARY_FILE}` and post it as a GitLab issue note so future continue-mode runs can read what past attempts did.
 - `references/paths.md` — full path layout and required artifacts.
 - `references/state_schema.md` — `issue-<iid>.json` schema and update cadence.
@@ -188,7 +188,7 @@ In continue mode the executor:
 - Allocates a NEW attempt directory `attempt-NNN` (numbers are monotonically increasing — past attempts are preserved on disk). Calls `scripts/prepare_attempt.sh` with `ISSUE_MODE=continue`. The script bases the new worktree on `origin/${WORK_BRANCH}` (the existing work-in-progress branch from the prior attempt). If `${WORK_BRANCH}` does not exist on the remote, the script downgrades to fresh mode and records `mode_downgraded_from="continue"`.
 - Builds the Claude Code prompt with the live issue body + ALL past `uiautotester:attempt-summary` notes + ALL non-summary reviewer comments. See `references/continue_mode.md`.
 - After the attempt finishes, `scripts/summarize_attempt.sh` posts a new summary comment to the issue so future continue-mode runs can see what this attempt did.
-- **MR rotation.** Unlike fresh mode (which reuses the single MR for `${WORK_BRANCH}`), continue mode closes the previous open MR (without merging — the integration branch is untouched) and creates a fresh MR pointing at the same source branch. The new MR's description includes `Supersedes !<old_mr_iid>` for traceability. Each continue cycle therefore produces a distinct MR object in GitLab so reviewers can see the resolution history.
+- **MR rotation.** Unlike fresh mode (which reuses the single MR for `${WORK_BRANCH}`), continue mode closes all existing open MRs for `${WORK_BRANCH}` (without merging — the integration branch is untouched) and creates a fresh MR pointing at the same source branch. The new MR's description includes `Supersedes !<old_mr_iid>` (or multiple refs if multiple old MRs existed) for traceability. Each continue cycle therefore produces a distinct MR object in GitLab so reviewers can see the resolution history.
 - All other later steps (stage + guard, commit, force-push, post-push verify, label transitions) are identical to fresh mode.
 
 The executor MUST NOT delete the remote work branch in continue mode, and MUST NOT delete past attempt directories on disk. Cleanliness guards (`stage_and_guard.sh`, `post_push_verify.sh`) still apply.
@@ -243,7 +243,7 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.4, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.5, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 5 env vars exported:**
 
@@ -340,7 +340,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 11. **Post-push verify.** `bash scripts/post_push_verify.sh`. Exit 4 → `status=blocked`, `block_reason="remote branch polluted with agent artifacts"`, summarize then stop.
 12. **Ensure MR exists (mode-dependent rotation).** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into both state files.
     - In `ISSUE_MODE=fresh`: reuses the existing open MR for `${WORK_BRANCH}` if any, else creates one (Strategy A — single MR per issue).
-    - In `ISSUE_MODE=continue`: closes any existing open MR for `${WORK_BRANCH}` (without merging), then creates a fresh MR. The new MR's description includes `Supersedes !<old_mr_iid>` so reviewers can trace which previous MR this run replaces.
+    - In `ISSUE_MODE=continue`: closes all existing open MRs for `${WORK_BRANCH}` (without merging), then creates a fresh MR. The new MR's description includes `Supersedes !<old_mr_iid>` (or multiple refs if multiple old MRs existed) so reviewers can trace which previous MR(s) this run replaces.
     - The MR description always starts with `Closes #${ISSUE_IID}` so GitLab auto-closes the issue when whichever MR is current is eventually merged.
 13. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`. The executor does NOT close the issue itself.
 14. **Summarize the attempt.** `ATTEMPT_STATUS=done COMMIT_SHA=... MERGE_REQUEST_URL=... bash scripts/summarize_attempt.sh`. This writes `${SUMMARY_FILE}` and posts the same content as a GitLab issue note (E9) marked with `<!-- uiautotester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->`. Set `summary_posted_to_issue=true` in `${ATTEMPT_STATE_FILE}`.
@@ -355,7 +355,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.4",
+  "skill_version": "2026-04-28.5",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -366,7 +366,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.4",
+  "skill_version": "2026-04-28.5",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

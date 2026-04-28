@@ -59,9 +59,9 @@ This rule overrides any default model behavior that interprets `hourly_issue_quo
 
 ## Source of Truth
 
-Disk state is the source of truth.
+GitLab live labels are the source of truth for per-issue workflow state. Disk state is the dispatcher's progress cache and must be corrected from GitLab reconciliation before any "already done" / skip / early-return decision.
 Never rely on prior chat context to determine progress.
-Always read and honor persisted state before doing any work.
+Always run reconciliation and honor the persisted evidence file before doing any scheduling work.
 
 All dispatcher paths must be derived by sourcing:
 

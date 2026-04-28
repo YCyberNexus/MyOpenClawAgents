@@ -57,7 +57,7 @@ EXISTING_JSON="$(
   || echo '[]'
 )"
 EXISTING_URL="$(echo "${EXISTING_JSON}" | jq -r 'if length > 0 then .[0].web_url else "" end')"
-EXISTING_IID="$(echo "${EXISTING_JSON}" | jq -r 'if length > 0 then (.[0].iid|tostring) else "" end')"
+EXISTING_COUNT="$(echo "${EXISTING_JSON}" | jq -r 'length')"
 
 if [ "${ISSUE_MODE}" = "fresh" ] && [ -n "${EXISTING_URL}" ]; then
   # Strategy A reuse for fresh mode.
@@ -65,14 +65,17 @@ if [ "${ISSUE_MODE}" = "fresh" ] && [ -n "${EXISTING_URL}" ]; then
   exit 0
 fi
 
-# For continue mode, close the existing MR (if any) before creating the
-# new one. Closing — not merging — preserves the history without changing
-# the integration branch.
+# For continue mode, close all existing open MRs before creating the new
+# one. Closing — not merging — preserves the history without changing the
+# integration branch.
 SUPERSEDES_LINE=""
-if [ "${ISSUE_MODE}" = "continue" ] && [ -n "${EXISTING_IID}" ]; then
-  glab mr close "${EXISTING_IID}" \
-    --repo "${PROJECT_FULL}" >/dev/null
-  SUPERSEDES_LINE="Supersedes !${EXISTING_IID} (closed by UiAutoTester continue-mode re-run)."
+if [ "${ISSUE_MODE}" = "continue" ] && [ "${EXISTING_COUNT}" -gt 0 ]; then
+  SUPERSEDES_REFS="$(echo "${EXISTING_JSON}" | jq -r 'map("!" + (.iid|tostring)) | join(", ")')"
+  echo "${EXISTING_JSON}" | jq -r '.[].iid' | while IFS= read -r existing_iid; do
+    glab mr close "${existing_iid}" \
+      --repo "${PROJECT_FULL}" >/dev/null
+  done
+  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by UiAutoTester continue-mode re-run)."
 fi
 
 # Build / refresh the MR description. `Closes #<iid>` triggers GitLab's
@@ -103,5 +106,16 @@ glab mr create \
   --description-file "${DESC_FILE}" \
   --yes >/dev/null
 
-glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json \
-  | jq -r '.web_url'
+OPEN_JSON="$(
+  glab mr list \
+    --repo "${PROJECT_FULL}" \
+    --source-branch "${WORK_BRANCH}" \
+    --state opened \
+    --output json
+)"
+OPEN_COUNT="$(echo "${OPEN_JSON}" | jq -r 'length')"
+if [ "${OPEN_COUNT}" -ne 1 ]; then
+  echo "create_mr: expected exactly one open MR for ${WORK_BRANCH}, found ${OPEN_COUNT}" >&2
+  exit 6
+fi
+echo "${OPEN_JSON}" | jq -r '.[0].web_url'
