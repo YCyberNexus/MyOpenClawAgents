@@ -63,7 +63,7 @@ The full schema lives in the executor SKILL's `references/state_schema.md`. From
 | `iid`             | yes                 | sanity                                              |
 | `status`          | yes                 | `pending` / `in_progress` / `blocked` / `failed` / `done` / `no_changes` |
 | `mode`            | dispatcher writes   | `fresh` (default) or `continue`                     |
-| `attempts_total`  | yes                 | informational                                       |
+| `attempts_total`  | dispatcher writes   | incremented atomically by `scripts/allocate_attempt.sh` before every executor spawn. Executor never modifies this. |
 | `block_reason`    | yes (for chat)      | only when `status=blocked` / `failed`               |
 
 Note: per-issue state previously lived at `${STATE_DIR}/issues/issue-<iid>.json`. That path is **gone** as of SKILL_VERSION 2026-04-25.1. The new path is `${ISSUES_ROOT}/issue-<iid>/state.json`. Old files, if any, should be migrated by the operator (the agent does not auto-migrate).

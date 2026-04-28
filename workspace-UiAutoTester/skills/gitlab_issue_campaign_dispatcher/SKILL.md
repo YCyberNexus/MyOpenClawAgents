@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-25.2] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-25.3] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-25.2**
+**SKILL_VERSION: 2026-04-25.3**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-25.2` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-25.3` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -17,6 +17,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/env_paths.sh` — populates path variables (SOURCE it, don't redefine).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/reconcile.sh` — queries GitLab for the IID range and writes the evidence file.
+- `scripts/allocate_attempt.sh` — atomically allocates the next attempt number for an IID; the dispatcher MUST call this before every executor spawn and pass the result via `attempt_number=` in the trigger.
 - `references/paths.md` — full path layout and rules.
 - `references/trigger_command.md` — the trigger spec and override rules.
 - `references/state_schema.md` — `campaign_state.json` and `issue-<iid>.json` schemas.
@@ -198,7 +199,14 @@ Run on every scheduled wake-up.
 6. **Strictly serial loop.** While quota and time budget remain:
    1. Pick the lowest-IID eligible backlog item, else the next fresh IID from `next_new_issue_iid`.
    2. Set `active_issue_iid` and persist.
-   3. Spawn (or resume) the dedicated session and send `RUN_SINGLE_ISSUE_SESSION` in a SINGLE blocking spawn call. The trigger payload MUST include `branch=` (target / integration branch, typically `master`) AND `dev_branch=` (clean baseline branch from which fresh-mode worktrees are checked out). If the per-issue state file has `mode="continue"` (set by reconciliation in Step 3 above), also include `issue_mode=continue` so the executor knows to reuse the existing work branch. Default is `issue_mode=fresh`.
+   3. **Allocate attempt number FIRST.** Before spawning, run `IID=<iid> bash scripts/allocate_attempt.sh`. This atomically increments `attempts_total` in `${ISSUES_ROOT}/issue-<iid>/state.json` and prints the new number `N` on stdout. Capture `N`. This step is mandatory for every spawn — fresh OR continue. Without it the executor will refuse to start (`env_paths.sh` no longer auto-allocates).
+   4. Spawn (or resume) the dedicated session and send `RUN_SINGLE_ISSUE_SESSION` in a SINGLE blocking spawn call. The trigger payload MUST include:
+      - `branch=` (target / integration branch, typically `master`)
+      - `dev_branch=` (clean baseline branch from which fresh-mode worktrees are checked out)
+      - `attempt_number=N` (the value just allocated in sub-step 3 above)
+      - `issue_mode=continue` if the per-issue state has `mode="continue"`; otherwise `issue_mode=fresh` (default)
+
+   Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source created an empty `attempt-NNN/` directory. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution.
    4. After the session returns, re-read `${ISSUE_STATE_DIR}/issue-<iid>.json` from disk.
    5. If terminal (`done` / `no_changes` / `failed`): update the corresponding list, increment `quota_completed_this_tick`.
    6. If `blocked`: keep in backlog; skip and continue.
@@ -233,7 +241,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-25.2",
+  "skill_version": "2026-04-25.3",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

@@ -46,7 +46,7 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 | `ATTEMPTS_DIR`       | `${ISSUE_ROOT}/attempts`                           | parent of all attempt-NNN dirs                           |
 | `WORK_BRANCH`        | `issue/${ISSUE_IID}-auto-fix`                      | the SINGLE remote branch (Strategy A)                    |
 
-### Attempt-level (resolved by env_paths.sh; the next attempt number is auto-detected from existing `attempts/` contents)
+### Attempt-level (set from `ATTEMPT_NUMBER` env var, which the trigger supplies; env_paths.sh does NOT auto-allocate)
 
 | Variable                  | Value                                                            | Notes                                                          |
 | ------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |

@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-25.2] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-25.3] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-25.2**
+**SKILL_VERSION: 2026-04-25.3**
 
-The executor MUST include `"skill_version": "2026-04-25.2"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-25.3"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -155,7 +155,9 @@ If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open 
 
 Required from the trigger command (`RUN_SINGLE_ISSUE_SESSION`):
 
-- `group`, `project`, `branch`, `dev_branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `non_interactive=true`
+- `group`, `project`, `branch`, `dev_branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `attempt_number`, `non_interactive=true`
+
+`attempt_number` is the integer attempt number allocated by the dispatcher via `dispatcher/scripts/allocate_attempt.sh`. The executor MUST NOT compute its own attempt number — `env_paths.sh` will refuse to load if `ATTEMPT_NUMBER` is missing from the environment. This rule prevents the "empty attempt-NNN/ directories on session restart" bug from older versions.
 
 `branch` is the integration / target branch (where the MR is opened). `dev_branch` is the clean baseline branch the fresh-mode worktree is checked out from, so Claude Code starts from a tree that does not contain past issues' spec accumulation. If the project does not maintain a separate clean baseline, the operator may set `dev_branch=<same-as-branch>` to fall back to single-branch behavior.
 
@@ -237,8 +239,9 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 Run once per session for `${ISSUE_IID}`. Every run produces a brand-new attempt directory.
 
 1. **Bootstrap.**
-   - `PROJECT=<project> ISSUE_IID=<iid> source scripts/env_paths.sh`
-     This resolves both issue-level and attempt-level paths and creates the next `attempt-NNN/` skeleton.
+   - Verify the trigger supplied `attempt_number=<N>`. If missing, mark the issue `blocked` with `block_reason="trigger missing attempt_number"` and stop. (The dispatcher must call `allocate_attempt.sh` before every spawn — see dispatcher SKILL.)
+   - `PROJECT=<project> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N> source scripts/env_paths.sh`
+     This resolves both issue-level and attempt-level paths and creates the `attempt-${N}/` skeleton. `env_paths.sh` is now idempotent — re-sourcing it in the same session reuses the same directory because `ATTEMPT_NUMBER` is fixed by the trigger.
    - `GITLAB_HOST="$(bash scripts/glab_auth.sh)"`; export `PROJECT_FULL`, `PROJECT_URI`. If auth fails, mark the attempt and the issue `blocked` with `block_reason="glab auth failed"` and stop.
 2. **Sync the main repo.** `bash scripts/clone_or_pull.sh`. This only fetches refs and prunes stale worktrees; it does NOT switch branches in the main repo.
 3. **Read the target issue + resolve mode.** Use command E1 from `references/glab_commands.md`. Capture title, description, current labels. `ISSUE_TITLE` is the short form for commit / MR title. Resolve `ISSUE_MODE`:
@@ -288,7 +291,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-25.2",
+  "skill_version": "2026-04-25.3",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -299,7 +302,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-25.2",
+  "skill_version": "2026-04-25.3",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

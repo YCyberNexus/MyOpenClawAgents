@@ -21,10 +21,16 @@
 # Usage (must be SOURCED):
 #   PROJECT=<p> ISSUE_IID=<n> source scripts/env_paths.sh
 #
-# Optional input:
-#   ATTEMPT_NUMBER     If unset, env_paths.sh resolves the next attempt
-#                      number by scanning ${ATTEMPTS_DIR}. The caller can
-#                      also force a number (used by recovery / debugging).
+# Required input:
+#   ATTEMPT_NUMBER     The attempt number for THIS run. As of SKILL_VERSION
+#                      2026-04-25.3, env_paths.sh NO LONGER auto-allocates.
+#                      The dispatcher must allocate the number once via
+#                      `dispatcher/scripts/allocate_attempt.sh` and pass it
+#                      to the executor via the `attempt_number=<N>` trigger
+#                      field. This prevents one logical resolution from
+#                      producing multiple empty attempt-NNN/ directories
+#                      when the executor session is cold-restarted or
+#                      env_paths.sh is sourced more than once.
 #
 # Exports (issue-level):
 #   REPO_PATH                main git repo
@@ -64,22 +70,13 @@ export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
 mkdir -p "${ISSUE_ROOT}" "${ATTEMPTS_DIR}"
 
-# Resolve attempt number.
+# ATTEMPT_NUMBER must be supplied by the dispatcher trigger. Auto-derivation
+# is intentionally forbidden — see the comment block at the top of this file.
 if [ -z "${ATTEMPT_NUMBER:-}" ]; then
-  # Find highest existing attempt-NNN, default 0, increment.
-  highest=0
-  if [ -d "${ATTEMPTS_DIR}" ]; then
-    for d in "${ATTEMPTS_DIR}"/attempt-*; do
-      [ -d "${d}" ] || continue
-      n="${d##*/attempt-}"
-      # strip leading zeros for arithmetic, but guard empty string
-      n_num="$((10#${n}))"
-      if [ "${n_num}" -gt "${highest}" ]; then
-        highest="${n_num}"
-      fi
-    done
-  fi
-  export ATTEMPT_NUMBER=$((highest + 1))
+  echo "env_paths.sh: ATTEMPT_NUMBER is required (must be supplied by dispatcher" >&2
+  echo "via the executor trigger field 'attempt_number=<N>'). Refusing to" >&2
+  echo "auto-allocate — that caused the empty-attempt-dir bug in older versions." >&2
+  return 2 2>/dev/null || exit 2
 fi
 
 # Zero-pad to 3 digits.
