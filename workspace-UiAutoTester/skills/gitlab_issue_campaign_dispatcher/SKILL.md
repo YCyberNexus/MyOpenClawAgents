@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-28.3] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-28.4] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-28.3**
+**SKILL_VERSION: 2026-04-28.4**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.3` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.4` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -120,7 +120,7 @@ Concrete rules:
 2. The dispatcher MUST NOT use `campaign_state.json.completed_iids`, `campaign_state.json.campaign_status`, or any per-issue `issue-<iid>.json.status` to decide an IID is finished. Those are caches.
 3. Ground truth per IID comes from the evidence file. Three signals:
    - `is_done_on_gitlab` ⇔ live GitLab labels contain literal `done`.
-   - `needs_continue` ⇔ live GitLab labels contain literal `continue`. This is set by a human reviewer who has noticed that a previous "done" was incorrect (Claude Code returned but didn't actually finish the work) and wants the agent to resume on the existing work branch.
+   - `needs_continue` ⇔ live GitLab labels contain literal `continue`. This is set by a human reviewer who has noticed that a previous "done" was incorrect (Claude Code returned but didn't actually finish the work) and wants the agent to resume on the existing work branch. `continue` wins over `done` if both labels are present.
    - `user_reopened` ⇔ none of `done`, `failed`, `continue` are present in live labels (the issue was bounced back to `todo` / `doing` from scratch).
 4. **Disk cache correction is mandatory** when they disagree:
    - If `needs_continue == true`:
@@ -178,7 +178,7 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.3, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.4, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 3 env vars exported:**
 
@@ -243,6 +243,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 4. **Early-return only if allowed.** Permitted iff:
    - the evidence file from this tick exists
    - every IID in range has `is_done_on_gitlab == true` in it
+   - every IID in range has `needs_continue == false` in it
    - `unfinished_iids` is empty and `campaign_status = completed`
    Otherwise continue.
 5. `quota_completed_this_tick = 0`; record tick start time.
@@ -281,7 +282,7 @@ Stop conditions: `quota_completed_this_tick == hourly_issue_quota`, time budget 
 
 ## Terminal Completion Policy
 
-Successful MR creation is the terminal completion condition. The executor labels the issue `done` and writes `status=done` immediately after MR creation. The dispatcher MUST NOT schedule that issue again unless reconciliation finds it user-reopened on GitLab.
+Successful MR creation is the terminal completion condition for a normal attempt. The executor labels the issue `done` and writes `status=done` immediately after MR creation. The dispatcher MUST NOT schedule that issue again unless reconciliation finds `needs_continue == true` or `user_reopened == true` on GitLab. `continue` wins over cached `done` state and over an existing MR.
 
 ---
 
@@ -291,7 +292,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-28.3",
+  "skill_version": "2026-04-28.4",
   "campaign_status": "running",
   "active_issue_iid": null,
   "active_issue_session": null,

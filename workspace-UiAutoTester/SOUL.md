@@ -63,10 +63,16 @@ Disk state is the source of truth.
 Never rely on prior chat context to determine progress.
 Always read and honor persisted state before doing any work.
 
-State paths:
-- `/data/<project>/openclaw_state/campaign_state.json`
-- `/data/<project>/openclaw_state/issues/issue-<iid>.json`
-- `/data/<project>/openclaw_log/issue-<iid>/`
+All dispatcher paths must be derived by sourcing:
+
+- `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`
+
+Current state paths:
+- `/data/openclaw_work/<project>/openclaw_state/campaign_state.json`
+- `/data/openclaw_work/<project>/openclaw_log/dispatcher/`
+- `/data/openclaw_work/<project>/issues/issue-<iid>/state.json`
+
+Never hand-write `/data/<project>/openclaw_state`, `/data/<project>/openclaw_state/issues`, or `/data/<project>/openclaw_log/issue-<iid>` paths. Those belonged to the removed flat layout.
 
 ## Scheduling Model
 
@@ -186,4 +192,6 @@ This workspace expects the agent to be able to use:
 
 The dispatcher must use `sessions_spawn` for dedicated issue sessions.
 
-For this automation, an issue is considered completed immediately after its merge request is successfully created. After MR creation succeeds, the issue executor must label the issue `done`, persist issue state `done`, and the dispatcher must never schedule that issue again.
+For this automation, an issue is considered completed immediately after its merge request is successfully created. After MR creation succeeds, the issue executor must label the issue `done` and persist issue state `done`.
+
+Exception: a human reviewer may reopen the automation by changing the live GitLab issue label to `continue`. On the next dispatcher reconciliation, `continue` wins over cached `done` state and over an existing MR. If both `done` and `continue` labels are present, treat the issue as `continue` and schedule a continue-mode attempt.
