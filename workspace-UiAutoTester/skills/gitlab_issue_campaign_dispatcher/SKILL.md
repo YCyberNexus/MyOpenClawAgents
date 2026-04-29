@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-29.6] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-29.7] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-29.5**
+**SKILL_VERSION: 2026-04-29.7**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.6` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.7` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -18,6 +18,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/reconcile.sh` — queries GitLab for the IID range and writes the evidence file.
 - `scripts/allocate_attempt.sh` — atomically allocates the next attempt number for an IID; the dispatcher MUST call this before every executor spawn and pass the result via `attempt_number=` in the trigger.
+- `scripts/load_ui_accounts.sh` — read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
 - `references/paths.md` — full path layout and rules.
 - `references/trigger_command.md` — the trigger spec and override rules.
 - `references/state_schema.md` — `campaign_state.json` and `issue-<iid>.json` schemas.
@@ -85,6 +86,31 @@ This dispatcher operates over issues in **bounded batches of size `max_concurren
 - Background / no-wait / fire-and-forget spawn modes are forbidden for issue sessions.
 
 If this policy conflicts with any other instruction, this policy wins.
+
+---
+
+## UI Account Allocation Policy (READ FIRST — HARD RULE)
+
+The system under test is a UI / web app. When the same UI account logs in twice, the older session is logged out. Two concurrent subagents that share an account therefore continuously kick each other out — the work product is unreliable, and the issue cannot complete.
+
+The dispatcher MUST therefore allocate a **distinct UI account per IID** for every concurrent batch:
+
+1. The pool of available accounts is pinned at deployment time in `<workspace>/config/ui_accounts.env`. The trigger does NOT carry account credentials.
+2. Before spawning each batch, the dispatcher runs `BATCH_SIZE=<n> bash scripts/load_ui_accounts.sh` (where `n` is the just-computed batch size). The script:
+   - prints `n` accounts in pool-file order, one `user:pass` per line, and exits 0; OR
+   - exits 10 if the pool file is missing (deployment incomplete);
+   - exits 11 if the pool is empty;
+   - exits 12 if a pool line is malformed;
+   - exits 13 if the pool is smaller than `BATCH_SIZE`.
+3. **Pool-too-small is a tick-level failure.** If `load_ui_accounts.sh` exits 13, the dispatcher MUST abort the tick with a one-line summary (`"ui_account_pool_too_small: pool=<size> batch=<n>"`). It MUST NOT shrink the batch, retry with a smaller `max_concurrent_subagents`, or share an account between IIDs. The operator's options are: enlarge the pool in `<workspace>/config/ui_accounts.env`, or lower `max_concurrent_subagents` in the trigger.
+4. **Allocation is per-batch and ephemeral.** The dispatcher binds one account to each IID in the batch, in iteration order (`account[k]` to the `k`-th IID). The mapping is held in memory for the duration of the batch and passed to each executor via the trigger fields `ui_account=<user>` and `ui_password=<pass>`. After the batch returns, the accounts implicitly return to the pool — there is no persisted allocation table, because the existing per-batch wait contract (form a batch, spawn it in one tool-call block, wait for ALL members, then form the next batch) guarantees that no two batches are in flight at once.
+5. **Forbidden workarounds.** The dispatcher MUST NOT:
+   - default a missing account from the pool by reusing one already assigned to another IID in the same batch
+   - read account credentials from `gitlab.env`, the trigger, the issue body, or any other source
+   - skip the `load_ui_accounts.sh` call when `max_concurrent_subagents=1` (the script is cheap; the single-IID batch still gets a deterministic account from the pool head)
+   - persist account-to-IID assignments across ticks (the next tick re-allocates from the head of the pool file)
+
+If `<workspace>/config/ui_accounts.env` is missing, malformed, or too small, the deployment is incomplete; abort the tick.
 
 ---
 
@@ -263,22 +289,24 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    1. **Check time budget at the TOP of the loop iteration**, before forming a new batch. If `now - tick_start_time >= max_runtime_minutes`, break out of the loop. (Time is NOT checked mid-batch — once a batch is spawned, the dispatcher commits to waiting for all members.)
    2. **Form the next batch.** Compute `batch_size = min(max_concurrent_subagents, remaining_quota, remaining_eligible_iids)`. Pick `batch_size` distinct IIDs in the standard order: lowest-IID eligible backlog items first, then fresh IIDs from `next_new_issue_iid` upward. If `batch_size == 0`, break out of the loop.
    3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`. Do all allocations BEFORE any `sessions_spawn`. Sequential allocation is mandatory — concurrent allocation would race even though each IID has its own state file (the order needs to be observable in dispatcher logs, and the script is cheap so serializing costs nothing).
-   4. **Update `active_issue_iids` + persist.** Append every IID in the batch (and corresponding session names in `active_issue_sessions`) to `campaign_state.json`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
-   5. **Spawn the batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID, all in the same parallel block. Each spawn MUST target the exact dedicated session name `issue-<project>-<iid>`; anonymous `agent:<name>:subagent:<uuid>` keys are not acceptable. Each spawn sends `RUN_SINGLE_ISSUE_SESSION` with payload:
+   4. **Allocate UI accounts for the batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the batch (k=0..batch_size-1). On any non-zero exit code (10/11/12/13 — see UI Account Allocation Policy above), abort the tick with a one-line failure summary; do not spawn the batch.
+   5. **Update `active_issue_iids` + persist.** Append every IID in the batch (and corresponding session names in `active_issue_sessions`) to `campaign_state.json`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
+   6. **Spawn the batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID, all in the same parallel block. Each spawn MUST target the exact dedicated session name `issue-<project>-<iid>`; anonymous `agent:<name>:subagent:<uuid>` keys are not acceptable. Each spawn sends `RUN_SINGLE_ISSUE_SESSION` with payload:
       - `branch=` (target / integration branch, typically `master`)
       - `dev_branch=` (clean baseline branch from which fresh-mode worktrees are checked out)
       - `attempt_number=N_iid` (the value allocated in sub-step 3 above for THIS IID)
+      - `ui_account=<user>` and `ui_password=<pass>` (the credentials allocated in sub-step 4 above for THIS IID — distinct from every other IID in the batch; never omit these fields)
       - `issue_mode=continue` if the per-issue state has `mode="continue"`; otherwise `issue_mode=fresh` (default)
 
-      When `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call — identical to the legacy serial behavior. When `> 1`, the calls run in parallel and the dispatcher waits for all of them to return.
+      When `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call — identical to the legacy serial behavior, except the UI account is now drawn from the pool head rather than from the issue body. When `> 1`, the calls run in parallel and the dispatcher waits for all of them to return.
 
-      Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source could double-count a logical attempt. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution. The same rule applies per IID inside a batch.
-   6. **After the WHOLE batch returns terminal executor replies**, for each IID in the batch:
+      Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source could double-count a logical attempt. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution. The same rule applies per IID inside a batch. UI accounts use the same allocate-first-then-spawn pattern for the same reason — and additionally to make the per-IID account assignment observable in dispatcher logs.
+   7. **After the WHOLE batch returns terminal executor replies**, for each IID in the batch:
       - Re-read `$(issue_state_file_for <iid>)` (`${ISSUES_ROOT}/issue-<iid>/state.json`) from disk.
       - If terminal (`done` / `no_changes` / `failed`): update the corresponding list (`completed_iids` / `failed_iids` etc.), increment `quota_completed_this_tick`.
       - If `blocked`: keep in backlog; will retry after cooldown per Blocked Skip-and-Retry.
       - If `in_progress` (the executor returned but its work is not yet terminal — rare): keep as backlog for the next tick.
-   7. **Drain `active_issue_iids` + persist.** Remove every IID in the just-finished batch from `active_issue_iids` and `active_issue_sessions`, then persist `campaign_state.json` before the next loop iteration. The list MUST be empty (or contain only IIDs from a future batch — i.e. never carry stragglers from a prior batch) before forming a new batch.
+   8. **Drain `active_issue_iids` + persist.** Remove every IID in the just-finished batch from `active_issue_iids` and `active_issue_sessions`, then persist `campaign_state.json` before the next loop iteration. The list MUST be empty (or contain only IIDs from a future batch — i.e. never carry stragglers from a prior batch) before forming a new batch.
 7. Update `next_new_issue_iid` if fresh issues were introduced.
 8. If every IID in `[issue_min_iid, issue_max_iid]` is terminal, set `campaign_status = completed`.
 9. Persist `campaign_state.json` and return the compact chat summary.
@@ -308,11 +336,12 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-29.5",
+  "skill_version": "2026-04-29.7",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],
   "max_concurrent_subagents": 1,
+  "ui_account_pool_size": 4,
   "unfinished_iids": [9, 10, 14],
   "next_new_issue_iid": 19,
   "quota_completed_this_tick": 3,

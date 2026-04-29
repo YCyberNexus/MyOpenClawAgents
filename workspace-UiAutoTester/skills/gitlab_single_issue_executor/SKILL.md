@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-29.6] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, publish attempt evidence to the project Wiki and link it from the issue before MR creation, change `doing` to `done`, create or rotate a merge request to master without merging, add `pr` after MR creation succeeds, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully and both `done` and `pr` labels being present is the terminal completion condition."
+description: "[SKILL_VERSION=2026-04-29.7] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx with a dispatcher-allocated UI test account injected into the prompt, persist logs, commit and push changes, publish attempt evidence to the project Wiki and link it from the issue before MR creation, change `doing` to `done`, create or rotate a merge request to master without merging, add `pr` after MR creation succeeds, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully and both `done` and `pr` labels being present is the terminal completion condition."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-29.6**
+**SKILL_VERSION: 2026-04-29.7**
 
-The executor MUST include `"skill_version": "2026-04-29.6"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-29.7"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -163,9 +163,11 @@ If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open 
 
 Required from the trigger command (`RUN_SINGLE_ISSUE_SESSION`):
 
-- `group`, `project`, `branch`, `dev_branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `attempt_number`, `non_interactive=true`
+- `group`, `project`, `branch`, `dev_branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `attempt_number`, `ui_account`, `ui_password`, `non_interactive=true`
 
 `attempt_number` is the integer attempt number allocated by the dispatcher via `dispatcher/scripts/allocate_attempt.sh`. The executor MUST NOT compute its own attempt number — `env_paths.sh` will refuse to load if `ATTEMPT_NUMBER` is missing from the environment. This rule prevents double-counted attempts on session restart.
+
+`ui_account` and `ui_password` are the UI test credentials the dispatcher allocated for THIS spawn from the deployment-pinned pool (`<workspace>/config/ui_accounts.env`). Distinct concurrent subagents always receive distinct accounts (see dispatcher SKILL "UI Account Allocation Policy"). The executor MUST forward both values into `scripts/build_prompt.sh` (env `UI_ACCOUNT` / `UI_PASSWORD`); they are appended to the Claude Code prompt's `# Working environment` section with an explicit override note saying any account named in the issue body is replaced by the allocated one. The executor MUST NOT default these fields, MUST NOT read them from the issue body or any other source, and MUST mark the issue `blocked` with `block_reason="missing required input: ui_account"` (or `ui_password`) if either is missing.
 
 `branch` is the integration / target branch (where the MR is opened). `dev_branch` is the clean baseline branch the fresh-mode worktree is checked out from, so Claude Code starts from a tree that does not contain past issues' spec accumulation. If the project does not maintain a separate clean baseline, the operator may set `dev_branch=<same-as-branch>` to fall back to single-branch behavior.
 
@@ -320,7 +322,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - `${ISSUE_STATE_FILE}` — write/update `status=in_progress`, `mode="${ISSUE_MODE}"`, `attempts_total=${ATTEMPT_NUMBER}`, `latest_attempt_number=${ATTEMPT_NUMBER}`, `latest_attempt_dir=${ATTEMPT_DIR}`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
 7. **Prepare the issue worktree for this attempt.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script replaces `${WORKTREE_DIR}`, recreates only this attempt's `${LOG_DIR}`, links `${WORKTREE_DIR}/_hulat`, copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude`, and excludes both local-only paths from git. It prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
 8. **Build the prompt and run Claude Code.**
-   1. `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments".
+   1. `UI_ACCOUNT="${UI_ACCOUNT}" UI_PASSWORD="${UI_PASSWORD}" bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments". The `UI_ACCOUNT` / `UI_PASSWORD` env vars come from the trigger fields `ui_account` / `ui_password` allocated by the dispatcher; the script appends them to the prompt's `# Working environment` section. If either env var is empty, `build_prompt.sh` exits non-zero — mark the issue `blocked` with `block_reason="missing required input: ui_account"` (or `ui_password`).
    2. Capture stderr — record `no_reviewer_comments` and `prior_attempt_count` into `${ATTEMPT_STATE_FILE}`.
    3. Run acpx per the Claude Code Execution Contract, with `${WORKTREE_DIR}` as cwd, then return to `${SKILL_DIR}` so subsequent relative `scripts/...` invocations still work:
       ```bash
@@ -361,7 +363,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-29.6",
+  "skill_version": "2026-04-29.7",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -372,7 +374,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-29.6",
+  "skill_version": "2026-04-29.7",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

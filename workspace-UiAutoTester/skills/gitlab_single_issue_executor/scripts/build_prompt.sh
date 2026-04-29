@@ -14,7 +14,16 @@
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
-#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH, HULAT_DIR
+#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH, HULAT_DIR,
+#   UI_ACCOUNT, UI_PASSWORD
+#
+# UI_ACCOUNT / UI_PASSWORD are the dispatcher-allocated test credentials for
+# this spawn. They are injected into the prompt's "# Working environment"
+# section with an explicit override note: any account named in the issue
+# body MUST be replaced by these values when Claude Code logs in. Different
+# concurrent subagents always receive different accounts (see dispatcher's
+# UI Account Allocation Policy), so this is what prevents one subagent from
+# kicking another out of the system under test.
 #
 # Output:
 #   Writes ${LOG_DIR}/prompt.txt and prints its absolute path on stdout.
@@ -33,6 +42,19 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}" "${HULAT_DIR:?}"
+
+# UI account is allocated by the dispatcher per-spawn; both fields are
+# required so the override block is unambiguous. The executor SKILL maps a
+# missing/empty value to status=blocked block_reason="missing required
+# input: ui_account|ui_password" — see executor SKILL "Inputs".
+if [ -z "${UI_ACCOUNT:-}" ]; then
+  echo "build_prompt: UI_ACCOUNT is required (dispatcher must pass ui_account=<user> in trigger)" >&2
+  exit 3
+fi
+if [ -z "${UI_PASSWORD:-}" ]; then
+  echo "build_prompt: UI_PASSWORD is required (dispatcher must pass ui_password=<pass> in trigger)" >&2
+  exit 4
+fi
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -142,6 +164,16 @@ EOF
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
+
+# UI test account (dispatcher-allocated — overrides any account in the issue body)
+The orchestrator has allocated the following test account for THIS run.
+When the issue description names a UI account (for example "use F100001 to log in"),
+you MUST IGNORE that name and use the credentials below instead. Other concurrent
+runs are using DIFFERENT accounts; reusing the issue body's account would cause
+both runs to log each other out of the system under test.
+
+- Username: ${UI_ACCOUNT}
+- Password: ${UI_PASSWORD}
 
 # Rules
 - Work only on this issue.
