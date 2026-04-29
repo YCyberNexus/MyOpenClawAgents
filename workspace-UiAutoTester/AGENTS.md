@@ -74,8 +74,8 @@ The behavioral commitments above are prompt-level — the model can still violat
 1. **OpenClaw platform-level concurrency knob (preferred).**
    The OpenClaw runtime should cap concurrent `sessions_spawn` from this parent session at `max_concurrent_subagents`. The exact field name depends on the OpenClaw version in use — operators must consult the OpenClaw maintainer to pin down the correct setting (likely candidates: `max_concurrent_subagents`, `max_parallel_sessions`, `spawn_concurrency`). The value SHOULD be set to the same integer that the dispatcher receives in the trigger so that the platform layer matches the prompt-layer contract. If the deployment uses a fixed value, it MUST be set to the maximum `max_concurrent_subagents` operators ever expect to send via trigger; the dispatcher's smaller per-tick value then becomes the binding constraint.
 
-2. **Per-IID session-name uniqueness (always-on, structural).**
-   Issue sessions are named `issue-<project>-<iid>`. Because the session name is derived from `${ISSUE_IID}`, two concurrent attempts for the same IID would collide on session name and the second `sessions_spawn` would either be deduplicated by OpenClaw or run in the same session (forbidden by Single-Issue Rule). This makes "same IID twice in parallel" structurally impossible without any extra slot file. Cross-IID parallelism is bounded only by (1) and (3).
+2. **Per-IID active list plus deterministic labels (always-on, structural for the dispatcher).**
+   Thread-bound `sessions_spawn` may create anonymous runtime keys such as `agent:<name>:subagent:<uuid>`, so the key is not the human-readable issue binding. The dispatcher MUST keep `${ISSUE_IID}` in `active_issue_iids` while it is in flight and MUST set each spawn label to `issue-<iid>_attempt#<attempt_number>` (for example `issue-38_attempt#4`). This makes same-IID overlap visible and auditable even when OpenClaw assigns an anonymous subagent key.
 
 3. **SOUL.md / AGENTS.md prompt rules.**
    The "Subagent Concurrency Policy (READ FIRST — HARD RULE)" in SOUL.md and the behavioral commitments above. These are the weakest layer; they must not be the only layer.
