@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-29.2] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-29.3] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-29.2**
+**SKILL_VERSION: 2026-04-29.3**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.2` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.3` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -186,7 +186,7 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.2, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.3, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 3 env vars exported:**
 
@@ -305,7 +305,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-29.2",
+  "skill_version": "2026-04-29.3",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],
