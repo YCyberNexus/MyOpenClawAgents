@@ -1,6 +1,6 @@
 # Per-Issue and Current-Attempt State Schemas (Executor)
 
-As of SKILL_VERSION 2026-04-29.6 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
+As of SKILL_VERSION 2026-04-29.8 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -12,13 +12,15 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
   "session": "issue-px_ifp_hulat_test-14",
   "status": "in_progress",
   "mode": "continue",
+  "claude_session_name": "issue-px_ifp_hulat_test-14",
+  "claude_session_dir": "/data/openclaw_work/.../issues/issue-14",
   "attempts_total": 2,
   "latest_attempt_number": 2,
   "latest_attempt_dir": "/data/openclaw_work/.../issues/issue-14",
   "retry_count": 1,
   "block_reason": null,
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-04-29.6",
+  "skill_version": "2026-04-29.8",
   "updated_at": "2026-04-25T10:00:00Z"
 }
 ```
@@ -29,6 +31,8 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
 | `session`               | string          | Dedicated session name `issue-<project>-<iid>`.                        |
 | `status`                | string (enum)   | See "Possible status values" below. This is the latest attempt's terminal status (or `in_progress` mid-flight). |
 | `mode`                  | string (enum)   | `"fresh"` or `"continue"` for the latest attempt.                      |
+| `claude_session_name`   | string          | Persistent Claude Code session name, always `issue-${PROJECT}-${ISSUE_IID}`. |
+| `claude_session_dir`    | string          | Persistent Claude Code session root, always `${ISSUE_ROOT}`.           |
 | `attempts_total`        | int             | Number of attempts ever launched for this IID.                         |
 | `latest_attempt_number` | int             | Same number as `${ATTEMPT_NUMBER}` of the most recent attempt.         |
 | `latest_attempt_dir`    | string          | Convenience absolute path; matches `${ATTEMPT_DIR}`. In the current layout this is `${ISSUE_ROOT}`. |
@@ -64,6 +68,8 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "mode_requested": "continue",
   "mode_actual": "continue",
   "mode_downgraded_from": null,
+  "claude_session_name": "issue-px_ifp_hulat_test-14",
+  "claude_session_dir": "/data/openclaw_work/.../issues/issue-14",
   "no_reviewer_comments": false,
   "prior_attempt_count": 1,
   "local_branch": "issue/14-auto-fix-att002",
@@ -75,7 +81,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-04-29.6"
+  "skill_version": "2026-04-29.8"
 }
 ```
 
@@ -85,6 +91,8 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `mode_requested`          | what the dispatcher asked for via `issue_mode=...` (or what the executor inferred)        |
 | `mode_actual`             | what `prepare_attempt.sh` ended up running                                                |
 | `mode_downgraded_from`    | non-null only when `mode_actual=fresh` but `mode_requested=continue` and the remote branch was missing |
+| `claude_session_name`     | `${CLAUDE_SESSION_NAME}` used for this attempt                                             |
+| `claude_session_dir`      | `${CLAUDE_SESSION_DIR}` used as acpx `--cwd` for this attempt                              |
 | `no_reviewer_comments`    | continue mode only — true if `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
 | `prior_attempt_count`     | continue mode only — number of past `uiautotester:attempt-summary` notes the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |

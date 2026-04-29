@@ -28,7 +28,7 @@ In continue mode the executor:
    - **Past attempt summaries** — notes whose body contains `<!-- uiautotester:attempt-summary `. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
    - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- uiautotester:attempt-wiki-artifacts ... -->`). This is where humans write supplemental instructions.
 4. Builds the Claude Code prompt with both buckets, in chronological order, in distinct sections (see template below).
-5. Runs `acpx claude exec -f` exactly as in fresh mode. Same No-Fallback Policy applies.
+5. Runs Claude Code through the same per-issue persistent acpx session used in fresh mode: create/reuse `${CLAUDE_SESSION_NAME}` under `${CLAUDE_SESSION_DIR}`, then invoke `acpx --cwd "${CLAUDE_SESSION_DIR}" claude -s "${CLAUDE_SESSION_NAME}" ...` from `${WORKTREE_DIR}`. Same No-Fallback Policy applies.
 6. After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- uiautotester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
 7. **MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
    - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
@@ -72,6 +72,7 @@ Description:
 
 # Working environment
 - Worktree (your cwd):        <worktree>
+- Claude session:             issue-<project>-<iid> under issue-<iid>/
 - Hulat materials (symlink):  <worktree>/_hulat → <hulat_dir>
 - Claude runtime config:      <worktree>/.claude (copied from <hulat_dir>/ifp-hulat/.claude; local-only)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/<work-branch>

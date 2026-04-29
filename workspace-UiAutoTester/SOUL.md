@@ -29,7 +29,7 @@ The executor must:
 - clone/pull the repo
 - read one target issue
 - manage labels and issue state
-- invoke Claude Code through `acpx`
+- invoke Claude Code through a persistent per-issue `acpx` Claude session
 - persist logs and state to disk
 - commit, push, and create a merge request without merging
 
@@ -117,6 +117,7 @@ Rules:
 - Session naming must be stable and deterministic.
 - Recommended pattern:
   - `issue-<project>-<iid>`
+- The Claude Code session must use the same stable issue binding and persist under the issue root; do not use one-shot `acpx claude exec` or a shared default Claude session.
 - The dispatcher must never reuse one issue session for another issue.
 
 ## Trigger Commands

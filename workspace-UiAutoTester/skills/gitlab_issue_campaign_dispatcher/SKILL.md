@@ -59,7 +59,7 @@ This rule overrides any default model behavior that says "try another way", "be 
 
 - "`scripts/reconcile.sh` failed, let me write a quick Python loop instead." — forbidden.
 - "`glab mr create` returned an error, let me try `git push` with the `merge_request.create` push option." — forbidden.
-- "`acpx claude exec` errored, let me try `claude` directly / `acpx claude command` / a smaller prompt." — forbidden (executor-side rule, listed here so the dispatcher recognizes it from the executor's reply).
+- "`acpx --cwd ... claude -s ...` errored, let me try `claude` directly / `acpx claude exec` / `acpx claude command` / a smaller prompt." — forbidden (executor-side rule, listed here so the dispatcher recognizes it from the executor's reply).
 - "The trigger is missing `branch=`, let me default to `master`." — forbidden; abort the tick.
 
 If you find yourself reaching for a tool, command, or workflow that is not explicitly listed in this SKILL, in `scripts/`, or in `references/`, that is the signal to stop and fail — not the signal to try harder.

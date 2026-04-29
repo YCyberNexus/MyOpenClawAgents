@@ -15,7 +15,7 @@
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
 #   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH, HULAT_DIR,
-#   UI_ACCOUNT, UI_PASSWORD
+#   CLAUDE_SESSION_NAME, CLAUDE_SESSION_DIR, UI_ACCOUNT, UI_PASSWORD
 #
 # UI_ACCOUNT / UI_PASSWORD are the dispatcher-allocated test credentials for
 # this spawn. They are injected into the prompt's "# Working environment"
@@ -41,7 +41,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" \
-  "${BRANCH:?}" "${DEV_BRANCH:?}" "${HULAT_DIR:?}"
+  "${BRANCH:?}" "${DEV_BRANCH:?}" "${HULAT_DIR:?}" \
+  "${CLAUDE_SESSION_NAME:?}" "${CLAUDE_SESSION_DIR:?}"
 
 # UI account is allocated by the dispatcher per-spawn; both fields are
 # required so the override block is unambiguous. The executor SKILL maps a
@@ -159,6 +160,8 @@ EOF
   cat <<EOF
 # Working environment
 - Worktree (your cwd):        ${WORKTREE_DIR}
+- Claude session:             ${CLAUDE_SESSION_NAME}
+- Claude session root:        ${CLAUDE_SESSION_DIR}
 - Hulat materials (symlink):  ${WORKTREE_DIR}/_hulat → ${HULAT_DIR}
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (copied from ${HULAT_DIR}/ifp-hulat/.claude; local-only)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
