@@ -28,7 +28,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/create_mr.sh` — fresh mode: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one (Strategy A). Continue mode: close all existing open MRs for `${WORK_BRANCH}` (without merging) and create a fresh one that references the closed predecessor(s) — each continue cycle leaves a visible MR trail in GitLab.
 - `scripts/summarize_attempt.sh` — write `${SUMMARY_FILE}` and post it as a GitLab issue note so future continue-mode runs can read what past attempts did.
 - `references/paths.md` — full path layout and required artifacts.
-- `references/state_schema.md` — `issue-<iid>.json` schema and update cadence.
+- `references/state_schema.md` — `issue-<iid>/state.json` schema and update cadence.
 - `references/glab_commands.md` — exhaustive list of allowed `glab` invocations.
 - `references/label_lifecycle.md` — label transitions and how to perform them.
 - `references/continue_mode.md` — reviewer contract for the `continue` label and the prompt template the executor builds in continue mode.

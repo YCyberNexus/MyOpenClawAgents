@@ -21,7 +21,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/load_ui_accounts.sh` — read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
 - `references/paths.md` — full path layout and rules.
 - `references/trigger_command.md` — the trigger spec and override rules.
-- `references/state_schema.md` — `campaign_state.json` and `issue-<iid>.json` schemas.
+- `references/state_schema.md` — `campaign_state.json` and `issue-<iid>/state.json` schemas.
 - `references/glab_commands.md` — exhaustive list of allowed `glab` invocations.
 
 When in doubt about a path / schema / command, READ the matching reference file. Do NOT reconstruct content from memory.
@@ -152,7 +152,7 @@ If `config/gitlab.env` is missing or malformed (`scripts/glab_auth.sh` exits 10/
 Concrete rules:
 
 1. On every wake-up, BEFORE any "already done" / "already completed" / "skip this IID" / "early return" decision, run `scripts/reconcile.sh` for the full `[issue_min_iid, issue_max_iid]` range. The script writes `${DISPATCHER_LOG_DIR}/reconcile-<ts>.json`. **No evidence file = reconciliation didn't happen = the tick is failed; do not early-return.**
-2. The dispatcher MUST NOT use `campaign_state.json.completed_iids`, `campaign_state.json.campaign_status`, or any per-issue `issue-<iid>.json.status` to decide an IID is finished. Those are caches.
+2. The dispatcher MUST NOT use `campaign_state.json.completed_iids`, `campaign_state.json.campaign_status`, or any per-issue `issue-<iid>/state.json.status` to decide an IID is finished. Those are caches.
 3. Ground truth per IID comes from the evidence file. Three signals:
    - `is_done_on_gitlab` ⇔ live GitLab labels contain both literal `done` and literal `pr`.
    - `needs_continue` ⇔ live GitLab labels contain literal `continue`. This is set by a human reviewer who has noticed that a previous `done` + `pr` result was incorrect (Claude Code returned but didn't actually finish the work) and wants the agent to resume on the existing work branch. `continue` wins if it is present alongside `done` and/or `pr`.
