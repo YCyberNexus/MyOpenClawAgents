@@ -14,9 +14,9 @@
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
 #   ISSUE_MODE               "fresh" or "continue"
-#   ATTEMPT_DIR              per-attempt dir
-#   LOG_DIR                  per-attempt log dir
-#   SUMMARY_FILE             ${ATTEMPT_DIR}/summary.md
+#   ATTEMPT_DIR              issue dir for the current attempt
+#   LOG_DIR                  current-attempt log dir
+#   SUMMARY_FILE             ${ISSUE_ROOT}/summary.md
 #
 # Optional env vars:
 #   ATTEMPT_STATUS           "done" | "no_changes" | "blocked" | "failed"

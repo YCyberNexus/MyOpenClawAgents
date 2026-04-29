@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# stage_and_guard.sh — stage Claude's repo changes inside the per-attempt
+# stage_and_guard.sh — stage Claude's repo changes inside the issue
 # worktree and guard against agent artifacts, the _hulat symlink, or
 # local Claude Code config leaking into the work branch.
 #
 # Required env vars:
 #   WORKTREE_DIR    git worktree (set by env_paths.sh)
-#   LOG_DIR         where to write evidence files (under ATTEMPT_DIR)
+#   LOG_DIR         where to write evidence files (under ISSUE_ROOT/log/attempt-NNN)
 #
 # Exit codes:
 #   0   normal staging completed; check stdout marker

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # clone_or_pull.sh — ensure ${REPO_PATH} exists as a clone of the project
 # repo, with up-to-date refs. The MAIN repo's working tree is not used
-# for issue work — every attempt gets its own git worktree. This script
-# therefore only needs to keep refs current and the remote URL set right.
+# for issue work — each issue gets a separate git worktree that is replaced
+# for every attempt. This script only needs to keep refs current and the
+# remote URL set right.
 #
 # Required env vars:
 #   REPO_PATH               from env_paths.sh

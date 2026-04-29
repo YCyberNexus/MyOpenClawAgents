@@ -2,7 +2,7 @@
 
 All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT redefine paths inline.
 
-## Disk layout (SKILL_VERSION 2026-04-25.1+)
+## Disk layout (SKILL_VERSION 2026-04-29.2+)
 
 ```
 /data/${PROJECT}/                                  ← main git repo (hosts worktrees; agent never edits its working tree directly)
@@ -16,14 +16,12 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
     issues/
         issue-<iid>/                               ← per-issue subtree, owned by executor
             state.json
-            attempts/
-                attempt-001/
-                    worktree/                      ← git worktree, Claude Code's cwd
-                    log/
-                    attempt_state.json
-                    summary.md
-                attempt-002/
-                    ...
+            worktree/                              ← git worktree, Claude Code's cwd; replaced every attempt
+            log/
+                attempt-001/                       ← logs for attempt 001, preserved
+                attempt-002/                       ← logs for attempt 002, preserved
+            attempt_state.json                     ← current attempt state; overwritten every attempt
+            summary.md                             ← latest summary mirror
 ```
 
 ## Variables
@@ -48,8 +46,8 @@ ISSUE_STATE="$(issue_state_file_for "${IID}")"
 
 ## Hard rules
 
-1. `REPO_PATH` is a git repo — only `git fetch`, `git worktree`, `git remote` operations on it. Never write any agent file under `REPO_PATH`. Never modify its working tree directly (the executor uses `git worktree` to spin off a separate working tree per attempt).
+1. `REPO_PATH` is a git repo — only `git fetch`, `git worktree`, `git remote` operations on it. Never write any agent file under `REPO_PATH`. Never modify its working tree directly (the executor uses `git worktree` to spin off the issue worktree).
 2. `WORK_ROOT` is outside the repo. This is what physically prevents `git add` from sweeping agent artifacts into a commit.
-3. `hulat_dir` is **read-only configuration** that the executor symlinks into each attempt's worktree as `_hulat`. The executor also copies the required Claude Code runtime config from `${HULAT_DIR}/ifp-hulat/.claude` to the attempt worktree as local-only `.claude` before invoking `acpx`. The dispatcher never touches it.
+3. `hulat_dir` is **read-only configuration** that the executor symlinks into the issue worktree as `_hulat`. The executor also copies the required Claude Code runtime config from `${HULAT_DIR}/ifp-hulat/.claude` to that worktree as local-only `.claude` before invoking `acpx`. The dispatcher never touches it.
 4. Per-issue state files live at `${ISSUES_ROOT}/issue-<iid>/state.json` (use `issue_state_file_for` helper). The OLD location `${STATE_DIR}/issues/issue-<iid>.json` is gone — do NOT read or write there.
 5. `reconcile-<ts>.json` evidence files stay at `${DISPATCHER_LOG_DIR}/`. They are dispatcher-global, NOT per-issue.

@@ -25,7 +25,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-04-29.1",
+  "skill_version": "2026-04-29.2",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260425T100501Z.json",
   "updated_at": "2026-04-25T10:05:30Z"
 }
@@ -75,7 +75,7 @@ The full schema lives in the executor SKILL's `references/state_schema.md`. From
 | `iid`             | yes                 | sanity                                              |
 | `status`          | yes                 | `pending` / `in_progress` / `blocked` / `failed` / `done` / `no_changes` |
 | `mode`            | dispatcher writes   | `fresh` (default) or `continue`                     |
-| `attempts_total`  | dispatcher writes   | incremented atomically by `scripts/allocate_attempt.sh` before every executor spawn. Executor never modifies this. |
+| `attempts_total`  | dispatcher allocates | incremented atomically by `scripts/allocate_attempt.sh` before every executor spawn. The executor may mirror the allocated value while refreshing state, but must not increment or derive it. |
 | `block_reason`    | yes (for chat)      | only when `status=blocked` / `failed`               |
 
 Note: per-issue state previously lived at `${STATE_DIR}/issues/issue-<iid>.json`. That path is **gone** as of SKILL_VERSION 2026-04-25.1. The new path is `${ISSUES_ROOT}/issue-<iid>/state.json`. Old files, if any, should be migrated by the operator (the agent does not auto-migrate).

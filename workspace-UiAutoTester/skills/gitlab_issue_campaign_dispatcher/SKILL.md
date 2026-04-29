@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-29.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-29.2] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-29.1**
+**SKILL_VERSION: 2026-04-29.2**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.2` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -133,7 +133,7 @@ Concrete rules:
    - If `needs_continue == true`:
      - remove IID from `completed_iids` / `failed_iids`
      - add to `unfinished_iids`
-     - update the per-issue state file (`$(issue_state_file_for <iid>)` → `${ISSUES_ROOT}/issue-<iid>/state.json`): write `status=pending`, `mode="continue"`, leave `attempts_total` untouched (the executor increments it next attempt). Do NOT delete the existing `attempts/` subtree — historical attempts must be preserved for audit.
+     - update the per-issue state file (`$(issue_state_file_for <iid>)` → `${ISSUES_ROOT}/issue-<iid>/state.json`): write `status=pending`, `mode="continue"`, leave `attempts_total` untouched (the dispatcher increments it before the next executor spawn). Do NOT delete the issue subtree; the executor replaces `${WORKTREE_DIR}` and writes the next attempt's logs under a new `${LOG_DIR}`.
      - remove this IID from `active_issue_iids` (and the corresponding session from `active_issue_sessions`) if present
      - force `campaign_status = running`
      - persist `campaign_state.json`
@@ -186,7 +186,7 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.1, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.2, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 3 env vars exported:**
 
@@ -269,7 +269,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 
       When `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call — identical to the legacy serial behavior. When `> 1`, the calls run in parallel and the dispatcher waits for all of them to return.
 
-      Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source created an empty `attempt-NNN/` directory. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution. The same rule applies per IID inside a batch.
+      Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source could double-count a logical attempt. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution. The same rule applies per IID inside a batch.
    6. **After the WHOLE batch returns**, for each IID in the batch:
       - Re-read `$(issue_state_file_for <iid>)` (`${ISSUES_ROOT}/issue-<iid>/state.json`) from disk.
       - If terminal (`done` / `no_changes` / `failed`): update the corresponding list (`completed_iids` / `failed_iids` etc.), increment `quota_completed_this_tick`.
@@ -305,7 +305,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-29.1",
+  "skill_version": "2026-04-29.2",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],

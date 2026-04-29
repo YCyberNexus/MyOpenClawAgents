@@ -22,7 +22,7 @@ That's it. The next dispatcher tick will pick the issue up and re-run.
 
 In continue mode the executor:
 
-1. Resolves a fresh attempt number (`attempt-NNN`, monotonically increasing) and creates a new git worktree at `${WORKTREE_DIR}` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). All prior attempts' files are preserved untouched on disk.
+1. Resolves a fresh attempt number (monotonically increasing) and replaces the git worktree at `${WORKTREE_DIR}` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `worktree/`, `attempt_state.json`, and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
 2. Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
 3. Reads the issue notes (`E1b`) and **partitions them in two buckets**:
    - **Past attempt summaries** — notes whose body contains `<!-- uiautotester:attempt-summary `. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
@@ -94,7 +94,7 @@ If continue mode is requested but `E1b` returns zero non-system notes that are n
 
 - Builds the prompt with the reviewer-comments section saying `(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)`.
 - Continues normally.
-- Records `no_reviewer_comments=true` in the per-attempt state for operator awareness.
+- Records `no_reviewer_comments=true` in the current-attempt state for operator awareness.
 
 The executor MUST NOT block, abort, or refuse to run just because reviewer comments are missing.
 

@@ -25,8 +25,8 @@
 #
 # Outputs (exported into the calling shell):
 #   path vars: REPO_PATH, WORK_ROOT, ISSUE_ROOT, ISSUE_STATE_FILE,
-#              ATTEMPTS_DIR, WORK_BRANCH, ATTEMPT_NUMBER_PADDED,
-#              ATTEMPT_DIR, WORKTREE_DIR, LOG_DIR, ATTEMPT_STATE_FILE,
+#              WORK_BRANCH, ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR,
+#              WORKTREE_DIR, ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE,
 #              SUMMARY_FILE, LOCAL_ATTEMPT_BRANCH
 #   glab vars: GITLAB_HOST, GITLAB_API_PROTOCOL
 #   project vars: PROJECT_FULL, PROJECT_URI
@@ -42,22 +42,25 @@ export REPO_PATH="/data/${PROJECT}"
 export WORK_ROOT="/data/openclaw_work/${PROJECT}"
 export ISSUE_ROOT="${WORK_ROOT}/issues/issue-${ISSUE_IID}"
 export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
-export ATTEMPTS_DIR="${ISSUE_ROOT}/attempts"
 export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
-mkdir -p "${ISSUE_ROOT}" "${ATTEMPTS_DIR}"
+mkdir -p "${ISSUE_ROOT}"
 
 export ATTEMPT_NUMBER_PADDED
 ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
 
-export ATTEMPT_DIR="${ATTEMPTS_DIR}/attempt-${ATTEMPT_NUMBER_PADDED}"
+# ATTEMPT_DIR is kept as a compatibility alias for scripts and state
+# updates. There is no attempts/attempt-NNN subtree; logs remain
+# attempt-scoped under log/attempt-NNN.
+export ATTEMPT_DIR="${ISSUE_ROOT}"
 export WORKTREE_DIR="${ATTEMPT_DIR}/worktree"
-export LOG_DIR="${ATTEMPT_DIR}/log"
+export ISSUE_LOG_ROOT="${ATTEMPT_DIR}/log"
+export LOG_DIR="${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}"
 export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
 export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
 export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
-mkdir -p "${ATTEMPT_DIR}" "${LOG_DIR}"
+mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
 
 # ─── 2. glab auth (idempotent) ──────────────────────────────────────
 # If GITLAB_HOST is already in env (e.g. parent shell already ran this),

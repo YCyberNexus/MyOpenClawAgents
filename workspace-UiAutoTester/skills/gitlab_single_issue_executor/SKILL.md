@@ -1,23 +1,23 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-28.5] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-29.2] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-28.5**
+**SKILL_VERSION: 2026-04-29.2**
 
-The executor MUST include `"skill_version": "2026-04-28.5"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-29.2"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
 This SKILL is intentionally short. Detailed bash and fixed reference data live in sibling folders:
 
-- `scripts/env_paths.sh` — populates issue-level AND attempt-level path variables (SOURCE it; auto-resolves the next attempt number).
+- `scripts/env_paths.sh` — populates issue-level and current-attempt path variables (SOURCE it; the dispatcher supplies the attempt number).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/clone_or_pull.sh` — keep the main repo's refs current (no working-tree edits; worktrees do that).
-- `scripts/prepare_attempt.sh` — create the per-attempt git worktree, set up the `_hulat` symlink, copy local `.claude` runtime config, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
+- `scripts/prepare_attempt.sh` — replace the issue's current git worktree, set up the `_hulat` symlink, copy local `.claude` runtime config, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
 - `scripts/build_prompt.sh` — build `${LOG_DIR}/prompt.txt` from the live issue + (continue mode) past-attempt summaries + reviewer comments. See `references/continue_mode.md` for the template.
 - `scripts/ensure_labels.sh` — make sure the seven workflow labels exist.
 - `scripts/set_issue_label.sh` — add or remove a single label (used for every transition).
@@ -146,7 +146,7 @@ The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is also constructed from the 
 
 The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues, no `_hulat` symlink, no local `.claude` runtime config.
 
-- All agent-owned files live under `${ATTEMPT_DIR}` (= `${ISSUE_ROOT}/attempts/attempt-NNN/`), OUTSIDE the worktree. See `references/paths.md`.
+- All agent-owned files live under `${ISSUE_ROOT}`. `${ATTEMPT_DIR}` is a compatibility alias for `${ISSUE_ROOT}`; there is no `attempts/attempt-NNN/` subtree. See `references/paths.md`.
 - `${WORKTREE_DIR}` is the only directory the executor allows Claude Code to modify. It is a real `git worktree` of `${REPO_PATH}` — `git add -A` here only sees repo-tracked content.
 - `_hulat` is a symlink inside `${WORKTREE_DIR}` pointing at `${HULAT_DIR}` for read-only config access. `scripts/prepare_attempt.sh` adds `/_hulat` to `.git/info/exclude` for the worktree.
 - `.claude` is copied from `${HULAT_DIR}/ifp-hulat/.claude` into `${WORKTREE_DIR}/.claude` before `acpx claude exec`, because Claude Code requires this local runtime config. `scripts/prepare_attempt.sh` adds `/.claude` to `.git/info/exclude` for the worktree. If the source directory is missing, preparation fails instead of invoking Claude Code without required config.
@@ -163,7 +163,7 @@ Required from the trigger command (`RUN_SINGLE_ISSUE_SESSION`):
 
 - `group`, `project`, `branch`, `dev_branch`, `hulat_dir`, `gitlab_token`, `issue_iid`, `attempt_number`, `non_interactive=true`
 
-`attempt_number` is the integer attempt number allocated by the dispatcher via `dispatcher/scripts/allocate_attempt.sh`. The executor MUST NOT compute its own attempt number — `env_paths.sh` will refuse to load if `ATTEMPT_NUMBER` is missing from the environment. This rule prevents the "empty attempt-NNN/ directories on session restart" bug from older versions.
+`attempt_number` is the integer attempt number allocated by the dispatcher via `dispatcher/scripts/allocate_attempt.sh`. The executor MUST NOT compute its own attempt number — `env_paths.sh` will refuse to load if `ATTEMPT_NUMBER` is missing from the environment. This rule prevents double-counted attempts on session restart.
 
 `branch` is the integration / target branch (where the MR is opened). `dev_branch` is the clean baseline branch the fresh-mode worktree is checked out from, so Claude Code starts from a tree that does not contain past issues' spec accumulation. If the project does not maintain a separate clean baseline, the operator may set `dev_branch=<same-as-branch>` to fall back to single-branch behavior.
 
@@ -185,13 +185,13 @@ In continue mode the executor:
 
 - Detects the mode from the trigger field `issue_mode=continue`. As a backstop, it re-derives the mode at Step 3 of the algorithm from live labels: if labels include `continue`, treat as continue mode regardless of the trigger field.
 - Transitions the issue label from `continue` to `doing` (instead of `todo` to `doing`). See `references/label_lifecycle.md`.
-- Allocates a NEW attempt directory `attempt-NNN` (numbers are monotonically increasing — past attempts are preserved on disk). Calls `scripts/prepare_attempt.sh` with `ISSUE_MODE=continue`. The script bases the new worktree on `origin/${WORK_BRANCH}` (the existing work-in-progress branch from the prior attempt). If `${WORK_BRANCH}` does not exist on the remote, the script downgrades to fresh mode and records `mode_downgraded_from="continue"`.
+- Allocates a NEW attempt number (numbers are monotonically increasing). Calls `scripts/prepare_attempt.sh` with `ISSUE_MODE=continue`. The script replaces `${WORKTREE_DIR}`, creates this attempt's preserved `${LOG_DIR}`, and bases the worktree on `origin/${WORK_BRANCH}` (the existing work-in-progress branch from the prior attempt). If `${WORK_BRANCH}` does not exist on the remote, the script downgrades to fresh mode and records `mode_downgraded_from="continue"`.
 - Builds the Claude Code prompt with the live issue body + ALL past `uiautotester:attempt-summary` notes + ALL non-summary reviewer comments. See `references/continue_mode.md`.
 - After the attempt finishes, `scripts/summarize_attempt.sh` posts a new summary comment to the issue so future continue-mode runs can see what this attempt did.
 - **MR rotation.** Unlike fresh mode (which reuses the single MR for `${WORK_BRANCH}`), continue mode closes all existing open MRs for `${WORK_BRANCH}` (without merging — the integration branch is untouched) and creates a fresh MR pointing at the same source branch. The new MR's description includes `Supersedes !<old_mr_iid>` (or multiple refs if multiple old MRs existed) for traceability. Each continue cycle therefore produces a distinct MR object in GitLab so reviewers can see the resolution history.
 - All other later steps (stage + guard, commit, force-push, post-push verify, label transitions) are identical to fresh mode.
 
-The executor MUST NOT delete the remote work branch in continue mode, and MUST NOT delete past attempt directories on disk. Cleanliness guards (`stage_and_guard.sh`, `post_push_verify.sh`) still apply.
+The executor MUST NOT delete the remote work branch in continue mode. Local issue artifacts are updated in place except logs: `${WORKTREE_DIR}` is replaced for the current run, `${LOG_DIR}` points to `log/attempt-NNN/` and is preserved after the attempt, and `${SUMMARY_FILE}` is updated with the latest summary. Cleanliness guards (`stage_and_guard.sh`, `post_push_verify.sh`) still apply.
 
 If continue-mode prep fails for any reason other than "remote branch does not exist" (corrupt fetch, conflicting worktree, etc.), follow the No-Fallback Policy: mark `status=blocked` with an accurate `block_reason`, do NOT silently fall back to fresh mode. The remote-branch-missing downgrade is the only documented exception.
 
@@ -202,7 +202,7 @@ If continue-mode prep fails for any reason other than "remote branch does not ex
 This is the ONLY way the executor is allowed to invoke Claude Code. It is governed by the No-Fallback Policy above — when this contract fails, the executor stops; it does NOT switch invocation modes or LLMs.
 
 - Build the prompt at `${LOG_DIR}/prompt.txt` by running `scripts/build_prompt.sh`. The script generates the canonical layout (issue title + description + working env + rules) for both modes, and additionally appends past-attempt summaries + reviewer comments in continue mode. Do NOT hand-write `prompt.txt` — that risks omitting comments and past summaries and silently losing context. See `references/continue_mode.md` for the exact template.
-- Run synchronously, one-shot, with `${WORKTREE_DIR}` as the working directory (NOT `${REPO_PATH}` — Claude must operate inside the per-attempt worktree, not the main repo):
+- Run synchronously, one-shot, with `${WORKTREE_DIR}` as the working directory (NOT `${REPO_PATH}` — Claude must operate inside the issue worktree, not the main repo):
   ```bash
   cd "${WORKTREE_DIR}"
   acpx claude exec -f "${LOG_DIR}/prompt.txt" \
@@ -243,7 +243,7 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.5, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.2, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 5 env vars exported:**
 
@@ -292,7 +292,7 @@ Note: at Step 8 (acpx) the algorithm explicitly switches cwd to `${WORKTREE_DIR}
 
 ## Executor Algorithm
 
-Run once per session for `${ISSUE_IID}`. Every run produces a brand-new attempt directory.
+Run once per session for `${ISSUE_IID}`. Every run reuses the issue directory: `${WORKTREE_DIR}` is replaced, `${LOG_DIR}` points to this attempt's preserved log directory under `log/attempt-NNN/`, and `${SUMMARY_FILE}` is updated in place.
 
 When a step below says `bash scripts/X.sh`, that is shorthand for the script action. In an actual OpenClaw Bash tool call, prefix the command with the minimum env vars from the Per-Exec Env Contract plus any script-specific vars in the same exec. Never rely on exports from a previous Bash tool call.
 
@@ -301,7 +301,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - Verify the trigger supplied `attempt_number=<N>`. If missing, mark the issue `blocked` with `block_reason="trigger missing attempt_number"` and stop. (The dispatcher must call `allocate_attempt.sh` before every spawn — see dispatcher SKILL.)
    - If doing an explicit bootstrap check in the current shell, use the full minimum env contract:
      `PROJECT=<project> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N> GROUP=<group> GITLAB_TOKEN=<token> source scripts/env_paths.sh`
-     This resolves both issue-level and attempt-level paths, authenticates glab, computes `PROJECT_FULL` / `PROJECT_URI`, and creates the `attempt-${N}/` skeleton.
+     This resolves issue-level and current-attempt paths, authenticates glab, computes `PROJECT_FULL` / `PROJECT_URI`, and creates the `issue-${ISSUE_IID}/` skeleton.
    - Do NOT call `scripts/glab_auth.sh` separately after `env_paths.sh`, and do NOT manually export `PROJECT_FULL` or `PROJECT_URI`. Every later `bash scripts/...` command is a fresh shell and must receive the minimum env vars from the Per-Exec Env Contract; the target script will source `env_paths.sh` itself.
 2. **Sync the main repo.** `bash scripts/clone_or_pull.sh`. This only fetches refs and prunes stale worktrees; it does NOT switch branches in the main repo.
 3. **Read the target issue + resolve mode.** Use command E1 from `references/glab_commands.md`. Capture title, description, current labels. `ISSUE_TITLE` is the short form for commit / MR title. Resolve `ISSUE_MODE`:
@@ -313,10 +313,10 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - `ISSUE_MODE=fresh`: `remove todo`, then `add doing`
    - `ISSUE_MODE=continue`: `remove continue`, then `add doing`
    Remove is idempotent.
-6. **Initialize per-attempt state and refresh per-issue state.** Per `references/state_schema.md`:
-   - `${ATTEMPT_STATE_FILE}` (new) — write `iid`, `attempt_number`, `attempt_started_at`, `mode_requested=${ISSUE_MODE}`, `skill_version`. Other fields filled in as the algorithm progresses.
+6. **Initialize current-attempt state and refresh per-issue state.** Per `references/state_schema.md`:
+   - `${ATTEMPT_STATE_FILE}` (overwritten for the current run) — write `iid`, `attempt_number`, `attempt_started_at`, `mode_requested=${ISSUE_MODE}`, `log_dir=${LOG_DIR}`, `skill_version`. Other fields filled in as the algorithm progresses.
    - `${ISSUE_STATE_FILE}` — write/update `status=in_progress`, `mode="${ISSUE_MODE}"`, `attempts_total=${ATTEMPT_NUMBER}`, `latest_attempt_number=${ATTEMPT_NUMBER}`, `latest_attempt_dir=${ATTEMPT_DIR}`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
-7. **Prepare the per-attempt worktree.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script creates `${WORKTREE_DIR}`, links `${WORKTREE_DIR}/_hulat`, copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude`, and excludes both local-only paths from git. It prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
+7. **Prepare the issue worktree for this attempt.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script replaces `${WORKTREE_DIR}`, recreates only this attempt's `${LOG_DIR}`, links `${WORKTREE_DIR}/_hulat`, copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude`, and excludes both local-only paths from git. It prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
 8. **Build the prompt and run Claude Code.**
    1. `bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments".
    2. Capture stderr — record `no_reviewer_comments` and `prior_attempt_count` into `${ATTEMPT_STATE_FILE}`.
@@ -336,7 +336,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - Exit 3 → leak. `status=blocked`, `block_reason="agent artifacts leaked into worktree"`, run summarize_attempt then stop.
    - `NO_CHANGES` → `status=no_changes`, run summarize_attempt then stop. No push, no MR.
    - `STAGED_OK` → continue.
-10. **Commit + force-push (Strategy A).** `ISSUE_TITLE="..." bash scripts/commit_and_push.sh` (prints commit SHA). Write `commit_sha` into both the per-attempt and per-issue state files.
+10. **Commit + force-push (Strategy A).** `ISSUE_TITLE="..." bash scripts/commit_and_push.sh` (prints commit SHA). Write `commit_sha` into both the current-attempt and per-issue state files.
 11. **Post-push verify.** `bash scripts/post_push_verify.sh`. Exit 4 → `status=blocked`, `block_reason="remote branch polluted with agent artifacts"`, summarize then stop.
 12. **Ensure MR exists (mode-dependent rotation).** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into both state files.
     - In `ISSUE_MODE=fresh`: reuses the existing open MR for `${WORK_BRANCH}` if any, else creates one (Strategy A — single MR per issue).
@@ -355,7 +355,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.5",
+  "skill_version": "2026-04-29.2",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -366,7 +366,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-28.5",
+  "skill_version": "2026-04-29.2",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

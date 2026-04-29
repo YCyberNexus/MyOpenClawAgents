@@ -108,7 +108,7 @@ The trigger's `gitlab_address` is verified against this pin on every tick. A mis
 
 See `<workspace>/config/README.md` for setup steps and rationale.
 
-## Disk State Layout (SKILL_VERSION 2026-04-25.1+)
+## Disk State Layout (SKILL_VERSION 2026-04-29.2+)
 
 ```
 /data/<project>/                              ← main git repo (host of worktrees)
@@ -122,18 +122,16 @@ See `<workspace>/config/README.md` for setup steps and rationale.
     issues/
         issue-<iid>/
             state.json                        ← cross-attempt per-issue state
-            attempts/
-                attempt-001/
-                    worktree/                 ← Claude Code's cwd (git worktree)
-                        _hulat → <hulat_dir>  (symlink, .git/info/exclude'd)
-                        .claude/              (copy of <hulat_dir>/ifp-hulat/.claude, .git/info/exclude'd)
-                    log/
-                    attempt_state.json
-                    summary.md
-                attempt-002/
-                    ...
+            worktree/                         ← Claude Code's cwd (git worktree), replaced every attempt
+                _hulat → <hulat_dir>          (symlink, .git/info/exclude'd)
+                .claude/                      (copy of <hulat_dir>/ifp-hulat/.claude, .git/info/exclude'd)
+            log/
+                attempt-001/                 ← logs for attempt 001, preserved
+                attempt-002/                 ← logs for attempt 002, preserved
+            attempt_state.json                ← current attempt state, overwritten every attempt
+            summary.md                        ← latest summary mirror
 ```
 
-The previous flat layout (`/data/<project>/openclaw_state/issues/issue-<iid>.json`, `/data/<project>/openclaw_log/issue-<iid>/`) is gone. All per-issue artifacts now live under `/data/openclaw_work/<project>/issues/issue-<iid>/` and are isolated **per attempt**: every retry creates a new `attempt-NNN/` directory with its own worktree, log, state, and summary.
+The previous flat layout (`/data/<project>/openclaw_state/issues/issue-<iid>.json`, `/data/<project>/openclaw_log/issue-<iid>/`) is gone. All per-issue artifacts now live directly under `/data/openclaw_work/<project>/issues/issue-<iid>/`. There is no `attempts/` subtree: every retry replaces `worktree/`, writes logs under `log/attempt-NNN/`, overwrites `attempt_state.json`, and updates `summary.md`. Historical attempt logs under `log/attempt-NNN/` are preserved.
 
 `hulat_dir` is shared across all issues / attempts via a symlink and remains read-only. The only copied Hulat material is Claude Code runtime config: each attempt copies `<hulat_dir>/ifp-hulat/.claude` to its worktree root as local-only `.claude/`, excluded from git and never pushed.

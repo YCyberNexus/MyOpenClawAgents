@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# prepare_attempt.sh — create the per-attempt git worktree, base it on the
-# right starting point, set up the _hulat symlink, copy Claude Code's
-# local runtime config, and write the .git/info/exclude for the worktree.
+# prepare_attempt.sh — replace the issue's git worktree for this attempt,
+# base it on the right starting point, set up the _hulat symlink, copy
+# Claude Code's local runtime config, and write the .git/info/exclude for
+# the worktree.
 #
 # Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
@@ -26,7 +27,7 @@
 #
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
 #   REPO_PATH, BRANCH, DEV_BRANCH, ISSUE_IID, ISSUE_MODE,
-#   ATTEMPT_DIR, WORKTREE_DIR, ATTEMPT_NUMBER_PADDED,
+#   ATTEMPT_DIR, WORKTREE_DIR, LOG_DIR, ATTEMPT_NUMBER_PADDED,
 #   WORK_BRANCH, LOCAL_ATTEMPT_BRANCH, HULAT_DIR
 #
 # Output (to stdout, two lines):
@@ -40,7 +41,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${REPO_PATH:?}" "${BRANCH:?}" "${DEV_BRANCH:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
-  "${ATTEMPT_DIR:?}" "${WORKTREE_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
+  "${ATTEMPT_DIR:?}" "${WORKTREE_DIR:?}" "${LOG_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
   "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}" "${HULAT_DIR:?}"
 
 case "${ISSUE_MODE}" in
@@ -89,6 +90,15 @@ if [ -e "${WORKTREE_DIR}" ]; then
   fi
 fi
 git worktree prune
+
+# The issue directory is reused across attempts, but logs are preserved
+# per attempt under log/attempt-NNN. Recreate only the current attempt's
+# log directory so stale evidence from a same-attempt rerun is not mixed
+# with the current run.
+if [ -d "${LOG_DIR}" ]; then
+  rm -rf "${LOG_DIR}"
+fi
+mkdir -p "${LOG_DIR}"
 
 # If a stale local branch with this name exists (shouldn't, since
 # attempt numbers monotonically increase, but guard anyway), drop it.
