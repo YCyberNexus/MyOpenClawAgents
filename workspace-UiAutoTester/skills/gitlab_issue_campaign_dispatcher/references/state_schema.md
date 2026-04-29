@@ -16,15 +16,16 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "max_runtime_minutes": 55,
   "blocked_retry_limit": 3,
   "blocked_cooldown_ticks": 1,
+  "max_concurrent_subagents": 1,
   "next_new_issue_iid": 4,
-  "active_issue_iid": null,
-  "active_issue_session": null,
+  "active_issue_iids": [],
+  "active_issue_sessions": [],
   "unfinished_iids": [],
   "completed_iids": [1, 2, 3],
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-04-25.1",
+  "skill_version": "2026-04-29.1",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260425T100501Z.json",
   "updated_at": "2026-04-25T10:05:30Z"
 }
@@ -33,15 +34,26 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
 ### Fresh-init values (when the file does not exist)
 
 ```text
-next_new_issue_iid    = issue_min_iid
-active_issue_iid      = null
-active_issue_session  = null
-unfinished_iids       = []
-completed_iids        = []
-blocked_iids          = []
-failed_iids           = []
-campaign_status       = running
+next_new_issue_iid        = issue_min_iid
+max_concurrent_subagents  = 1
+active_issue_iids         = []
+active_issue_sessions     = []
+unfinished_iids           = []
+completed_iids            = []
+blocked_iids              = []
+failed_iids               = []
+campaign_status           = running
 ```
+
+### Schema migration: `active_issue_iid` → `active_issue_iids`
+
+As of SKILL_VERSION 2026-04-29.1, the dispatcher tracks in-flight subagents as a list, not a scalar, to support `max_concurrent_subagents > 1`. On read:
+
+- If the on-disk file has the legacy scalar `active_issue_iid` and no `active_issue_iids`, treat it as `active_issue_iids = [active_issue_iid]` (or `[]` if the scalar was `null`) for the in-memory state, and persist the new array form on the next write.
+- Same applies to `active_issue_session` → `active_issue_sessions`.
+- If `max_concurrent_subagents` is missing on read, default it to `1` and persist on the next write.
+
+The dispatcher MUST NOT keep both the scalar and the array fields in the persisted file — pick one shape per write (the new array shape) and drop the legacy scalar from the JSON it writes.
 
 ### Possible `campaign_status` values
 

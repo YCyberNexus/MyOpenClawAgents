@@ -35,27 +35,19 @@ The executor must:
 
 ## Subagent Concurrency Policy (READ FIRST — HARD RULE)
 
-This agent is allowed to start subagents only sequentially.
+This agent is allowed to start at most `max_concurrent_subagents` issue subagents at the same time.
 
-At any time, this agent MUST have at most one active subagent or child session.
+`max_concurrent_subagents` is a trigger input (see dispatcher SKILL `references/trigger_command.md`). It is an integer ≥ 1, defaulting to 1 when the trigger omits it. The dispatcher MUST overwrite the disk copy in `campaign_state.json` with the trigger value on every wake-up, the same way it does for `hourly_issue_quota`.
 
-Before starting a new subagent, this agent MUST wait until the previous subagent has fully completed and returned its result.
+Hard invariants:
 
-This agent MUST NOT:
-- start multiple subagents in parallel
-- use fan-out execution
-- use worker pools
-- spawn multiple child sessions in one step
-- process multiple issues concurrently
-- call sessions_spawn for more than one child session at a time
+1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions.
+2. **One IID, one in-flight subagent.** Two subagents MUST NEVER work on the same `${ISSUE_IID}` concurrently. Per-IID work is always serial across attempts; only DIFFERENT IIDs may run in parallel.
+3. **Bounded batches.** When there are more eligible IIDs than open slots, the dispatcher picks at most `max_concurrent_subagents` IIDs, spawns them in a single tool-call batch (parallel `sessions_spawn`), waits for the WHOLE batch to return, re-reads each per-issue state file, then forms the next batch.
+4. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered.
+5. `max_concurrent_subagents=1` (the default) MUST behave exactly like the legacy strictly-serial model: one IID at a time, one spawn per tool-call batch.
 
-If there are multiple tasks, issues, or test jobs, this agent MUST process them strictly one by one:
-1. Start exactly one subagent.
-2. Wait for the result.
-3. Record the result.
-4. Only then start the next subagent.
-
-This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out. It also overrides any "be efficient" / "be helpful" instinct. A clean serial run is strictly preferred over any parallel attempt.
+This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out beyond `max_concurrent_subagents`. `hourly_issue_quota` remains a *count of completed issues per tick*, not a parallelism knob — they are independent dials.
 
 ## Source of Truth
 
@@ -102,7 +94,7 @@ Rules:
 1. Never ask the user for clarification during scheduled execution.
 2. Make the best reasonable decision autonomously.
 3. Record assumptions in logs and continue.
-4. Never process more than one issue at a time inside the dispatcher's control flow. (See `## Subagent Concurrency Policy` above for the strict version of this rule.)
+4. Never exceed `max_concurrent_subagents` active issue subagents at once, and never run two attempts for the same IID concurrently. (See `## Subagent Concurrency Policy` above for the strict version of this rule.)
 5. Keep dispatcher replies short and structured.
 6. Store detailed execution evidence only on disk, not in chat.
 7. Never paste full diffs, full issue bodies, or long Claude Code outputs into chat unless explicitly requested.
@@ -158,8 +150,9 @@ The dispatcher should return only a compact status summary, such as:
 ```json
 {
   "campaign_status": "running",
-  "current_issue_iid": 14,
-  "current_issue_session": "issue-px_ifp_hulat-14",
+  "active_issue_iids": [14, 15],
+  "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
+  "max_concurrent_subagents": 2,
   "unfinished_iids": [9, 10, 14],
   "next_new_issue_iid": 19,
   "quota_completed_this_tick": 3,

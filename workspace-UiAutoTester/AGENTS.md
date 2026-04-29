@@ -40,44 +40,47 @@ The agent configuration should allow:
 
 Hard limits this agent's runtime configuration must enforce:
 
-- Maximum active subagents: **1**
-- Maximum active child sessions: **1**
-- All subagent execution must be sequential.
-- The agent may use `sessions_spawn` only after the previous child session has completed.
-- Parallel subagent execution is forbidden.
+- Maximum active issue subagents: **`max_concurrent_subagents`** (trigger input, integer ≥ 1, default 1).
+- Maximum active child sessions for the same `${ISSUE_IID}`: **1**, always — independent of `max_concurrent_subagents`.
+- All same-IID work is sequential across attempts; only DIFFERENT IIDs may run in parallel.
+- A batch of `sessions_spawn` calls is allowed only when each call targets a distinct IID and the total in-flight count stays ≤ `max_concurrent_subagents`.
+- The dispatcher MUST wait for the WHOLE batch to return before forming the next batch (no fire-and-forget, no rolling pool).
 
 ### Behavioral commitments (mirror of SOUL.md)
 
 The same constraint, restated as model-facing rules so the two documents do not drift:
 
 This agent MUST NOT:
-- start multiple subagents in parallel
-- use fan-out execution
-- use worker pools
-- spawn multiple child sessions in one step
-- process multiple issues concurrently
-- call `sessions_spawn` for more than one child session at a time
+- exceed `max_concurrent_subagents` active issue subagents at once
+- spawn two subagents for the same `${ISSUE_IID}` concurrently
+- use fire-and-forget / `--no-wait` / background spawn modes for issue sessions
+- start the next batch before the current batch has fully returned
+- treat `hourly_issue_quota` as a parallelism / fan-out knob (it is a per-tick completion count)
 
-If there are multiple tasks, issues, or test jobs, this agent MUST process them strictly one by one:
-1. Start exactly one subagent.
-2. Wait for the result.
-3. Record the result.
-4. Only then start the next subagent.
+If `max_concurrent_subagents=1`, the agent MUST behave exactly like the legacy strictly-serial model: pick one IID, spawn one session, wait, record, repeat.
+
+If `max_concurrent_subagents>1`, the agent MUST process issues in bounded batches:
+1. Pick up to `max_concurrent_subagents` distinct IIDs.
+2. Allocate an attempt number for each (sequential `allocate_attempt.sh` calls — concurrent allocation would race on `attempts_total`).
+3. Spawn the batch in a single tool-call block (parallel `sessions_spawn`).
+4. Wait for every spawn to return.
+5. Re-read each per-issue state file, update backlog / quota / `active_issue_iids`.
+6. Only then form the next batch.
 
 ### Enforcement
 
-The behavioral commitments above are prompt-level — the model can still violate them. Enforcement of "max 1 subagent" must therefore live below the prompt. Use whichever of the following the deployment can deliver, in priority order:
+The behavioral commitments above are prompt-level — the model can still violate them. Enforcement of the per-tick concurrency cap must therefore live below the prompt. Use whichever of the following the deployment can deliver, in priority order:
 
 1. **OpenClaw platform-level concurrency knob (preferred).**
-   The OpenClaw runtime should refuse a second concurrent `sessions_spawn` from the same parent session for this agent. The exact field name depends on the OpenClaw version in use — operators must consult the OpenClaw maintainer to pin down the correct setting (likely candidates: `max_concurrent_subagents`, `max_parallel_sessions`, `spawn_concurrency`, or a per-capability `serialize: true` modifier on `sessions_spawn`). Once known, the value MUST be set to `1` for `agent:UiAutoTester:main`.
+   The OpenClaw runtime should cap concurrent `sessions_spawn` from this parent session at `max_concurrent_subagents`. The exact field name depends on the OpenClaw version in use — operators must consult the OpenClaw maintainer to pin down the correct setting (likely candidates: `max_concurrent_subagents`, `max_parallel_sessions`, `spawn_concurrency`). The value SHOULD be set to the same integer that the dispatcher receives in the trigger so that the platform layer matches the prompt-layer contract. If the deployment uses a fixed value, it MUST be set to the maximum `max_concurrent_subagents` operators ever expect to send via trigger; the dispatcher's smaller per-tick value then becomes the binding constraint.
 
-2. **Workspace-level spawn-slot fallback (if platform knob is unavailable or not yet configured).**
-   The dispatcher writes a `spawn_slot.json` under `${STATE_DIR}` before each `sessions_spawn` and clears it only after the spawned session returns. The executor verifies on entry that the slot's `active_iid` matches its own `${ISSUE_IID}`; if not, it refuses to run and returns `status=blocked` with `block_reason="spawn slot held by IID <X>"`. This makes a violation deterministically observable and inert — the second/third executor still launches but does no work.
+2. **Per-IID session-name uniqueness (always-on, structural).**
+   Issue sessions are named `issue-<project>-<iid>`. Because the session name is derived from `${ISSUE_IID}`, two concurrent attempts for the same IID would collide on session name and the second `sessions_spawn` would either be deduplicated by OpenClaw or run in the same session (forbidden by Single-Issue Rule). This makes "same IID twice in parallel" structurally impossible without any extra slot file. Cross-IID parallelism is bounded only by (1) and (3).
 
 3. **SOUL.md / AGENTS.md prompt rules.**
    The "Subagent Concurrency Policy (READ FIRST — HARD RULE)" in SOUL.md and the behavioral commitments above. These are the weakest layer; they must not be the only layer.
 
-Operators are expected to confirm with the OpenClaw maintainer which of (1) is available before relying on (3) alone.
+Operators are expected to confirm with the OpenClaw maintainer that (1) is available and configured before relying on (3) alone. The previously documented `spawn_slot.json` fallback (single-slot file under `${STATE_DIR}`) is no longer applicable in the multi-slot model and has been removed; (2) replaces its same-IID guarantee, and (1) replaces its cross-IID guarantee.
 
 ## Session Naming Recommendation
 

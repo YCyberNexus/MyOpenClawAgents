@@ -36,16 +36,17 @@ Older triggers may also include `gitlab_address=...`. That is still accepted —
 | `gitlab_token`          | Token used by `glab auth login` against the deployment-pinned host    |
 | `issue_min_iid`         | Integer, inclusive                                                    |
 | `issue_max_iid`         | Integer, inclusive                                                    |
-| `hourly_issue_quota`    | Integer. **Sequential count, not parallelism.**                       |
+| `hourly_issue_quota`    | Integer. **Per-tick completion count, not parallelism.** Independent of `max_concurrent_subagents`. |
 | `max_runtime_minutes`   | Integer wall-clock budget for this tick                               |
 | `blocked_retry_limit`   | Integer                                                               |
 | `blocked_cooldown_ticks`| Integer                                                               |
 
 ## Optional inputs
 
-| Field                   | Notes                                                                                                                                              |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `gitlab_address`        | Pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; it is never derived from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. New triggers should omit this field. |
+| Field                       | Notes                                                                                                                                              |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `gitlab_address`            | Pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; it is never derived from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. New triggers should omit this field. |
+| `max_concurrent_subagents`  | Integer ≥ 1, defaults to `1` if omitted. Upper bound on concurrent issue subagents this dispatcher may have in flight at the same time. **Different IIDs only — two attempts for the same IID never run concurrently regardless of this value.** Independent of `hourly_issue_quota` (which counts terminal completions per tick). When `=1`, behavior is identical to the legacy strictly-serial model. See SOUL.md "Subagent Concurrency Policy" and SKILL.md "Concurrency Policy" for the full contract. |
 
 ## Expected fixed values
 
@@ -63,5 +64,7 @@ If any of these is missing or different, abort the tick with a short summary; do
 Every scalar in "Required inputs" above is authoritative for the current tick. The dispatcher MUST overwrite the disk copy in `campaign_state.json` with the trigger values before running the algorithm. Stale values from disk MUST NOT be used.
 
 This applies in particular to: `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`.
+
+`max_concurrent_subagents` (when supplied) is also applied as an override using the same rule: write the trigger value into `campaign_state.json.max_concurrent_subagents`. When the trigger omits it, the dispatcher MUST default the field to `1` for the tick AND persist that default so the disk schema stays consistent across versions.
 
 `gitlab_address` (when supplied) is NOT applied as an override — it is used only for the cross-check above. The pin in `<workspace>/config/gitlab.env` is the single source of truth for host / protocol.

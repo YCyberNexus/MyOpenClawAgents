@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-28.4] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-29.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-28.4**
+**SKILL_VERSION: 2026-04-29.1**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-28.4` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -67,12 +67,19 @@ If you find yourself reaching for a tool, command, or workflow that is not expli
 
 ## Concurrency Policy (READ FIRST — HARD RULE)
 
-This dispatcher is **strictly single-threaded over issues**. No exceptions.
+This dispatcher operates over issues in **bounded batches of size `max_concurrent_subagents`** (trigger input, integer ≥ 1, default 1).
 
-- At any moment, at most **one** issue session may be active.
-- `hourly_issue_quota` is a **sequential count**. `=3` means "finish A → finish B → finish C" serially. It is NOT a parallelism / fan-out / subagent-count knob.
-- `sessions_spawn` for an issue session MUST be the only tool call in its tool-call batch. Never place two or more issue-session spawns in the same parallel block.
-- After spawning, the dispatcher MUST block until that session returns its terminal reply AND MUST re-read the per-issue state file from disk before considering the next IID.
+- At any moment, at most `max_concurrent_subagents` issue sessions may be active.
+- The two dials are **independent**:
+  - `max_concurrent_subagents` = how many subagents may be in flight at the same time (parallelism width).
+  - `hourly_issue_quota` = how many issues must reach a terminal state in this tick (per-tick completion count). It is NOT a parallelism knob.
+- **Same IID never runs twice in parallel.** Per-IID work is always serial across attempts. The session name `issue-<project>-<iid>` is the structural guarantee. Cross-IID parallelism is bounded by `max_concurrent_subagents`.
+- **Batch shape.** When picking the next batch:
+  - Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh).
+  - Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call). Concurrent allocation would race on `attempts_total` even though each IID has its own state file — a single Bash batch makes the order observable in logs.
+  - Spawn the batch as parallel `sessions_spawn` calls in a SINGLE tool-call block (one tool call per IID, all in the same block). When `max_concurrent_subagents=1` this degenerates to "exactly one spawn per block" — the legacy serial behavior.
+- **Wait for the WHOLE batch before forming the next.** No fire-and-forget, no rolling pool. Every spawn must return its terminal reply before the dispatcher re-reads per-issue state and considers the next batch. This means a slow IID inside a batch can stall faster IIDs in the same batch — that is the explicit trade-off for simplicity and predictable time-budget accounting.
+- **Time budget is checked between batches, not within a batch.** Once a batch is spawned, the dispatcher commits to waiting for all members; the `max_runtime_minutes` check happens at the top of the next batch loop iteration.
 - Background / no-wait / fire-and-forget spawn modes are forbidden for issue sessions.
 
 If this policy conflicts with any other instruction, this policy wins.
@@ -127,7 +134,7 @@ Concrete rules:
      - remove IID from `completed_iids` / `failed_iids`
      - add to `unfinished_iids`
      - update the per-issue state file (`$(issue_state_file_for <iid>)` → `${ISSUES_ROOT}/issue-<iid>/state.json`): write `status=pending`, `mode="continue"`, leave `attempts_total` untouched (the executor increments it next attempt). Do NOT delete the existing `attempts/` subtree — historical attempts must be preserved for audit.
-     - clear any `active_issue_iid` referencing this IID
+     - remove this IID from `active_issue_iids` (and the corresponding session from `active_issue_sessions`) if present
      - force `campaign_status = running`
      - persist `campaign_state.json`
    - Else if disk says finished but `is_done_on_gitlab == false` (i.e. `user_reopened == true`):
@@ -169,16 +176,17 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 1. Never reuse an issue session for a different issue.
 2. The dispatcher creates the session if it doesn't exist; otherwise resumes it.
-3. The dispatcher sends the executor a single `RUN_SINGLE_ISSUE_SESSION` message (see executor SKILL for the full payload).
-4. **Strict serial.** Spawn one session, block on its terminal reply, re-read the per-issue state file, only then consider the next IID. This rule overrides any quota-driven reading.
-5. **Single-spawn batches.** `sessions_spawn` for an issue is the only tool call in its tool-call batch.
-6. **`active_issue_iid` is set before spawning and persisted; cleared / replaced only after the spawned session reports a terminal status.** Never holds more than one IID at a time.
+3. The dispatcher sends each executor a single `RUN_SINGLE_ISSUE_SESSION` message (see executor SKILL for the full payload).
+4. **Bounded batch.** A batch contains at most `max_concurrent_subagents` distinct IIDs. The dispatcher spawns the whole batch in one tool-call block (parallel `sessions_spawn`), blocks on every spawn's terminal reply, re-reads each per-issue state file, only then considers the next batch.
+5. **Distinct IIDs only.** Two `sessions_spawn` calls in the same batch MUST target different IIDs. Same-IID parallelism is forbidden (see Concurrency Policy above). The session-name derivation `issue-<project>-<iid>` is the structural guarantee.
+6. **`active_issue_iids` is updated atomically per batch.** Before spawning a batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. After the batch returns and per-issue states are re-read, remove every batch member from `active_issue_iids` (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress`/budget-exhausted IIDs go back to `unfinished_iids`) and persist again. The list MUST never exceed `max_concurrent_subagents` entries.
+7. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, form a fresh batch.
 
 ---
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-28.4, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.1, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 3 env vars exported:**
 
@@ -234,7 +242,8 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - Do NOT call `scripts/glab_auth.sh` separately after `env_paths.sh`, and do NOT manually export `PROJECT_FULL` or `PROJECT_URI`. Every later `bash scripts/...` command is a fresh shell and must receive the minimum env vars from the Per-Exec Env Contract; the target script will source `env_paths.sh` itself. If `env_paths.sh` / glab auth fails, abort the tick.
 2. **Load + override campaign state.**
    - Read `${CAMPAIGN_STATE_FILE}`, or initialize using fresh-init values from `references/state_schema.md` if absent.
-   - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks` with the trigger values.
+   - Apply schema migration if the on-disk file uses the legacy scalar `active_issue_iid` / `active_issue_session` — see `references/state_schema.md` "Schema migration" for the rule. Default `max_concurrent_subagents` to `1` if missing.
+   - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, and `max_concurrent_subagents` with the trigger values. When the trigger omits `max_concurrent_subagents`, default it to `1` for the tick AND persist that default.
    - Persist.
 3. **Reconcile against GitLab — MANDATORY, ALWAYS RUNS.**
    - `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> MIN_IID=... MAX_IID=... bash scripts/reconcile.sh` (self-bootstrapping; see Source-of-Truth Policy).
@@ -247,27 +256,31 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - `unfinished_iids` is empty and `campaign_status = completed`
    Otherwise continue.
 5. `quota_completed_this_tick = 0`; record tick start time.
-6. **Strictly serial loop.** While quota and time budget remain:
-   1. Pick the lowest-IID eligible backlog item, else the next fresh IID from `next_new_issue_iid`.
-   2. Set `active_issue_iid` and persist.
-   3. **Allocate attempt number FIRST.** Before spawning, run `IID=<iid> bash scripts/allocate_attempt.sh`. This atomically increments `attempts_total` in `${ISSUES_ROOT}/issue-<iid>/state.json` and prints the new number `N` on stdout. Capture `N`. This step is mandatory for every spawn — fresh OR continue. Without it the executor will refuse to start (`env_paths.sh` no longer auto-allocates).
-   4. Spawn (or resume) the dedicated session and send `RUN_SINGLE_ISSUE_SESSION` in a SINGLE blocking spawn call. The trigger payload MUST include:
+6. **Bounded-batch loop.** While quota AND time budget remain:
+   1. **Check time budget at the TOP of the loop iteration**, before forming a new batch. If `now - tick_start_time >= max_runtime_minutes`, break out of the loop. (Time is NOT checked mid-batch — once a batch is spawned, the dispatcher commits to waiting for all members.)
+   2. **Form the next batch.** Compute `batch_size = min(max_concurrent_subagents, remaining_quota, remaining_eligible_iids)`. Pick `batch_size` distinct IIDs in the standard order: lowest-IID eligible backlog items first, then fresh IIDs from `next_new_issue_iid` upward. If `batch_size == 0`, break out of the loop.
+   3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`. Do all allocations BEFORE any `sessions_spawn`. Sequential allocation is mandatory — concurrent allocation would race even though each IID has its own state file (the order needs to be observable in dispatcher logs, and the script is cheap so serializing costs nothing).
+   4. **Update `active_issue_iids` + persist.** Append every IID in the batch (and corresponding session names in `active_issue_sessions`) to `campaign_state.json`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
+   5. **Spawn the batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID, all in the same parallel block. Each spawn sends `RUN_SINGLE_ISSUE_SESSION` to the dedicated session `issue-<project>-<iid>` with payload:
       - `branch=` (target / integration branch, typically `master`)
       - `dev_branch=` (clean baseline branch from which fresh-mode worktrees are checked out)
-      - `attempt_number=N` (the value just allocated in sub-step 3 above)
+      - `attempt_number=N_iid` (the value allocated in sub-step 3 above for THIS IID)
       - `issue_mode=continue` if the per-issue state has `mode="continue"`; otherwise `issue_mode=fresh` (default)
 
-   Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source created an empty `attempt-NNN/` directory. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution.
-   4. After the session returns, re-read `$(issue_state_file_for <iid>)` (`${ISSUES_ROOT}/issue-<iid>/state.json`) from disk.
-   5. If terminal (`done` / `no_changes` / `failed`): update the corresponding list, increment `quota_completed_this_tick`.
-   6. If `blocked`: keep in backlog; skip and continue.
-   7. If `in_progress` and tick budget exhausted: keep as backlog for next tick.
-   8. Clear / update `active_issue_iid` and persist before the next loop iteration.
+      When `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call — identical to the legacy serial behavior. When `> 1`, the calls run in parallel and the dispatcher waits for all of them to return.
+
+      Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source created an empty `attempt-NNN/` directory. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution. The same rule applies per IID inside a batch.
+   6. **After the WHOLE batch returns**, for each IID in the batch:
+      - Re-read `$(issue_state_file_for <iid>)` (`${ISSUES_ROOT}/issue-<iid>/state.json`) from disk.
+      - If terminal (`done` / `no_changes` / `failed`): update the corresponding list (`completed_iids` / `failed_iids` etc.), increment `quota_completed_this_tick`.
+      - If `blocked`: keep in backlog; will retry after cooldown per Blocked Skip-and-Retry.
+      - If `in_progress` (the executor returned but its work is not yet terminal — rare): keep as backlog for the next tick.
+   7. **Drain `active_issue_iids` + persist.** Remove every IID in the just-finished batch from `active_issue_iids` and `active_issue_sessions`, then persist `campaign_state.json` before the next loop iteration. The list MUST be empty (or contain only IIDs from a future batch — i.e. never carry stragglers from a prior batch) before forming a new batch.
 7. Update `next_new_issue_iid` if fresh issues were introduced.
 8. If every IID in `[issue_min_iid, issue_max_iid]` is terminal, set `campaign_status = completed`.
 9. Persist `campaign_state.json` and return the compact chat summary.
 
-Stop conditions: `quota_completed_this_tick == hourly_issue_quota`, time budget exhausted, or no eligible IID remains.
+Stop conditions (checked at the top of each batch iteration): `quota_completed_this_tick >= hourly_issue_quota`, time budget exhausted (`now - tick_start_time >= max_runtime_minutes`), or no eligible IID remains for the next batch.
 
 ---
 
@@ -292,10 +305,11 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-28.4",
+  "skill_version": "2026-04-29.1",
   "campaign_status": "running",
-  "active_issue_iid": null,
-  "active_issue_session": null,
+  "active_issue_iids": [],
+  "active_issue_sessions": [],
+  "max_concurrent_subagents": 1,
   "unfinished_iids": [9, 10, 14],
   "next_new_issue_iid": 19,
   "quota_completed_this_tick": 3,
@@ -303,5 +317,7 @@ Return a single compact JSON summary, e.g.:
   "last_reconcile_evidence": "/data/openclaw_work/<project>/openclaw_log/dispatcher/reconcile-<ts>.json"
 }
 ```
+
+Between batches, while a batch is in flight, `active_issue_iids` reflects the IIDs currently in flight (e.g. `[14, 15]` when `max_concurrent_subagents=2`). After the batch returns and per-issue states are re-read, the list is drained back toward `[]` before the next batch is formed.
 
 Never paste full logs, full diffs, or long issue bodies into chat.
