@@ -25,7 +25,7 @@ glab api \
 
 ## E1b — Read the target issue's notes (comments)
 
-Used in **continue mode** so the executor can pick up reviewer-supplied supplemental steps. Reviewers leave the supplemental instructions as a comment on the issue before flipping the label from `done` to `continue`; this command reads those comments. See `references/continue_mode.md` for the reviewer contract.
+Used in **continue mode** so the executor can pick up reviewer-supplied supplemental steps. Reviewers leave the supplemental instructions as a comment on the issue before flipping the workflow labels from `done` / `pr` to `continue`; this command reads those comments. See `references/continue_mode.md` for the reviewer contract.
 
 ```bash
 glab api --paginate \
@@ -123,7 +123,7 @@ The executor MUST NEVER call `glab mr merge`. Closing (E10) is allowed as part o
 
 ## E9 — Post a note (comment) on the issue
 
-Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before MR creation / `done` labeling.
+Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before `done` labeling and MR creation.
 
 ```bash
 glab api --method POST \
@@ -135,7 +135,7 @@ The `-F body=@<file>` form uploads the file contents as the form field, which av
 
 ## E11 — Read a Wiki page
 
-Used by `scripts/upload_attempt_artifacts.sh` before MR creation / `done` labeling to decide whether to create or update an attempt-scoped Wiki page.
+Used by `scripts/upload_attempt_artifacts.sh` before `done` labeling and MR creation to decide whether to create or update an attempt-scoped Wiki page.
 
 ```bash
 glab api \

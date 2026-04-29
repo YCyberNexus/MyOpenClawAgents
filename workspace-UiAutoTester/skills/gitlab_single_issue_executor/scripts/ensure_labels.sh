@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ensure_labels.sh — make sure the six workflow labels exist in the project.
+# ensure_labels.sh — make sure the seven workflow labels exist in the project.
 # Only creates labels that are missing; never modifies existing ones.
 #
 # Required env vars:
@@ -9,7 +9,7 @@
 # Workflow labels: todo doing pr done blocked failed continue
 #
 # `continue` is a human-applied review label. Reviewers set it on an issue
-# whose MR was created and labeled `done` by the agent, but where the
+# whose MR was created and labeled `done` + `pr` by the agent, but where the
 # Claude Code run actually didn't finish (env error, partial edits, etc.).
 # When the dispatcher's reconciliation sees `continue` on an issue, it
 # re-enqueues the IID and the executor restarts the resolution flow on

@@ -185,6 +185,6 @@ This workspace expects the agent to be able to use:
 
 The dispatcher must use `sessions_spawn` for dedicated issue sessions.
 
-For this automation, an issue is considered completed immediately after its merge request is successfully created. After MR creation succeeds, the issue executor must label the issue `done` and persist issue state `done`.
+For this automation, an issue is considered completed after its merge request is successfully created and the live issue has both `done` and `pr` labels. The issue executor must change `doing` to `done` immediately after solving the issue and publishing Wiki evidence, then create or rotate the MR, then add `pr` after MR creation succeeds and persist issue state `done`.
 
-Exception: a human reviewer may reopen the automation by changing the live GitLab issue label to `continue`. On the next dispatcher reconciliation, `continue` wins over cached `done` state and over an existing MR. If both `done` and `continue` labels are present, treat the issue as `continue` and schedule a continue-mode attempt.
+Exception: a human reviewer may reopen the automation by changing the live GitLab issue label to `continue`. On the next dispatcher reconciliation, `continue` wins over cached `done` state and over an existing MR. If `continue` is present alongside `done` and/or `pr`, treat the issue as `continue` and schedule a continue-mode attempt.

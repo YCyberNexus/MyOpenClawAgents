@@ -94,7 +94,7 @@ fi
     cat <<EOF
 This is a CONTINUE-MODE re-run of GitLab issue #${ISSUE_IID}.
 
-A prior run on this issue produced a merge request and was marked \`done\`,
+A prior run on this issue produced a merge request and was marked \`done\` + \`pr\`,
 but a human reviewer has determined the work was incomplete or incorrect.
 You are running inside a fresh git worktree at ${WORKTREE_DIR}, branched
 from \`origin/${WORK_BRANCH}\` (the work-in-progress branch from the prior

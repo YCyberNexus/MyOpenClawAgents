@@ -1,6 +1,6 @@
 # Per-Issue and Current-Attempt State Schemas (Executor)
 
-As of SKILL_VERSION 2026-04-29.5 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
+As of SKILL_VERSION 2026-04-29.6 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -18,7 +18,7 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
   "retry_count": 1,
   "block_reason": null,
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-04-29.5",
+  "skill_version": "2026-04-29.6",
   "updated_at": "2026-04-25T10:00:00Z"
 }
 ```
@@ -46,7 +46,7 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
 | `in_progress` | After `prepare_attempt.sh` returns; during Claude execution.                 | no        |
 | `blocked`     | Retryable failure (auth, runtime mismatch, leak guard tripped, etc.).        | no        |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
-| `done`        | After post-push verification, Wiki evidence publication, and MR creation succeeded. | yes       |
+| `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes       |
 | `no_changes`  | Claude produced no diff (`stage_and_guard.sh` printed `NO_CHANGES`).         | yes       |
 
 ## issue-<iid>/attempt_state.json — current-attempt state
@@ -75,7 +75,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-04-29.5"
+  "skill_version": "2026-04-29.6"
 }
 ```
 

@@ -19,8 +19,8 @@
 #       "state":             "opened" | "closed" | null,
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
-#       "is_done_on_gitlab": bool,   # labels include literal "done"
-#       "user_reopened":     bool,   # neither "done" nor "failed" in labels
+#       "is_done_on_gitlab": bool,   # labels include both "done" and "pr"
+#       "user_reopened":     bool,   # no completed pair and no failed/blocked/continue label
 #       "needs_continue":    bool,   # labels include literal "continue"
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
@@ -31,11 +31,11 @@
 #         executor will re-run the resolution flow against the existing
 #         work branch (or build one from master if none exists)
 #   - `user_reopened == true`                             → re-enqueue from
-#         scratch (label was reverted to todo / doing)
+#         scratch (label was reverted to todo / doing, or is done-only
+#         before MR / pr completion)
 #
-# `needs_continue` and `user_reopened` are not mutually exclusive. If both
-# are true, treat the IID as continue mode (existing branch reuse) — the
-# human reviewer asked for a re-run, not a wipe.
+# `needs_continue` wins over every other label combination. The jq below
+# keeps `needs_continue` and `user_reopened` mutually exclusive.
 
 set -euo pipefail
 
@@ -57,15 +57,17 @@ for iid in $(seq "${MIN_IID}" "${MAX_IID}"); do
     digest="$(echo "${body}" | jq -c --argjson iid "${iid}" '
       . as $issue |
       ($issue.labels // []) as $labels |
+      (($labels | index("done") != null) and ($labels | index("pr") != null)) as $done_with_pr |
       {
         iid: $iid,
         state: $issue.state,
         labels: $labels,
         title: $issue.title,
-        is_done_on_gitlab: ($labels | index("done") != null),
+        is_done_on_gitlab: $done_with_pr,
         user_reopened: (
-          ($labels | index("done") == null) and
+          ($done_with_pr | not) and
           ($labels | index("failed") == null) and
+          ($labels | index("blocked") == null) and
           ($labels | index("continue") == null)
         ),
         needs_continue: ($labels | index("continue") != null),

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # upload_attempt_artifacts.sh -- publish attempt-scoped execution evidence
-# to GitLab Wiki pages and link them from the issue before MR creation /
-# done labeling.
+# to GitLab Wiki pages and link them from the issue before done labeling
+# and MR creation.
 #
 # Required env vars:
 #   GITLAB_HOST              from glab_auth.sh
@@ -134,7 +134,7 @@ fi
   echo "<!-- uiautotester:attempt-wiki-artifacts v1 attempt=${ATTEMPT_NUMBER_PADDED} -->"
   echo "## UiAutoTester attempt ${ATTEMPT_NUMBER_PADDED} OpenClaw logs"
   echo
-  echo "Attempt-scoped files published to this project's GitLab Wiki before merge request creation and before the issue is labeled \`done\`:"
+  echo "Attempt-scoped files published to this project's GitLab Wiki before the issue is labeled \`done\` and before merge request creation / rotation:"
   echo
   cat "${LINKS_FILE}"
   if [ -z "${REPORT_SOURCE}" ]; then

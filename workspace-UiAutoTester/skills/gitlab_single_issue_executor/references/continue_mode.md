@@ -14,7 +14,7 @@ When you find an issue whose MR was created but the work is incomplete or wrong,
    > 2. Run `uv run robot --variable HEADLESS:True login.robot` and capture the report.
    > 3. If the report is green, commit the report file under `reports/` and update the existing MR.
 
-3. **Flip the issue's label from `done` to `continue`.** The agent only triggers continue mode on the `continue` label.
+3. **Flip the issue's label from `done` / `pr` to `continue`.** The agent only triggers continue mode on the `continue` label.
 
 That's it. The next dispatcher tick will pick the issue up and re-run.
 
@@ -45,7 +45,7 @@ The executor does NOT try to extract specific commands out of reviewer comments 
 ```text
 This is a CONTINUE-MODE re-run of GitLab issue #<iid>.
 
-A prior run on this issue produced a merge request and was marked `done`,
+A prior run on this issue produced a merge request and was marked `done` + `pr`,
 but a human reviewer has determined the work was incomplete or incorrect.
 You are running inside a fresh git worktree at <worktree>, branched from
 `origin/<work-branch>` (the work-in-progress branch from the prior run).
