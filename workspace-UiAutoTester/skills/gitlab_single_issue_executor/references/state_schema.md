@@ -1,6 +1,6 @@
 # Per-Issue and Current-Attempt State Schemas (Executor)
 
-As of SKILL_VERSION 2026-04-29.2 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
+As of SKILL_VERSION 2026-04-29.5 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -18,7 +18,7 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
   "retry_count": 1,
   "block_reason": null,
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-04-29.2",
+  "skill_version": "2026-04-29.5",
   "updated_at": "2026-04-25T10:00:00Z"
 }
 ```
@@ -46,7 +46,7 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
 | `in_progress` | After `prepare_attempt.sh` returns; during Claude execution.                 | no        |
 | `blocked`     | Retryable failure (auth, runtime mismatch, leak guard tripped, etc.).        | no        |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
-| `done`        | After MR creation succeeded and post-push verification passed.               | yes       |
+| `done`        | After post-push verification, Wiki evidence publication, and MR creation succeeded. | yes       |
 | `no_changes`  | Claude produced no diff (`stage_and_guard.sh` printed `NO_CHANGES`).         | yes       |
 
 ## issue-<iid>/attempt_state.json — current-attempt state
@@ -69,11 +69,13 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "local_branch": "issue/14-auto-fix-att002",
   "log_dir": "/data/openclaw_work/.../issues/issue-14/log/attempt-002",
   "commit_sha": "abc1234...",
+  "wiki_artifacts_file": "/data/openclaw_work/.../issues/issue-14/log/attempt-002/wiki_artifacts.md",
+  "attempt_artifacts_posted_to_wiki": true,
   "status": "done",
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-04-29.2"
+  "skill_version": "2026-04-29.5"
 }
 ```
 
@@ -87,6 +89,8 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `prior_attempt_count`     | continue mode only — number of past `uiautotester:attempt-summary` notes the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |
 | `log_dir`                 | `${LOG_DIR}` for this attempt                                                             |
+| `wiki_artifacts_file`     | `${LOG_DIR}/wiki_artifacts.md` once `upload_attempt_artifacts.sh` has posted Wiki links to GitLab |
+| `attempt_artifacts_posted_to_wiki` | true after `prompt.txt`, `claude_result.txt`, and optional `report.html` were published to the project Wiki and linked from the issue |
 | `summary_file`            | `${SUMMARY_FILE}` once `summarize_attempt.sh` has run                                     |
 | `summary_posted_to_issue` | true after the summary was successfully posted as a GitLab issue note                     |
 

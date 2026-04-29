@@ -44,7 +44,7 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
 | `todo`     | `doing`    | executor begins work in fresh mode                   | `set_issue_label.sh remove todo` ; `set_issue_label.sh add doing`     |
 | `continue` | `doing`    | executor begins work in continue mode (resume run)   | `set_issue_label.sh remove continue` ; `set_issue_label.sh add doing` |
-| `doing`    | `pr`       | branch pushed, MR successfully created               | `set_issue_label.sh remove doing` ; `set_issue_label.sh add pr`       |
+| `doing`    | `pr`       | branch pushed, attempt artifacts published to the project Wiki and linked from the issue, MR successfully created | `set_issue_label.sh remove doing` ; `set_issue_label.sh add pr`       |
 | `pr`       | `done`     | immediately after MR creation succeeds (terminal)    | `set_issue_label.sh remove pr` ; `set_issue_label.sh add done`        |
 | `doing`    | `blocked`  | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
 | `blocked`  | `doing`    | retry begins on a later tick                         | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
@@ -54,9 +54,10 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 ## Important rules
 
 1. **`pr` is a transient state.** For this automation, successful MR creation is the terminal completion condition. The executor MUST transition `pr → done` immediately after `create_mr.sh` returns. The issue must not be left at `pr` waiting for human merge.
-2. **Never call `glab mr merge`.** The merge request stays open for human review.
-3. **No full-set label overwrite.** Always use add+remove of single labels (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, etc.) the user may have added.
-4. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
+2. **Attempt evidence comes first.** Before `create_mr.sh` runs and before the issue can be labeled `done`, `scripts/upload_attempt_artifacts.sh` MUST publish attempt-scoped Wiki pages for `prompt.txt`, `claude_result.txt`, and optional `report.html`, then link them from the issue.
+3. **Never call `glab mr merge`.** The merge request stays open for human review.
+4. **No full-set label overwrite.** Always use add+remove of single labels (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, etc.) the user may have added.
+5. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
 
 ## Issue closure vs `done` label
 
@@ -64,7 +65,7 @@ These are two SEPARATE signals. The executor only controls the first; the second
 
 | Signal              | Who sets it                         | When                                              | Means                                  |
 | ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
-| `done` label        | the executor (this skill)           | immediately after `create_mr.sh` returns          | "the agent finished its half of the work" |
+| `done` label        | the executor (this skill)           | immediately after attempt evidence Wiki publication and `create_mr.sh` return successfully | "the agent finished its half of the work" |
 | issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "a human reviewed, approved, and merged" |
 
 GitLab's native auto-close is triggered by the **closing keyword in the MR description**. `scripts/create_mr.sh` writes the description starting with:

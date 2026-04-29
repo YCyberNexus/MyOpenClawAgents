@@ -93,6 +93,9 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
   echo "Execution evidence (logs, prompts, raw acpx output) is preserved on the"
   echo "runner under: ${LOG_DIR}"
   echo
+  echo "Attempt prompt/result logs are also published to the project Wiki before"
+  echo "this MR is created."
+  echo
   echo "Per-attempt summaries are posted as comments on the linked issue."
   echo
   echo "Do not merge until reviewed."

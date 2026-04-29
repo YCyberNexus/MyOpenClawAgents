@@ -123,7 +123,7 @@ The executor MUST NEVER call `glab mr merge`. Closing (E10) is allowed as part o
 
 ## E9 — Post a note (comment) on the issue
 
-Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it.
+Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before MR creation / `done` labeling.
 
 ```bash
 glab api --method POST \
@@ -132,6 +132,47 @@ glab api --method POST \
 ```
 
 The `-F body=@<file>` form uploads the file contents as the form field, which avoids quoting issues for large multiline summaries.
+
+## E11 — Read a Wiki page
+
+Used by `scripts/upload_attempt_artifacts.sh` before MR creation / `done` labeling to decide whether to create or update an attempt-scoped Wiki page.
+
+```bash
+glab api \
+  "projects/${PROJECT_URI}/wikis/${WIKI_SLUG_URI}"
+```
+
+`WIKI_SLUG_URI` is the URI-encoded Wiki title, for example `issue33%2Fattempt-001%2Fprompt.txt`.
+
+## E12 — Create a Wiki page
+
+Used by `scripts/upload_attempt_artifacts.sh` when E11 reports the page is absent. The script creates attempt-scoped Wiki pages:
+
+- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/prompt.txt`
+- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/claude_result.txt`
+- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/report.html` when a `report.html` exists under `${WORKTREE_DIR}`
+
+```bash
+glab api --method POST \
+  "projects/${PROJECT_URI}/wikis" \
+  -f "title=${WIKI_TITLE}" \
+  -F "content=@${SOURCE_PATH}" \
+  -f "format=markdown"
+```
+
+## E13 — Update a Wiki page
+
+Used by `scripts/upload_attempt_artifacts.sh` when rerunning the same allocated attempt or resuming after a partial post. Updating is preferable to creating duplicate pages.
+
+```bash
+glab api --method PUT \
+  "projects/${PROJECT_URI}/wikis/${WIKI_SLUG_URI}" \
+  -f "title=${WIKI_TITLE}" \
+  -F "content=@${SOURCE_PATH}" \
+  -f "format=markdown"
+```
+
+The executor constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}/-/wikis/${WIKI_TITLE}` and posts those links back to the issue with E9.
 
 ## What is FORBIDDEN
 

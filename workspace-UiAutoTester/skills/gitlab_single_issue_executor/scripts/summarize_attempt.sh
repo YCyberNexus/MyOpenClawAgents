@@ -4,9 +4,9 @@
 #
 # Design choice (2026-04-25.5+): the comment is intentionally short.
 # Detailed evidence (full claude_result.txt, full git_diff.patch,
-# acpx_raw.log, prompt.txt) lives on the runner under ${LOG_DIR} and is
-# referenced from the comment by absolute path. Reviewers grab the full
-# files from there if they need depth; the comment itself stays scannable.
+# acpx_raw.log, prompt.txt) lives on the runner under ${LOG_DIR}. On
+# push-ready attempts, prompt/result/report evidence is also published to
+# the project Wiki before MR creation. The summary itself stays scannable.
 #
 # Required env vars:
 #   GITLAB_HOST              from glab_auth.sh
@@ -74,6 +74,9 @@ fi
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
   echo "- **Evidence (on runner)**: \`${LOG_DIR}\`"
+  if [ -f "${LOG_DIR}/wiki_artifacts.md" ]; then
+    echo "- **Wiki evidence**: published and linked from this issue before MR creation"
+  fi
 
   if [ -n "${CHANGED_PREVIEW}" ] && [ "${CHANGED_COUNT}" -gt 0 ]; then
     echo

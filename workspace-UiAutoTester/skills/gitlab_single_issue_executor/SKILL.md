@@ -1,14 +1,14 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-04-29.3] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
+description: "[SKILL_VERSION=2026-04-29.5] Execute one GitLab issue in one dedicated session. Clone or pull the repository, ensure labels exist, set the issue to doing, invoke Claude Code through acpx, persist logs, commit and push changes, publish attempt evidence to the project Wiki and link it from the issue before MR creation, create a merge request to master without merging, and update per-issue state on disk. Supports blocked and failed states for retryable scheduling. For this automation, a merge request being created successfully is the terminal completion condition, so the issue must be labeled `done` immediately after MR creation succeeds."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Single-Issue Executor Skill
 
-**SKILL_VERSION: 2026-04-29.3**
+**SKILL_VERSION: 2026-04-29.5**
 
-The executor MUST include `"skill_version": "2026-04-29.3"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
+The executor MUST include `"skill_version": "2026-04-29.5"` in its compact chat summary, and MUST write the same string into `${ISSUE_STATE_FILE}.skill_version`. This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -24,6 +24,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `_hulat`, `.claude`).
 - `scripts/commit_and_push.sh` — commit and FORCE-push the per-attempt local branch to the SINGLE remote `${WORK_BRANCH}` (Strategy A).
 - `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts, no `_hulat`, and no `.claude`.
+- `scripts/upload_attempt_artifacts.sh` — before MR creation / `done` labeling, publish attempt-scoped `prompt.txt`, `claude_result.txt`, and optional `report.html` to the project Wiki and link them from the GitLab issue.
 - `scripts/create_mr.sh` — fresh mode: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one (Strategy A). Continue mode: close all existing open MRs for `${WORK_BRANCH}` (without merging) and create a fresh one that references the closed predecessor(s) — each continue cycle leaves a visible MR trail in GitLab.
 - `scripts/summarize_attempt.sh` — write `${SUMMARY_FILE}` and post it as a GitLab issue note so future continue-mode runs can read what past attempts did.
 - `references/paths.md` — full path layout and required artifacts.
@@ -67,8 +68,9 @@ This rule overrides any default model behavior that says "try another way", "be 
 5. If `prepare_attempt.sh` cannot produce a clean worktree, the executor MUST NOT manually `rm -rf` parts of the repo or skip the clean step. Mark the issue `blocked` with `block_reason="worktree could not be prepared: <reason>"` and stop.
 6. If `stage_and_guard.sh` exits 3 (artifact leak), the executor MUST NOT manually `git rm` the leaked paths and re-run staging. The leak indicates a prior bug that must be investigated; mark `blocked` with `block_reason="agent artifacts leaked into repo working tree"` and stop.
 7. If `post_push_verify.sh` exits 4 (remote polluted), the executor MUST NOT manually `git push --delete` and rebuild. Mark `blocked` with `block_reason="remote branch polluted with agent artifacts"` and stop.
-8. If `create_mr.sh` fails, the executor MUST NOT create the MR through the GitLab web UI scrape, through `git push --push-option=merge_request.create`, or by manually crafting an HTTP request. Mark `blocked` and stop.
-9. If a required input is missing or malformed, the executor MUST abort with `status=blocked`, `block_reason="missing required input: <field>"`. It MUST NOT guess a default.
+8. If `upload_attempt_artifacts.sh` fails, the executor MUST NOT skip Wiki evidence publication and continue to MR creation / `done` labeling. Mark `blocked` with `block_reason="attempt wiki artifact publication failed: <reason>"`, run summarize_attempt, and stop.
+9. If `create_mr.sh` fails, the executor MUST NOT create the MR through the GitLab web UI scrape, through `git push --push-option=merge_request.create`, or by manually crafting an HTTP request. Mark `blocked` and stop.
+10. If a required input is missing or malformed, the executor MUST abort with `status=blocked`, `block_reason="missing required input: <field>"`. It MUST NOT guess a default.
 
 ### What the executor does on failure
 
@@ -186,7 +188,7 @@ In continue mode the executor:
 - Detects the mode from the trigger field `issue_mode=continue`. As a backstop, it re-derives the mode at Step 3 of the algorithm from live labels: if labels include `continue`, treat as continue mode regardless of the trigger field.
 - Transitions the issue label from `continue` to `doing` (instead of `todo` to `doing`). See `references/label_lifecycle.md`.
 - Allocates a NEW attempt number (numbers are monotonically increasing). Calls `scripts/prepare_attempt.sh` with `ISSUE_MODE=continue`. The script replaces `${WORKTREE_DIR}`, creates this attempt's preserved `${LOG_DIR}`, and bases the worktree on `origin/${WORK_BRANCH}` (the existing work-in-progress branch from the prior attempt). If `${WORK_BRANCH}` does not exist on the remote, the script downgrades to fresh mode and records `mode_downgraded_from="continue"`.
-- Builds the Claude Code prompt with the live issue body + ALL past `uiautotester:attempt-summary` notes + ALL non-summary reviewer comments. See `references/continue_mode.md`.
+- Builds the Claude Code prompt with the live issue body + ALL past `uiautotester:attempt-summary` notes + ALL non-summary, non-Wiki-artifact reviewer comments. Auto-posted `uiautotester:attempt-wiki-artifacts` notes are ignored for prompt purposes. See `references/continue_mode.md`.
 - After the attempt finishes, `scripts/summarize_attempt.sh` posts a new summary comment to the issue so future continue-mode runs can see what this attempt did.
 - **MR rotation.** Unlike fresh mode (which reuses the single MR for `${WORK_BRANCH}`), continue mode closes all existing open MRs for `${WORK_BRANCH}` (without merging — the integration branch is untouched) and creates a fresh MR pointing at the same source branch. The new MR's description includes `Supersedes !<old_mr_iid>` (or multiple refs if multiple old MRs existed) for traceability. Each continue cycle therefore produces a distinct MR object in GitLab so reviewers can see the resolution history.
 - All other later steps (stage + guard, commit, force-push, post-push verify, label transitions) are identical to fresh mode.
@@ -243,7 +245,7 @@ If `acpx claude exec` returns non-zero, hangs and is killed by the runtime, or C
 
 ## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.3, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.5, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
 
 **Every Bash exec MUST start with these 5 env vars exported:**
 
@@ -338,14 +340,17 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - `STAGED_OK` → continue.
 10. **Commit + force-push (Strategy A).** `ISSUE_TITLE="..." bash scripts/commit_and_push.sh` (prints commit SHA). Write `commit_sha` into both the current-attempt and per-issue state files.
 11. **Post-push verify.** `bash scripts/post_push_verify.sh`. Exit 4 → `status=blocked`, `block_reason="remote branch polluted with agent artifacts"`, summarize then stop.
-12. **Ensure MR exists (mode-dependent rotation).** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into both state files.
+12. **Publish attempt evidence to the project Wiki before MR / `done`.** `bash scripts/upload_attempt_artifacts.sh` (prints `${LOG_DIR}/wiki_artifacts.md`). This script upserts Wiki pages under `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/`: `${LOG_DIR}/prompt.txt` as `prompt.txt`, `${LOG_DIR}/claude_result.txt` as `claude_result.txt`, and the first `report.html` found anywhere under `${WORKTREE_DIR}` as `report.html`. If no `report.html` exists under the worktree, it publishes no report page. The issue note is marked with `<!-- uiautotester:attempt-wiki-artifacts v1 attempt=${ATTEMPT_NUMBER_PADDED} -->` so future continue-mode prompts do not treat it as reviewer guidance.
+    - If this script fails, set `status=blocked`, `block_reason="attempt wiki artifact publication failed: <reason>"`, run summarize_attempt, and stop. Do NOT create an MR and do NOT label the issue `done`.
+    - On success, set `attempt_artifacts_posted_to_wiki=true` and `wiki_artifacts_file=${LOG_DIR}/wiki_artifacts.md` in `${ATTEMPT_STATE_FILE}`.
+13. **Ensure MR exists (mode-dependent rotation).** `ISSUE_TITLE="..." bash scripts/create_mr.sh` (prints MR URL). Write `merge_request_url` into both state files.
     - In `ISSUE_MODE=fresh`: reuses the existing open MR for `${WORK_BRANCH}` if any, else creates one (Strategy A — single MR per issue).
     - In `ISSUE_MODE=continue`: closes all existing open MRs for `${WORK_BRANCH}` (without merging), then creates a fresh MR. The new MR's description includes `Supersedes !<old_mr_iid>` (or multiple refs if multiple old MRs existed) so reviewers can trace which previous MR(s) this run replaces.
     - The MR description always starts with `Closes #${ISSUE_IID}` so GitLab auto-closes the issue when whichever MR is current is eventually merged.
-13. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`. The executor does NOT close the issue itself.
-14. **Summarize the attempt.** `ATTEMPT_STATUS=done COMMIT_SHA=... MERGE_REQUEST_URL=... bash scripts/summarize_attempt.sh`. This writes `${SUMMARY_FILE}` and posts the same content as a GitLab issue note (E9) marked with `<!-- uiautotester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->`. Set `summary_posted_to_issue=true` in `${ATTEMPT_STATE_FILE}`.
-    For non-`done` terminal statuses (`no_changes`, `blocked`, `failed`), Step 14 still runs — pass the appropriate `ATTEMPT_STATUS` and `BLOCK_REASON`. The summary is always posted, even on failure paths, so future continue-mode runs and reviewers can see what happened.
-15. **Finalize.** Write the terminal `status` and `updated_at` to BOTH `${ATTEMPT_STATE_FILE}` (with `attempt_finished_at`) and `${ISSUE_STATE_FILE}`. Return the compact chat summary.
+14. **Transition `doing → pr → done`.** Per `references/label_lifecycle.md`. The executor does NOT close the issue itself.
+15. **Summarize the attempt.** `ATTEMPT_STATUS=done COMMIT_SHA=... MERGE_REQUEST_URL=... bash scripts/summarize_attempt.sh`. This writes `${SUMMARY_FILE}` and posts the same content as a GitLab issue note (E9) marked with `<!-- uiautotester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->`. Set `summary_posted_to_issue=true` in `${ATTEMPT_STATE_FILE}`.
+    For non-`done` terminal statuses (`no_changes`, `blocked`, `failed`), Step 15 still runs — pass the appropriate `ATTEMPT_STATUS` and `BLOCK_REASON`. The summary is always posted, even on failure paths, so future continue-mode runs and reviewers can see what happened.
+16. **Finalize.** Write the terminal `status` and `updated_at` to BOTH `${ATTEMPT_STATE_FILE}` (with `attempt_finished_at`) and `${ISSUE_STATE_FILE}`. Return the compact chat summary.
 
 ---
 
@@ -355,7 +360,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-29.3",
+  "skill_version": "2026-04-29.5",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",
@@ -366,7 +371,7 @@ Return a single compact JSON summary. Examples:
 
 ```json
 {
-  "skill_version": "2026-04-29.3",
+  "skill_version": "2026-04-29.5",
   "iid": 14,
   "status": "blocked",
   "retry_count": 2,

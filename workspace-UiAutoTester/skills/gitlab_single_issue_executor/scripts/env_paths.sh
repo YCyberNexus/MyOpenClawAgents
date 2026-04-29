@@ -70,8 +70,14 @@ if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
   : "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set to bootstrap glab}"
   __ENV_PATHS_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   GITLAB_HOST="$(bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh")"
-  export GITLAB_HOST
+  if [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
+    __PIN_FILE="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)/config/gitlab.env"
+    # shellcheck disable=SC1090
+    source "${__PIN_FILE}"
+  fi
+  export GITLAB_HOST GITLAB_API_PROTOCOL
   unset __ENV_PATHS_SH_DIR
+  unset __PIN_FILE
 fi
 
 # ─── 3. Project handle ──────────────────────────────────────────────

@@ -6,7 +6,8 @@
 #   - Issue title + description
 #   - Past attempt summaries  (notes posted by uiautotester itself, marked
 #                              with <!-- uiautotester:attempt-summary ... -->)
-#   - Reviewer comments       (all OTHER non-system notes)
+#   - Reviewer comments       (all OTHER non-system notes, excluding
+#                              agent-posted Wiki artifact notes)
 #
 # In fresh mode only the first section is included.
 #
@@ -62,6 +63,7 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
 
   # Split notes:
   #   agent-posted summaries → match the marker comment
+  #   agent-posted Wiki artifact notes → ignore for prompt purposes
   #   everything else (non-system) → reviewer comments
   PAST_ATTEMPTS_BLOCK="$(echo "${NOTES_JSON}" | jq -r '
     [ .[] | select(.system == false)
@@ -75,7 +77,7 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
 
   REVIEWER_BLOCK="$(echo "${NOTES_JSON}" | jq -r '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-summary v[0-9]+ ") | not) | .body ]
+          | select(.body | test("<!-- uiautotester:attempt-(summary|attachments|wiki-artifacts) v[0-9]+ ") | not) | .body ]
     | if length == 0 then "" else (join("\n---\n")) end
   ')"
 

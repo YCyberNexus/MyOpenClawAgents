@@ -2,7 +2,7 @@
 
 All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT redefine paths inline.
 
-## Disk layout (SKILL_VERSION 2026-04-29.2+)
+## Disk layout (SKILL_VERSION 2026-04-29.5+)
 
 ```
 /data/${PROJECT}/                                         ← main git repo (host of worktrees)
@@ -27,6 +27,9 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
                     acpx_raw.log
                     git_status.txt
                     git_diff.patch
+                    wiki_artifacts.md                    (GitLab issue note body with Wiki links)
+                    wiki_artifact_links.md               (generated list of Wiki links)
+                    wiki_artifact_responses.jsonl        (raw GitLab Wiki API responses)
                 attempt-002/                             ← logs for attempt 002, preserved
                     ...
             attempt_state.json                            (current attempt; overwritten every attempt)
@@ -69,15 +72,26 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
 7. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
 
-## Required artifacts in `${LOG_DIR}`
+## Core artifacts in `${LOG_DIR}`
 
-By the end of each attempt, these MUST exist:
+By the end of each Claude run, these MUST exist:
 
 - `prompt.txt`           — the prompt fed to `acpx claude exec -f`
 - `claude_result.txt`    — stdout from acpx
 - `acpx_raw.log`         — stderr from acpx
 - `git_status.txt`       — `git status --porcelain` after the Claude run
 - `git_diff.patch`       — `git diff` after the Claude run
-- (auto-created) `mr_description.md` — body of the merge request
+
+After post-push verification succeeds and before MR creation, these are auto-created:
+
+- `wiki_artifacts.md` — issue note body linking project Wiki pages for attempt evidence
+- `wiki_artifact_links.md` — generated list of Wiki links used in the issue note
+- `wiki_artifact_responses.jsonl` — raw `projects/:id/wikis` create/update responses
+
+When a new MR is created (rather than an existing fresh-mode MR being reused), this is also auto-created:
+
+- `mr_description.md` — body of the merge request
 
 These files NEVER go into the work branch — they live under this attempt's `${LOG_DIR}`.
+
+`scripts/upload_attempt_artifacts.sh` publishes the required `prompt.txt` and `claude_result.txt`, plus the first `report.html` found anywhere under `${WORKTREE_DIR}` when present, to project Wiki pages under `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/`. If no `report.html` exists under the worktree, no report Wiki page is published.
