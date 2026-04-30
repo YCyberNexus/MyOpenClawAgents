@@ -1,4 +1,4 @@
-# UiAutoTester User Contract
+# acpx_auto_tester User Contract
 
 Use this workspace for a recurring scheduled GitLab issue campaign.
 

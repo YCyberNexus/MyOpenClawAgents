@@ -86,7 +86,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `mode_actual`             | what `prepare_attempt.sh` ended up running                                                |
 | `mode_downgraded_from`    | non-null only when `mode_actual=fresh` but `mode_requested=continue` and the remote branch was missing |
 | `no_reviewer_comments`    | continue mode only — true if `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
-| `prior_attempt_count`     | continue mode only — number of past `uiautotester:attempt-summary` notes the prompt included |
+| `prior_attempt_count`     | continue mode only — number of past `acpx_auto_tester:attempt-summary` notes (plus legacy pre-rename attempt-summary notes) the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |
 | `log_dir`                 | `${LOG_DIR}` for this attempt                                                             |
 | `wiki_artifacts_file`     | `${LOG_DIR}/wiki_artifacts.md` once `upload_attempt_artifacts.sh` has posted Wiki links to GitLab |

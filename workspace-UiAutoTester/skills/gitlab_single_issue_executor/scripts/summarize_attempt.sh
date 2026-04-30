@@ -28,9 +28,9 @@
 # build_prompt.sh runs distinguish agent-posted summaries from reviewer
 # comments:
 #
-#   <!-- uiautotester:attempt-summary v2 attempt=NNN -->
+#   <!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->
 #   ...short summary...
-#   <!-- /uiautotester:attempt-summary -->
+#   <!-- /acpx_auto_tester:attempt-summary -->
 
 set -euo pipefail
 
@@ -58,8 +58,8 @@ if [ -s "${LOG_DIR}/git_status.txt" ]; then
 fi
 
 {
-  echo "<!-- uiautotester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
-  echo "## UiAutoTester attempt ${ATTEMPT_NUMBER_PADDED}"
+  echo "<!-- acpx_auto_tester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
+  echo "## acpx_auto_tester attempt ${ATTEMPT_NUMBER_PADDED}"
   echo
   echo "- **Mode**: ${ISSUE_MODE}"
   echo "- **Status**: ${ATTEMPT_STATUS}"
@@ -94,7 +94,7 @@ fi
   fi
 
   echo
-  echo "<!-- /uiautotester:attempt-summary -->"
+  echo "<!-- /acpx_auto_tester:attempt-summary -->"
 } > "${SUMMARY_FILE}"
 
 glab api --method POST \
