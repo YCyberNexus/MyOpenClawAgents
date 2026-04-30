@@ -7,16 +7,10 @@ This page documents how human reviewers and the executor cooperate when an issue
 When you find an issue whose MR was created but the work is incomplete or wrong, the agent will not detect this on its own. Do these three things, in this order:
 
 1. **Read the latest auto-posted attempt summary on the issue.** The agent posts a short comment after every attempt with the marker `<!-- uiautotester:attempt-summary v2 ... -->`. This tells you the attempt status, commit SHA when available, MR URL when available, changed-file count / preview, and the runner evidence path for full logs and diffs. For successful push-ready attempts, the agent also posts `<!-- uiautotester:attempt-wiki-artifacts v1 ... -->` before MR creation with links to the Wiki pages for prompt/result logs and optional report.
-2. **Leave a comment on the issue describing what to do on the next run.** The comment is freeform — write whatever the next Claude Code run needs. Include any specific shell commands, file paths, env requirements, or "do not do X" cautions. A typical comment:
-
-   > Previous run did not actually execute the test. Please:
-   > 1. Confirm `tests/login.robot` exists in the repo.
-   > 2. Run `uv run robot --variable HEADLESS:True login.robot` and capture the report.
-   > 3. If the report is green, commit the report file under `reports/` and update the existing MR.
-
+2. **Leave a comment on the issue describing what to do on the next run.** The comment is freeform — write whatever the next Claude Code run needs. Include file paths, env requirements, acceptance criteria, or "do not do X" cautions.
 3. **Flip the issue's label from `done` / `pr` to `continue`.** The agent only triggers continue mode on the `continue` label.
 
-That's it. The next dispatcher tick will pick the issue up and re-run.
+The next dispatcher tick will pick the issue up and re-run.
 
 ## What the executor does on its side
 
@@ -35,8 +29,6 @@ In continue mode the executor:
    - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
    - creates a fresh MR for the new attempt with description that begins `Closes #<iid>` and includes `Supersedes !<old_mr_iid>` references so reviewers can trace the chain
    This means each continue cycle produces a distinct MR in GitLab. Reviewers see one MR per attempt. Only the latest MR is open; older ones are closed but still visible.
-
-The executor does NOT try to extract specific commands out of reviewer comments and run them itself in bash. The comments are passed to Claude Code, and Claude Code is what actually runs them — through its normal tool use, exactly like in a fresh run.
 
 ## Prompt template (continue mode)
 
@@ -106,9 +98,3 @@ This is unusual — it means continue mode triggered on an issue that has no `ui
 - All prior attempts ran on a deployment that predates SKILL_VERSION 2026-04-25.1 and never posted summaries.
 
 In this case the prompt's "Past attempt summaries" section says `(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)`. The executor still runs.
-
-## What goes in SKILL.md vs here
-
-- SKILL.md keeps the **abstract rules**: continue mode is detected from labels, prompt MUST include both buckets of notes, prompt construction is delegated here.
-- This reference is the place to look for **what the prompt actually contains** and **what reviewers must do**.
-- Specific shell commands like `uv run robot --variable HEADLESS:True login.robot` are NOT pinned anywhere in this skill. They live in the GitLab issue's reviewer comment, per issue, per run. That is by design.
