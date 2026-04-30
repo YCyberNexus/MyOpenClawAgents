@@ -64,6 +64,6 @@ Full tree, variable table, and hard rules live in [`skills/gitlab_single_issue_e
 - `/data/${PROJECT}/` — main git repo (hosts worktrees; agent never edits its working tree directly).
 - `/data/openclaw_work/${PROJECT}/` — all agent-owned files (campaign state, logs, per-issue worktrees, summaries). **Outside the repo** so `git add` cannot sweep agent artifacts into a commit.
 - Per-issue subtree: `${WORK_ROOT}/issues/issue-<iid>/` (state.json, worktree/, log/attempt-NNN/, attempt_state.json, summary.md). Every retry replaces `worktree/` and writes a new `log/attempt-NNN/`; historical attempt logs are preserved.
-- `hulat_dir` is shared, read-only, single source. Each attempt symlinks it as `_hulat` inside the worktree and copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude` for Claude Code's local runtime config. Both are git-excluded and rejected by leak guards.
+- `hulat_dir` is shared, read-only, single source. Each attempt symlinks it as `hulat` inside the worktree and copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude` for Claude Code's local runtime config. Both are git-excluded and rejected by leak guards.
 
 Claude Code invocation contract and Wiki-evidence publication contract live in the executor SKILL ([`skills/gitlab_single_issue_executor/SKILL.md`](skills/gitlab_single_issue_executor/SKILL.md) §Claude Code Execution Contract and Step 12 of the algorithm).

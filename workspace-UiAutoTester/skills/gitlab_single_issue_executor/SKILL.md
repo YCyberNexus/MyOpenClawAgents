@@ -17,13 +17,13 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/env_paths.sh` — populates issue-level and current-attempt path variables (SOURCE it; the dispatcher supplies the attempt number).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/clone_or_pull.sh` — keep the main repo's refs current (no working-tree edits; worktrees do that).
-- `scripts/prepare_attempt.sh` — replace the issue's current git worktree, set up the `_hulat` symlink, copy local `.claude` runtime config, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
+- `scripts/prepare_attempt.sh` — replace the issue's current git worktree, set up the `hulat` symlink, copy local `.claude` runtime config, write `.git/info/exclude`. Replaces the old `prepare_branch.sh`.
 - `scripts/build_prompt.sh` — build `${LOG_DIR}/prompt.txt` from the live issue + (continue mode) past-attempt summaries + reviewer comments. See `references/continue_mode.md` for the template.
 - `scripts/ensure_labels.sh` — make sure the seven workflow labels exist.
 - `scripts/set_issue_label.sh` — add or remove a single label (used for every transition).
-- `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `_hulat`, `.claude`).
+- `scripts/stage_and_guard.sh` — `git add -A` inside the worktree + leak guard (rejects `openclaw_log/`, `openclaw_state/`, `hulat`, `.claude`).
 - `scripts/commit_and_push.sh` — commit and FORCE-push the per-attempt local branch to the SINGLE remote `${WORK_BRANCH}` (Strategy A).
-- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts, no `_hulat`, and no `.claude`.
+- `scripts/post_push_verify.sh` — confirm the remote branch contains no agent artifacts, no `hulat`, and no `.claude`.
 - `scripts/upload_attempt_artifacts.sh` — before `done` labeling and MR creation, publish attempt-scoped `prompt.txt`, `claude_result.txt`, and optional `report.html` to the project Wiki and link them from the GitLab issue.
 - `scripts/create_mr.sh` — fresh mode: reuse the existing open MR for `${WORK_BRANCH}` if any, else create one (Strategy A). Continue mode: close all existing open MRs for `${WORK_BRANCH}` (without merging) and create a fresh one that references the closed predecessor(s) — each continue cycle leaves a visible MR trail in GitLab.
 - `scripts/summarize_attempt.sh` — write `${SUMMARY_FILE}` and post it as a GitLab issue note so future continue-mode runs can read what past attempts did.
@@ -91,13 +91,13 @@ The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is constructed from the deplo
 
 ## Repo Cleanliness Policy (READ FIRST — HARD RULE)
 
-The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues, no `_hulat` symlink, no local `.claude` runtime config.
+The pushed work branch MUST contain ONLY this issue's code changes. No agent logs, no agent state, no artifacts from other issues, no `hulat` symlink, no local `.claude` runtime config.
 
 - All agent-owned files live under `${ISSUE_ROOT}`. `${ATTEMPT_DIR}` is a compatibility alias for `${ISSUE_ROOT}`; there is no `attempts/attempt-NNN/` subtree. See `references/paths.md`.
 - `${WORKTREE_DIR}` is the only directory the executor allows Claude Code to modify. It is a real `git worktree` of `${REPO_PATH}` — `git add -A` here only sees repo-tracked content.
-- `_hulat` is a symlink inside `${WORKTREE_DIR}` pointing at `${HULAT_DIR}` for read-only config access. `scripts/prepare_attempt.sh` adds `/_hulat` to `.git/info/exclude` for the worktree.
+- `hulat` is a symlink inside `${WORKTREE_DIR}` pointing at `${HULAT_DIR}` for read-only config access. `scripts/prepare_attempt.sh` adds `/hulat` to `.git/info/exclude` for the worktree.
 - `.claude` is copied from `${HULAT_DIR}/ifp-hulat/.claude` into `${WORKTREE_DIR}/.claude` before `acpx claude exec` runs, because Claude Code requires this local runtime config. `scripts/prepare_attempt.sh` adds `/.claude` to `.git/info/exclude` for the worktree. If the source directory is missing, preparation fails instead of invoking Claude Code without required config.
-- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/`, `openclaw_state/`, `_hulat`, or `.claude` path appears in the staged tree.
+- `scripts/stage_and_guard.sh` aborts with exit 3 if any `openclaw_log/`, `openclaw_state/`, `hulat`, or `.claude` path appears in the staged tree.
 - `scripts/post_push_verify.sh` aborts with exit 4 if the remote branch contains any such path.
 
 If either guard trips, mark the issue `blocked`. Do NOT attempt to push or open an MR.
@@ -167,7 +167,7 @@ This is the ONLY way the executor is allowed to invoke Claude Code. It is govern
   - dropping or changing `--auth-policy skip` — forbidden
   - calling `claude` directly without acpx — forbidden
   - any non-Claude LLM CLI as a substitute (`openai`, `gemini`, `ollama`, etc.) — forbidden
-- Claude must write only inside `${WORKTREE_DIR}`. It MUST NOT write into `${REPO_PATH}` (the main repo's working tree), `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else. Reading from `${WORKTREE_DIR}/_hulat` (the symlink) is fine; writing through that symlink is forbidden. `${WORKTREE_DIR}/.claude` is local runtime config copied before invocation; Claude must not modify it or include it in issue output.
+- Claude must write only inside `${WORKTREE_DIR}`. It MUST NOT write into `${REPO_PATH}` (the main repo's working tree), `${WORK_ROOT}`, `${HULAT_DIR}`, or anywhere else. Reading from `${WORKTREE_DIR}/hulat` (the symlink) is fine; writing through that symlink is forbidden. `${WORKTREE_DIR}/.claude` is local runtime config copied before invocation; Claude must not modify it or include it in issue output.
 
 ### What to do when this contract fails
 
@@ -237,7 +237,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 6. **Initialize current-attempt state and refresh per-issue state.** Per `references/state_schema.md`:
    - `${ATTEMPT_STATE_FILE}` (overwritten for the current run) — write `iid`, `attempt_number`, `attempt_started_at`, `mode_requested=${ISSUE_MODE}`, `log_dir=${LOG_DIR}`, `skill_version`. Other fields filled in as the algorithm progresses.
    - `${ISSUE_STATE_FILE}` — write/update `status=in_progress`, `mode="${ISSUE_MODE}"`, `attempts_total=${ATTEMPT_NUMBER}`, `latest_attempt_number=${ATTEMPT_NUMBER}`, `latest_attempt_dir=${ATTEMPT_DIR}`, increment `retry_count` if this is a retry, set `skill_version`, `updated_at`.
-7. **Prepare the issue worktree for this attempt.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script replaces `${WORKTREE_DIR}`, recreates only this attempt's `${LOG_DIR}`, links `${WORKTREE_DIR}/_hulat`, copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude`, and excludes both local-only paths from git. It prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
+7. **Prepare the issue worktree for this attempt.** `ISSUE_MODE="${ISSUE_MODE}" bash scripts/prepare_attempt.sh`. The script replaces `${WORKTREE_DIR}`, recreates only this attempt's `${LOG_DIR}`, links `${WORKTREE_DIR}/hulat`, copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude`, and excludes both local-only paths from git. It prints two lines: the actual mode (`fresh` or `continue`) and `${LOCAL_ATTEMPT_BRANCH}`. If a downgrade happened (continue requested but no remote branch), set `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}`. Otherwise `mode_actual` matches `mode_requested`. Write `local_branch=${LOCAL_ATTEMPT_BRANCH}` into `${ATTEMPT_STATE_FILE}`.
 8. **Build the prompt and run Claude Code.**
    1. `UI_ACCOUNT="${UI_ACCOUNT}" UI_PASSWORD="${UI_PASSWORD}" bash scripts/build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`). In continue mode this fetches issue notes (E1b) and partitions them into "past attempt summaries" + "reviewer comments". The `UI_ACCOUNT` / `UI_PASSWORD` env vars come from the trigger fields `ui_account` / `ui_password` allocated by the dispatcher; the script appends them to the prompt's `# Working environment` section. If either env var is empty, `build_prompt.sh` exits non-zero — mark the issue `blocked` with `block_reason="missing required input: ui_account"` (or `ui_password`).
    2. Capture stderr — record `no_reviewer_comments` and `prior_attempt_count` into `${ATTEMPT_STATE_FILE}`.

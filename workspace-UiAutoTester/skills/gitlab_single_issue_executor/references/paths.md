@@ -17,7 +17,7 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
         issue-${ISSUE_IID}/                               ← per-issue, owned by executor
             state.json                                    (cross-attempt)
             worktree/                                     ← Claude Code's cwd; replaced every attempt
-                _hulat → ${HULAT_DIR}                     (symlink, .git/info/exclude'd)
+                hulat → ${HULAT_DIR}                      (symlink, .git/info/exclude'd)
                 .claude/                                  (copy of ${HULAT_DIR}/ifp-hulat/.claude, .git/info/exclude'd)
                 ...repo files...
             log/
@@ -65,8 +65,8 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 ## Hard rules
 
 1. `REPO_PATH`'s **working tree** is never edited. The agent uses `git worktree add` to create the issue worktree at `${WORKTREE_DIR}`, replacing it at the start of each attempt.
-2. All agent-owned files (logs, prompts, state, summaries) live under `${ISSUE_ROOT}`. None of them go inside `${WORKTREE_DIR}`. The only local-only non-repo content allowed in the worktree is the `_hulat` symlink and `.claude` runtime config described below; leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) keep both out of commits.
-3. **`hulat_dir` is shared, read-only, single source.** Each attempt creates a symlink at `${WORKTREE_DIR}/_hulat` pointing to `${HULAT_DIR}`. `_hulat` is excluded from the worktree's git via `.git/info/exclude` and explicitly rejected by both leak guards. Do NOT modify anything under `${HULAT_DIR}` from inside an attempt.
+2. All agent-owned files (logs, prompts, state, summaries) live under `${ISSUE_ROOT}`. None of them go inside `${WORKTREE_DIR}`. The only local-only non-repo content allowed in the worktree is the `hulat` symlink and `.claude` runtime config described below; leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) keep both out of commits.
+3. **`hulat_dir` is shared, read-only, single source.** Each attempt creates a symlink at `${WORKTREE_DIR}/hulat` pointing to `${HULAT_DIR}`. `hulat` is excluded from the worktree's git via `.git/info/exclude` and explicitly rejected by both leak guards. Do NOT modify anything under `${HULAT_DIR}` from inside an attempt.
 4. Claude Code runtime config is the only copied Hulat material: `${HULAT_DIR}/ifp-hulat/.claude` is copied to `${WORKTREE_DIR}/.claude` before `acpx` runs. `.claude` is local-only, excluded from git, and rejected by both leak guards.
 5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt replaces `${WORKTREE_DIR}`, recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/`; historical summaries are preserved as GitLab issue notes.
 6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
