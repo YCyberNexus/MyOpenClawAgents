@@ -2,7 +2,7 @@
 
 All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT redefine paths inline.
 
-## Disk layout (SKILL_VERSION 2026-04-29.5+)
+## Disk layout (SKILL_VERSION 2026-04-30.1+)
 
 ```
 /data/${PROJECT}/                                         ← main git repo (host of worktrees)
@@ -15,7 +15,6 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
             reconcile-<ts>.json                           (dispatcher-global)
     issues/
         issue-${ISSUE_IID}/                               ← per-issue, owned by executor
-            (Claude session root for acpx --cwd)
             state.json                                    (cross-attempt)
             worktree/                                     ← Claude Code's cwd; replaced every attempt
                 _hulat → ${HULAT_DIR}                     (symlink, .git/info/exclude'd)
@@ -48,8 +47,6 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 | `ISSUE_ROOT`         | `${WORK_ROOT}/issues/issue-${ISSUE_IID}`           | this issue's full subtree                                |
 | `ISSUE_STATE_FILE`   | `${ISSUE_ROOT}/state.json`                         | cross-attempt per-issue state                            |
 | `WORK_BRANCH`        | `issue/${ISSUE_IID}-auto-fix`                      | the SINGLE remote branch (Strategy A)                    |
-| `CLAUDE_SESSION_NAME` | `issue-${PROJECT}-${ISSUE_IID}`                    | persistent Claude Code session name for this IID         |
-| `CLAUDE_SESSION_DIR` | `${ISSUE_ROOT}`                                    | acpx `--cwd` / session root; persists across attempts    |
 
 ### Attempt-level (set from `ATTEMPT_NUMBER` env var, which the trigger supplies; env_paths.sh does NOT auto-allocate)
 
@@ -73,20 +70,18 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 4. Claude Code runtime config is the only copied Hulat material: `${HULAT_DIR}/ifp-hulat/.claude` is copied to `${WORKTREE_DIR}/.claude` before `acpx` runs. `.claude` is local-only, excluded from git, and rejected by both leak guards.
 5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt replaces `${WORKTREE_DIR}`, recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/`; historical summaries are preserved as GitLab issue notes.
 6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
-7. Claude Code session state is persistent per issue: create/use `${CLAUDE_SESSION_NAME}` under `${CLAUDE_SESSION_DIR}` and invoke Claude with `acpx --cwd "${CLAUDE_SESSION_DIR}" claude -s "${CLAUDE_SESSION_NAME}" ...`. Do not use the default acpx/Claude session or a session shared with another IID.
+7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}`. Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
 8. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
 
 ## Core artifacts in `${LOG_DIR}`
 
 By the end of each Claude run, these MUST exist:
 
-- `prompt.txt`           — the prompt fed to the per-issue Claude session
+- `prompt.txt`           — the prompt fed to `acpx claude exec -f`
 - `claude_result.txt`    — stdout from acpx
 - `acpx_raw.log`         — stderr from acpx
 - `git_status.txt`       — `git status --porcelain` after the Claude run
 - `git_diff.patch`       — `git diff` after the Claude run
-
-When the per-issue Claude session is first created, the executor also writes `claude_session_new.txt` and `acpx_session_new.log` in that attempt's `${LOG_DIR}`.
 
 After post-push verification succeeds and before MR creation, these are auto-created:
 

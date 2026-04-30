@@ -108,7 +108,7 @@ The trigger's `gitlab_address` is verified against this pin on every tick. A mis
 
 See `<workspace>/config/README.md` for setup steps and rationale.
 
-## Disk State Layout (SKILL_VERSION 2026-04-29.5+)
+## Disk State Layout (SKILL_VERSION 2026-04-30.1+)
 
 ```
 /data/<project>/                              ← main git repo (host of worktrees)
@@ -121,7 +121,6 @@ See `<workspace>/config/README.md` for setup steps and rationale.
             reconcile-<ts>.json
     issues/
         issue-<iid>/
-            (Claude Code session root for acpx --cwd)
             state.json                        ← cross-attempt per-issue state
             worktree/                         ← Claude Code's cwd (git worktree), replaced every attempt
                 _hulat → <hulat_dir>          (symlink, .git/info/exclude'd)
@@ -137,6 +136,6 @@ The previous flat layout (`/data/<project>/openclaw_state/issues/issue-<iid>.jso
 
 `hulat_dir` is shared across all issues / attempts via a symlink and remains read-only. The only copied Hulat material is Claude Code runtime config: each attempt copies `<hulat_dir>/ifp-hulat/.claude` to its worktree root as local-only `.claude/`, excluded from git and never pushed.
 
-Claude Code sessions are persistent per issue, not one-shot `exec` runs. The executor creates / reuses session `issue-<project>-<iid>` from the issue root (`/data/openclaw_work/<project>/issues/issue-<iid>/`) and invokes Claude from `worktree/` with `acpx --cwd <issue-root> claude -s issue-<project>-<iid> <prompt>`, so retries can use the same Claude session memory.
+Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f <prompt-file>` from the worktree directory. Per-attempt continuity comes from the prompt itself — `build_prompt.sh` re-injects past attempt summaries and reviewer comments in continue mode — not from a shared Claude session. Persistent / named acpx sessions (`-s`) are forbidden because they do not terminate cleanly under the non-interactive scheduler.
 
 Before an issue is changed from `doing` to `done` and before its MR is created / rotated, the single-issue executor publishes attempt-scoped evidence to the GitLab project Wiki and links it from the issue: `log/attempt-<NNN>/prompt.txt` as `/-/wikis/issue<IID>/attempt-<NNN>/prompt.txt`, `log/attempt-<NNN>/claude_result.txt` as `/-/wikis/issue<IID>/attempt-<NNN>/claude_result.txt`, and the first `report.html` found under `worktree/` (if any) as `/-/wikis/issue<IID>/attempt-<NNN>/report.html`. After MR creation / rotation succeeds, the executor adds `pr` and leaves both `done` and `pr` labels present. If no `report.html` exists under the worktree, no report Wiki page is published.

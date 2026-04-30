@@ -25,10 +25,9 @@
 #
 # Outputs (exported into the calling shell):
 #   path vars: REPO_PATH, WORK_ROOT, ISSUE_ROOT, ISSUE_STATE_FILE,
-#              WORK_BRANCH, CLAUDE_SESSION_NAME, CLAUDE_SESSION_DIR,
-#              ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR,
-#              ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE,
-#              SUMMARY_FILE, LOCAL_ATTEMPT_BRANCH
+#              WORK_BRANCH, ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR,
+#              WORKTREE_DIR, ISSUE_LOG_ROOT, LOG_DIR,
+#              ATTEMPT_STATE_FILE, SUMMARY_FILE, LOCAL_ATTEMPT_BRANCH
 #   glab vars: GITLAB_HOST, GITLAB_API_PROTOCOL
 #   project vars: PROJECT_FULL, PROJECT_URI
 
@@ -44,8 +43,6 @@ export WORK_ROOT="/data/openclaw_work/${PROJECT}"
 export ISSUE_ROOT="${WORK_ROOT}/issues/issue-${ISSUE_IID}"
 export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
 export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
-export CLAUDE_SESSION_NAME="issue-${PROJECT}-${ISSUE_IID}"
-export CLAUDE_SESSION_DIR="${ISSUE_ROOT}"
 
 mkdir -p "${ISSUE_ROOT}"
 

@@ -34,7 +34,6 @@ blocked_policy=skip_and_retry
 
 - same dispatcher session every scheduler tick
 - one dedicated session per issue
-- one persistent Claude Code session per issue, stored under that issue's work root
 - backlog carryover
 - blocked issues may be skipped temporarily and retried later
 - remaining quota should be used on later issues when possible
