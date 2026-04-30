@@ -42,7 +42,7 @@ This agent is allowed to start at most `max_concurrent_subagents` issue subagent
 Hard invariants:
 
 1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions.
-2. **One IID, one in-flight subagent.** Two subagents MUST NEVER work on the same `${ISSUE_IID}` concurrently. Per-IID work is always serial across attempts; only DIFFERENT IIDs may run in parallel. Because thread-bound runtime keys may be anonymous, each spawn MUST carry a deterministic label `issue-<iid>_attempt#<attempt_number>`.
+2. **One IID, one in-flight subagent.** Two subagents MUST NEVER work on the same `${ISSUE_IID}` concurrently. Per-IID work is always serial across attempts; only DIFFERENT IIDs may run in parallel.
 3. **Bounded batches.** When there are more eligible IIDs than open slots, the dispatcher picks at most `max_concurrent_subagents` IIDs, spawns them in a single tool-call batch (parallel `sessions_spawn`), waits for the WHOLE batch to return, re-reads each per-issue state file, then forms the next batch.
 4. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered.
 5. `max_concurrent_subagents=1` (the default) MUST behave exactly like the legacy strictly-serial model: one IID at a time, one spawn per tool-call batch.

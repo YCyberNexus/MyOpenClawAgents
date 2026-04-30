@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-04-29.7] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-04-30.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-04-29.7**
+**SKILL_VERSION: 2026-04-30.1**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-29.7` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-04-30.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -74,7 +74,7 @@ This dispatcher operates over issues in **bounded batches of size `max_concurren
 - The two dials are **independent**:
   - `max_concurrent_subagents` = how many subagents may be in flight at the same time (parallelism width).
   - `hourly_issue_quota` = how many issues must reach a terminal state in this tick (per-tick completion count). It is NOT a parallelism knob.
-- **Same IID never runs twice in parallel.** Per-IID work is always serial across attempts. The dispatcher-owned `active_issue_iids` list is the scheduling guard, and the `issue-<iid>_attempt#<attempt_number>` spawn label is the operator-facing audit trail. Cross-IID parallelism is bounded by `max_concurrent_subagents`.
+- **Same IID never runs twice in parallel.** Per-IID work is always serial across attempts. The session name `issue-<project>-<iid>` is the structural guarantee. Cross-IID parallelism is bounded by `max_concurrent_subagents`.
 - **Batch shape.** When picking the next batch:
   - Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh).
   - Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call). Concurrent allocation would race on `attempts_total` even though each IID has its own state file — a single Bash batch makes the order observable in logs.
@@ -82,7 +82,7 @@ This dispatcher operates over issues in **bounded batches of size `max_concurren
 - **Wait for the WHOLE batch before forming the next.** No fire-and-forget, no rolling pool. Every spawn must return its terminal reply before the dispatcher re-reads per-issue state and considers the next batch. This means a slow IID inside a batch can stall faster IIDs in the same batch — that is the explicit trade-off for simplicity and predictable time-budget accounting.
 - A `childSessionKey`, session id, thread id, or "created" acknowledgement is NOT a terminal executor reply. If the runtime returns only child-session identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait operation as failed or unsupported for this tick. Do NOT report "batch in flight" as success, and do NOT leave `active_issue_iids` populated on the assumption that detached child sessions are running.
 - If `sessions_spawn` returns `thread_required`, the dispatcher call was malformed: rerun the spawn in the same tick only if no executor session actually started, using the required `mode="session"` + `thread=true` arguments. If it returns `thread_binding_invalid`, `spawn_failed`, or `ACP runtime backend is currently unavailable`, treat that as a runtime/backend capability failure and do not try a different spawn mode.
-- With `thread=true`, the runtime may create an anonymous key such as `agent:<name>:subagent:<uuid>`. That is acceptable ONLY if the spawn request used the required deterministic label `issue-<iid>_attempt#<attempt_number>` and the terminal executor reply is returned. The label is the operator-facing identifier; do not leave it empty or `(optional)`.
+- Anonymous child keys such as `agent:<name>:subagent:<uuid>` are NOT dedicated issue sessions. A successful issue spawn MUST target or return the deterministic session name `issue-<project>-<iid>`. If the runtime creates an anonymous subagent instead, treat it as a spawn failure for that IID.
 - **Time budget is checked between batches, not within a batch.** Once a batch is spawned, the dispatcher commits to waiting for all members; the `max_runtime_minutes` check happens at the top of the next batch loop iteration.
 - Background / no-wait / fire-and-forget spawn modes are forbidden for issue sessions.
 
@@ -208,8 +208,8 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 3. The dispatcher sends each executor a single `RUN_SINGLE_ISSUE_SESSION` message (see executor SKILL for the full payload).
 4. **Bounded batch.** A batch contains at most `max_concurrent_subagents` distinct IIDs. The dispatcher spawns the whole batch in one tool-call block (parallel `sessions_spawn`), blocks on every spawn's terminal reply, re-reads each per-issue state file, only then considers the next batch. Runtime responses that only contain `childSessionKey` / session ids / "created" acknowledgements do not satisfy this rule.
 5. **Thread-bound session mode only.** Each `sessions_spawn` call MUST use `mode="session"` and `thread=true`. `mode="session"` without `thread=true` fails with `thread_required`; any fallback that avoids thread binding is forbidden because the dispatcher must wait for a terminal executor reply.
-6. **Deterministic labels.** Each `sessions_spawn` call MUST set `label="issue-<iid>_attempt#<attempt_number>"`, for example `issue-38_attempt#4`. This label is required because thread-bound runtime keys may be anonymous UUID-based subagent keys.
-7. **Distinct IIDs only.** Two `sessions_spawn` calls in the same batch MUST target different IIDs. Same-IID parallelism is forbidden (see Concurrency Policy above). The dispatcher-owned `active_issue_iids` list and deterministic label make the in-flight IID binding auditable even if the runtime key is anonymous.
+6. **Deterministic session names only.** Each `sessions_spawn` call MUST target the exact session name `issue-<project>-<iid>`. Do NOT accept anonymous runtime-generated keys like `agent:<name>:subagent:<uuid>` as a substitute.
+7. **Distinct IIDs only.** Two `sessions_spawn` calls in the same batch MUST target different IIDs. Same-IID parallelism is forbidden (see Concurrency Policy above). The session-name derivation `issue-<project>-<iid>` is the structural guarantee.
 8. **`active_issue_iids` is updated atomically per batch.** Before spawning a batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. After the batch returns and per-issue states are re-read, remove every batch member from `active_issue_iids` (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress`/budget-exhausted IIDs go back to `unfinished_iids`) and persist again. The list MUST never exceed `max_concurrent_subagents` entries.
 9. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, form a fresh batch.
 
@@ -293,7 +293,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`. Do all allocations BEFORE any `sessions_spawn`. Sequential allocation is mandatory — concurrent allocation would race even though each IID has its own state file (the order needs to be observable in dispatcher logs, and the script is cheap so serializing costs nothing).
    4. **Allocate UI accounts for the batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the batch (k=0..batch_size-1). On any non-zero exit code (10/11/12/13 — see UI Account Allocation Policy above), abort the tick with a one-line failure summary; do not spawn the batch.
    5. **Update `active_issue_iids` + persist.** Append every IID in the batch (and corresponding session names in `active_issue_sessions`) to `campaign_state.json`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
-   6. **Spawn the batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID, all in the same parallel block. Each spawn MUST use `mode="session"` and `thread=true`, and MUST set `label="issue-<iid>_attempt#<N_iid>"` (for example `issue-38_attempt#4`). Thread-bound runtime keys may be anonymous `agent:<name>:subagent:<uuid>` values; the label is the required human-visible issue/attempt identifier. Each spawn sends `RUN_SINGLE_ISSUE_SESSION` with payload:
+   6. **Spawn the batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID, all in the same parallel block. Each spawn MUST use `mode="session"` and `thread=true`, and MUST target the exact dedicated session name `issue-<project>-<iid>`; anonymous `agent:<name>:subagent:<uuid>` keys are not acceptable. Each spawn sends `RUN_SINGLE_ISSUE_SESSION` with payload:
       - `branch=` (target / integration branch, typically `master`)
       - `dev_branch=` (clean baseline branch from which fresh-mode worktrees are checked out)
       - `attempt_number=N_iid` (the value allocated in sub-step 3 above for THIS IID)
@@ -338,7 +338,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-04-29.7",
+  "skill_version": "2026-04-30.1",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],
