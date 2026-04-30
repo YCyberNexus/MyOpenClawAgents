@@ -25,7 +25,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-04-29.4",
+  "skill_version": "2026-04-30.2",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260425T100501Z.json",
   "updated_at": "2026-04-25T10:05:30Z"
 }
@@ -60,7 +60,7 @@ The dispatcher MUST NOT keep both the scalar and the array fields in the persist
 - `running`
 - `completed`
 
-`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live labels contain both `done` and `pr`) AND `needs_continue == false` in the evidence file.
+`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live state is `closed` OR live labels contain both `done` and `pr`) AND `needs_continue == false` in the evidence file.
 
 ## issue-<iid>/state.json (per-issue, owned by executor)
 

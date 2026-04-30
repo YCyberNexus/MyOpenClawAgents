@@ -19,13 +19,16 @@
 #       "state":             "opened" | "closed" | null,
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
-#       "is_done_on_gitlab": bool,   # labels include both "done" and "pr"
-#       "user_reopened":     bool,   # no completed pair and no failed/blocked/continue label
-#       "needs_continue":    bool,   # labels include literal "continue"
+#       "has_done_pr":       bool,   # labels include both "done" and "pr"
+#       "is_closed_on_gitlab": bool,  # state is "closed"
+#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR done+pr
+#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue label
+#       "needs_continue":    bool,   # opened and labels include literal "continue"
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
 #
 # Semantics for the dispatcher (consumed in Source-of-Truth Policy):
+#   - `is_closed_on_gitlab == true`                       → finished, skip
 #   - `is_done_on_gitlab == true` AND no `needs_continue` → finished, skip
 #   - `needs_continue == true`                            → re-enqueue; the
 #         executor will re-run the resolution flow against the existing
@@ -34,8 +37,9 @@
 #         scratch (label was reverted to todo / doing, or is done-only
 #         before MR / pr completion)
 #
-# `needs_continue` wins over every other label combination. The jq below
-# keeps `needs_continue` and `user_reopened` mutually exclusive.
+# Closed issue state wins over every label combination, including `continue`.
+# For opened issues, `needs_continue` wins over every other label combination.
+# The jq below keeps `needs_continue` and `user_reopened` mutually exclusive.
 
 set -euo pipefail
 
@@ -58,23 +62,27 @@ for iid in $(seq "${MIN_IID}" "${MAX_IID}"); do
       . as $issue |
       ($issue.labels // []) as $labels |
       (($labels | index("done") != null) and ($labels | index("pr") != null)) as $done_with_pr |
+      ($issue.state == "closed") as $closed |
       {
         iid: $iid,
         state: $issue.state,
         labels: $labels,
         title: $issue.title,
-        is_done_on_gitlab: $done_with_pr,
+        has_done_pr: $done_with_pr,
+        is_closed_on_gitlab: $closed,
+        is_done_on_gitlab: ($closed or $done_with_pr),
         user_reopened: (
+          ($closed | not) and
           ($done_with_pr | not) and
           ($labels | index("failed") == null) and
           ($labels | index("blocked") == null) and
           ($labels | index("continue") == null)
         ),
-        needs_continue: ($labels | index("continue") != null),
+        needs_continue: (($closed | not) and ($labels | index("continue") != null)),
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, is_done_on_gitlab:false, user_reopened:false, needs_continue:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, user_reopened:false, needs_continue:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"
