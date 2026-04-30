@@ -49,6 +49,70 @@ Hard invariants:
 
 This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out beyond `max_concurrent_subagents`. `hourly_issue_quota` remains a *count of completed issues per tick*, not a parallelism knob — they are independent dials.
 
+## Shared Operational Policies (HARD RULES)
+
+These policies apply to BOTH the dispatcher and the single-issue executor. They live here once; SKILL.md files reference this section instead of restating the rules. Per-skill specifics (which prohibitions are role-specific, how a violation maps to status) live in each SKILL.md's matching section.
+
+### No-Fallback
+
+Both roles MUST follow the prescribed method exactly. When the prescribed method fails, the role fails the affected unit of work and stops — it does NOT improvise. A clean controlled failure is strictly better than an unsupervised alternative.
+
+Universal prohibitions:
+
+1. If a script in `scripts/` exits non-zero, do NOT rewrite its logic inline, skip and "do it manually", or substitute a "simpler" command. Read stdout/stderr, classify, persist state, stop.
+2. If `glab` cannot do something, do NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library.
+3. If a required input is missing or malformed, abort the affected unit of work. Do NOT guess defaults beyond those explicitly listed in `references/trigger_command.md`.
+4. If a SKILL algorithm step produces an unexpected result, stop and record the failure. Do NOT invent a recovery path that is not in the SKILL.
+
+If you find yourself reaching for a tool, command, flag, or workflow that is not explicitly listed in the relevant SKILL, in `scripts/`, or in `references/`, that is the signal to stop and fail — not to try harder.
+
+### GitLab Access
+
+Both roles MUST access GitLab exclusively through the `glab` CLI, via `scripts/` and the commands listed in the role's `references/glab_commands.md`.
+
+Forbidden:
+
+- `curl`, `wget`, `http`, `httpie`, any HTTP library (`requests`, `urllib`, `python-gitlab`, `@gitbeaker/*`, etc.)
+- Any custom shell function that wraps an HTTP call to a `*/api/v4/*` URL
+- Any `glab` subcommand or flag not listed in `references/glab_commands.md`
+- Full-set label overwrite (`-f labels=...`) for transitions — wipes manually-added labels
+- `glab mr merge` (executor only; dispatcher does not touch MRs)
+
+If `glab auth status` fails after `scripts/glab_auth.sh`, the role surfaces a tick-level / per-issue failure (see SKILL for the mapping). Do NOT silently switch to curl.
+
+**Do NOT pass `--hostname` to `glab api` calls.** `scripts/glab_auth.sh` exports `GITLAB_HOST` as an env var; glab reads that natively. Passing `--hostname` with a `host:port` value confuses glab's URL resolution for some subcommands and historically caused the agent to spin trying alternative invocations. The single allowed convention is: rely on the exported `GITLAB_HOST`, drop `--hostname` everywhere.
+
+### GitLab Host Pinning
+
+The GitLab host and protocol are **pinned at deployment time in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every tick / run. See `<workspace>/config/README.md` for setup.
+
+- Roles MUST read the host via `scripts/glab_auth.sh`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
+- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` aborts non-zero if it does not match the pin. Each role surfaces that as a tick-level / per-issue failure.
+- `gitlab_token` from the trigger refreshes `glab auth login` against the pinned host (token rotation works). The host itself never changes from a trigger input.
+
+If `config/gitlab.env` is missing or malformed (`scripts/glab_auth.sh` exits 10/11/12), the deployment is incomplete; the role aborts with a one-line operator-facing summary.
+
+### Per-Exec Env Contract
+
+OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports do NOT survive to the next exec. Every `scripts/*.sh` self-bootstraps by sourcing `env_paths.sh` at its top — but `env_paths.sh` needs the minimum trigger inputs in env at every call.
+
+The exact minimum env list is role-specific (see each SKILL's "Per-Exec Env Contract"). The universal rule: every Bash exec MUST export the minimum vars at the front of the command line. Never rely on exports from a previous Bash tool call.
+
+### Working Directory
+
+All `scripts/...` / `references/...` paths in each SKILL are relative to that skill's own directory (the directory containing its SKILL.md).
+
+Before issuing ANY `bash scripts/...` command, the role MUST `cd` into the skill directory in the same shell session. Otherwise relative paths resolve against whatever cwd OpenClaw started the session in.
+
+Bootstrap snippet, run ONCE per session before anything else:
+
+```bash
+SKILL_DIR="<absolute path of this SKILL.md's parent>"
+cd "${SKILL_DIR}"
+```
+
+Do NOT invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` / `ls`. The single allowed convention: `cd ${SKILL_DIR}` once, then invoke scripts by relative path. Some algorithm steps (e.g. acpx in the executor) explicitly switch cwd and switch back; those are documented in the relevant SKILL.
+
 ## Source of Truth
 
 GitLab live labels are the source of truth for per-issue workflow state. Disk state is the dispatcher's progress cache and must be corrected from GitLab reconciliation before any "already done" / skip / early-return decision.

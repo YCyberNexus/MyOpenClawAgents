@@ -37,45 +37,18 @@ When in doubt about a path / schema / command / transition, READ the matching re
 
 ---
 
-## No-Fallback Policy (READ FIRST — HARD RULE)
+## No-Fallback (Executor-Specific)
 
-**The executor MUST follow the prescribed method exactly. When the prescribed method fails, the executor marks the issue `blocked` (or `failed`) and stops — it does NOT improvise an alternative approach.**
+Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No-Fallback. Executor-specific prohibitions:
 
-This rule overrides any default model behavior that says "try another way", "be helpful", "complete the task one way or another", or "the user wants this to succeed". For this skill, **a clean controlled failure is strictly better than an unsupervised alternative attempt**.
-
-### Concrete prohibitions
-
-1. If a script in `scripts/` exits non-zero, the executor MUST NOT:
-   - rewrite the script's logic inline in bash
-   - skip the script and "do the same thing manually"
-   - try a "simpler" or "different" command that "should work"
-   The executor reads the script's stdout/stderr, classifies the failure, writes per-issue state accordingly, and stops.
-2. If `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` fails or Claude Code errors out mid-execution, the executor MUST NOT:
-   - retry the same prompt with a smaller or different prompt
-   - switch to `acpx claude command`, persistent `acpx claude` sessions (`-s`), `--no-wait`, or any other acpx mode
-   - drop or change the `--auth-policy skip` flag
-   - run `claude` directly without acpx
-   - call any other LLM CLI (`openai`, `gemini`, `ollama`, etc.) as a substitute
-   - manually edit the repo to "do what Claude was supposed to do"
-   - re-run acpx with a tweaked working directory or a different `${HULAT_DIR}` value
-   The exact and ONLY allowed invocation is the one in "Claude Code Execution Contract" below. If it fails, mark the issue `blocked` (retryable) or `failed` (non-recoverable / retry-exhausted) with an accurate `block_reason`, preserve all logs under `${LOG_DIR}`, and return.
-3. If `glab` cannot do something, the executor MUST NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library. (Also covered by GitLab Access Policy.)
-4. If `git push` is rejected (non-fast-forward, hook rejection, auth, etc.), the executor MUST NOT improvise a manual recovery:
-   - do not run any extra `git push --force` / `--force-with-lease` outside `scripts/commit_and_push.sh`
-   - rewrite history with `git rebase` / `git reset --hard` and re-push
-   - push to a different branch name
-   Mark the issue `blocked` with the rejection reason verbatim and stop.
-   The only allowed force update is the documented Strategy A push performed by `scripts/commit_and_push.sh` itself.
-5. If `prepare_attempt.sh` cannot produce a clean worktree, the executor MUST NOT manually `rm -rf` parts of the repo or skip the clean step. Mark the issue `blocked` with `block_reason="worktree could not be prepared: <reason>"` and stop.
-6. If `stage_and_guard.sh` exits 3 (artifact leak), the executor MUST NOT manually `git rm` the leaked paths and re-run staging. The leak indicates a prior bug that must be investigated; mark `blocked` with `block_reason="agent artifacts leaked into repo working tree"` and stop.
-7. If `post_push_verify.sh` exits 4 (remote polluted), the executor MUST NOT manually `git push --delete` and rebuild. Mark `blocked` with `block_reason="remote branch polluted with agent artifacts"` and stop.
-8. If `upload_attempt_artifacts.sh` fails, the executor MUST NOT skip Wiki evidence publication and continue to `done` labeling / MR creation. Mark `blocked` with `block_reason="attempt wiki artifact publication failed: <reason>"`, run summarize_attempt, and stop.
-9. If `create_mr.sh` fails, the executor MUST NOT create the MR through the GitLab web UI scrape, through `git push --push-option=merge_request.create`, or by manually crafting an HTTP request. Mark `blocked`, do not add `pr`, and stop.
-10. If a required input is missing or malformed, the executor MUST abort with `status=blocked`, `block_reason="missing required input: <field>"`. It MUST NOT guess a default.
+1. **acpx invariants.** If `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` fails or Claude Code errors mid-execution, the executor MUST NOT: retry with a smaller / different prompt, switch to `acpx claude command` / persistent `-s` sessions / `--no-wait`, drop or change `--auth-policy skip`, run `claude` directly without acpx, call any other LLM CLI as a substitute, manually edit the repo to "complete what Claude was supposed to do", or re-run with a tweaked cwd / `${HULAT_DIR}`. The only allowed invocation is in §Claude Code Execution Contract below.
+2. **git push rejection.** If `git push` is rejected (non-fast-forward, hook rejection, auth), the executor MUST NOT run extra `git push --force` / `--force-with-lease` outside `scripts/commit_and_push.sh`, rewrite history with `git rebase` / `git reset --hard` and re-push, or push to a different branch name. Mark `blocked` with the rejection reason verbatim. The only allowed force update is the documented Strategy A push performed inside `commit_and_push.sh`.
+3. **Worktree preparation.** If `prepare_attempt.sh` cannot produce a clean worktree, do NOT manually `rm -rf` parts of the repo or skip the clean step. Mark `blocked` with `block_reason="worktree could not be prepared: <reason>"`.
+4. **Leak guards.** If `stage_and_guard.sh` exits 3 (artifact leak in working tree), do NOT manually `git rm` the leaked paths and re-run. If `post_push_verify.sh` exits 4 (remote polluted), do NOT `git push --delete` and rebuild. Both indicate prior bugs; mark `blocked`.
+5. **Wiki evidence.** If `upload_attempt_artifacts.sh` fails, do NOT skip Wiki publication and continue to `done` labeling / MR creation. Mark `blocked` with `block_reason="attempt wiki artifact publication failed: <reason>"`, run summarize_attempt, and stop.
+6. **MR creation.** If `create_mr.sh` fails, do NOT create the MR through web-UI scraping, `git push --push-option=merge_request.create`, or manually crafted HTTP requests. Mark `blocked`, do not add `pr`, and stop.
 
 ### What the executor does on failure
-
-For every failure path:
 
 1. Write the failure into `${LOG_DIR}` with the rawest possible detail (stderr, exit code, command line, current working directory).
 2. Update `${ISSUE_STATE_FILE}`:
@@ -83,17 +56,6 @@ For every failure path:
    - `retry_count > blocked_retry_limit` or non-recoverable → `status=failed`, set `block_reason`
 3. Do NOT push, do NOT create an MR, and do NOT change the issue label to `done` before Wiki evidence has been published. If the failure occurs after the required `done` transition, do not add `pr` and do not persist terminal `status=done`.
 4. Return the compact chat summary with the failure status.
-
-### What "improvising" looks like (forbidden examples)
-
-- "`acpx --auth-policy skip claude exec -f ...` returned non-zero, let me retry with `acpx claude command -p ...` / `acpx claude -s ...` / drop `--auth-policy skip`." — forbidden.
-- "Claude Code crashed halfway through, let me complete the remaining edits by hand based on its output so far." — forbidden.
-- "`glab mr create` failed, let me POST to `/api/v4/projects/.../merge_requests` with curl." — forbidden.
-- "`git push` was rejected because of a server-side hook, let me `git push --force` to overwrite." — forbidden.
-- "The work branch already exists on the remote, let me delete it and try again." — forbidden (mark `blocked` instead).
-- "`set_issue_label.sh` returned a 403, let me set the label by editing the issue description through the web UI." — forbidden.
-
-If you find yourself reaching for a tool, command, flag, or workflow that is not explicitly listed in this SKILL, in `scripts/`, or in `references/`, that is the signal to stop and fail — not the signal to try harder.
 
 ---
 
@@ -106,42 +68,24 @@ If you find yourself reaching for a tool, command, flag, or workflow that is not
 
 ---
 
-## GitLab Access Policy (READ FIRST — HARD RULE)
+## GitLab Access (Executor-Specific)
 
-The executor MUST access GitLab exclusively through the `glab` CLI, via the scripts in `scripts/` and the commands documented in `references/glab_commands.md`.
+Universal rules (`glab`-only, forbidden libraries, `--hostname` rule, host pinning): [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → GitLab Access / GitLab Host Pinning. The allowed glab invocations for the executor are listed in [`references/glab_commands.md`](references/glab_commands.md).
 
-Forbidden — never used to talk to GitLab:
+Executor-specific prohibitions and failure mappings:
 
-- `curl`, `wget`, `http`, `httpie`
-- Any HTTP library in any language (`requests`, `urllib`, `python-gitlab`, `@gitbeaker/*`, etc.)
-- `glab mr merge` (under any circumstances — MRs stay open until a human merges them)
-- Closing the issue itself (`-f state_event=close`, `glab issue close`, etc.). Issue closure is GitLab's job via the `Closes #<iid>` keyword that `scripts/create_mr.sh` puts in the MR description. The executor only manages workflow labels (`done` after Wiki evidence, `pr` after MR creation).
+- `glab mr merge` is forbidden under any circumstances — MRs stay open until a human merges them.
+- Closing the issue itself (`-f state_event=close`, `glab issue close`, etc.) is forbidden. Issue closure is GitLab's job via the `Closes #<iid>` keyword written by `scripts/create_mr.sh`. The executor only manages workflow labels (`done` after Wiki evidence, `pr` after MR creation).
+- The executor MAY close MRs (`glab mr close`) only as part of the continue-mode MR rotation in `scripts/create_mr.sh`. Closing is not merging.
+- If a required operation is not in `references/glab_commands.md`, mark the issue `blocked` with `block_reason="executor needs unsupported glab op: <description>"` and stop.
+- If `glab auth status` fails after `scripts/glab_auth.sh`, mark the issue `blocked` with `block_reason="glab auth failed"`.
+- `scripts/glab_auth.sh` exit-code mapping for per-issue state:
+  - exit 10 → `block_reason="deployment incomplete: config/gitlab.env missing"`
+  - exit 11 → `block_reason="deployment incomplete: config/gitlab.env malformed"`
+  - exit 12 → `block_reason="deployment incomplete: GITLAB_API_PROTOCOL invalid"`
+  - exit 13 → `block_reason="trigger gitlab_address does not match deployed config/gitlab.env"`
 
-The executor MAY close MRs (`glab mr close`) — but only as part of the continue-mode MR rotation in `scripts/create_mr.sh`. Closing is not merging, and it does not change the integration branch. Closed MRs remain in GitLab as historical record.
-- Full-set label overwrite (`-f labels=...`) for transitions — wipes manually added labels. Use `set_issue_label.sh` instead.
-- Any `glab` subcommand or flag not listed in `references/glab_commands.md`.
-
-If a required operation is not in the allowed list, mark the issue `blocked` with `block_reason="executor needs unsupported glab op: <description>"` and stop. Do NOT fall back to curl.
-
-If `glab auth status` fails after `scripts/glab_auth.sh`, mark the issue `blocked` with `block_reason="glab auth failed"` and stop.
-
-**Do NOT pass `--hostname` to `glab api` calls.** `scripts/glab_auth.sh` exports `GITLAB_HOST` as an env var; glab natively reads that env var and routes API calls correctly. Passing `--hostname` with a `host:port` value confuses glab's URL resolution for some subcommands and historically caused the executor to spin trying alternative invocations (env var, `-R` flag, different config keys, etc.). The single allowed convention is: rely on the exported `GITLAB_HOST` env var, drop the `--hostname` flag everywhere.
-
-### GitLab host is pinned at deployment time
-
-The GitLab host (and protocol) the executor talks to is **pinned in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every run. See `<workspace>/config/README.md` for the rationale.
-
-Implications:
-
-- The executor MUST read the host from `scripts/glab_auth.sh`, never re-derive it inline from `${GITLAB_ADDRESS}`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
-- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` will refuse to run if the trigger's host does not match `config/gitlab.env`, and exits non-zero. Map the exit codes to per-issue state as follows:
-  - exit 10 (pin file missing) → `status=blocked`, `block_reason="deployment incomplete: config/gitlab.env missing"`
-  - exit 11 (pin file fields missing) → `status=blocked`, `block_reason="deployment incomplete: config/gitlab.env malformed"`
-  - exit 12 (bad protocol value) → `status=blocked`, `block_reason="deployment incomplete: GITLAB_API_PROTOCOL invalid"`
-  - exit 13 (trigger does not match pin) → `status=blocked`, `block_reason="trigger gitlab_address does not match deployed config/gitlab.env"`
-- `gitlab_token` from the trigger is used to refresh `glab auth login` against the pinned host every run; token rotation works, but the host itself never changes from a trigger input.
-
-The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is also constructed from the trigger's `GITLAB_ADDRESS`. That is acceptable because `clone_or_pull.sh` is a single, well-tested code path that does not parse host/protocol — it just passes the original URL straight to `git clone` / `git remote set-url`. Do NOT add separate host parsing in any other script.
+The `AUTHED_REMOTE_URL` used by `clone_or_pull.sh` is constructed from the deployment-pinned `GITLAB_API_PROTOCOL` / `GITLAB_HOST` exported by `scripts/env_paths.sh` via `scripts/glab_auth.sh`. The trigger's `gitlab_address`, if supplied, remains a verification value only. Do NOT add separate host parsing in any other script.
 
 ---
 
@@ -175,7 +119,7 @@ Required from the trigger command (`RUN_SINGLE_ISSUE_SESSION`):
 Optional:
 
 - `blocked_retry_limit`
-- `gitlab_address` — pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; the executor never derives it from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. The remote URL passed to `git clone` is also built from the pin, not from this field.
+- `gitlab_address` — verification value only. See [`SOUL.md`](../../SOUL.md) §GitLab Host Pinning.
 - `issue_mode` — `fresh` (default) or `continue`. Set by the dispatcher based on reconciliation. If `continue`, the executor reuses the existing `issue/<iid>-auto-fix` remote branch (or falls back to fresh if no remote branch exists) and starts the resolution flow from there. See `## Continue Mode` below.
 
 `hulat_dir` is a string passed through to the Claude Code prompt. The executor itself never `cd`s into it or writes there. See `references/paths.md`.
@@ -227,32 +171,13 @@ This is the ONLY way the executor is allowed to invoke Claude Code. It is govern
 
 ### What to do when this contract fails
 
-If `acpx --auth-policy skip claude exec -f ...` returns non-zero, hangs and is killed by the runtime, or Claude Code itself reports an error mid-execution:
-
-1. Preserve all output that was written to `${LOG_DIR}` (do NOT delete partial logs).
-2. Classify the failure from the stderr / exit code:
-   - retryable (runtime / library mismatch, transient env failure, transient credential / connectivity, acpx process startup failure): `status=blocked`, increment `retry_count`, set `block_reason` to the verbatim error
-   - non-recoverable or `retry_count > blocked_retry_limit`: `status=failed`, set `block_reason`
-3. Do NOT push, do NOT open an MR, do NOT label the issue `done`.
-4. Return the compact chat summary with the failure status and stop.
-
-**Forbidden recovery moves (per No-Fallback Policy):**
-
-- Re-running with a tweaked or shortened prompt
-- Switching to `acpx claude command` / persistent session (`-s`) / `--no-wait`
-- Dropping or changing `--auth-policy skip`
-- Running `claude` directly
-- Using a different LLM
-- Manually editing the repo to "complete what Claude was supposed to do"
-- Re-running with a different working directory or `${HULAT_DIR}`
+If acpx returns non-zero, hangs and is killed by the runtime, or Claude Code reports an error mid-execution: preserve all `${LOG_DIR}` output (do NOT delete partial logs) and follow §No-Fallback prohibition 1 (acpx invariants) plus §What the executor does on failure above. Classify retryable env / runtime / connectivity issues as `blocked`; classify non-recoverable failures or retry-exhausted issues as `failed`.
 
 ---
 
-## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
+## Per-Exec Env Contract (Executor Minimum Vars)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-30.1, every `scripts/*.sh` file in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
-
-**Every Bash exec MUST start with these 5 env vars exported:**
+Universal frame: [`SOUL.md`](../../SOUL.md) §Per-Exec Env Contract. Executor's minimum env per Bash exec:
 
 ```
 PROJECT          # project slug
@@ -262,9 +187,9 @@ GROUP            # GitLab group slug
 GITLAB_TOKEN     # GitLab access token
 ```
 
-Some scripts also need `BRANCH`, `DEV_BRANCH`, `HULAT_DIR`, `ISSUE_MODE`, `ISSUE_TITLE` — these are listed at the top of each script. Pass whatever the script needs.
+Some scripts also need `BRANCH`, `DEV_BRANCH`, `HULAT_DIR`, `ISSUE_MODE`, `ISSUE_TITLE` — listed at the top of each script. Pass whatever the script needs.
 
-Recommended pattern for every exec:
+Recommended pattern:
 
 ```bash
 cd "${SKILL_DIR}" && \
@@ -274,26 +199,15 @@ ISSUE_MODE=fresh ISSUE_TITLE="..." \
 bash scripts/<script>.sh
 ```
 
-The script itself sources `env_paths.sh`, which derives all paths, runs `glab_auth.sh` to set `GITLAB_HOST`, computes `PROJECT_FULL` / `PROJECT_URI`, and proceeds. The model does NOT need to manage these derived vars across execs.
+The script sources `env_paths.sh`, which derives all paths, runs `glab_auth.sh`, computes `PROJECT_FULL` / `PROJECT_URI`.
 
 ---
 
-## Working Directory (READ BEFORE Step 1 — HARD RULE)
+## Working Directory
 
-All `scripts/...` and `references/...` paths in this SKILL are **relative to this skill's own directory** (the directory containing this SKILL.md, e.g. `<workspace>/skills/gitlab_single_issue_executor/`).
+See [`SOUL.md`](../../SOUL.md) §Working Directory. The skill directory for THIS skill is the directory containing this SKILL.md (e.g. `<workspace>/skills/gitlab_single_issue_executor/`). Run `cd "${SKILL_DIR}"` ONCE per session before any `bash scripts/...` invocation.
 
-Before issuing ANY `bash scripts/...` command, the executor MUST `cd` into the skill directory in the same shell session. Otherwise relative paths like `scripts/env_paths.sh` resolve against whatever cwd OpenClaw started the session in (often the user home, NOT the skill dir), and the first invocation fails with "no such file or directory".
-
-The skill directory's absolute path is known to the agent at load time (the same path SKILL.md was read from). Bootstrap snippet, run ONCE per session before anything else:
-
-```bash
-SKILL_DIR="<absolute path of this SKILL.md's parent>"   # e.g. /home/claw/.openclaw/workspace-UiAutoTester/skills/gitlab_single_issue_executor
-cd "${SKILL_DIR}"
-```
-
-After this, every subsequent `bash scripts/X.sh` and `source scripts/X.sh` invocation resolves correctly. Do NOT attempt to invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` or `ls`. The single allowed convention is: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
-
-Note: at Step 8 (acpx) the algorithm explicitly switches cwd to `${WORKTREE_DIR}` for the Claude Code invocation. After acpx returns, switch back to `${SKILL_DIR}` (or use absolute paths to scripts) so the remaining `bash scripts/...` commands continue to work. The path-conscious order is documented in each step below.
+Note: at Step 8 (acpx) the algorithm explicitly switches cwd to `${WORKTREE_DIR}` for the Claude Code invocation. After acpx returns, switch back to `${SKILL_DIR}` so the remaining `bash scripts/...` commands continue to work — see Step 8 for the exact form.
 
 ---
 

@@ -4,9 +4,18 @@ The dispatcher is allowed only the commands listed below. Anything else — `cur
 
 ## Authentication and host
 
-The host is **pinned at deployment time** in `<workspace>/config/gitlab.env`. `scripts/env_paths.sh` calls `scripts/glab_auth.sh`, which reads that pin, verifies the trigger's `gitlab_address` matches, refreshes the token via `glab auth login`, and prints `${GITLAB_HOST}`.
+The host is pinned in `<workspace>/config/gitlab.env`; `scripts/env_paths.sh` invokes `scripts/glab_auth.sh` to authenticate and exports `${GITLAB_HOST}`, `${PROJECT_FULL}`, `${PROJECT_URI}`. Policy (verification, token rotation, abort-on-mismatch, never re-derive host) lives in [`SOUL.md`](../../../SOUL.md) §GitLab Host Pinning.
 
-The dispatcher MUST get `${GITLAB_HOST}`, `${PROJECT_FULL}`, and `${PROJECT_URI}` through `scripts/env_paths.sh`. It MUST NEVER re-derive the host from `${GITLAB_ADDRESS}` or hand-export derived project vars in later tool calls.
+The dispatcher may use these auth commands only inside `scripts/glab_auth.sh`:
+
+```bash
+glab auth login \
+  --hostname "${GITLAB_HOST}" \
+  --token "${GITLAB_TOKEN}" \
+  --api-protocol "${GITLAB_API_PROTOCOL}"
+
+glab auth status --hostname "${GITLAB_HOST}"
+```
 
 ## D1 — Read one issue
 

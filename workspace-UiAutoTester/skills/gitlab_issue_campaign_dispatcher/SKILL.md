@@ -28,64 +28,28 @@ When in doubt about a path / schema / command, READ the matching reference file.
 
 ---
 
-## No-Fallback Policy (READ FIRST — HARD RULE)
+## No-Fallback (Dispatcher-Specific)
 
-**The dispatcher MUST follow the prescribed method exactly. When the prescribed method fails, the dispatcher fails the affected unit of work and stops — it does NOT improvise an alternative approach.**
+Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No-Fallback. Dispatcher-specific additions:
 
-This rule overrides any default model behavior that says "try another way", "be helpful", "complete the task one way or another", or "the user wants this to succeed". For this skill, **a clean controlled failure is strictly better than an unsupervised alternative attempt**.
+1. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass it (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops). Return a one-line status summary and exit.
+2. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT run executor logic inline in the dispatcher session, spawn a non-dedicated session as a substitute, or retry by spawning a different session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
 
-### Concrete prohibitions
+On failure:
 
-1. If a script in `scripts/` exits non-zero, the dispatcher MUST NOT:
-   - rewrite the script's logic inline in bash
-   - skip the script and "do the same thing manually"
-   - try a "simpler" or "different" command that "should work"
-2. If `glab` cannot do something, the dispatcher MUST NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library. (Also covered by GitLab Access Policy below — listed here for emphasis.)
-3. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass the lock (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops).
-4. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT:
-   - run executor logic inline in the dispatcher session
-   - spawn a non-dedicated session as a substitute
-   - retry by spawning a different session name
-   The IID is marked `blocked` with an accurate `block_reason`, the dispatcher continues to the next IID per Blocked Skip-and-Retry rules.
-5. If a required input is missing or malformed, the dispatcher MUST abort the tick with a short summary. It MUST NOT guess defaults beyond those explicitly listed in `references/trigger_command.md`.
-6. If a step listed in the Dispatcher Algorithm produces an unexpected result, the dispatcher MUST stop the affected IID (or the tick), record the failure on disk, and return. It MUST NOT invent a recovery path that is not in this SKILL.
-
-### What the dispatcher does on failure
-
-- Per-IID failure → mark that IID `blocked` (retryable) or `failed` (non-recoverable / retry-exhausted) per Blocked Skip-and-Retry rules; persist; continue with later IIDs.
+- Per-IID failure → mark that IID `blocked` (retryable) or `failed` (retry-exhausted) per Blocked Skip-and-Retry; persist; continue with later IIDs.
 - Tick-level failure (lock, auth, reconciliation evidence missing, etc.) → return a one-line failure summary; do not early-return as "completed".
-
-### What "improvising" looks like (forbidden examples)
-
-- "`scripts/reconcile.sh` failed, let me write a quick Python loop instead." — forbidden.
-- "`glab mr create` returned an error, let me try `git push` with the `merge_request.create` push option." — forbidden.
-- "`acpx --auth-policy skip claude exec -f ...` errored, let me try `claude` directly / `acpx claude -s ...` / `acpx claude command` / drop `--auth-policy skip` / a smaller prompt." — forbidden (executor-side rule, listed here so the dispatcher recognizes it from the executor's reply).
-- "The trigger is missing `branch=`, let me default to `master`." — forbidden; abort the tick.
-
-If you find yourself reaching for a tool, command, or workflow that is not explicitly listed in this SKILL, in `scripts/`, or in `references/`, that is the signal to stop and fail — not the signal to try harder.
 
 ---
 
-## Concurrency Policy (READ FIRST — HARD RULE)
+## Concurrency Policy (Dispatcher-Specific)
 
-This dispatcher operates over issues in **bounded batches of size `max_concurrent_subagents`** (trigger input, integer ≥ 1, default 1).
+Universal contract (cap = `max_concurrent_subagents`, same-IID never parallel, bounded batches, wait-for-whole-batch, no fire-and-forget): [`SOUL.md`](../../SOUL.md) §Subagent Concurrency Policy. Dispatcher-specific operational details:
 
-- At any moment, at most `max_concurrent_subagents` issue sessions may be active.
-- The two dials are **independent**:
-  - `max_concurrent_subagents` = how many subagents may be in flight at the same time (parallelism width).
-  - `hourly_issue_quota` = how many issues must reach a terminal state in this tick (per-tick completion count). It is NOT a parallelism knob.
-- **Same IID never runs twice in parallel.** Per-IID work is always serial across attempts. The session name `issue-<project>-<iid>` is the structural guarantee. Cross-IID parallelism is bounded by `max_concurrent_subagents`.
-- **Batch shape.** When picking the next batch:
-  - Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh).
-  - Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call). Concurrent allocation would race on `attempts_total` even though each IID has its own state file — a single Bash batch makes the order observable in logs.
-  - Spawn the batch as parallel `sessions_spawn` calls in a SINGLE tool-call block (one tool call per IID, all in the same block). When `max_concurrent_subagents=1` this degenerates to "exactly one spawn per block" — the legacy serial behavior.
-- **Wait for the WHOLE batch before forming the next.** No fire-and-forget, no rolling pool. Every spawn must return its terminal reply before the dispatcher re-reads per-issue state and considers the next batch. This means a slow IID inside a batch can stall faster IIDs in the same batch — that is the explicit trade-off for simplicity and predictable time-budget accounting.
-- A `childSessionKey`, session id, thread id, or "created" acknowledgement is NOT a terminal executor reply. If the runtime returns only child-session identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait operation as failed or unsupported for this tick. Do NOT report "batch in flight" as success, and do NOT leave `active_issue_iids` populated on the assumption that detached child sessions are running.
-- Anonymous child keys such as `agent:<name>:subagent:<uuid>` are NOT dedicated issue sessions. A successful issue spawn MUST target or return the deterministic session name `issue-<project>-<iid>`. If the runtime creates an anonymous subagent instead, treat it as a spawn failure for that IID.
-- **Time budget is checked between batches, not within a batch.** Once a batch is spawned, the dispatcher commits to waiting for all members; the `max_runtime_minutes` check happens at the top of the next batch loop iteration.
-- Background / no-wait / fire-and-forget spawn modes are forbidden for issue sessions.
-
-If this policy conflicts with any other instruction, this policy wins.
+- **Batch shape.** Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh). Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call) — concurrent allocation would race on `attempts_total` even with per-IID state files, and the order needs to be observable in dispatcher logs. Spawn the batch as parallel `sessions_spawn` calls in a SINGLE tool-call block. With `max_concurrent_subagents=1` this degenerates to one spawn per block — legacy serial behavior.
+- **What counts as a successful spawn.** A `childSessionKey` / session id / thread id / "created" acknowledgement is NOT a terminal executor reply. If the runtime returns only child-session identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait as failed for this tick. Do NOT report "batch in flight" as success, and do NOT leave `active_issue_iids` populated on the assumption that detached child sessions are running.
+- **Deterministic session names only.** Anonymous keys like `agent:<name>:subagent:<uuid>` are NOT dedicated issue sessions. A successful issue spawn MUST target / return `issue-<project>-<iid>`. If the runtime creates an anonymous subagent instead, treat it as a spawn failure for that IID.
+- **Time budget is checked between batches, not within a batch.** Once a batch is spawned, the dispatcher commits to waiting for all members; `max_runtime_minutes` is checked at the top of the next batch loop iteration. A slow IID in a batch can stall faster IIDs in the same batch — explicit trade-off for predictable time-budget accounting.
 
 ---
 
@@ -114,34 +78,14 @@ If `<workspace>/config/ui_accounts.env` is missing, malformed, or too small, the
 
 ---
 
-## GitLab Access Policy (READ FIRST — HARD RULE)
+## GitLab Access (Dispatcher-Specific)
 
-The dispatcher MUST access GitLab exclusively through the `glab` CLI, via the scripts in `scripts/` and the commands documented in `references/glab_commands.md`.
+Universal rules (`glab`-only, forbidden libraries, `--hostname` rule, host pinning, exit-code mapping for `scripts/glab_auth.sh`): [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → GitLab Access / GitLab Host Pinning. The allowed glab invocations for the dispatcher are listed in [`references/glab_commands.md`](references/glab_commands.md).
 
-Forbidden — never used to talk to GitLab:
+Dispatcher-specific failure mapping:
 
-- `curl`, `wget`, `http`, `httpie`
-- Any HTTP library in any language (`requests`, `urllib`, `python-gitlab`, `@gitbeaker/*`, etc.)
-- Any custom shell function that wraps an HTTP call to a `*/api/v4/*` URL
-- Any `glab` subcommand not listed in `references/glab_commands.md`
-
-If the dispatcher cannot accomplish something with the listed glab commands, mark the affected IID `blocked` with `block_reason="dispatcher needs unsupported glab op: <description>"` and stop. Do NOT fall back to curl.
-
-If `glab auth status` fails after `scripts/glab_auth.sh`, abort the tick — do NOT silently switch to curl.
-
-**Do NOT pass `--hostname` to `glab api` calls.** `scripts/glab_auth.sh` exports `GITLAB_HOST` as an env var; glab natively reads that env var and routes API calls correctly. Passing `--hostname` with a `host:port` value confuses glab's URL resolution for some subcommands and historically caused the agent to spin trying alternative invocations (env var, `-R` flag, different config keys, etc.). The single allowed convention is: rely on the exported `GITLAB_HOST` env var, drop the `--hostname` flag everywhere.
-
-### GitLab host is pinned at deployment time
-
-The GitLab host (and protocol) the dispatcher talks to is **pinned in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every tick. See `<workspace>/config/README.md` for the rationale.
-
-Implications:
-
-- The dispatcher MUST read the host from `scripts/glab_auth.sh`, never re-derive it inline from `${GITLAB_ADDRESS}`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
-- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` will refuse to run if the trigger's host does not match `config/gitlab.env`, and exits non-zero. The dispatcher MUST treat that as a tick-level failure and abort.
-- `gitlab_token` from the trigger is used to refresh `glab auth login` against the pinned host every tick (token rotation works), but the host itself never changes from a trigger input.
-
-If `config/gitlab.env` is missing or malformed (`scripts/glab_auth.sh` exits 10/11/12), the deployment is incomplete: abort the tick with a one-line summary and surface the operator-facing error.
+- If the dispatcher cannot accomplish something with the listed glab commands, mark the affected IID `blocked` with `block_reason="dispatcher needs unsupported glab op: <description>"` and stop.
+- If `glab auth status` fails after `scripts/glab_auth.sh`, or `scripts/glab_auth.sh` itself exits 10/11/12 (deployment-pin missing/malformed) or 13 (trigger mismatch), abort the tick with a one-line summary.
 
 ---
 
@@ -205,19 +149,16 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 1. Never reuse an issue session for a different issue.
 2. The dispatcher creates the session if it doesn't exist; otherwise resumes it.
 3. The dispatcher sends each executor a single `RUN_SINGLE_ISSUE_SESSION` message (see executor SKILL for the full payload).
-4. **Bounded batch.** A batch contains at most `max_concurrent_subagents` distinct IIDs. The dispatcher spawns the whole batch in one tool-call block (parallel `sessions_spawn`), blocks on every spawn's terminal reply, re-reads each per-issue state file, only then considers the next batch. Runtime responses that only contain `childSessionKey` / session ids / "created" acknowledgements do not satisfy this rule.
-5. **Deterministic session names only.** Each `sessions_spawn` call MUST target the exact session name `issue-<project>-<iid>`. Do NOT accept anonymous runtime-generated keys like `agent:<name>:subagent:<uuid>` as a substitute.
-6. **Distinct IIDs only.** Two `sessions_spawn` calls in the same batch MUST target different IIDs. Same-IID parallelism is forbidden (see Concurrency Policy above). The session-name derivation `issue-<project>-<iid>` is the structural guarantee.
-7. **`active_issue_iids` is updated atomically per batch.** Before spawning a batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. After the batch returns and per-issue states are re-read, remove every batch member from `active_issue_iids` (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress`/budget-exhausted IIDs go back to `unfinished_iids`) and persist again. The list MUST never exceed `max_concurrent_subagents` entries.
-8. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, form a fresh batch.
+4. **`active_issue_iids` is updated atomically per batch.** Before spawning a batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. After the batch returns and per-issue states are re-read, remove every batch member (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress`/budget-exhausted IIDs go back to `unfinished_iids`) and persist again. The list MUST never exceed `max_concurrent_subagents` entries.
+5. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, then form a fresh one.
+
+Batch sizing, spawn semantics (parallel `sessions_spawn` in one tool-call block, what counts as a successful spawn), deterministic session names, and same-IID guarantees are in §Concurrency Policy above.
 
 ---
 
-## Per-Exec Env Contract (READ BEFORE Step 1 — HARD RULE)
+## Per-Exec Env Contract (Dispatcher Minimum Vars)
 
-OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports made in one exec do NOT survive to the next. As of SKILL_VERSION 2026-04-29.5, every `scripts/*.sh` in this skill self-bootstraps by sourcing `env_paths.sh` at its top — but that script needs the minimum trigger inputs to be in env at every call.
-
-**Every Bash exec MUST start with these 3 env vars exported:**
+Universal frame: [`SOUL.md`](../../SOUL.md) §Per-Exec Env Contract. Dispatcher's minimum env per Bash exec:
 
 ```
 PROJECT          # project slug
@@ -227,7 +168,7 @@ GITLAB_TOKEN     # GitLab access token
 
 Reconcile / allocate also need `MIN_IID` / `MAX_IID` / `IID` per their script docs.
 
-Recommended pattern for every exec:
+Recommended pattern:
 
 ```bash
 cd "${SKILL_DIR}" && \
@@ -235,24 +176,13 @@ PROJECT=px_ifp_hulat GROUP=claw_gitlab GITLAB_TOKEN=<token> \
 bash scripts/<script>.sh ...
 ```
 
-The script self-bootstraps from there: derives paths, runs glab auth, computes `PROJECT_FULL` / `PROJECT_URI`. The dispatcher does NOT need to manage these derived vars across execs.
+The script self-bootstraps: derives paths, runs glab auth, computes `PROJECT_FULL` / `PROJECT_URI`.
 
 ---
 
-## Working Directory (READ BEFORE Step 1 — HARD RULE)
+## Working Directory
 
-All `scripts/...` and `references/...` paths in this SKILL are **relative to this skill's own directory** (the directory containing this SKILL.md, e.g. `<workspace>/skills/gitlab_issue_campaign_dispatcher/`).
-
-Before issuing ANY `bash scripts/...` command, the dispatcher MUST `cd` into the skill directory in the same shell session. Otherwise relative paths like `scripts/env_paths.sh` resolve against whatever cwd OpenClaw started the session in (often the user home, NOT the skill dir), and the very first invocation fails with "no such file or directory".
-
-The skill directory's absolute path is known to the agent at load time (the same path SKILL.md was read from). Bootstrap snippet, run ONCE per session before anything else:
-
-```bash
-SKILL_DIR="<absolute path of this SKILL.md's parent>"   # e.g. /home/claw/.openclaw/workspace-UiAutoTester/skills/gitlab_issue_campaign_dispatcher
-cd "${SKILL_DIR}"
-```
-
-After this, every subsequent `bash scripts/X.sh` and `source scripts/X.sh` invocation in the algorithm below resolves correctly. Do NOT attempt to invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` or `ls`. The single allowed convention is: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
+See [`SOUL.md`](../../SOUL.md) §Working Directory. The skill directory for THIS skill is the directory containing this SKILL.md (e.g. `<workspace>/skills/gitlab_issue_campaign_dispatcher/`). Run `cd "${SKILL_DIR}"` ONCE per session before any `bash scripts/...` invocation.
 
 ---
 

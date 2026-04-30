@@ -2,11 +2,12 @@
 
 All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT redefine paths inline.
 
-## Disk layout (SKILL_VERSION 2026-04-29.2+)
+## Disk layout
+
+Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout. Full per-issue tree is in [`../../gitlab_single_issue_executor/references/paths.md`](../../gitlab_single_issue_executor/references/paths.md). Dispatcher-relevant slice:
 
 ```
-/data/${PROJECT}/                                  ← main git repo (hosts worktrees; agent never edits its working tree directly)
-/data/openclaw_work/${PROJECT}/                    ← all agent-owned files, OUTSIDE the repo
+/data/openclaw_work/${PROJECT}/
     openclaw_state/
         campaign_state.json                        ← campaign-level cache (NOT source of truth)
         campaign.lock                              ← flock target
@@ -14,14 +15,7 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
         dispatcher/
             reconcile-<ts>.json                    ← reconciliation evidence files
     issues/
-        issue-<iid>/                               ← per-issue subtree, owned by executor
-            state.json
-            worktree/                              ← git worktree, Claude Code's cwd; replaced every attempt
-            log/
-                attempt-001/                       ← logs for attempt 001, preserved
-                attempt-002/                       ← logs for attempt 002, preserved
-            attempt_state.json                     ← current attempt state; overwritten every attempt
-            summary.md                             ← latest summary mirror
+        issue-<iid>/state.json                     ← per-issue cache, owned by executor; dispatcher reads after spawn
 ```
 
 ## Variables
@@ -44,10 +38,10 @@ ISSUE_STATE="$(issue_state_file_for "${IID}")"
 # → /data/openclaw_work/${PROJECT}/issues/issue-${IID}/state.json
 ```
 
-## Hard rules
+## Hard rules (dispatcher-specific)
 
-1. `REPO_PATH` is a git repo — only `git fetch`, `git worktree`, `git remote` operations on it. Never write any agent file under `REPO_PATH`. Never modify its working tree directly (the executor uses `git worktree` to spin off the issue worktree).
-2. `WORK_ROOT` is outside the repo. This is what physically prevents `git add` from sweeping agent artifacts into a commit.
-3. `hulat_dir` is **read-only configuration** that the executor symlinks into the issue worktree as `_hulat`. The executor also copies the required Claude Code runtime config from `${HULAT_DIR}/ifp-hulat/.claude` to that worktree as local-only `.claude` before invoking `acpx`. The dispatcher never touches it.
-4. Per-issue state files live at `${ISSUES_ROOT}/issue-<iid>/state.json` (use `issue_state_file_for` helper). The OLD location `${STATE_DIR}/issues/issue-<iid>.json` is gone — do NOT read or write there.
-5. `reconcile-<ts>.json` evidence files stay at `${DISPATCHER_LOG_DIR}/`. They are dispatcher-global, NOT per-issue.
+Workspace-wide invariants (REPO_PATH untouched, WORK_ROOT outside repo, hulat_dir shared read-only) live in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout. Dispatcher-specific:
+
+1. Per-issue state files live at `${ISSUES_ROOT}/issue-<iid>/state.json` (use `issue_state_file_for` helper). The OLD location `${STATE_DIR}/issues/issue-<iid>.json` is gone — do NOT read or write there.
+2. `reconcile-<ts>.json` evidence files stay at `${DISPATCHER_LOG_DIR}/`. They are dispatcher-global, NOT per-issue.
+3. The dispatcher never touches `hulat_dir` — that is executor territory.
