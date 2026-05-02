@@ -40,7 +40,7 @@ set -euo pipefail
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
-: "${REPO_PATH:?}" "${BRANCH:?}" "${DEV_BRANCH:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
+: "${REPO_PATH:?}" "${WORK_ROOT:?}" "${BRANCH:?}" "${DEV_BRANCH:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
   "${ATTEMPT_DIR:?}" "${WORKTREE_DIR:?}" "${LOG_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
   "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}" "${HULAT_DIR:?}"
 
@@ -51,6 +51,11 @@ case "${ISSUE_MODE}" in
     exit 2
     ;;
 esac
+
+LOCK_DIR="${WORK_ROOT}/locks"
+mkdir -p "${LOCK_DIR}"
+exec 8>"${LOCK_DIR}/repo.lock"
+flock 8
 
 # Refresh refs. clone_or_pull.sh has already fetched, but do it again
 # defensively in case this script is run standalone.
@@ -108,6 +113,7 @@ fi
 
 mkdir -p "${ATTEMPT_DIR}"
 git worktree add -b "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
+flock -u 8
 
 # Set up hulat symlink inside the worktree (zero-cost shared read-only
 # config), and copy Claude Code's local runtime config into the cwd used

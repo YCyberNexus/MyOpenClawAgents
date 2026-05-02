@@ -44,8 +44,9 @@ Hard invariants:
 1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions.
 2. **One IID, one in-flight subagent.** Two subagents MUST NEVER work on the same `${ISSUE_IID}` concurrently. Per-IID work is always serial across attempts; only DIFFERENT IIDs may run in parallel.
 3. **Bounded batches.** When there are more eligible IIDs than open slots, the dispatcher picks at most `max_concurrent_subagents` IIDs, spawns them in a single tool-call batch (parallel `sessions_spawn`), waits for the WHOLE batch to return, re-reads each per-issue state file, then forms the next batch.
-4. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered.
-5. `max_concurrent_subagents=1` (the default) MUST behave exactly like the legacy strictly-serial model: one IID at a time, one spawn per tool-call batch.
+4. **Synchronous terminal replies only.** A spawn is successful only when the dispatcher receives the executor's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`) and can then re-read that issue's state file. Runtime acknowledgements such as `accepted`, `runId`, `childSessionKey`, thread ids, session ids, or "created" are not terminal executor replies.
+5. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered. If the current OpenClaw channel can only start a push-based/background run, the dispatcher must fail the affected IID or tick according to the dispatcher SKILL; it must not switch to `mode=run` or any other fallback.
+6. `max_concurrent_subagents=1` (the default) MUST behave exactly like the legacy strictly-serial model: one IID at a time, one spawn per tool-call batch.
 
 This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out beyond `max_concurrent_subagents`. `hourly_issue_quota` remains a *count of completed issues per tick*, not a parallelism knob — they are independent dials.
 
@@ -249,6 +250,7 @@ This workspace expects the agent to be able to use:
 - sessions_spawn
 
 The dispatcher must use `sessions_spawn` for dedicated issue sessions.
+The `sessions_spawn` call must be a blocking dedicated-session spawn that returns the executor's terminal reply. Push-based acknowledgements (`accepted`, `runId`, anonymous `agent:<name>:subagent:<uuid>` keys, or child-session ids without executor status) do not satisfy this workspace's scheduling contract.
 
 For this automation, an issue is considered completed after its merge request is successfully created and the live issue has both `done` and `pr` labels. Separately, a live GitLab issue with `state=closed` is a hard terminal skip condition: the dispatcher must never schedule it, even if `continue` is present or `done`/`pr` are absent. The issue executor must change `doing` to `done` immediately after solving the issue and publishing Wiki evidence, then create or rotate the MR, then add `pr` after MR creation succeeds and persist issue state `done`.
 

@@ -81,6 +81,12 @@ if [ -n "${GITLAB_ADDRESS:-}" ]; then
   fi
 fi
 
+LOCK_ROOT="/tmp/acpx_auto_tester_locks"
+mkdir -p "${LOCK_ROOT}"
+LOCK_HOST="$(printf '%s' "${GITLAB_HOST}" | tr -c 'A-Za-z0-9_.-' '_')"
+exec 8>"${LOCK_ROOT}/glab-auth-${LOCK_HOST}.lock"
+flock 8
+
 glab auth login \
   --hostname "${GITLAB_HOST}" \
   --token "${GITLAB_TOKEN}" \

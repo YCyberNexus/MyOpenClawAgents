@@ -53,7 +53,7 @@ The pool size MUST be `>= max_concurrent_subagents` for the deployment. The disp
 1. Dispatcher sources `<workspace>/config/ui_accounts.env` via `scripts/load_ui_accounts.sh` at the top of every batch.
 2. Dispatcher allocates one account per IID in the batch (first N entries from the pool, in file order) and passes them through the executor trigger as `ui_account=<user>` and `ui_password=<pass>`.
 3. Executor forwards the values into `scripts/build_prompt.sh`, which appends them to the `# Working environment` section of the Claude Code prompt with an explicit override note: any account named in the issue body should be replaced by the allocated one.
-4. After the batch returns the accounts implicitly return to the pool — the dispatcher does not persist allocations; the next batch re-allocates from the head of the file. Per-batch waiting (the existing concurrency contract) is what makes this safe.
+4. After the whole batch returns terminal executor replies, the accounts implicitly return to the pool — the dispatcher does not persist allocations; the next batch re-allocates from the head of the file. Per-batch synchronous waiting (the existing concurrency contract) is what makes this safe. A push-based `accepted` / `runId` acknowledgement is not a returned batch and must not release accounts.
 
 ### Setup
 
