@@ -1,4 +1,4 @@
-# UiAutoTester User Contract
+# cctester User Contract
 
 Use this workspace for a recurring scheduled GitLab issue campaign.
 

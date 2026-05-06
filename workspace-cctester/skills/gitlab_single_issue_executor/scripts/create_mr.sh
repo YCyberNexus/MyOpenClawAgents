@@ -75,7 +75,7 @@ if [ "${ISSUE_MODE}" = "continue" ] && [ "${EXISTING_COUNT}" -gt 0 ]; then
     glab mr close "${existing_iid}" \
       --repo "${PROJECT_FULL}" >/dev/null
   done
-  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by UiAutoTester continue-mode re-run)."
+  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by cctester continue-mode re-run)."
 fi
 
 # Build / refresh the MR description. `Closes #<iid>` triggers GitLab's

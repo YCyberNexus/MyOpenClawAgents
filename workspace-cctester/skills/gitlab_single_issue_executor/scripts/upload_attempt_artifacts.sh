@@ -131,8 +131,8 @@ if [ -n "${REPORT_SOURCE}" ]; then
 fi
 
 {
-  echo "<!-- uiautotester:attempt-wiki-artifacts v1 attempt=${ATTEMPT_NUMBER_PADDED} -->"
-  echo "## UiAutoTester attempt ${ATTEMPT_NUMBER_PADDED} OpenClaw logs"
+  echo "<!-- cctester:attempt-wiki-artifacts v1 attempt=${ATTEMPT_NUMBER_PADDED} -->"
+  echo "## cctester attempt ${ATTEMPT_NUMBER_PADDED} OpenClaw logs"
   echo
   echo "Attempt-scoped files published to this project's GitLab Wiki before the issue is labeled \`done\` and before merge request creation / rotation:"
   echo
@@ -141,7 +141,7 @@ fi
     echo "- **report.html**: not found under \`${WORKTREE_DIR}\`; no Wiki page published."
   fi
   echo
-  echo "<!-- /uiautotester:attempt-wiki-artifacts -->"
+  echo "<!-- /cctester:attempt-wiki-artifacts -->"
 } > "${NOTE_FILE}"
 
 glab api --method POST \

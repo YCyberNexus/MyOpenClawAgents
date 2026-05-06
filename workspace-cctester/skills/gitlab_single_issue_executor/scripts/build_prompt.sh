@@ -4,8 +4,9 @@
 #
 # The prompt has up to three input sections (continue mode):
 #   - Issue title + description
-#   - Past attempt summaries  (notes posted by uiautotester itself, marked
-#                              with <!-- uiautotester:attempt-summary ... -->)
+#   - Past attempt summaries  (notes posted by cctester itself, marked
+#                              with <!-- cctester:attempt-summary ... -->;
+#                              legacy uiautotester markers are also read)
 #   - Reviewer comments       (all OTHER non-system notes, excluding
 #                              agent-posted Wiki artifact notes)
 #
@@ -83,23 +84,26 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
   NOTES_JSON="$(glab api --paginate \
     "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at")"
 
+  AGENT_MARKER_REGEX="<!-- (cctester|uiautotester):attempt-(summary|attachments|wiki-artifacts) v[0-9]+ "
+  SUMMARY_MARKER_REGEX="<!-- (cctester|uiautotester):attempt-summary v[0-9]+ "
+
   # Split notes:
-  #   agent-posted summaries → match the marker comment
-  #   agent-posted Wiki artifact notes → ignore for prompt purposes
+  #   agent-posted summaries -> match current or legacy marker comments
+  #   agent-posted Wiki artifact notes -> ignore for prompt purposes
   #   everything else (non-system) → reviewer comments
-  PAST_ATTEMPTS_BLOCK="$(echo "${NOTES_JSON}" | jq -r '
+  PAST_ATTEMPTS_BLOCK="$(echo "${NOTES_JSON}" | jq -r --arg summary_marker_regex "${SUMMARY_MARKER_REGEX}" '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-summary v[0-9]+ ")) | .body ]
+          | select(.body | test($summary_marker_regex)) | .body ]
     | if length == 0 then "" else (join("\n\n")) end
   ')"
-  PRIOR_ATTEMPT_COUNT="$(echo "${NOTES_JSON}" | jq -r '
+  PRIOR_ATTEMPT_COUNT="$(echo "${NOTES_JSON}" | jq -r --arg summary_marker_regex "${SUMMARY_MARKER_REGEX}" '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-summary v[0-9]+ ")) ] | length
+          | select(.body | test($summary_marker_regex)) ] | length
   ')"
 
-  REVIEWER_BLOCK="$(echo "${NOTES_JSON}" | jq -r '
+  REVIEWER_BLOCK="$(echo "${NOTES_JSON}" | jq -r --arg agent_marker_regex "${AGENT_MARKER_REGEX}" '
     [ .[] | select(.system == false)
-          | select(.body | test("<!-- uiautotester:attempt-(summary|attachments|wiki-artifacts) v[0-9]+ ") | not) | .body ]
+          | select(.body | test($agent_marker_regex) | not) | .body ]
     | if length == 0 then "" else (join("\n---\n")) end
   ')"
 
@@ -147,7 +151,7 @@ EOF
 
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
-# Past attempt summaries (auto-posted by UiAutoTester)
+# Past attempt summaries (auto-posted by cctester)
 ${PAST_ATTEMPTS_BLOCK:-(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)}
 
 # Reviewer comments (everything else, chronological)

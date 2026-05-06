@@ -18,7 +18,7 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
   "retry_count": 1,
   "block_reason": null,
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-04-29.6",
+  "skill_version": "2026-05-06.1",
   "updated_at": "2026-04-25T10:00:00Z"
 }
 ```
@@ -75,7 +75,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-04-29.6"
+  "skill_version": "2026-05-06.1"
 }
 ```
 
@@ -86,7 +86,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `mode_actual`             | what `prepare_attempt.sh` ended up running                                                |
 | `mode_downgraded_from`    | non-null only when `mode_actual=fresh` but `mode_requested=continue` and the remote branch was missing |
 | `no_reviewer_comments`    | continue mode only — true if `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
-| `prior_attempt_count`     | continue mode only — number of past `uiautotester:attempt-summary` notes the prompt included |
+| `prior_attempt_count`     | continue mode only — number of past `cctester:attempt-summary` notes the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |
 | `log_dir`                 | `${LOG_DIR}` for this attempt                                                             |
 | `wiki_artifacts_file`     | `${LOG_DIR}/wiki_artifacts.md` once `upload_attempt_artifacts.sh` has posted Wiki links to GitLab |

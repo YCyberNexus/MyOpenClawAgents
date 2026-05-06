@@ -6,7 +6,7 @@ This page documents how human reviewers and the executor cooperate when an issue
 
 When you find an issue whose MR was created but the work is incomplete or wrong, the agent will not detect this on its own. Do these three things, in this order:
 
-1. **Read the latest auto-posted attempt summary on the issue.** The agent posts a short comment after every attempt with the marker `<!-- uiautotester:attempt-summary v2 ... -->`. This tells you the attempt status, commit SHA when available, MR URL when available, changed-file count / preview, and the runner evidence path for full logs and diffs. For successful push-ready attempts, the agent also posts `<!-- uiautotester:attempt-wiki-artifacts v1 ... -->` before MR creation with links to the Wiki pages for prompt/result logs and optional report.
+1. **Read the latest auto-posted attempt summary on the issue.** The agent posts a short comment after every attempt with the marker `<!-- cctester:attempt-summary v2 ... -->`. This tells you the attempt status, commit SHA when available, MR URL when available, changed-file count / preview, and the runner evidence path for full logs and diffs. For successful push-ready attempts, the agent also posts `<!-- cctester:attempt-wiki-artifacts v1 ... -->` before MR creation with links to the Wiki pages for prompt/result logs and optional report.
 2. **Leave a comment on the issue describing what to do on the next run.** The comment is freeform — write whatever the next Claude Code run needs. Include any specific shell commands, file paths, env requirements, or "do not do X" cautions. A typical comment:
 
    > Previous run did not actually execute the test. Please:
@@ -25,11 +25,11 @@ In continue mode the executor:
 1. Resolves a fresh attempt number (monotonically increasing) and replaces the git worktree at `${WORKTREE_DIR}` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `worktree/`, `attempt_state.json`, and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
 2. Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
 3. Reads the issue notes (`E1b`) and **partitions them in two buckets**:
-   - **Past attempt summaries** — notes whose body contains `<!-- uiautotester:attempt-summary `. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
-   - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- uiautotester:attempt-wiki-artifacts ... -->`). This is where humans write supplemental instructions.
+   - **Past attempt summaries** — notes whose body contains `<!-- cctester:attempt-summary `. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
+   - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- cctester:attempt-wiki-artifacts ... -->`). This is where humans write supplemental instructions.
 4. Builds the Claude Code prompt with both buckets, in chronological order, in distinct sections (see template below).
 5. Runs `acpx claude exec -f` exactly as in fresh mode. Same No-Fallback Policy applies.
-6. After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- uiautotester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
+6. After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- cctester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
 7. **MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
    - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
    - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
@@ -58,7 +58,7 @@ Title: <issue title>
 Description:
 <issue description verbatim>
 
-# Past attempt summaries (auto-posted by UiAutoTester)
+# Past attempt summaries (auto-posted by cctester)
 <summary 1 body — full markdown including the marker comments>
 <summary 2 body>
 ...
@@ -100,7 +100,7 @@ The executor MUST NOT block, abort, or refuse to run just because reviewer comme
 
 ## What if there are no prior attempt summaries either?
 
-This is unusual — it means continue mode triggered on an issue that has no `uiautotester:attempt-summary` notes from past attempts. Typical causes:
+This is unusual — it means continue mode triggered on an issue that has no `cctester:attempt-summary` notes from past attempts. Typical causes:
 
 - The label was flipped to `continue` before any prior attempt actually ran.
 - All prior attempts ran on a deployment that predates SKILL_VERSION 2026-04-25.1 and never posted summaries.

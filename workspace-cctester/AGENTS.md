@@ -1,4 +1,4 @@
-# UiAutoTester Workspace Notes
+# cctester Workspace Notes
 
 This workspace implements a quota-carryover GitLab issue campaign with blocked skip-and-retry.
 
@@ -6,8 +6,8 @@ The repo follows a **two-branch model**: a clean baseline branch (typically `dev
 
 ## Agent Identity
 
-- Agent name: `UiAutoTester`
-- Dispatcher session: `agent:UiAutoTester:main`
+- Agent name: `cctester`
+- Dispatcher session: `agent:cctester:main`
 
 ## Execution Model
 
