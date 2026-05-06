@@ -25,7 +25,7 @@
 #   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed
 #
 # The posted comment is wrapped with a recognizable marker so future
-# build_prompt.sh runs distinguish agent-posted summaries from reviewer
+# dispatcher prompt-building runs distinguish agent-posted summaries from reviewer
 # comments:
 #
 #   <!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->

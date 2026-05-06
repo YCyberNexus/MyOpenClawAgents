@@ -17,7 +17,7 @@
 # On success:
 #   - prints the pinned GITLAB_HOST to stdout
 #
-# On failure: exits non-zero. The executor MUST mark the issue
+# On failure: exits non-zero. The prepared worker MUST mark the issue
 #   status=blocked, block_reason="<verbatim error>"
 # and stop — it MUST NOT fall back to curl or re-derive the host from
 # GITLAB_ADDRESS, per the No-Fallback Policy in SKILL.md.

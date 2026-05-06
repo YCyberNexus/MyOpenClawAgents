@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-02.1] Run a recurring scheduled GitLab issue campaign using one lightweight dispatcher session plus one dedicated session per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, synchronous bounded batches, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-05-06.1] Run a recurring scheduled GitLab issue campaign using a dispatcher/main session that prepares each issue environment before spawning one dedicated prepared worker per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, gitlab-issues-style preflight/claim checks, synchronous bounded batches, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-05-02.1**
+**SKILL_VERSION: 2026-05-06.1**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-02.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -17,8 +17,13 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/env_paths.sh` — populates path variables (SOURCE it, don't redefine).
 - `scripts/glab_auth.sh` — bootstraps `glab` CLI; prints `GITLAB_HOST`.
 - `scripts/reconcile.sh` — queries GitLab for the IID range and writes the evidence file.
-- `scripts/allocate_attempt.sh` — atomically allocates the next attempt number for an IID; the dispatcher MUST call this before every executor spawn and pass the result via `attempt_number=` in the trigger.
+- `scripts/clone_or_pull.sh` — dispatcher-owned repo clone/fetch/prune.
+- `scripts/preflight_issue.sh` — gitlab-issues-style repo/auth/open-MR/remote-branch/claim check for one IID.
+- `scripts/allocate_attempt.sh` — atomically allocates the next attempt number for an IID; the dispatcher MUST call this before every prepared-worker spawn and pass the result via `attempt_number=` in the trigger.
 - `scripts/load_ui_accounts.sh` — read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
+- `scripts/prepare_attempt.sh` — dispatcher-owned worktree preparation; replaces `${WORKTREE_DIR}`, links `hulat`, copies `.claude`, and writes git excludes.
+- `scripts/build_prompt.sh` — dispatcher-owned prompt generation from the live issue, continue-mode notes, and UI account.
+- `scripts/prepare_issue_environment.sh` — one-shot dispatcher preparation entrypoint; syncs repo, prepares worktree, builds prompt, initializes state, writes `${ISSUE_ROOT}/handoff.json`, and writes `${LOG_DIR}/subagent_task.md`.
 - `references/paths.md` — full path layout and rules.
 - `references/trigger_command.md` — the trigger spec and override rules.
 - `references/state_schema.md` — `campaign_state.json` and `issue-<iid>/state.json` schemas.
@@ -33,7 +38,7 @@ When in doubt about a path / schema / command, READ the matching reference file.
 Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No-Fallback. Dispatcher-specific additions:
 
 1. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass it (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops). Return a one-line status summary and exit.
-2. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT run executor logic inline in the dispatcher session, spawn a non-dedicated session as a substitute, or retry by spawning a different session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
+2. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT run prepared-worker logic inline in the dispatcher session, spawn a non-dedicated session as a substitute, or retry by spawning a different session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
 3. If the runtime reports that the current channel cannot wait for child sessions, or if it returns only a push-based launch acknowledgement, the dispatcher MUST NOT switch to `mode=run`, `--no-wait`, anonymous subagents, or any other fire-and-forget fallback. Record spawn/wait as unsupported for the affected IID or tick.
 
 On failure:
@@ -47,9 +52,9 @@ On failure:
 
 Universal contract (cap = `max_concurrent_subagents`, same-IID never parallel, bounded batches, wait-for-whole-batch, no fire-and-forget): [`SOUL.md`](../../SOUL.md) §Subagent Concurrency Policy. Dispatcher-specific operational details:
 
-- **Batch shape.** Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh). Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call) — concurrent allocation would race on `attempts_total` even with per-IID state files, and the order needs to be observable in dispatcher logs. Spawn the batch as parallel `sessions_spawn` calls in a SINGLE tool-call block. With `max_concurrent_subagents=1` this degenerates to one spawn per block — legacy serial behavior.
-- **Spawn completion contract.** A spawn meets this contract only when it is a blocking dedicated-session spawn that returns the executor's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`). A `status=accepted`, `runId`, `childSessionKey`, session id, thread id, or "created" acknowledgement is NOT a terminal executor reply. If the runtime returns only launch identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait as failed for this tick. Do NOT report "batch in flight" as complete, do NOT increment quota, and do NOT drain `active_issue_iids` or release the batch's UI accounts on the assumption that detached child sessions are running.
-- **Deterministic session names only.** Anonymous keys like `agent:<name>:subagent:<uuid>` are NOT dedicated issue sessions. A successful issue spawn MUST target / return `issue-<project>-<iid>` together with the executor terminal reply. If the runtime creates an anonymous subagent instead, treat it as a spawn failure for that IID.
+- **Batch shape.** Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh). For each candidate, run `scripts/preflight_issue.sh` first; skipped candidates do not consume a worker slot. Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID), allocate UI accounts, run `scripts/prepare_issue_environment.sh` for each selected IID, then spawn the prepared batch as parallel `sessions_spawn` calls in a SINGLE tool-call block. With `max_concurrent_subagents=1` this degenerates to one prepared worker per block.
+- **Spawn completion contract.** A spawn meets this contract only when it is a blocking dedicated-session spawn that returns the prepared worker's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`). A `status=accepted`, `runId`, `childSessionKey`, session id, thread id, or "created" acknowledgement is NOT a terminal worker reply. If the runtime returns only launch identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait as failed for this tick. Do NOT report "batch in flight" as complete, do NOT increment quota, and do NOT drain `active_issue_iids` or release the batch's UI accounts on the assumption that detached child sessions are running.
+- **Deterministic session names only.** Anonymous keys like `agent:<name>:subagent:<uuid>` are NOT dedicated issue sessions. A successful issue spawn MUST target / return `issue-<project>-<iid>` together with the prepared worker terminal reply. If the runtime creates an anonymous subagent instead, treat it as a spawn failure for that IID.
 - **Time budget is checked between batches, not within a batch.** Once a batch is spawned, the dispatcher commits to waiting for all members; `max_runtime_minutes` is checked at the top of the next batch loop iteration. A slow IID in a batch can stall faster IIDs in the same batch — explicit trade-off for predictable time-budget accounting.
 
 ---
@@ -68,7 +73,7 @@ The dispatcher MUST therefore allocate a **distinct UI account per IID** for eve
    - exits 12 if a pool line is malformed;
    - exits 13 if the pool is smaller than `BATCH_SIZE`.
 3. **Pool-too-small is a tick-level failure.** If `load_ui_accounts.sh` exits 13, the dispatcher MUST abort the tick with a one-line summary (`"ui_account_pool_too_small: pool=<size> batch=<n>"`). It MUST NOT shrink the batch, retry with a smaller `max_concurrent_subagents`, or share an account between IIDs. The operator's options are: enlarge the pool in `<workspace>/config/ui_accounts.env`, or lower `max_concurrent_subagents` in the trigger.
-4. **Allocation is per-batch and ephemeral.** The dispatcher binds one account to each IID in the batch, in iteration order (`account[k]` to the `k`-th IID). The mapping is held in memory for the duration of the batch and passed to each executor via the trigger fields `ui_account=<user>` and `ui_password=<pass>`. After the whole batch returns terminal executor replies, the accounts implicitly return to the pool. There is no persisted allocation table, because the synchronous per-batch wait contract (form a batch, spawn it in one tool-call block, wait for ALL members to reach terminal status, then form the next batch) guarantees that no two batches are in flight at once. If the runtime only returns `accepted` / `runId`, the account is still occupied and the spawn/wait contract has failed.
+4. **Allocation is per-batch and ephemeral.** The dispatcher binds one account to each IID in the batch, in iteration order (`account[k]` to the `k`-th IID). The mapping is held in memory for preparation and passed into `scripts/prepare_issue_environment.sh`, which injects it into the prepared prompt. The worker does not receive or choose UI credentials. After the whole batch returns terminal worker replies, the accounts implicitly return to the pool. There is no persisted allocation table, because the synchronous per-batch wait contract (form a batch, spawn it in one tool-call block, wait for ALL members to reach terminal status, then form the next batch) guarantees that no two batches are in flight at once. If the runtime only returns `accepted` / `runId`, the account is still occupied and the spawn/wait contract has failed.
 5. **Forbidden workarounds.** The dispatcher MUST NOT:
    - default a missing account from the pool by reusing one already assigned to another IID in the same batch
    - read account credentials from `gitlab.env`, the trigger, the issue body, or any other source
@@ -114,7 +119,7 @@ Concrete rules:
    - Else if `needs_continue == true`:
      - remove IID from `completed_iids` / `failed_iids`
      - add to `unfinished_iids`
-     - update the per-issue state file (`$(issue_state_file_for <iid>)` → `${ISSUES_ROOT}/issue-<iid>/state.json`): write `status=pending`, `mode="continue"`, leave `attempts_total` untouched (the dispatcher increments it before the next executor spawn). Do NOT delete the issue subtree; the executor replaces `${WORKTREE_DIR}` and writes the next attempt's logs under a new `${LOG_DIR}`.
+     - update the per-issue state file (`$(issue_state_file_for <iid>)` → `${ISSUES_ROOT}/issue-<iid>/state.json`): write `status=pending`, `mode="continue"`, leave `attempts_total` untouched (the dispatcher increments it before the next worker spawn). Do NOT delete the issue subtree; dispatcher preparation replaces `${WORKTREE_DIR}` and writes the next attempt's logs under a new `${LOG_DIR}`.
      - remove this IID from `active_issue_iids` (and the corresponding session from `active_issue_sessions`) if present
      - force `campaign_status = running`
      - persist `campaign_state.json`
@@ -157,9 +162,10 @@ Each issue uses its own dedicated session named `issue-<project>-<iid>`.
 
 1. Never reuse an issue session for a different issue.
 2. The dispatcher creates the session if it doesn't exist; otherwise resumes it.
-3. The dispatcher sends each executor a single `RUN_SINGLE_ISSUE_SESSION` message (see executor SKILL for the full payload).
-4. **`active_issue_iids` is updated atomically per batch.** Before spawning a batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. Only after the whole batch returns terminal executor replies and per-issue states are re-read, remove every batch member (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress`/budget-exhausted IIDs go back to `unfinished_iids`) and persist again. The list MUST never exceed `max_concurrent_subagents` entries. Launch acknowledgements such as `accepted`, `runId`, or `childSessionKey` are not a reason to drain this list.
-5. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, then form a fresh one.
+3. Before spawning, the dispatcher MUST have written `${ISSUES_ROOT}/issue-<iid>/handoff.json` and `${LOG_DIR}/subagent_task.md`.
+4. The dispatcher sends each worker a single `RUN_PREPARED_ISSUE_WORKER` message with the handoff path and minimum trigger values needed by `scripts/run_prepared_worker.sh`.
+5. **`active_issue_iids` is updated atomically per batch.** Before spawning a prepared batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. Only after the whole batch returns terminal worker replies and per-issue states are re-read, remove every batch member (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress`/budget-exhausted IIDs go back to `unfinished_iids`) and persist again. The list MUST never exceed `max_concurrent_subagents` entries. Launch acknowledgements such as `accepted`, `runId`, or `childSessionKey` are not a reason to drain this list.
+6. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, then form a fresh one.
 
 Batch sizing, spawn semantics (parallel `sessions_spawn` in one tool-call block, what counts as a successful spawn), deterministic session names, and same-IID guarantees are in §Concurrency Policy above.
 
@@ -176,6 +182,7 @@ GITLAB_TOKEN     # GitLab access token
 ```
 
 Reconcile / allocate also need `MIN_IID` / `MAX_IID` / `IID` per their script docs.
+Preflight / preparation also need `ISSUE_IID`, `ATTEMPT_NUMBER` after allocation, `BRANCH`, `DEV_BRANCH`, `HULAT_DIR`, `ISSUE_MODE`, `UI_ACCOUNT`, and `UI_PASSWORD` as listed in each script header.
 
 Recommended pattern:
 
@@ -226,26 +233,25 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 5. `quota_completed_this_tick = 0`; record tick start time.
 6. **Bounded-batch loop.** While quota AND time budget remain:
    1. **Check time budget at the TOP of the loop iteration**, before forming a new batch. If `now - tick_start_time >= max_runtime_minutes`, break out of the loop. (Time is NOT checked mid-batch — once a batch is spawned, the dispatcher commits to waiting for all members.)
-   2. **Form the next batch.** Compute `batch_size = min(max_concurrent_subagents, remaining_quota, remaining_eligible_iids)`. Pick `batch_size` distinct IIDs in the standard order: lowest-IID eligible backlog items first, then fresh IIDs from `next_new_issue_iid` upward. If `batch_size == 0`, break out of the loop.
-   3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`. Do all allocations BEFORE any `sessions_spawn`. Sequential allocation is mandatory — concurrent allocation would race even though each IID has its own state file (the order needs to be observable in dispatcher logs, and the script is cheap so serializing costs nothing).
-   4. **Allocate UI accounts for the batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the batch (k=0..batch_size-1). On any non-zero exit code (10/11/12/13 — see UI Account Allocation Policy above), abort the tick with a one-line failure summary; do not spawn the batch.
-   5. **Update `active_issue_iids` + persist.** Append every IID in the batch (and corresponding session names in `active_issue_sessions`) to `campaign_state.json`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
-   6. **Spawn the batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID, all in the same parallel block. Each spawn MUST target the exact dedicated session name `issue-<project>-<iid>`; anonymous `agent:<name>:subagent:<uuid>` keys are not acceptable. Each spawn sends `RUN_SINGLE_ISSUE_SESSION` with payload:
-      - `branch=` (target / integration branch, typically `master`)
-      - `dev_branch=` (clean baseline branch from which fresh-mode worktrees are checked out)
-      - `attempt_number=N_iid` (the value allocated in sub-step 3 above for THIS IID)
-      - `ui_account=<user>` and `ui_password=<pass>` (the credentials allocated in sub-step 4 above for THIS IID — distinct from every other IID in the batch; never omit these fields)
-      - `issue_mode=continue` if the per-issue state has `mode="continue"`; otherwise `issue_mode=fresh` (default)
+   2. **Form the next prepared batch.** Walk eligible IIDs in the standard order (lowest-IID backlog first, then fresh IIDs). For each candidate, run `ISSUE_IID=<iid> ISSUE_MODE=<fresh|continue> BRANCH=<branch> bash scripts/preflight_issue.sh`. Skip candidates whose preflight JSON returns `eligible=false` (`open_mr_exists`, `remote_branch_exists`, or `claimed`) and continue scanning until the prepared batch has `min(max_concurrent_subagents, remaining_quota)` IIDs or no eligible candidate remains. If the prepared batch is empty, break out of the loop.
+   3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the prepared batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`. Do all allocations BEFORE any `sessions_spawn`.
+   4. **Allocate UI accounts for the prepared batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the prepared batch. On any non-zero exit code (10/11/12/13 — see UI Account Allocation Policy above), abort the tick with a one-line failure summary; do not spawn the batch.
+   5. **Prepare every issue environment before spawn.** For each IID in the prepared batch, run `ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> ISSUE_MODE=<fresh|continue> UI_ACCOUNT=<user> UI_PASSWORD=<pass> BRANCH=<branch> DEV_BRANCH=<dev_branch> HULAT_DIR=<hulat_dir> bash scripts/prepare_issue_environment.sh`. This script writes `${ISSUE_ROOT}/handoff.json` and `${LOG_DIR}/subagent_task.md`, initializes attempt state, and returns compact handoff JSON. If preparation fails, mark that IID `blocked` and do not spawn it.
+   6. **Update `active_issue_iids` + persist.** Append every successfully prepared IID in the batch (and corresponding session names in `active_issue_sessions`) to `campaign_state.json`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
+   7. **Spawn the prepared batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per prepared IID, all in the same parallel block. Each spawn MUST target the exact dedicated session name `issue-<project>-<iid>`; anonymous `agent:<name>:subagent:<uuid>` keys are not acceptable. Each spawn sends `RUN_PREPARED_ISSUE_WORKER` with payload:
+      - `handoff_file=${ISSUES_ROOT}/issue-<iid>/handoff.json`
+      - `project=`, `group=`, `issue_iid=`, `attempt_number=`
+      - `branch=`, `dev_branch=`, `hulat_dir=`
+      - `gitlab_token=` and optional `blocked_retry_limit=`
+      - instruction to run `${LOG_DIR}/subagent_task.md` / `scripts/run_prepared_worker.sh`
 
-      When `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call — identical to the legacy serial behavior, except the UI account is now drawn from the pool head rather than from the issue body. When `> 1`, the calls run in parallel and the dispatcher waits for all of them to return terminal executor replies. A push-based `accepted` / `runId` response is a spawn/wait failure, not a valid in-flight state.
-
-      Why allocate-first-then-spawn: `env_paths.sh` used to auto-increment on every source. If the executor session was cold-restarted (OpenClaw retry, transient error in the executor's Step 1, etc.), each source could double-count a logical attempt. Allocating once in the dispatcher and passing the number through the trigger makes attempt allocation a single deterministic event per logical resolution. The same rule applies per IID inside a batch. UI accounts use the same allocate-first-then-spawn pattern for the same reason — and additionally to make the per-IID account assignment observable in dispatcher logs.
-   7. **After the WHOLE batch returns terminal executor replies**, for each IID in the batch:
+      The worker MUST NOT read SKILL.md or references; the handoff and subagent task are self-contained. When `max_concurrent_subagents=1` this block contains exactly one prepared worker. When `> 1`, the calls run in parallel and the dispatcher waits for all of them to return terminal worker replies. A push-based `accepted` / `runId` response is a spawn/wait failure, not a valid in-flight state.
+   8. **After the WHOLE batch returns terminal worker replies**, for each IID in the batch:
       - Re-read `$(issue_state_file_for <iid>)` (`${ISSUES_ROOT}/issue-<iid>/state.json`) from disk.
       - If terminal (`done` / `no_changes` / `failed`): update the corresponding list (`completed_iids` / `failed_iids` etc.), increment `quota_completed_this_tick`.
       - If `blocked`: keep in backlog; will retry after cooldown per Blocked Skip-and-Retry.
-      - If `in_progress` (the executor returned but its work is not yet terminal — rare): keep as backlog for the next tick.
-   8. **Drain `active_issue_iids` + persist.** Remove every IID in the just-finished batch from `active_issue_iids` and `active_issue_sessions`, then persist `campaign_state.json` before the next loop iteration. The list MUST be empty (or contain only IIDs from a future batch — i.e. never carry stragglers from a prior batch) before forming a new batch.
+      - If `in_progress` (the worker returned but its work is not yet terminal — rare): keep as backlog for the next tick.
+   9. **Drain `active_issue_iids` + persist.** Remove every IID in the just-finished batch from `active_issue_iids` and `active_issue_sessions`, then persist `campaign_state.json` before the next loop iteration. The list MUST be empty (or contain only IIDs from a future batch — i.e. never carry stragglers from a prior batch) before forming a new batch.
 7. Update `next_new_issue_iid` if fresh issues were introduced.
 8. If every IID in `[issue_min_iid, issue_max_iid]` is terminal, set `campaign_status = completed`.
 9. Persist `campaign_state.json` and return the compact chat summary.
@@ -265,7 +271,7 @@ Stop conditions (checked at the top of each batch iteration): `quota_completed_t
 
 ## Terminal Completion Policy
 
-Successful MR creation plus both workflow labels (`done` and `pr`) being present is the terminal completion condition for a normal attempt. Separately, GitLab `state=closed` is a hard terminal skip condition: the dispatcher MUST NOT schedule a closed issue, even if `continue` is present or `done`/`pr` are absent. The executor changes `doing` to `done` after Wiki evidence is published, then adds `pr` after MR creation / rotation succeeds, and only then writes `status=done`. For opened issues, the dispatcher MUST NOT schedule that issue again unless reconciliation finds `needs_continue == true` or `user_reopened == true` on GitLab. `continue` wins over cached `done` state and over an existing MR only while the issue is opened.
+Successful MR creation plus both workflow labels (`done` and `pr`) being present is the terminal completion condition for a normal attempt. Separately, GitLab `state=closed` is a hard terminal skip condition: the dispatcher MUST NOT schedule a closed issue, even if `continue` is present or `done`/`pr` are absent. The prepared worker changes `doing` to `done` after Wiki evidence is published, then adds `pr` after MR creation / rotation succeeds, and only then writes `status=done`. For opened issues, the dispatcher MUST NOT schedule that issue again unless reconciliation finds `needs_continue == true` or `user_reopened == true` on GitLab. `continue` wins over cached `done` state and over an existing MR only while the issue is opened.
 
 ---
 
@@ -275,7 +281,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-05-02.1",
+  "skill_version": "2026-05-06.1",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],

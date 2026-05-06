@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# env_paths.sh (executor) — bootstrap ALL executor env in one place:
+# env_paths.sh (prepared worker) — bootstrap worker env in one place:
 # paths + glab auth + PROJECT_FULL/PROJECT_URI.
 #
 # As of SKILL_VERSION 2026-04-28.1 this script is the SINGLE bootstrap
@@ -44,7 +44,14 @@ export ISSUE_ROOT="${WORK_ROOT}/issues/issue-${ISSUE_IID}"
 export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
 export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
-mkdir -p "${ISSUE_ROOT}"
+if [ "${PREPARED_WORKER:-}" = "1" ]; then
+  if [ ! -d "${ISSUE_ROOT}" ]; then
+    echo "env_paths.sh: prepared worker missing dispatcher-created ISSUE_ROOT: ${ISSUE_ROOT}" >&2
+    exit 20
+  fi
+else
+  mkdir -p "${ISSUE_ROOT}"
+fi
 
 export ATTEMPT_NUMBER_PADDED
 ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
@@ -60,7 +67,17 @@ export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
 export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
 export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
-mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+if [ "${PREPARED_WORKER:-}" = "1" ]; then
+  for __prepared_dir in "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"; do
+    if [ ! -d "${__prepared_dir}" ]; then
+      echo "env_paths.sh: prepared worker missing dispatcher-created directory: ${__prepared_dir}" >&2
+      exit 20
+    fi
+  done
+  unset __prepared_dir
+else
+  mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+fi
 
 # ─── 2. glab auth (idempotent) ──────────────────────────────────────
 # If GITLAB_HOST is already in env (e.g. parent shell already ran this),

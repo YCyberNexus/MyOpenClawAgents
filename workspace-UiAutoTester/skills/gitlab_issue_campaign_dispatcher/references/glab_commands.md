@@ -19,7 +19,7 @@ glab auth status --hostname "${GITLAB_HOST}"
 
 ## D1 — Read one issue
 
-Used for ad-hoc lookups. The bulk reconciliation in `scripts/reconcile.sh` already calls this for the entire IID range.
+Used by reconciliation and `scripts/prepare_issue_environment.sh` / `scripts/build_prompt.sh`.
 
 ```bash
 glab api \
@@ -27,6 +27,35 @@ glab api \
 ```
 
 Response is the raw issue JSON. Parse with `jq` to read `.state` and `.labels`.
+
+## D1b — Read one issue's notes
+
+Used by dispatcher-owned `scripts/build_prompt.sh` in continue mode before the worker is spawned.
+
+```bash
+glab api --paginate \
+  "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at"
+```
+
+## D3 — Verify glab auth
+
+Used by `scripts/preflight_issue.sh` after `scripts/env_paths.sh` has authenticated against the pinned host.
+
+```bash
+glab auth status --hostname "${GITLAB_HOST}"
+```
+
+## D4 — List open MRs for the prepared work branch
+
+Used by `scripts/preflight_issue.sh` in fresh mode to skip IIDs that already have an open MR.
+
+```bash
+glab mr list \
+  --repo "${PROJECT_FULL}" \
+  --source-branch "${WORK_BRANCH}" \
+  --state opened \
+  --output json
+```
 
 ## D2 — List issues in the project (rarely needed)
 
@@ -41,7 +70,7 @@ glab api --paginate \
 
 - `curl`, `wget`, `httpie`, any HTTP library
 - `glab issue list`, `glab issue view` — the dispatcher uses the raw API form so output is stable JSON
-- Any operation that mutates GitLab state (label changes, MR creation, etc.) — those belong to the executor
+- Any operation that mutates GitLab state (label changes, MR creation, Wiki writes, etc.) — those belong to the prepared worker
 - Falling back to anything not on this list "just for one quick check"
 
 If a needed operation is not on this list, mark the affected IID `blocked` with `block_reason="dispatcher needs unsupported glab op: <description>"` and stop.

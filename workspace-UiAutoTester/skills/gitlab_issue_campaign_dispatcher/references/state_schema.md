@@ -25,7 +25,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-05-02.1",
+  "skill_version": "2026-05-06.1",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260425T100501Z.json",
   "updated_at": "2026-04-25T10:05:30Z"
 }
@@ -62,20 +62,49 @@ The dispatcher MUST NOT keep both the scalar and the array fields in the persist
 
 `completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live state is `closed` OR live labels contain both `done` and `pr`) AND `needs_continue == false` in the evidence file.
 
-## issue-<iid>/state.json (per-issue, owned by executor)
+## issue-<iid>/state.json (per-issue, prepared by dispatcher, finalized by worker)
 
 Path: `${ISSUES_ROOT}/issue-<iid>/state.json` (use `issue_state_file_for` helper)
 
-This file is written and updated by the executor; the dispatcher only **reads** it (after a spawned executor session returns) and only **mutates** it during reconciliation when re-enqueuing an IID.
+This file is initialized and refreshed by dispatcher preparation before spawn, then updated/finalized by the prepared worker. The dispatcher also mutates it during reconciliation when re-enqueuing an IID.
 
-The full schema lives in the executor SKILL's `references/state_schema.md`. From the dispatcher's perspective the relevant fields are:
+The full schema lives in the prepared-worker skill's `references/state_schema.md`. From the dispatcher's perspective the relevant fields are:
 
 | Field             | Read by dispatcher? | Notes                                               |
 | ----------------- | ------------------- | --------------------------------------------------- |
 | `iid`             | yes                 | sanity                                              |
 | `status`          | yes                 | `pending` / `in_progress` / `blocked` / `failed` / `done` / `no_changes` |
 | `mode`            | dispatcher writes   | `fresh` (default) or `continue`                     |
-| `attempts_total`  | dispatcher allocates | incremented atomically by `scripts/allocate_attempt.sh` before every executor spawn. The executor may mirror the allocated value while refreshing state, but must not increment or derive it. |
+| `attempts_total`  | dispatcher allocates | incremented atomically by `scripts/allocate_attempt.sh` before every prepared-worker spawn. The worker may mirror the allocated value while refreshing state, but must not increment or derive it. |
 | `block_reason`    | yes (for chat)      | only when `status=blocked` / `failed`               |
+
+## issue-<iid>/handoff.json
+
+Path: `${ISSUES_ROOT}/issue-<iid>/handoff.json`
+
+Written by `scripts/prepare_issue_environment.sh` before `sessions_spawn`. Required v1 fields:
+
+```json
+{
+  "handoff_version": "1",
+  "project": "px_ifp_hulat_test",
+  "group": "claw_gitlab",
+  "iid": 14,
+  "attempt_number": 2,
+  "issue_title": "Issue title",
+  "issue_mode_requested": "continue",
+  "issue_mode_actual": "continue",
+  "worktree_dir": "/data/openclaw_work/.../issues/issue-14/worktree",
+  "log_dir": "/data/openclaw_work/.../issues/issue-14/log/attempt-002",
+  "prompt_file": "/data/openclaw_work/.../issues/issue-14/log/attempt-002/prompt.txt",
+  "work_branch": "issue/14-auto-fix",
+  "local_branch": "issue/14-auto-fix-att002",
+  "issue_state_file": "/data/openclaw_work/.../issues/issue-14/state.json",
+  "attempt_state_file": "/data/openclaw_work/.../issues/issue-14/attempt_state.json",
+  "created_at": "2026-05-06T10:05:30Z"
+}
+```
+
+`gitlab_token` is intentionally NOT persisted in this file. The dispatcher passes it only in the worker payload.
 
 Note: per-issue state previously lived at `${STATE_DIR}/issues/issue-<iid>.json`. That path is **gone** as of SKILL_VERSION 2026-04-25.1. The new path is `${ISSUES_ROOT}/issue-<iid>/state.json`. Old files, if any, should be migrated by the operator (the agent does not auto-migrate).

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # post_push_verify.sh — confirm the remote ${WORK_BRANCH} contains only
 # repo code, no agent artifacts, no hulat symlink, and no local Claude
-# Code config. If verification fails the executor must mark the issue
+# Code config. If verification fails the prepared worker must mark the issue
 # blocked and skip MR creation.
 #
 # Required env vars:

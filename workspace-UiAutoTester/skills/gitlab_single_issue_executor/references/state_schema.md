@@ -1,6 +1,6 @@
-# Per-Issue and Current-Attempt State Schemas (Executor)
+# Per-Issue and Current-Attempt State Schemas (Prepared Worker)
 
-As of SKILL_VERSION 2026-04-30.1 the executor maintains state at TWO levels: one cross-attempt file per issue, and one current-attempt file that is overwritten on each new attempt.
+As of SKILL_VERSION 2026-05-06.1 the dispatcher initializes state before worker spawn, and the prepared worker finalizes it after execution. State has TWO levels: one cross-attempt file per issue, and one current-attempt file overwritten on each attempt.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -18,7 +18,7 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
   "retry_count": 1,
   "block_reason": null,
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-04-30.1",
+  "skill_version": "2026-05-06.1",
   "updated_at": "2026-04-25T10:00:00Z"
 }
 ```
@@ -42,8 +42,8 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
 
 | Status        | When written                                                                 | Terminal? |
 | ------------- | ---------------------------------------------------------------------------- | --------- |
-| `pending`     | After dispatcher reconciliation re-enqueues; before executor starts running. | no        |
-| `in_progress` | After `prepare_attempt.sh` returns; during Claude execution.                 | no        |
+| `pending`     | After dispatcher reconciliation re-enqueues; before dispatcher preparation. | no        |
+| `in_progress` | After `prepare_issue_environment.sh` writes the handoff; during worker execution. | no        |
 | `blocked`     | Retryable failure (auth, runtime mismatch, leak guard tripped, etc.).        | no        |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
 | `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes       |
@@ -75,17 +75,17 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-04-30.1"
+  "skill_version": "2026-05-06.1"
 }
 ```
 
 | Field                     | Notes                                                                                    |
 | ------------------------- | ---------------------------------------------------------------------------------------- |
 | `attempt_number`          | matches `${ATTEMPT_NUMBER}` for this attempt                                              |
-| `mode_requested`          | what the dispatcher asked for via `issue_mode=...` (or what the executor inferred)        |
-| `mode_actual`             | what `prepare_attempt.sh` ended up running                                                |
+| `mode_requested`          | what the dispatcher asked for via `issue_mode=...`                                       |
+| `mode_actual`             | what dispatcher `prepare_attempt.sh` ended up preparing                                   |
 | `mode_downgraded_from`    | non-null only when `mode_actual=fresh` but `mode_requested=continue` and the remote branch was missing |
-| `no_reviewer_comments`    | continue mode only — true if `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
+| `no_reviewer_comments`    | continue mode only — true if dispatcher `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
 | `prior_attempt_count`     | continue mode only — number of past `acpx_auto_tester:attempt-summary` notes (plus legacy pre-rename attempt-summary notes) the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |
 | `log_dir`                 | `${LOG_DIR}` for this attempt                                                             |
@@ -94,4 +94,20 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `summary_file`            | `${SUMMARY_FILE}` once `summarize_attempt.sh` has run                                     |
 | `summary_posted_to_issue` | true after the summary was successfully posted as a GitLab issue note                     |
 
-The executor MUST update `attempt_state.json` at every major step inside the attempt (mirroring the issue-level `state.json` cadence). When the attempt reaches a terminal status, both files are updated atomically: current-attempt state first (with full detail), then issue-level state (which copies the latest summary fields).
+The dispatcher writes the initial `in_progress` attempt state before spawn. The prepared worker updates `attempt_state.json` at major execution/publication steps and finalizes both files atomically: current-attempt state first, then issue-level state.
+
+## issue-<iid>/handoff.json
+
+Path: `${ISSUE_ROOT}/handoff.json`
+
+This file is written by dispatcher preparation and read by `scripts/run_prepared_worker.sh`. It must include:
+
+- `handoff_version`
+- `project`, `group`, `iid`, `attempt_number`
+- `issue_title`, `issue_mode_requested`, `issue_mode_actual`
+- `worktree_dir`, `log_dir`, `prompt_file`
+- `work_branch`, `local_branch`
+- `issue_state_file`, `attempt_state_file`
+- `created_at`
+
+The GitLab token is never persisted in handoff JSON; it is passed only in the worker payload.

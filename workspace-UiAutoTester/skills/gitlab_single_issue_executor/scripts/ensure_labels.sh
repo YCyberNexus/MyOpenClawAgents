@@ -12,7 +12,7 @@
 # whose MR was created and labeled `done` + `pr` by the agent, but where the
 # Claude Code run actually didn't finish (env error, partial edits, etc.).
 # When the dispatcher's reconciliation sees `continue` on an issue, it
-# re-enqueues the IID and the executor restarts the resolution flow on
+# re-enqueues the IID and the dispatcher prepares a continue-mode handoff on
 # the existing work branch (or creates one from master if none exists).
 
 set -euo pipefail

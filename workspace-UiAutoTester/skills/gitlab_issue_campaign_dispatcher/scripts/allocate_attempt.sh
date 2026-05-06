@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # allocate_attempt.sh — atomically allocate the next attempt number for an
 # IID and persist it into the per-issue state file. Returns the allocated
-# number on stdout for the dispatcher to put into the executor trigger as
+# number on stdout for the dispatcher to put into the prepared-worker trigger as
 # `attempt_number=<N>`.
 #
-# Why this exists: the executor's env_paths.sh used to auto-increment the
-# attempt number every time it was sourced. If the executor session got
+# Why this exists: the worker's env_paths.sh used to auto-increment the
+# attempt number every time it was sourced. If the worker session got
 # cold-restarted or env_paths was sourced multiple times in one logical
 # resolution, you ended up with multiple attempt numbers and stale
 # attempt-scoped paths because each source() advanced attempt state. The
 # fix is to make attempt allocation a SINGLE event owned by the dispatcher:
-# dispatcher allocates once before spawning, executor reads the allocated number from the
+# dispatcher allocates once before spawning, worker reads the allocated number from the
 # trigger and never derives its own.
 #
 # Required env vars:
@@ -50,13 +50,13 @@ if [ -s "${STATE_FILE}" ]; then
 else
   CURRENT=0
   # Initialize a minimal state file. Other fields (status, mode, etc.)
-  # will be filled in by the executor.
+  # will be filled in by dispatcher preparation and the worker.
   jq -n --argjson iid "${IID}" '{
     iid: $iid,
     status: "pending",
     mode: "fresh",
     attempts_total: 0,
-    skill_version: "2026-04-29.4"
+    skill_version: "2026-05-06.1"
   }' > "${STATE_FILE}"
 fi
 

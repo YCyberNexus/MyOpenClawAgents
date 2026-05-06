@@ -19,7 +19,7 @@
 # Required env vars:
 #   PROJECT_FULL    "${GROUP}/${PROJECT}"
 #   ISSUE_IID       from env_paths.sh
-#   ISSUE_MODE      "fresh" or "continue" (set by Step 3 of executor algo)
+#   ISSUE_MODE      "fresh" or "continue" (from the prepared handoff)
 #   ISSUE_TITLE     short human title for the MR title
 #   LOG_DIR         where mr_description.md lives (under ISSUE_ROOT/log/attempt-NNN)
 #   BRANCH          target branch (typically "master")
@@ -27,7 +27,7 @@
 #   ATTEMPT_NUMBER_PADDED  e.g. "002" (used in MR title for visibility)
 #
 # Output:
-#   Prints the resulting MR web URL to stdout. The executor writes this to
+#   Prints the resulting MR web URL to stdout. The worker writes this to
 #   the per-issue and current-attempt state files.
 
 set -euo pipefail

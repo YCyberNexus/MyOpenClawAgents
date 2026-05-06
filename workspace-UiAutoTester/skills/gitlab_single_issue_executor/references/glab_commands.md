@@ -1,12 +1,12 @@
-# glab Commands (Executor)
+# glab Commands (Prepared Worker)
 
-The executor is allowed only the commands listed here. Any other approach to talking to GitLab — `curl`, `wget`, Python HTTP libraries, alternate `glab` subcommands not in this table, modifying `.gitlab-ci.yml` to bypass `glab` — is forbidden by the GitLab Access Policy in `SKILL.md`.
+The prepared worker is allowed only the commands listed here. Any other approach to talking to GitLab — `curl`, `wget`, Python HTTP libraries, alternate `glab` subcommands not in this table, modifying `.gitlab-ci.yml` to bypass `glab` — is forbidden by the GitLab Access Policy in `SKILL.md`.
 
 ## Authentication and host
 
 The host is pinned in `<workspace>/config/gitlab.env`; `scripts/env_paths.sh` invokes `scripts/glab_auth.sh` to authenticate and exports `${GITLAB_HOST}`, `${PROJECT_FULL}`, `${PROJECT_URI}`. Policy (verification, token rotation, abort-on-mismatch, never re-derive host) lives in [`SOUL.md`](../../../SOUL.md) §GitLab Host Pinning. Minimum trigger env vars per Bash exec are listed in `SKILL.md` §Per-Exec Env Contract.
 
-The executor may use these auth commands only inside `scripts/glab_auth.sh`:
+The prepared worker may use these auth commands only inside `scripts/glab_auth.sh`:
 
 ```bash
 glab auth login \
@@ -17,27 +17,7 @@ glab auth login \
 glab auth status --hostname "${GITLAB_HOST}"
 ```
 
-## E1 — Read the target issue
-
-Used to fetch title, description, and current labels.
-
-```bash
-glab api \
-  "projects/${PROJECT_URI}/issues/${ISSUE_IID}"
-```
-
-## E1b — Read the target issue's notes (comments)
-
-Used in **continue mode** so the executor can pick up reviewer-supplied supplemental steps. Reviewers leave the supplemental instructions as a comment on the issue before flipping the workflow labels from `done` / `pr` to `continue`; this command reads those comments. See `references/continue_mode.md` for the reviewer contract.
-
-```bash
-glab api --paginate \
-  "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at"
-```
-
-The response is a JSON array of note objects. The executor cares about non-system notes (`.system == false`); each has `body`, `author.username`, `created_at`. The executor concatenates these into the Claude Code prompt verbatim, in chronological order.
-
-In fresh mode, fetching notes is optional — the original description is the source of truth. In continue mode, fetching notes is **mandatory**.
+Reading issue bodies and notes is dispatcher-owned prompt preparation. The prepared worker receives that content through `${LOG_DIR}/prompt.txt` and must not fetch/rebuild it.
 
 ## E2 — List project labels
 
@@ -122,7 +102,7 @@ glab mr close <mr_iid> --repo "${PROJECT_FULL}"
 
 `<mr_iid>` is the per-project MR IID (the integer in `merge_requests/<N>`). Get it via E6 (`.[0].iid`).
 
-The executor MUST NEVER call `glab mr merge`. Closing (E10) is allowed as part of the continue-mode MR rotation; merging is not.
+The prepared worker MUST NEVER call `glab mr merge`. Closing (E10) is allowed as part of the continue-mode MR rotation; merging is not.
 
 ## E9 — Post a note (comment) on the issue
 
@@ -175,11 +155,11 @@ glab api --method PUT \
   -f "format=markdown"
 ```
 
-The executor constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}/-/wikis/${WIKI_TITLE}` and posts those links back to the issue with E9.
+The prepared worker constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}/-/wikis/${WIKI_TITLE}` and posts those links back to the issue with E9.
 
 ## What is FORBIDDEN
 
 - `glab mr merge` — under any circumstances. The MR stays open.
 - Full-set label overwrite (`-f labels=...`) for transitions — wipes manually added labels. Use E4/E5 instead.
 - `curl`, `wget`, `httpie`, any HTTP library, any non-glab GitLab SDK.
-- Inventing flags or alternative subcommands. If the operation isn't in this list, mark the issue `blocked` with `block_reason="executor needs unsupported glab op: <description>"` and stop.
+- Inventing flags or alternative subcommands. If the operation isn't in this list, mark the issue `blocked` with `block_reason="worker needs unsupported glab op: <description>"` and stop.

@@ -68,3 +68,24 @@ This applies in particular to: `issue_min_iid`, `issue_max_iid`, `hourly_issue_q
 `max_concurrent_subagents` (when supplied) is also applied as an override using the same rule: write the trigger value into `campaign_state.json.max_concurrent_subagents`. When the trigger omits it, the dispatcher MUST default the field to `1` for the tick AND persist that default so the disk schema stays consistent across versions.
 
 `gitlab_address` (when supplied) is NOT applied as an override — it is used only for the cross-check above. The pin in `<workspace>/config/gitlab.env` is the single source of truth for host / protocol.
+
+## Child worker trigger
+
+The dispatcher no longer sends `RUN_SINGLE_ISSUE_SESSION`. After `scripts/prepare_issue_environment.sh` writes `${ISSUE_ROOT}/handoff.json` and `${LOG_DIR}/subagent_task.md`, the dispatcher wakes the dedicated issue session with:
+
+```text
+RUN_PREPARED_ISSUE_WORKER
+handoff_file=<absolute path to ${ISSUE_ROOT}/handoff.json>
+project=<project>
+group=<group>
+issue_iid=<iid>
+attempt_number=<dispatcher-allocated attempt number>
+branch=<branch>
+dev_branch=<dev_branch>
+hulat_dir=<hulat_dir>
+gitlab_token=<token>
+blocked_retry_limit=<limit>
+non_interactive=true
+```
+
+The worker payload must tell the worker not to read SKILL.md or references and to run the self-contained command in `${LOG_DIR}/subagent_task.md`.
