@@ -1,8 +1,10 @@
-# Label Lifecycle (Executor)
+# Label Lifecycle
+
+This document is the workspace-wide reference for issue workflow labels. Both halves of the agent (the dispatcher's prep, and the subagent's post-acpx flow) follow these transitions.
 
 ## Required project labels
 
-The executor ensures these seven labels exist via `scripts/ensure_labels.sh`:
+`scripts/ensure_labels.sh` (called once per tick by the dispatcher) ensures these seven labels exist:
 
 - `todo`
 - `doing`
@@ -10,7 +12,7 @@ The executor ensures these seven labels exist via `scripts/ensure_labels.sh`:
 - `done`
 - `blocked`
 - `failed`
-- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` + `pr` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and the executor restarts the resolution flow against the existing work branch. **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
+- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` + `pr` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and prepares the next attempt's worktree from the existing work branch (continue mode). **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
 
 ## Transition diagram
 
@@ -40,17 +42,17 @@ The executor ensures these seven labels exist via `scripts/ensure_labels.sh`:
 
 All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so that unrelated labels on the issue are preserved.
 
-| From       | To         | Trigger                                              | Operations                                                            |
-| ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `todo`     | `doing`    | executor begins work in fresh mode                   | remove `todo`, `blocked`, `done`, `pr`; add `doing`                   |
-| `continue` | `doing`    | executor begins work in continue mode (resume run)   | remove `continue`, `blocked`, `done`, `pr`; add `doing`               |
-| `doing`    | `done`     | branch pushed, post-push verification passed, and attempt artifacts published to the project Wiki and linked from the issue | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
-| `done`     | `done+pr`  | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr`                                           |
-| `doing`    | `blocked`  | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
-| `done`     | `done+blocked` | retryable failure after Wiki evidence and `done`, before `pr` can be added | `set_issue_label.sh add blocked`; do NOT add `pr`                     |
-| `blocked`  | `doing`    | retry begins on a later tick                         | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
-| `blocked`  | `failed`   | `retry_count > blocked_retry_limit`                  | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
-| `done+pr`  | `continue` | **human reviewer** notices the prior run was incomplete and wants the agent to re-run on the existing branch | manual on the GitLab UI; the executor does NOT make this transition itself |
+| From       | To         | Performer  | Trigger                                              | Operations                                                            |
+| ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
+| `todo`     | `doing`    | dispatcher | dispatcher begins prep in fresh mode                 | remove `todo`, `blocked`, `done`, `pr`; add `doing`                   |
+| `continue` | `doing`    | dispatcher | dispatcher begins prep in continue mode              | remove `continue`, `blocked`, `done`, `pr`; add `doing`               |
+| `doing`    | `done`     | subagent   | branch pushed, post-push verification passed, attempt artifacts published to the project Wiki and linked from the issue | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
+| `done`     | `done+pr`  | subagent   | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr`                                           |
+| `doing`    | `blocked`  | subagent   | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
+| `done`     | `done+blocked` | subagent | retryable failure after Wiki evidence and `done`, before `pr` can be added | `set_issue_label.sh add blocked`; do NOT add `pr`                     |
+| `blocked`  | `doing`    | dispatcher | retry begins on a later tick                         | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
+| `blocked`  | `failed`   | subagent   | `retry_count > blocked_retry_limit`                  | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
+| `done+pr`  | `continue` | **human reviewer** | reviewer notices the prior run was incomplete and wants the agent to re-run on the existing branch | manual on the GitLab UI; the agent does NOT make this transition itself |
 
 ## Important rules
 
@@ -63,12 +65,12 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 
 ## Issue closure vs `done` label
 
-These are two SEPARATE signals. The executor only controls the first; the second is GitLab's job.
+These are two SEPARATE signals. The agent only controls the first; the second is GitLab's job.
 
 | Signal              | Who sets it                         | When                                              | Means                                  |
 | ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
-| `done` label        | the executor (this skill)           | immediately after attempt evidence Wiki publication, before MR creation / rotation | "the agent finished solving and published evidence" |
-| `pr` label          | the executor (this skill)           | immediately after `create_mr.sh` returns successfully | "the MR exists for human review" |
+| `done` label        | the subagent                        | immediately after attempt evidence Wiki publication, before MR creation / rotation | "the agent finished solving and published evidence" |
+| `pr` label          | the subagent                        | immediately after `create_mr.sh` returns successfully | "the MR exists for human review" |
 | issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "a human reviewed, approved, and merged" |
 
 GitLab's native auto-close is triggered by the **closing keyword in the MR description**. `scripts/create_mr.sh` writes the description starting with:
@@ -84,6 +86,6 @@ When the MR merges, GitLab parses that line and closes the linked issue automati
 - Project → Settings → Merge requests → "Automatically close referenced merge requests" is enabled.
 - The MR's target branch is the project's default branch (`master` in this workspace), which is the only case GitLab auto-closes for. Auto-close does NOT fire on MRs into non-default branches.
 
-**The executor MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the executor's job ends when `done` and `pr` are both present.
+**The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the subagent's job ends when `done` and `pr` are both present.
 
 **Approve vs merge.** GitLab's auto-close fires on **merge**, not approve. If your team uses "approve must precede merge", the practical effect is "issue closes after approve+merge", which is what you want. There is no agent-side support for "close on approve only" — that would require webhook plumbing outside this skill.

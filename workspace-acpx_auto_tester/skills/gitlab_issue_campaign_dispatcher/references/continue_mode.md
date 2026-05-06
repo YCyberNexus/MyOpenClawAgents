@@ -1,6 +1,6 @@
 # Continue Mode — Reviewer Contract and Prompt Construction
 
-This page documents how human reviewers and the executor cooperate when an issue's earlier "done" was wrong (Claude Code returned without actually finishing the work).
+This page documents how human reviewers and the agent cooperate when an issue's earlier "done" was wrong (Claude Code returned without actually finishing the work). Both halves of the agent (the dispatcher's prep and the subagent's post-acpx flow) follow the rules below — `scripts/prepare_attempt.sh` and `scripts/build_prompt.sh` are run by the dispatcher; `scripts/create_mr.sh` is run by the subagent.
 
 ## Reviewer's responsibility (the human side)
 
@@ -12,19 +12,19 @@ When you find an issue whose MR was created but the work is incomplete or wrong,
 
 The next dispatcher tick will pick the issue up and re-run.
 
-## What the executor does on its side
+## What the agent does on its side
 
-In continue mode the executor:
+In continue mode:
 
-1. Resolves a fresh attempt number (monotonically increasing) and replaces the git worktree at `${WORKTREE_DIR}` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `worktree/`, `attempt_state.json`, and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
-2. Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
-3. Reads the issue notes (`E1b`) and **partitions them in two buckets**:
+1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to replace the git worktree at `${WORKTREE_DIR}` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `worktree/`, `attempt_state.json`, and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
+2. **Dispatcher prep:** Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
+3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`E1b`) and **partitions them in two buckets**:
    - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
    - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- acpx_auto_tester:attempt-wiki-artifacts ... -->`) and legacy pre-rename Wiki artifact notes. This is where humans write supplemental instructions.
-4. Builds the Claude Code prompt with both buckets, in chronological order, in distinct sections (see template below).
-5. Runs Claude Code via the same one-shot invocation used in fresh mode: `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from `${WORKTREE_DIR}`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the prompt's "Past attempt summaries" section, not from a persistent Claude session.
-6. After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
-7. **MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
+4. **Dispatcher prep:** `build_prompt.sh` writes the Claude Code prompt at `${LOG_DIR}/prompt.txt` with both buckets, in chronological order, in distinct sections (see template below).
+5. **Subagent:** Runs Claude Code via the same one-shot invocation used in fresh mode: `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from `${WORKTREE_DIR}`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the prompt's "Past attempt summaries" section, not from a persistent Claude session.
+6. **Subagent:** After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
+7. **Subagent — MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
    - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
    - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
    - creates a fresh MR for the new attempt with description that begins `Closes #<iid>` and includes `Supersedes !<old_mr_iid>` references so reviewers can trace the chain
@@ -82,13 +82,12 @@ In fresh mode the prompt looks similar but omits the "Past attempt summaries" an
 
 ## What if there are no reviewer comments?
 
-If continue mode is requested but `E1b` returns zero non-system notes that are not auto-summaries, the reviewer flipped the label without leaving guidance. In that case the executor:
+If continue mode is requested but `E1b` returns zero non-system notes that are not auto-summaries, the reviewer flipped the label without leaving guidance. In that case the dispatcher's `build_prompt.sh`:
 
 - Builds the prompt with the reviewer-comments section saying `(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)`.
-- Continues normally.
-- Records `no_reviewer_comments=true` in the current-attempt state for operator awareness.
+- Continues normally; the dispatcher records `no_reviewer_comments=true` in the current-attempt state for operator awareness.
 
-The executor MUST NOT block, abort, or refuse to run just because reviewer comments are missing.
+The agent MUST NOT block, abort, or refuse to run just because reviewer comments are missing.
 
 ## What if there are no prior attempt summaries either?
 
@@ -97,4 +96,6 @@ This is unusual — it means continue mode triggered on an issue that has no `ac
 - The label was flipped to `continue` before any prior attempt actually ran.
 - All prior attempts ran on a deployment that predates SKILL_VERSION 2026-04-25.1 and never posted summaries.
 
-In this case the prompt's "Past attempt summaries" section says `(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)`. The executor still runs.
+In this case the prompt's "Past attempt summaries" section says `(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)`. The agent still runs.
+
+`mode_downgraded_from`: if continue mode was requested but `prepare_attempt.sh` could not find `origin/${WORK_BRANCH}` on the remote, it downgrades to fresh mode. The dispatcher records `mode_downgraded_from="continue"` and `mode_actual="fresh"` in `${ATTEMPT_STATE_FILE}` so the operator can see the downgrade happened. This is the only documented exception to the No-Fallback Policy for continue mode.

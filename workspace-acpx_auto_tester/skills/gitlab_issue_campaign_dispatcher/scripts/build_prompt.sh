@@ -44,10 +44,13 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}" "${HULAT_DIR:?}"
 
-# UI account is allocated by the dispatcher per-spawn; both fields are
-# required so the override block is unambiguous. The executor SKILL maps a
-# missing/empty value to status=blocked block_reason="missing required
-# input: ui_account|ui_password" — see executor SKILL "Inputs".
+# UI account is allocated by the dispatcher per-batch from the pool pinned
+# at <workspace>/config/ui_accounts.env; both fields are required so the
+# override block in the Claude Code prompt is unambiguous. The dispatcher
+# ensures distinct accounts across concurrent batch members — see SKILL.md
+# §UI Account Allocation Policy. If either env var is missing here, this
+# script exits non-zero and the dispatcher marks the IID `blocked` for
+# this batch.
 if [ -z "${UI_ACCOUNT:-}" ]; then
   echo "build_prompt: UI_ACCOUNT is required (dispatcher must pass ui_account=<user> in trigger)" >&2
   exit 3
