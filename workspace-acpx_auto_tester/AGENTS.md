@@ -29,6 +29,11 @@ This workspace is intentionally split into two skills:
    - must not clone, pull, create directories, prepare worktrees, copy `.claude`, or build prompts
    - receives `RUN_PREPARED_ISSUE_WORKER` plus a handoff and directly executes the prepared prompt, publishes evidence, pushes, and opens/rotates the MR
 
+Role selection is trigger-driven:
+
+- `RUN_SCHEDULED_ISSUE_CAMPAIGN` means this session is the dispatcher and may use `sessions_spawn`.
+- `RUN_PREPARED_ISSUE_WORKER` means this session is already the prepared worker. It MUST NOT call `sessions_spawn`, `sessions_history`, or any dispatcher skill. It runs only the prepared command from `${LOG_DIR}/subagent_task.md` / `scripts/run_prepared_worker.sh` and returns compact JSON.
+
 ## Required Capabilities and Concurrency Limit
 
 Capability list and the per-tick concurrency contract are defined canonically in [`SOUL.md`](SOUL.md) §Tooling Expectations and §Subagent Concurrency Policy. This file does not restate them.
@@ -38,7 +43,7 @@ Capability list and the per-tick concurrency contract are defined canonically in
 The Subagent Concurrency Policy in SOUL.md is prompt-level — the model can still violate it. Enforcement of the per-tick concurrency cap must therefore live below the prompt. Use whichever of the following the deployment can deliver, in priority order:
 
 1. **Blocking dedicated-session spawn support (required).**
-   This workspace uses the e712962c synchronous batch strategy: every `sessions_spawn` must block until the prepared worker returns a terminal compact reply. A runtime response containing only `accepted`, `runId`, `childSessionKey`, a thread id, a session id, or an anonymous `agent:<name>:subagent:<uuid>` key is only a launch acknowledgement and does not satisfy the contract. If the active OpenClaw channel cannot wait for child sessions, the deployment is incompatible with this strategy; the dispatcher must fail the affected work instead of switching to `mode=run` or any other push-based fallback.
+   This workspace uses the e712962c synchronous batch strategy: every `sessions_spawn` must use `mode="session"` with `thread=true` and must block until the prepared worker returns a terminal compact reply. A runtime response containing only `accepted`, `runId`, `childSessionKey`, a thread id, a session id, or an anonymous `agent:<name>:subagent:<uuid>` key is only a launch acknowledgement and does not satisfy the contract. If the active OpenClaw channel cannot wait for child sessions, the deployment is incompatible with this strategy; the dispatcher must fail the affected work instead of switching to `mode=run` or any other push-based fallback.
 
 2. **OpenClaw platform-level concurrency knob (preferred).**
    The OpenClaw runtime should cap concurrent `sessions_spawn` from this parent session at `max_concurrent_subagents`. The exact field name depends on the OpenClaw version in use — operators must consult the OpenClaw maintainer to pin down the correct setting (likely candidates: `max_concurrent_subagents`, `max_parallel_sessions`, `spawn_concurrency`). The value SHOULD match the integer the dispatcher receives in the trigger so the platform layer mirrors the prompt-layer contract. If the deployment uses a fixed value, set it to the maximum `max_concurrent_subagents` operators expect to send via trigger; the dispatcher's smaller per-tick value then becomes the binding constraint.
@@ -49,6 +54,10 @@ The Subagent Concurrency Policy in SOUL.md is prompt-level — the model can sti
 4. **SOUL.md prompt rules.** The weakest layer; they must not be the only layer.
 
 Operators are expected to confirm with the OpenClaw maintainer that (1) and (2) are available and configured before relying on (4) alone. The previously documented `spawn_slot.json` fallback is no longer applicable in the multi-slot model.
+
+### Spawn Error Handling
+
+Any `sessions_spawn` response with `status="error"` is terminal for that spawn attempt. In particular, `errorCode="thread_required"`, `errorCode="spawn_failed"`, gateway timeout text, backend-unavailable text, or a response that contains only `childSessionKey` MUST NOT be retried in a loop. The dispatcher records the affected IID as blocked with the raw spawn error and moves on or ends the tick according to quota policy.
 
 ## Session Naming
 

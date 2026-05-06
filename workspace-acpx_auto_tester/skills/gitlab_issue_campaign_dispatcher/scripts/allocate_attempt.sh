@@ -56,7 +56,7 @@ else
     status: "pending",
     mode: "fresh",
     attempts_total: 0,
-    skill_version: "2026-05-06.1"
+    skill_version: "2026-05-06.2"
   }' > "${STATE_FILE}"
 fi
 

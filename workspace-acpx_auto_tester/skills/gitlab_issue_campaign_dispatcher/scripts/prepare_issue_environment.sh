@@ -72,7 +72,7 @@ jq -n \
   --argjson prior_attempt_count "${PRIOR_ATTEMPT_COUNT}" \
   --arg local_branch "${PREP_LOCAL_BRANCH}" \
   --arg log_dir "${LOG_DIR}" \
-  --arg skill_version "2026-05-06.1" \
+  --arg skill_version "2026-05-06.2" \
   '{
     iid: $iid,
     attempt_number: $attempt_number,
@@ -99,7 +99,7 @@ if [ -s "${ISSUE_STATE_FILE}" ]; then
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
     --arg latest_attempt_dir "${ATTEMPT_DIR}" \
     --argjson retry_count "${RETRY_COUNT}" \
-    --arg skill_version "2026-05-06.1" \
+    --arg skill_version "2026-05-06.2" \
     --arg now "${NOW}" \
     '.iid = $iid
       | .session = $session
@@ -120,7 +120,7 @@ else
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
     --arg latest_attempt_dir "${ATTEMPT_DIR}" \
     --argjson retry_count "${RETRY_COUNT}" \
-    --arg skill_version "2026-05-06.1" \
+    --arg skill_version "2026-05-06.2" \
     --arg now "${NOW}" \
     '{
       iid: $iid,
@@ -190,9 +190,18 @@ cat > "${SUBAGENT_TASK_FILE}" <<EOF
 
 RUN_PREPARED_ISSUE_WORKER
 
-Do not load or read SKILL.md or reference files. The dispatcher has already
-synced the repo, created the worktree, copied local runtime config, built the
-Claude prompt, and initialized state. Run only the prepared worker command.
+You are already inside the dedicated issue worker session:
+${SESSION_NAME}
+
+Role guard:
+- Do NOT call sessions_spawn.
+- Do NOT call sessions_history.
+- Do NOT run dispatcher logic or RUN_SCHEDULED_ISSUE_CAMPAIGN.
+- Do NOT load or read SKILL.md, SOUL.md, AGENTS.md, or reference files.
+
+The dispatcher has already synced the repo, created the worktree, copied local
+runtime config, built the Claude prompt, and initialized state. Run only the
+prepared worker command below, then return its compact JSON result.
 
 Handoff file:
 ${HANDOFF_FILE}
@@ -210,6 +219,9 @@ GITLAB_TOKEN="<gitlab_token from RUN_PREPARED_ISSUE_WORKER payload>" \\
 HANDOFF_FILE="${HANDOFF_FILE}" PREPARED_WORKER=1 \\
 bash scripts/run_prepared_worker.sh
 \`\`\`
+
+If you are about to use any tool other than Bash to run that command, stop and
+run the command instead. This worker is a leaf task, not a dispatcher.
 EOF
 
 jq -c . "${HANDOFF_FILE}"

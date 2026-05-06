@@ -1,14 +1,16 @@
 ---
 name: gitlab_single_issue_executor
-description: "[SKILL_VERSION=2026-05-06.1] Execute a dispatcher-prepared GitLab issue handoff in one dedicated session. The worker must not clone/pull, prepare directories/worktrees, copy .claude, link hulat, or build prompts. It receives RUN_PREPARED_ISSUE_WORKER with a handoff file, runs the prepared Claude prompt, stages/guards, commits, pushes, publishes Wiki evidence, changes doing to done, creates or rotates the MR, adds pr, updates state, and returns compact JSON."
+description: "[SKILL_VERSION=2026-05-06.2] Execute a dispatcher-prepared GitLab issue handoff in one dedicated session. The worker must not clone/pull, prepare directories/worktrees, copy .claude, link hulat, or build prompts. It receives RUN_PREPARED_ISSUE_WORKER with a handoff file, runs the prepared Claude prompt, stages/guards, commits, pushes, publishes Wiki evidence, changes doing to done, creates or rotates the MR, adds pr, updates state, and returns compact JSON."
 allowed-tools: Bash, Read, Write, Edit
 ---
 
 # GitLab Prepared Issue Worker Skill
 
-**SKILL_VERSION: 2026-05-06.1**
+**SKILL_VERSION: 2026-05-06.2**
 
-The worker MUST include `"skill_version": "2026-05-06.1"` in its compact chat summary. Normal workers should not read this file at runtime; the dispatcher sends a self-contained `RUN_PREPARED_ISSUE_WORKER` payload and writes `${LOG_DIR}/subagent_task.md`.
+The worker MUST include `"skill_version": "2026-05-06.2"` in its compact chat summary. Normal workers should not read this file at runtime; the dispatcher sends a self-contained `RUN_PREPARED_ISSUE_WORKER` payload and writes `${LOG_DIR}/subagent_task.md`.
+
+If the current message starts with `RUN_PREPARED_ISSUE_WORKER`, this session is already the dedicated issue worker. Do not call `sessions_spawn`, `sessions_history`, or any dispatcher workflow. Run the prepared worker command only.
 
 ## Companion Files
 
@@ -26,6 +28,8 @@ The worker starts only after the dispatcher has prepared the environment.
 
 Forbidden in this role:
 
+- call `sessions_spawn` or `sessions_history`
+- run `RUN_SCHEDULED_ISSUE_CAMPAIGN` / dispatcher scheduling logic
 - clone, pull, fetch, prune, or set up `/data/${PROJECT}`
 - create issue directories or attempt log directories
 - remove/recreate `${WORKTREE_DIR}`
@@ -104,7 +108,7 @@ Return a single compact JSON summary, for example:
 
 ```json
 {
-  "skill_version": "2026-05-06.1",
+  "skill_version": "2026-05-06.2",
   "iid": 14,
   "status": "done",
   "work_branch": "issue/14-auto-fix",

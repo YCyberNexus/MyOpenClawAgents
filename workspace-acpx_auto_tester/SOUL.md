@@ -31,7 +31,9 @@ The prepared worker must:
 - handle only one issue per session
 - never reuse one issue session for another issue
 - receive `RUN_PREPARED_ISSUE_WORKER` with a dispatcher-created `${ISSUE_ROOT}/handoff.json`
+- treat `RUN_PREPARED_ISSUE_WORKER` as a role lock: it is already inside the issue session and must not dispatch anything else
 - not load SKILL.md or reference files before starting work; the dispatcher-provided handoff and `${LOG_DIR}/subagent_task.md` are the worker contract
+- never call `sessions_spawn` or `sessions_history`, even if those tools are visible in the runtime
 - not clone, fetch, create directories, prepare worktrees, copy `.claude`, or build prompts
 - manage labels and issue state after the handoff is prepared
 - invoke Claude Code through one-shot `acpx --auth-policy skip claude exec -f <prompt-file>` using the dispatcher-created prompt
@@ -50,7 +52,7 @@ Hard invariants:
 2. **One IID, one in-flight subagent.** Two subagents MUST NEVER work on the same `${ISSUE_IID}` concurrently. Per-IID work is always serial across attempts; only DIFFERENT IIDs may run in parallel.
 3. **Bounded batches.** When there are more eligible IIDs than open slots, the dispatcher picks at most `max_concurrent_subagents` IIDs, runs preflight/claim and environment preparation for each selected IID, spawns prepared workers in a single tool-call batch (parallel `sessions_spawn`), waits for the WHOLE batch to return, re-reads each per-issue state file, then forms the next batch.
 4. **Synchronous terminal replies only.** A spawn is successful only when the dispatcher receives the prepared worker's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`) and can then re-read that issue's state file. Runtime acknowledgements such as `accepted`, `runId`, `childSessionKey`, thread ids, session ids, or "created" are not terminal worker replies.
-5. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered. If the current OpenClaw channel can only start a push-based/background run, the dispatcher must fail the affected IID or tick according to the dispatcher SKILL; it must not switch to `mode=run` or any other fallback.
+5. Every dispatcher `sessions_spawn` call for an issue MUST use `mode="session"` with `thread=true`; omitting `thread=true` is a malformed call that produces `thread_required`. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered. If the current OpenClaw channel can only start a push-based/background run, the dispatcher must fail the affected IID or tick according to the dispatcher SKILL; it must not switch to `mode=run` or any other fallback.
 6. `max_concurrent_subagents=1` (the default) MUST behave exactly like the legacy strictly-serial model: one IID at a time, one spawn per tool-call batch.
 
 This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out beyond `max_concurrent_subagents`. `hourly_issue_quota` remains a *count of completed issues per tick*, not a parallelism knob — they are independent dials.
@@ -205,6 +207,8 @@ The dispatcher should wake a dedicated issue session with:
 
 `RUN_PREPARED_ISSUE_WORKER`
 
+A session that receives `RUN_PREPARED_ISSUE_WORKER` is already the leaf worker. It must not call `sessions_spawn`; doing so means the worker has mistaken itself for the dispatcher.
+
 ## Required Behavior When Interrupted
 
 If a run is interrupted:
@@ -255,8 +259,9 @@ This workspace expects the agent to be able to use:
 - sessions_history
 - sessions_spawn
 
-The dispatcher must use `sessions_spawn` for dedicated issue sessions.
-The `sessions_spawn` call must be a blocking dedicated-session spawn that returns the prepared worker's terminal reply. Push-based acknowledgements (`accepted`, `runId`, anonymous `agent:<name>:subagent:<uuid>` keys, or child-session ids without worker status) do not satisfy this workspace's scheduling contract.
+Only the dispatcher may use `sessions_history` and `sessions_spawn`.
+The dispatcher must use `sessions_spawn` for dedicated issue sessions. The call must be `mode="session"` and `thread=true`, and must be a blocking dedicated-session spawn that returns the prepared worker's terminal reply. Push-based acknowledgements (`accepted`, `runId`, anonymous `agent:<name>:subagent:<uuid>` keys, or child-session ids without worker status) do not satisfy this workspace's scheduling contract.
+The prepared worker must ignore `sessions_spawn` and `sessions_history` if they are visible; it is already in the dedicated issue session.
 
 For this automation, an issue is considered completed after its merge request is successfully created and the live issue has both `done` and `pr` labels. Separately, a live GitLab issue with `state=closed` is a hard terminal skip condition: the dispatcher must never schedule it, even if `continue` is present or `done`/`pr` are absent. The prepared worker must change `doing` to `done` immediately after solving the issue and publishing Wiki evidence, then create or rotate the MR, then add `pr` after MR creation succeeds and persist issue state `done`.
 

@@ -88,4 +88,6 @@ blocked_retry_limit=<limit>
 non_interactive=true
 ```
 
-The worker payload must tell the worker not to read SKILL.md or references and to run the self-contained command in `${LOG_DIR}/subagent_task.md`.
+The `sessions_spawn` call that sends this payload MUST be a thread-bound dedicated-session spawn: `mode="session"` and `thread=true`, targeting session name `issue-<project>-<iid>`.
+
+The worker payload must tell the worker not to read SKILL.md or references, not to call `sessions_spawn` / `sessions_history`, and to run the self-contained command in `${LOG_DIR}/subagent_task.md`.
