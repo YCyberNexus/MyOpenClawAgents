@@ -72,7 +72,7 @@ jq -n \
   --argjson prior_attempt_count "${PRIOR_ATTEMPT_COUNT}" \
   --arg local_branch "${PREP_LOCAL_BRANCH}" \
   --arg log_dir "${LOG_DIR}" \
-  --arg skill_version "2026-05-06.3" \
+  --arg skill_version "2026-05-06.4" \
   '{
     iid: $iid,
     attempt_number: $attempt_number,
@@ -99,7 +99,7 @@ if [ -s "${ISSUE_STATE_FILE}" ]; then
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
     --arg latest_attempt_dir "${ATTEMPT_DIR}" \
     --argjson retry_count "${RETRY_COUNT}" \
-    --arg skill_version "2026-05-06.3" \
+    --arg skill_version "2026-05-06.4" \
     --arg now "${NOW}" \
     '.iid = $iid
       | .session = $session
@@ -120,7 +120,7 @@ else
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
     --arg latest_attempt_dir "${ATTEMPT_DIR}" \
     --argjson retry_count "${RETRY_COUNT}" \
-    --arg skill_version "2026-05-06.3" \
+    --arg skill_version "2026-05-06.4" \
     --arg now "${NOW}" \
     '{
       iid: $iid,

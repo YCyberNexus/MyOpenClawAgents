@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-06.3] Run a recurring scheduled GitLab issue campaign using a dispatcher/main session that prepares each issue environment before launching one prepared worker child per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, gitlab-issues-style preflight/claim checks, async runtime completion callbacks, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
+description: "[SKILL_VERSION=2026-05-06.4] Run a recurring scheduled GitLab issue campaign using a dispatcher/main session that prepares each issue environment before launching one prepared worker child per issue. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, gitlab-issues-style preflight/claim checks, async runtime completion callbacks, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact dispatcher chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-05-06.3**
+**SKILL_VERSION: 2026-05-06.4**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.3` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.4` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded.
 
 ## Companion files
 
@@ -58,6 +58,7 @@ Universal contract (cap = `max_concurrent_subagents`, same-IID never parallel, b
 - **Spawn call shape.** Every issue spawn MUST send exactly one `RUN_PREPARED_ISSUE_WORKER` payload and MUST request parent completion callback delivery to `agent:acpx_auto_tester:main` using whatever OpenClaw fields the deployment exposes (for example `mode="run"`, `notify_parent=true`, `callback=true`, `parent=agent:acpx_auto_tester:main`, or an equivalent). Anonymous child keys are allowed. A deterministic `issue-<project>-<iid>` runtime session name is NOT required.
 - **Launch contract.** A `status=accepted`, `runId`, `childSessionKey`, session id, thread id, or "created" acknowledgement is a successful launch acknowledgement if it contains a child key or run id. Record the key in `active_issue_sessions` at the same index as the IID in `active_issue_iids`, then return a compact summary with status `waiting_for_callbacks`. Do NOT increment completion counters, do NOT drain active state, and do NOT release the batch's UI accounts on launch acknowledgement.
 - **Completion contract.** A child meets the completion contract only when the runtime wakes the dispatcher with `RUN_CHILD_COMPLETION_CALLBACK` carrying the child key/run id, `issue_iid`, `attempt_number`, and the prepared worker's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`). The dispatcher then reconciles GitLab, re-reads the issue state file, updates campaign lists, and drains that active slot.
+- **Pending-launch recovery.** An `active_issue_sessions` entry that is still the logical placeholder `issue-<project>-<iid>` is NOT a launched child. It means the dispatcher persisted prepared active state before a launch acknowledgement was recorded. The next scheduled wake-up MUST resume launch for those placeholder entries before forming any new batch; it MUST NOT wait for callbacks from placeholders.
 - **Time budget is checked before launching a new async batch.** Once a batch is launched, the dispatcher returns; callbacks may arrive after the scheduled tick's wall-clock budget. Callback wake-ups should process completion and state cleanup even if no launch budget remains.
 
 ---
@@ -167,7 +168,7 @@ Each issue attempt uses its own runtime child. The child may be anonymous.
 2. The dispatcher records a logical issue key `issue-<project>-<iid>` in state/logs, but it does not require the runtime child key to use that name.
 3. Before spawning, the dispatcher MUST have written `${ISSUES_ROOT}/issue-<iid>/handoff.json` and `${LOG_DIR}/subagent_task.md`.
 4. The dispatcher sends each worker a single `RUN_PREPARED_ISSUE_WORKER` message with the handoff path and minimum trigger values needed by `scripts/run_prepared_worker.sh`.
-5. **`active_issue_iids` is updated atomically per batch.** Before spawning a prepared batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json` with placeholder child keys in `active_issue_sessions` if needed. After each successful launch acknowledgement, replace the corresponding placeholder with the returned `childSessionKey` / `runId` and persist. Only after `RUN_CHILD_COMPLETION_CALLBACK` or GitLab reconciliation proves that IID has left active execution, remove that IID and child key from the active arrays and persist again. The list MUST never exceed `max_concurrent_subagents` entries.
+5. **`active_issue_iids` is updated atomically per batch.** Before spawning a prepared batch, append every IID in the batch to `active_issue_iids` and persist `campaign_state.json` with placeholder child keys in `active_issue_sessions` if needed. A placeholder MUST be exactly the logical issue key `issue-<project>-<iid>`. After each successful launch acknowledgement, replace the corresponding placeholder with the returned `childSessionKey` / `runId` and persist. Only after `RUN_CHILD_COMPLETION_CALLBACK` or GitLab reconciliation proves that IID has left active execution, remove that IID and child key from the active arrays and persist again. The list MUST never exceed `max_concurrent_subagents` entries.
 6. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch completes early. Wait until the whole batch has drained (`active_issue_iids=[]`) before forming a fresh batch. This preserves UI account safety without a persisted account allocation table.
 
 Batch sizing, spawn semantics (parallel `sessions_spawn` in one tool-call block, what counts as a successful launch), callback completion, and same-IID guarantees are in §Concurrency Policy above.
@@ -243,7 +244,8 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - Persist `campaign_state.json` and return. Callback wake-ups do not start replacement children; the next scheduled wake-up launches the next batch once the active list is empty.
 6. **Scheduled wake-up launch budget.**
    - Set `quota_launched_this_tick = 0`; record tick start time.
-   - If `active_issue_iids` is non-empty, return `"campaign_status":"waiting_for_callbacks"` and do not form a new batch. This preserves per-batch UI-account safety.
+   - If `active_issue_iids` is non-empty and every corresponding `active_issue_sessions` entry is a non-placeholder child key/run id, return `"campaign_status":"waiting_for_callbacks"` and do not form a new batch. This preserves per-batch UI-account safety.
+   - If `active_issue_iids` is non-empty and any corresponding `active_issue_sessions` entry is the placeholder logical key `issue-<project>-<iid>`, treat those entries as `pending_launch`. Do NOT wait for callbacks from placeholders. Do NOT allocate new attempts. Reuse the already prepared `${ISSUES_ROOT}/issue-<iid>/handoff.json` and `${LOG_DIR}/subagent_task.md` for the latest attempt, then continue at Step 8 to launch exactly those pending entries. If a pending entry is missing its handoff or subagent task, mark that IID `blocked`, remove it from the active arrays, persist, and do not spawn it.
    - Check time budget before forming a new batch. If `now - tick_start_time >= max_runtime_minutes`, return a compact time-budget summary.
 7. **Form one prepared async batch.**
    - Walk eligible IIDs in the standard order (lowest-IID backlog first, then fresh IIDs). For each candidate, run `ISSUE_IID=<iid> ISSUE_MODE=<fresh|continue> BRANCH=<branch> bash scripts/preflight_issue.sh`. Skip candidates whose preflight JSON returns `eligible=false` (`open_mr_exists`, `remote_branch_exists`, or `claimed`) and continue scanning until the prepared batch has `min(max_concurrent_subagents, hourly_issue_quota)` IIDs or no eligible candidate remains. If the prepared batch is empty, skip to final persistence.
@@ -252,7 +254,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - Prepare every issue environment before spawn. For each IID in the prepared batch, run `ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> ISSUE_MODE=<fresh|continue> UI_ACCOUNT=<user> UI_PASSWORD=<pass> BRANCH=<branch> DEV_BRANCH=<dev_branch> HULAT_DIR=<hulat_dir> bash scripts/prepare_issue_environment.sh`. This script writes `${ISSUE_ROOT}/handoff.json` and `${LOG_DIR}/subagent_task.md`, initializes attempt state, and returns compact handoff JSON. If preparation fails, mark that IID `blocked` and do not spawn it.
    - Update `active_issue_iids` + persist. Append every successfully prepared IID in the batch to `active_issue_iids` and append matching placeholder logical keys (`issue-<project>-<iid>`) to `active_issue_sessions`. Persist before spawning so a crash mid-spawn leaves an accurate cache for reconciliation.
 8. **Launch the prepared batch in a SINGLE tool-call block.**
-   - Issue one `sessions_spawn` per prepared IID, all in the same parallel block.
+   - Issue one `sessions_spawn` per prepared IID or pending-launch IID, all in the same parallel block.
    - Each spawn may be anonymous (for example `mode="run"`) but MUST request runtime parent callback delivery to `agent:acpx_auto_tester:main`.
    - Each spawn sends `RUN_PREPARED_ISSUE_WORKER` with payload:
      - first line: `RUN_PREPARED_ISSUE_WORKER`
@@ -294,7 +296,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-05-06.3",
+  "skill_version": "2026-05-06.4",
   "campaign_status": "waiting_for_callbacks",
   "active_issue_iids": [14, 15],
   "active_issue_sessions": ["agent:acpx_auto_tester:subagent:uuid-a", "agent:acpx_auto_tester:subagent:uuid-b"],

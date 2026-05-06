@@ -51,6 +51,7 @@ The Subagent Concurrency Policy in SOUL.md is prompt-level — the model can sti
 
 3. **Per-IID active-state uniqueness (always-on, structural).**
    Anonymous child keys do not provide per-IID uniqueness. The dispatcher MUST enforce same-IID serialism with GitLab preflight/claims plus `campaign_state.json.active_issue_iids`. A callback for an IID/attempt that is no longer active is idempotent: reconcile GitLab, ignore the stale child result for scheduling, and do not launch a duplicate attempt.
+   An `active_issue_sessions` value that is still the logical key `issue-<project>-<iid>` is only a pending-launch placeholder. It does not prove a child exists and must not cause the dispatcher to wait for callbacks.
 
 4. **SOUL.md prompt rules.** The weakest layer; they must not be the only layer.
 
