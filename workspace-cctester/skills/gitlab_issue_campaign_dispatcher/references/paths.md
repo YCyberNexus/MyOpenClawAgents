@@ -48,6 +48,6 @@ ISSUE_STATE="$(issue_state_file_for "${IID}")"
 
 1. `REPO_PATH` is a git repo — only `git fetch`, `git worktree`, `git remote` operations on it. Never write any agent file under `REPO_PATH`. Never modify its working tree directly (the executor uses `git worktree` to spin off the issue worktree).
 2. `WORK_ROOT` is outside the repo. This is what physically prevents `git add` from sweeping agent artifacts into a commit.
-3. `hulat_dir` is **read-only configuration** that the executor symlinks into the issue worktree as `_hulat`. The executor also copies the required Claude Code runtime config from `${HULAT_DIR}/ifp-hulat/.claude` to that worktree as local-only `.claude` before invoking `acpx`. The dispatcher never touches it.
+3. `hulat_dir` is **read-only configuration** that the executor symlinks into the issue worktree as `hulat`. The executor also copies the required Claude Code runtime config from `${HULAT_DIR}/ifp-hulat/.claude` to that worktree as local-only `.claude` before invoking `acpx`. The dispatcher never touches it.
 4. Per-issue state files live at `${ISSUES_ROOT}/issue-<iid>/state.json` (use `issue_state_file_for` helper). The OLD location `${STATE_DIR}/issues/issue-<iid>.json` is gone — do NOT read or write there.
 5. `reconcile-<ts>.json` evidence files stay at `${DISPATCHER_LOG_DIR}/`. They are dispatcher-global, NOT per-issue.

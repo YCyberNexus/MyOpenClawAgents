@@ -118,7 +118,7 @@ publish_wiki_page \
 find "${WORKTREE_DIR}" \
   \( -path "${WORKTREE_DIR}/.git" -o \
      -path "${WORKTREE_DIR}/.claude" -o \
-     -path "${WORKTREE_DIR}/_hulat" \) -prune \
+     -path "${WORKTREE_DIR}/hulat" \) -prune \
   -o -type f -name report.html -print \
   | sort > "${REPORT_CANDIDATES_FILE}"
 

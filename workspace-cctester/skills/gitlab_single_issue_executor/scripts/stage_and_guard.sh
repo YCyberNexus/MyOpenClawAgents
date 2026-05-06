@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # stage_and_guard.sh — stage Claude's repo changes inside the issue
-# worktree and guard against agent artifacts, the _hulat symlink, or
+# worktree and guard against agent artifacts, the hulat symlink, or
 # local Claude Code config leaking into the work branch.
 #
 # Required env vars:
@@ -34,7 +34,7 @@ git diff > "${LOG_DIR}/git_diff.patch"
 git add -A
 
 LEAKED="$(git diff --cached --name-only \
-  | grep -E '^(openclaw_log/|openclaw_state/|_hulat(/|$)|\.claude(/|$))' || true)"
+  | grep -E '^(openclaw_log/|openclaw_state/|hulat(/|$)|\.claude(/|$))' || true)"
 if [ -n "${LEAKED}" ]; then
   echo "AGENT_ARTIFACTS_LEAKED" >&2
   echo "${LEAKED}" >&2

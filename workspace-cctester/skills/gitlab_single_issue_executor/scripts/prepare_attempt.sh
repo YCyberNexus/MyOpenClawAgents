@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # prepare_attempt.sh — replace the issue's git worktree for this attempt,
-# base it on the right starting point, set up the _hulat symlink, copy
+# base it on the right starting point, set up the hulat symlink, copy
 # Claude Code's local runtime config, and write the .git/info/exclude for
 # the worktree.
 #
@@ -109,12 +109,12 @@ fi
 mkdir -p "${ATTEMPT_DIR}"
 git worktree add -b "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 
-# Set up _hulat symlink inside the worktree (zero-cost shared read-only
+# Set up hulat symlink inside the worktree (zero-cost shared read-only
 # config), and copy Claude Code's local runtime config into the cwd used
 # by acpx. Both are local-only and excluded via the worktree's own
 # .git/info/exclude.
 cd "${WORKTREE_DIR}"
-ln -sfn "${HULAT_DIR}" "_hulat"
+ln -sfn "${HULAT_DIR}" "hulat"
 
 CLAUDE_CONFIG_SRC="${HULAT_DIR}/ifp-hulat/.claude"
 CLAUDE_CONFIG_DST="${WORKTREE_DIR}/.claude"
@@ -131,7 +131,7 @@ EXCLUDE_FILE="$(git rev-parse --git-path info/exclude)"
 mkdir -p "$(dirname "${EXCLUDE_FILE}")"
 {
   echo "# managed by prepare_attempt.sh"
-  echo "/_hulat"
+  echo "/hulat"
   echo "/.claude"
 } > "${EXCLUDE_FILE}"
 

@@ -123,7 +123,7 @@ See `<workspace>/config/README.md` for setup steps and rationale.
         issue-<iid>/
             state.json                        ← cross-attempt per-issue state
             worktree/                         ← Claude Code's cwd (git worktree), replaced every attempt
-                _hulat → <hulat_dir>          (symlink, .git/info/exclude'd)
+                hulat → <hulat_dir>          (symlink, .git/info/exclude'd)
                 .claude/                      (copy of <hulat_dir>/ifp-hulat/.claude, .git/info/exclude'd)
             log/
                 attempt-001/                 ← logs for attempt 001, preserved
