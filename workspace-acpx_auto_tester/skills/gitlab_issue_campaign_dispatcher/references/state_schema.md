@@ -25,7 +25,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-05-06.2",
+  "skill_version": "2026-05-06.3",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260425T100501Z.json",
   "updated_at": "2026-04-25T10:05:30Z"
 }
@@ -37,7 +37,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 active_issue_iids         = []
-active_issue_sessions     = []
+active_issue_sessions     = []   # same-index childSessionKey/runId entries; placeholder logical issue keys before launch ack
 unfinished_iids           = []
 completed_iids            = []
 blocked_iids              = []
@@ -50,7 +50,7 @@ campaign_status           = running
 As of SKILL_VERSION 2026-04-29.1, the dispatcher tracks in-flight subagents as a list, not a scalar, to support `max_concurrent_subagents > 1`. On read:
 
 - If the on-disk file has the legacy scalar `active_issue_iid` and no `active_issue_iids`, treat it as `active_issue_iids = [active_issue_iid]` (or `[]` if the scalar was `null`) for the in-memory state, and persist the new array form on the next write.
-- Same applies to `active_issue_session` → `active_issue_sessions`.
+- Same applies to `active_issue_session` → `active_issue_sessions`. In async-callback mode the plural field may contain anonymous child keys such as `agent:acpx_auto_tester:subagent:<uuid>` or temporary logical issue keys until the launch acknowledgement is persisted.
 - If `max_concurrent_subagents` is missing on read, default it to `1` and persist on the next write.
 
 The dispatcher MUST NOT keep both the scalar and the array fields in the persisted file — pick one shape per write (the new array shape) and drop the legacy scalar from the JSON it writes.

@@ -72,7 +72,7 @@ jq -n \
   --argjson prior_attempt_count "${PRIOR_ATTEMPT_COUNT}" \
   --arg local_branch "${PREP_LOCAL_BRANCH}" \
   --arg log_dir "${LOG_DIR}" \
-  --arg skill_version "2026-05-06.2" \
+  --arg skill_version "2026-05-06.3" \
   '{
     iid: $iid,
     attempt_number: $attempt_number,
@@ -99,7 +99,7 @@ if [ -s "${ISSUE_STATE_FILE}" ]; then
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
     --arg latest_attempt_dir "${ATTEMPT_DIR}" \
     --argjson retry_count "${RETRY_COUNT}" \
-    --arg skill_version "2026-05-06.2" \
+    --arg skill_version "2026-05-06.3" \
     --arg now "${NOW}" \
     '.iid = $iid
       | .session = $session
@@ -120,7 +120,7 @@ else
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
     --arg latest_attempt_dir "${ATTEMPT_DIR}" \
     --argjson retry_count "${RETRY_COUNT}" \
-    --arg skill_version "2026-05-06.2" \
+    --arg skill_version "2026-05-06.3" \
     --arg now "${NOW}" \
     '{
       iid: $iid,
@@ -190,13 +190,14 @@ cat > "${SUBAGENT_TASK_FILE}" <<EOF
 
 RUN_PREPARED_ISSUE_WORKER
 
-You are already inside the dedicated issue worker session:
+You are already inside a runtime-created prepared child worker.
+Logical issue key:
 ${SESSION_NAME}
 
 Role guard:
 - Do NOT call sessions_spawn.
 - Do NOT call sessions_history.
-- Do NOT run dispatcher logic or RUN_SCHEDULED_ISSUE_CAMPAIGN.
+- Do NOT run dispatcher logic, RUN_SCHEDULED_ISSUE_CAMPAIGN, or RUN_CHILD_COMPLETION_CALLBACK.
 - Do NOT load or read SKILL.md, SOUL.md, AGENTS.md, or reference files.
 
 The dispatcher has already synced the repo, created the worktree, copied local

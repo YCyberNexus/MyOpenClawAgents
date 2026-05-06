@@ -59,7 +59,7 @@ if [ ! -d "${WORKTREE_DIR}" ] || [ ! -f "${PROMPT_FILE}" ]; then
 fi
 
 BLOCKED_RETRY_LIMIT="${BLOCKED_RETRY_LIMIT:-${blocked_retry_limit:-}}"
-WORKER_VERSION="2026-05-06.2"
+WORKER_VERSION="2026-05-06.3"
 export WORKER_VERSION
 
 json_update() {

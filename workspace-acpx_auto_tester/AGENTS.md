@@ -20,12 +20,12 @@ This workspace is intentionally split into two skills:
    - handles backlog carryover
    - skips blocked issues temporarily and retries them later
    - performs GitLab repo sync, preflight/claim checks, issue directory creation, worktree preparation, `hulat` symlink setup, `.claude` copy, prompt generation, and handoff manifest creation
-   - creates or resumes one dedicated prepared-worker session per issue
+   - launches one prepared-worker child subagent per issue and records the runtime launch acknowledgement
 
 2. `gitlab_single_issue_executor`
    - prepared single-issue worker
-   - runs only inside a dedicated issue session after the dispatcher has prepared the environment
-   - must never be reused for another issue
+   - runs only inside a runtime-created child subagent after the dispatcher has prepared the environment
+   - must handle exactly one issue and then return compact JSON for the runtime callback
    - must not clone, pull, create directories, prepare worktrees, copy `.claude`, or build prompts
    - receives `RUN_PREPARED_ISSUE_WORKER` plus a handoff and directly executes the prepared prompt, publishes evidence, pushes, and opens/rotates the MR
 
@@ -33,6 +33,7 @@ Role selection is trigger-driven:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` means this session is the dispatcher and may use `sessions_spawn`.
 - `RUN_PREPARED_ISSUE_WORKER` means this session is already the prepared worker. It MUST NOT call `sessions_spawn`, `sessions_history`, or any dispatcher skill. It runs only the prepared command from `${LOG_DIR}/subagent_task.md` / `scripts/run_prepared_worker.sh` and returns compact JSON.
+- `RUN_CHILD_COMPLETION_CALLBACK` means the OpenClaw runtime is waking the dispatcher with a completed child result. The dispatcher reconciles, re-reads the issue state, updates campaign state, drains the matching active slot, and returns compact JSON. It MUST NOT rerun prepared-worker logic inline.
 
 ## Required Capabilities and Concurrency Limit
 
@@ -42,26 +43,26 @@ Capability list and the per-tick concurrency contract are defined canonically in
 
 The Subagent Concurrency Policy in SOUL.md is prompt-level — the model can still violate it. Enforcement of the per-tick concurrency cap must therefore live below the prompt. Use whichever of the following the deployment can deliver, in priority order:
 
-1. **Blocking dedicated-session spawn support (required).**
-   This workspace uses the e712962c synchronous batch strategy: every `sessions_spawn` must use `mode="session"` with `thread=true` and must block until the prepared worker returns a terminal compact reply. A runtime response containing only `accepted`, `runId`, `childSessionKey`, a thread id, a session id, or an anonymous `agent:<name>:subagent:<uuid>` key is only a launch acknowledgement and does not satisfy the contract. If the active OpenClaw channel cannot wait for child sessions, the deployment is incompatible with this strategy; the dispatcher must fail the affected work instead of switching to `mode=run` or any other push-based fallback.
+1. **Asynchronous child completion callback support (required).**
+   This workspace uses an async callback strategy: `sessions_spawn` may launch an anonymous child subagent and return a launch acknowledgement (`accepted`, `runId`, `childSessionKey`, thread id, or anonymous `agent:<name>:subagent:<uuid>`). That acknowledgement only means launched, not completed. The OpenClaw runtime MUST later wake `agent:acpx_auto_tester:main` with `RUN_CHILD_COMPLETION_CALLBACK` carrying the child key, `issue_iid`, `attempt_number`, and the prepared worker's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`). If the runtime cannot deliver parent callbacks, the deployment is incompatible with this strategy.
 
 2. **OpenClaw platform-level concurrency knob (preferred).**
    The OpenClaw runtime should cap concurrent `sessions_spawn` from this parent session at `max_concurrent_subagents`. The exact field name depends on the OpenClaw version in use — operators must consult the OpenClaw maintainer to pin down the correct setting (likely candidates: `max_concurrent_subagents`, `max_parallel_sessions`, `spawn_concurrency`). The value SHOULD match the integer the dispatcher receives in the trigger so the platform layer mirrors the prompt-layer contract. If the deployment uses a fixed value, set it to the maximum `max_concurrent_subagents` operators expect to send via trigger; the dispatcher's smaller per-tick value then becomes the binding constraint.
 
-3. **Per-IID session-name uniqueness (always-on, structural).**
-   Issue sessions are named `issue-<project>-<iid>`. Two concurrent attempts for the same IID would collide on session name; the second blocking dedicated-session `sessions_spawn` is either deduplicated by OpenClaw or runs in the same session (forbidden by the Single-Issue Rule). This guarantee does not apply to push-based anonymous subagent keys. Cross-IID parallelism is bounded only by (2) and (4).
+3. **Per-IID active-state uniqueness (always-on, structural).**
+   Anonymous child keys do not provide per-IID uniqueness. The dispatcher MUST enforce same-IID serialism with GitLab preflight/claims plus `campaign_state.json.active_issue_iids`. A callback for an IID/attempt that is no longer active is idempotent: reconcile GitLab, ignore the stale child result for scheduling, and do not launch a duplicate attempt.
 
 4. **SOUL.md prompt rules.** The weakest layer; they must not be the only layer.
 
-Operators are expected to confirm with the OpenClaw maintainer that (1) and (2) are available and configured before relying on (4) alone. The previously documented `spawn_slot.json` fallback is no longer applicable in the multi-slot model.
+Operators are expected to confirm with the OpenClaw maintainer that (1) and (2) are available and configured before relying on (4) alone. The previously documented blocking dedicated-session strategy and `spawn_slot.json` fallback are no longer applicable in this async-callback model.
 
 ### Spawn Error Handling
 
-Any `sessions_spawn` response with `status="error"` is terminal for that spawn attempt. In particular, `errorCode="thread_required"`, `errorCode="spawn_failed"`, gateway timeout text, backend-unavailable text, or a response that contains only `childSessionKey` MUST NOT be retried in a loop. The dispatcher records the affected IID as blocked with the raw spawn error and moves on or ends the tick according to quota policy.
+Any `sessions_spawn` response with `status="error"` is terminal for that launch attempt. In particular, `errorCode="spawn_failed"`, gateway timeout text, or backend-unavailable text MUST NOT be retried in a loop. The dispatcher records the affected IID as blocked with the raw spawn error and moves on or ends the tick according to quota policy. A successful launch acknowledgement with `accepted` plus `childSessionKey` / `runId` is NOT terminal completion; it is recorded as an active child and must be completed by `RUN_CHILD_COMPLETION_CALLBACK`.
 
-## Session Naming
+## Child Identity
 
-Dedicated issue session pattern: `issue-<project>-<iid>` (e.g. `issue-px_ifp_hulat-1`). Detailed session policy lives in [`SOUL.md`](SOUL.md) §Session Policy.
+Anonymous child keys such as `agent:acpx_auto_tester:subagent:<uuid>` are allowed. The dispatcher still uses a logical issue key `issue-<project>-<iid>` in disk state and logs for human correlation, but it does not require the runtime child session to use that name. Detailed child policy lives in [`SOUL.md`](SOUL.md) §Child Subagent Policy.
 
 ## Deployment Pin: GitLab Host
 

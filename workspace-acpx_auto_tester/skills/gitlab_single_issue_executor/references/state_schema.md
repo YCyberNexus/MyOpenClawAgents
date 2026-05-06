@@ -1,6 +1,6 @@
 # Per-Issue and Current-Attempt State Schemas (Prepared Worker)
 
-As of SKILL_VERSION 2026-05-06.2 the dispatcher initializes state before worker spawn, and the prepared worker finalizes it after execution. State has TWO levels: one cross-attempt file per issue, and one current-attempt file overwritten on each attempt.
+As of SKILL_VERSION 2026-05-06.3 the dispatcher initializes state before worker spawn, and the prepared worker finalizes it after execution. State has TWO levels: one cross-attempt file per issue, and one current-attempt file overwritten on each attempt.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -18,15 +18,15 @@ Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
   "retry_count": 1,
   "block_reason": null,
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-05-06.2",
+  "skill_version": "2026-05-06.3",
   "updated_at": "2026-04-25T10:00:00Z"
 }
 ```
 
 | Field                   | Type            | Notes                                                                  |
 | ----------------------- | --------------- | ---------------------------------------------------------------------- |
-| `iid`                   | int             | GitLab issue IID this session is bound to.                             |
-| `session`               | string          | Dedicated session name `issue-<project>-<iid>`.                        |
+| `iid`                   | int             | GitLab issue IID this child run is bound to.                            |
+| `session`               | string          | Logical issue key `issue-<project>-<iid>` for correlation. In async-callback deployments this is not required to match the runtime child key. |
 | `status`                | string (enum)   | See "Possible status values" below. This is the latest attempt's terminal status (or `in_progress` mid-flight). |
 | `mode`                  | string (enum)   | `"fresh"` or `"continue"` for the latest attempt.                      |
 | `attempts_total`        | int             | Number of attempts ever launched for this IID.                         |
@@ -75,7 +75,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-05-06.2"
+  "skill_version": "2026-05-06.3"
 }
 ```
 

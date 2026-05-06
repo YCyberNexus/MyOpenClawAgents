@@ -36,7 +36,7 @@ Older triggers may also include `gitlab_address=...`. That is still accepted —
 | `gitlab_token`          | Token used by `glab auth login` against the deployment-pinned host    |
 | `issue_min_iid`         | Integer, inclusive                                                    |
 | `issue_max_iid`         | Integer, inclusive                                                    |
-| `hourly_issue_quota`    | Integer. **Per-tick completion count, not parallelism.** Independent of `max_concurrent_subagents`. |
+| `hourly_issue_quota`    | Integer. In async-callback mode this is the **per scheduled-tick launch count**, not terminal completion count and not parallelism. Independent of `max_concurrent_subagents`. |
 | `max_runtime_minutes`   | Integer wall-clock budget for this tick                               |
 | `blocked_retry_limit`   | Integer                                                               |
 | `blocked_cooldown_ticks`| Integer                                                               |
@@ -46,7 +46,7 @@ Older triggers may also include `gitlab_address=...`. That is still accepted —
 | Field                       | Notes                                                                                                                                              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gitlab_address`            | Pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; it is never derived from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. New triggers should omit this field. |
-| `max_concurrent_subagents`  | Integer ≥ 1, defaults to `1` if omitted. Upper bound on concurrent issue subagents this dispatcher may have in flight at the same time. **Different IIDs only — two attempts for the same IID never run concurrently regardless of this value.** Independent of `hourly_issue_quota` (which counts terminal completions per tick). When `=1`, behavior is identical to the legacy strictly-serial model. See SOUL.md "Subagent Concurrency Policy" and SKILL.md "Concurrency Policy" for the full contract. |
+| `max_concurrent_subagents`  | Integer ≥ 1, defaults to `1` if omitted. Upper bound on concurrent issue subagents this dispatcher may have in flight at the same time. **Different IIDs only — two attempts for the same IID never run concurrently regardless of this value.** Independent of `hourly_issue_quota` (which limits launches per scheduled tick). When `=1`, only one active child is allowed at a time. See SOUL.md "Subagent Concurrency Policy" and SKILL.md "Concurrency Policy" for the full contract. |
 
 ## Expected fixed values
 
@@ -58,6 +58,8 @@ blocked_policy=skip_and_retry
 ```
 
 If any of these is missing or different, abort the tick with a short summary; do not silently substitute defaults.
+
+`session_mode=per_issue` is a legacy fixed trigger name. In async-callback deployments it means one prepared child run per issue attempt, not a deterministic runtime session name.
 
 ## Trigger-input override
 
@@ -71,7 +73,7 @@ This applies in particular to: `issue_min_iid`, `issue_max_iid`, `hourly_issue_q
 
 ## Child worker trigger
 
-The dispatcher no longer sends `RUN_SINGLE_ISSUE_SESSION`. After `scripts/prepare_issue_environment.sh` writes `${ISSUE_ROOT}/handoff.json` and `${LOG_DIR}/subagent_task.md`, the dispatcher wakes the dedicated issue session with:
+The dispatcher no longer sends `RUN_SINGLE_ISSUE_SESSION`. After `scripts/prepare_issue_environment.sh` writes `${ISSUE_ROOT}/handoff.json` and `${LOG_DIR}/subagent_task.md`, the dispatcher launches a prepared child subagent with:
 
 ```text
 RUN_PREPARED_ISSUE_WORKER
@@ -88,6 +90,24 @@ blocked_retry_limit=<limit>
 non_interactive=true
 ```
 
-The `sessions_spawn` call that sends this payload MUST be a thread-bound dedicated-session spawn: `mode="session"` and `thread=true`, targeting session name `issue-<project>-<iid>`.
+The `sessions_spawn` call that sends this payload MAY be an anonymous child run (for example `mode="run"`), but it MUST request runtime parent completion callback delivery to `agent:acpx_auto_tester:main`. A launch acknowledgement (`accepted`, `runId`, `childSessionKey`) is launch success only; terminal completion arrives later through `RUN_CHILD_COMPLETION_CALLBACK`.
 
 The worker payload must tell the worker not to read SKILL.md or references, not to call `sessions_spawn` / `sessions_history`, and to run the self-contained command in `${LOG_DIR}/subagent_task.md`.
+
+## Child completion callback trigger
+
+When a child finishes, OpenClaw MUST wake the dispatcher session with:
+
+```text
+RUN_CHILD_COMPLETION_CALLBACK
+childSessionKey=<child key or run id>
+issue_iid=<iid>
+attempt_number=<dispatcher-allocated attempt number>
+worker_status=<done|blocked|failed|no_changes>
+worker_result_json=<compact JSON returned by the prepared worker>
+project=<project>
+group=<group>
+gitlab_token=<token>
+```
+
+The callback should include the same scalar scheduling inputs as a normal dispatcher wake-up when the runtime has them. If omitted, the dispatcher preserves the on-disk values for those scalars, but `project`, `group`, and `gitlab_token` are still required so reconciliation can run.
