@@ -6,7 +6,7 @@ Files in this directory are **deployment-time pins** edited once on each runner 
 
 Pins the GitLab host the agent talks to. Required fields:
 
-- `GITLAB_HOST` — value passed to `glab --hostname`. Example: `gitlab-b.pxsemic.tech:30000`.
+- `GITLAB_HOST` — host (with port if non-default) of the pinned GitLab instance. Exported by `scripts/glab_auth.sh`; `glab` reads it natively from the env var, so `glab api` / `glab mr` / `glab issue` calls **must NOT pass `--hostname`** (only `glab auth login` / `glab auth status` inside `glab_auth.sh` take that flag). Example: `gitlab-b.pxsemic.tech:30000`.
 - `GITLAB_API_PROTOCOL` — `http` or `https` (must match what the GitLab server actually serves).
 
 ### Why pin?

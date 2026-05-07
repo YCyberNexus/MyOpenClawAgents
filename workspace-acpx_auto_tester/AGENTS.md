@@ -83,7 +83,7 @@ Logical issue subagent name: `issue-<project>-<iid>` (e.g. `issue-px_ifp_hulat-1
 
 The agent's GitLab host is pinned at `<workspace>/config/gitlab.env`. Required fields:
 
-- `GITLAB_HOST` — value passed to `glab --hostname`. Examples: `gitlab.com`, `gitlab-b.pxsemic.tech:30000`.
+- `GITLAB_HOST` — host (with port if non-default) of the pinned GitLab instance. Exported by `scripts/glab_auth.sh`; `glab` reads it natively from the env var. Examples: `gitlab.com`, `gitlab-b.pxsemic.tech:30000`. **Do NOT pass `--hostname` to `glab api` / `glab mr` / `glab issue`** — only `glab auth login` / `glab auth status` inside `scripts/glab_auth.sh` accept `--hostname`, and even there `glab` rejects `host:port` values for some subcommands. See [`SOUL.md`](SOUL.md) §GitLab Access.
 - `GITLAB_API_PROTOCOL` — `http` or `https` (must match what the GitLab server actually serves).
 
 Behavioral rules (verification against trigger, token rotation, abort-on-mismatch) live in [`SOUL.md`](SOUL.md) §GitLab Host Pinning. Setup steps and rationale are in [`config/README.md`](config/README.md).
