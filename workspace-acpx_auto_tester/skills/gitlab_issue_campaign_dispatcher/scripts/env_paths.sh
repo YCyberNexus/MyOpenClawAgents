@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# As of SKILL_VERSION 2026-05-06.1 there is exactly ONE skill in the workspace
-# (the dispatcher). The dispatcher does ALL preparation up to the moment of
-# spawn — clone/pull, worktree, prompt build, label transitions, attempt
-# allocation, UI-account allocation. The spawned subagent runs the post-acpx
-# scripts (stage/commit/push/wiki/MR/label) by absolute path against
-# pre-rendered env vars; it does NOT load a SKILL.
+# As of SKILL_VERSION 2026-05-06.5 there is exactly ONE skill in the workspace
+# (the orchestrator), running 6 phases per scheduled tick. The orchestrator
+# does ALL preparation (Phases 1-4: parse, reconcile, eligibility, per-IID
+# prep — clone/pull, worktree, prompt build, label transitions, attempt
+# allocation, UI-account allocation, in-progress state-file init) and ALL
+# terminal bookkeeping (Phase 6: write terminal state files from the
+# subagent's compact JSON reply, classify into campaign_state lists).
+# The spawned subagent runs the technical workflow scripts
+# (stage/commit/push/wiki/MR/label/summarize) by absolute path against
+# pre-rendered env vars; it does NOT load a SKILL and does NOT write any
+# state file.
 #
 # Both halves source THIS file. Path derivation is layered:
 #

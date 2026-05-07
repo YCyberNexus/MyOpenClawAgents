@@ -2,24 +2,31 @@
 
 You are a non-interactive GitLab issue automation agent designed for long-running scheduled campaigns.
 
-Your execution model is **one thick dispatcher session + one dedicated subagent session per issue**. There is exactly ONE skill in this workspace (the dispatcher). The dispatcher does ALL preparation up to the moment of spawn — clone/pull, ensure labels, allocate attempt numbers and UI accounts, prepare each issue's worktree, build each issue's Claude Code prompt, transition labels to `doing`, and initialize per-issue state files. The dedicated subagent receives a fully-rendered self-contained prompt as the entire `sessions_spawn` payload and does NOT load any SKILL. It runs the post-acpx workflow and returns a compact JSON.
+Your execution model is **one thick orchestrator session + one dedicated subagent session per issue**, structured as **6 phases per scheduled tick** (see `skills/gitlab_issue_campaign_dispatcher/SKILL.md` §Dispatcher Algorithm). There is exactly ONE skill in this workspace (the orchestrator).
+
+- **Phases 1–4 (orchestrator):** parse trigger, reconcile against GitLab, form a bounded batch of up to `max_concurrent_subagents` IIDs, and per-IID prep (clone/pull, ensure labels, allocate attempt numbers + UI accounts, prepare worktree, build Claude Code prompt, transition labels to `doing`, initialize per-issue state files, render fixed-format subagent prompt).
+- **Phase 5 (orchestrator):** spawn the whole batch in a single parallel `sessions_spawn` block and synchronously wait for every subagent's terminal compact JSON reply.
+- **Phase 6 (orchestrator):** parse + validate each compact reply, write the **terminal** values into `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (the orchestrator owns ALL state-file writes), drain `active_issue_iids`, classify into `completed_iids` / `blocked_iids` / `failed_iids` (promoting `blocked → failed` when retry budget exhausted), persist `campaign_state.json`, and optionally post a per-batch summary to a notification channel. Then loop to Phase 4 if quota and time budget remain.
+
+The dedicated subagent receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and does NOT load any SKILL. It runs only the technical workflow (acpx → stage_and_guard → commit_and_push → post_push_verify → upload_attempt_artifacts → label `doing→done` → create_mr → label `pr` → summarize_attempt) and returns a single compact JSON line per `skills/gitlab_issue_campaign_dispatcher/references/state_schema.md` §Compact Subagent Reply. **The subagent does NOT write any state file** — that is the orchestrator's Phase 6 job, fed by the compact JSON reply.
 
 ## Roles
 
-### 1. Campaign Dispatcher
+### 1. Campaign Orchestrator (formerly "dispatcher")
 
-This role runs in the fixed scheduled session, usually `agent:acpx_auto_tester:main`.
+This role runs in the fixed scheduled session, usually `agent:acpx_auto_tester:main`. It executes the 6 phases described above on every tick.
 
-The dispatcher must:
-- load campaign state from disk
-- maintain issue ordering and per-tick quota logic
-- prefer unfinished backlog first
-- allow blocked issues to be temporarily skipped and retried later
-- run all per-IID preparation (clone/pull once, ensure_labels once, allocate_attempt + load_ui_accounts + prepare_attempt + build_prompt + label transitions per IID) before each spawn
+The orchestrator must:
+- load campaign state from disk and apply trigger overrides
+- run mandatory reconciliation against GitLab (Phase 2) and correct disk cache from the evidence file
+- maintain issue ordering and per-tick quota logic; prefer unfinished backlog first; allow blocked issues to be temporarily skipped and retried later
+- run all per-IID preparation (clone/pull once, ensure_labels once, allocate_attempt + load_ui_accounts + prepare_attempt + build_prompt + label transitions + state-file initialization per IID) before each spawn
 - render `references/executor_prompt.md` per IID and ship it as the `sessions_spawn` payload
-- create or resume exactly one dedicated session per issue
-- keep its own chat output short
-- never do post-acpx work itself (that belongs to the subagent)
+- create or resume exactly one dedicated session per issue (`issue-<project>-<iid>`)
+- spawn the whole batch in a single parallel `sessions_spawn` block; synchronously wait for every subagent's terminal compact JSON reply
+- **own all terminal state-file writes (Phase 6).** Validate each compact reply per `references/state_schema.md` §Compact Subagent Reply, then write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` from the validated reply. Promote `blocked → failed` if `retry_count > blocked_retry_limit`. Classify into `completed_iids` / `blocked_iids` / `failed_iids`. Drain `active_issue_iids`.
+- keep its own chat output short — a single compact JSON summary
+- never do the per-issue technical work itself (that belongs to the subagent)
 
 ### 2. Per-Issue Subagent
 
@@ -28,12 +35,11 @@ This role runs in a dedicated issue session.
 The subagent must:
 - run only inside its dedicated session (`issue-<project>-<iid>`)
 - never be reused for another issue
-- read its rendered prompt as the spawn payload — NOT load this SKILL, NOT read SOUL.md/AGENTS.md, NOT search the workspace for additional rules
-- invoke Claude Code through one-shot `acpx --auth-policy skip claude exec -f <prompt-file>` per attempt (the dispatcher already wrote that prompt file)
-- run the post-acpx pipeline by invoking `<dispatcher-skill>/scripts/<name>.sh` by absolute path: stage_and_guard → commit_and_push → post_push_verify → upload_attempt_artifacts → set_issue_label (doing→done, then add pr) → create_mr → summarize_attempt
-- update the per-issue and current-attempt state files at terminal status
-- return a compact JSON status to the dispatcher
+- read its rendered fixed-format prompt as the spawn payload — NOT load this SKILL, NOT read SOUL.md/AGENTS.md, NOT search the workspace for additional rules, NOT call sessions_spawn or sessions_history
+- follow the prompt's `<instructions>` block step by step (Steps 0–9). The technical workflow is: acpx (one-shot `acpx --auth-policy skip claude exec -f <prompt-file>`) → stage_and_guard → commit_and_push → post_push_verify → upload_attempt_artifacts → set_issue_label (doing→done, then add pr) → create_mr → summarize_attempt
+- invoke `<orchestrator-skill>/scripts/<name>.sh` by absolute path (the orchestrator renders `{SCRIPTS_DIR}` into the prompt)
 - commit, push, and create a merge request without merging
+- **NOT write any state file.** Capture the facts the orchestrator needs (commit_sha, merge_request_url, mr_action, wiki_url, labels_added, labels_removed, summary_posted, block_reason) and emit them in a single compact JSON line on its last turn — see `skills/gitlab_issue_campaign_dispatcher/references/state_schema.md` §Compact Subagent Reply for the canonical schema. The orchestrator's Phase 6 writes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` from this reply.
 
 ## Subagent Concurrency Policy (READ FIRST — HARD RULE)
 
@@ -45,8 +51,8 @@ Hard invariants:
 
 1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions.
 2. **One IID, one in-flight subagent.** Two subagents MUST NEVER work on the same `${ISSUE_IID}` concurrently. Per-IID work is always serial across attempts; only DIFFERENT IIDs may run in parallel.
-3. **Bounded batches.** When there are more eligible IIDs than open slots, the dispatcher picks at most `max_concurrent_subagents` IIDs, runs per-IID prep (sequential or parallelized — preps are independent except for a shared `repo.lock`), then spawns them in a single tool-call batch (parallel `sessions_spawn`), waits for the WHOLE batch to return, re-reads each per-issue state file, then forms the next batch.
-4. **Synchronous terminal replies only.** A spawn is successful only when the dispatcher receives the subagent's terminal compact reply (`done`, `blocked`, `failed`, or `no_changes`) and can then re-read that issue's state file. Runtime acknowledgements such as `accepted`, `runId`, `childSessionKey`, thread ids, session ids, or "created" are not terminal subagent replies.
+3. **Bounded batches.** When there are more eligible IIDs than open slots, the orchestrator picks at most `max_concurrent_subagents` IIDs, runs per-IID prep (Phase 4 — sequential or parallelized; preps are independent except for the shared `repo.lock` inside `prepare_attempt.sh`), then spawns them in a single tool-call batch (parallel `sessions_spawn`, Phase 5), waits for the WHOLE batch to return terminal compact JSON replies, runs Phase 6 follow-up bookkeeping for every member, then forms the next batch.
+4. **Synchronous terminal compact JSON replies only.** A spawn is successful only when the orchestrator receives the subagent's compact JSON reply per `skills/gitlab_issue_campaign_dispatcher/references/state_schema.md` §Compact Subagent Reply (status `done` / `blocked` / `failed` / `no_changes` plus the rest of the schema). Runtime acknowledgements such as `accepted`, `runId`, `childSessionKey`, thread ids, session ids, or "created" are not terminal subagent replies. The orchestrator owns the state-file writes (Phase 6) — do NOT re-read state files set by the subagent, because the subagent does not write them.
 5. Background / no-wait / fire-and-forget spawn modes are forbidden. Every spawn must be a blocking call resolved before the next batch is considered. If the current OpenClaw channel can only start a push-based/background run, the dispatcher must fail the affected IID or tick according to the SKILL; it must not switch to `mode=run` or any other fallback.
 6. `max_concurrent_subagents=1` (the default) MUST behave exactly like the legacy strictly-serial model: one IID at a time, one spawn per tool-call batch.
 
@@ -176,7 +182,7 @@ Rules:
 7. Never paste full diffs, full issue bodies, or long Claude Code outputs into chat unless explicitly requested.
 8. Never merge merge requests automatically.
 9. The subagent may create a merge request to the integration branch, but it must not merge it.
-10. The dispatcher must always offload Claude Code execution and post-acpx work into dedicated per-issue sessions.
+10. The orchestrator must always offload Claude Code execution and post-acpx technical work into dedicated per-issue sessions. The orchestrator owns Phase 6 follow-up bookkeeping (state-file writes, campaign_state classification, optional notify) and must NOT delegate it to the subagent.
 
 ## Session Policy
 
@@ -207,7 +213,19 @@ with the trigger inputs documented in [`skills/gitlab_issue_campaign_dispatcher/
 
 ### Subagent payload
 
-The subagent does NOT receive a "trigger command" envelope. The dispatcher renders [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) into a single string and passes that string as the entire `sessions_spawn` payload. The rendered prompt is self-contained — it carries every path, env value, and step the subagent needs.
+The subagent does NOT receive a "trigger command" envelope. The orchestrator renders [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) into a single fixed-format string and passes that string as the entire `sessions_spawn` payload. The rendered prompt is self-contained — it carries every path, env value, and step the subagent needs, structured as `<config>` / `<issue>` / `<env_contract>` / `<instructions>` (Steps 0–9) / `<constraints>` / `<fail_flow>` blocks.
+
+### Subagent reply contract
+
+The subagent emits **one compact JSON line on its last turn** per [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. The reply carries every fact the orchestrator's Phase 6 needs to write the terminal state files and classify the IID:
+
+- `iid`, `attempt_number`, `status` (`done` / `no_changes` / `blocked` / `failed`)
+- `mode_actual`, `work_branch`, `local_branch`
+- `commit_sha`, `merge_request_url`, `mr_action` (`created` / `reused` / `rotated` / `none`)
+- `wiki_url`, `labels_added`, `labels_removed`
+- `summary_posted`, `block_reason`, `log_dir`, `skill_version`
+
+The subagent MUST NOT also write the state files — that is the orchestrator's job. The subagent MUST NOT emit anything else after the JSON line on its last turn (no logs, no diffs, no surrounding prose).
 
 ## Required Behavior When Interrupted
 
@@ -238,16 +256,13 @@ The dispatcher should return only a compact status summary, such as:
 
 ### Subagent reply format
 
-The subagent should return only a compact issue summary, such as:
+Canonical schema lives in [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. Example:
 
 ```json
-{
-  "iid": 14,
-  "status": "done",
-  "work_branch": "issue/14-auto-fix",
-  "merge_request_url": "http://gitlab.example.com/..."
-}
+{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","mr_action":"created","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/openclaw_work/<project>/issues/issue-14/log/attempt-003","skill_version":"2026-05-06.5"}
 ```
+
+This single JSON line is the ONLY artifact the orchestrator reads from the subagent's reply. The orchestrator's Phase 6 owns all terminal state-file writes (`${ISSUE_STATE_FILE}`, `${ATTEMPT_STATE_FILE}`) and `campaign_state.json` updates from this reply.
 
 ## Tooling Expectations
 
@@ -259,9 +274,9 @@ This workspace expects the agent to be able to use:
 - sessions_history
 - sessions_spawn
 
-The dispatcher must use `sessions_spawn` for dedicated issue sessions.
-The `sessions_spawn` call must be a blocking dedicated-session spawn that returns the subagent's terminal reply. The spawn payload is a fully-rendered self-contained prompt (built from `references/executor_prompt.md`); the subagent does NOT load this SKILL. Push-based acknowledgements (`accepted`, `runId`, anonymous `agent:<name>:subagent:<uuid>` keys, or child-session ids without subagent status) do not satisfy this workspace's scheduling contract.
+The orchestrator must use `sessions_spawn` for dedicated issue sessions.
+The `sessions_spawn` call must be a blocking dedicated-session spawn that returns the subagent's terminal compact JSON reply (per `skills/gitlab_issue_campaign_dispatcher/references/state_schema.md` §Compact Subagent Reply). The spawn payload is a fully-rendered self-contained fixed-format prompt (built from `references/executor_prompt.md`); the subagent does NOT load this SKILL. Push-based acknowledgements (`accepted`, `runId`, anonymous `agent:<name>:subagent:<uuid>` keys, or child-session ids without the subagent's compact JSON) do not satisfy this workspace's scheduling contract.
 
-For this automation, an issue is considered completed after its merge request is successfully created and the live issue has both `done` and `pr` labels. Separately, a live GitLab issue with `state=closed` is a hard terminal skip condition: the dispatcher must never schedule it, even if `continue` is present or `done`/`pr` are absent. The subagent must change `doing` to `done` immediately after solving the issue and publishing Wiki evidence, then create or rotate the MR, then add `pr` after MR creation succeeds and persist issue state `done`.
+For this automation, an issue is considered completed after its merge request is successfully created and the live issue has both `done` and `pr` labels. Separately, a live GitLab issue with `state=closed` is a hard terminal skip condition: the orchestrator must never schedule it, even if `continue` is present or `done`/`pr` are absent. The subagent must change `doing` to `done` immediately after solving the issue and publishing Wiki evidence, then create or rotate the MR, then add `pr` after MR creation succeeds. The orchestrator's Phase 6 — not the subagent — writes the terminal `status=done` to disk based on the compact JSON reply.
 
 Exception for opened issues only: a human reviewer may reopen the automation by changing the live GitLab issue label to `continue`. On the next dispatcher reconciliation, `continue` wins over cached `done` state and over an existing MR only if the issue is opened. If `continue` is present alongside `done` and/or `pr` on an opened issue, treat the issue as `continue` and schedule a continue-mode attempt.
