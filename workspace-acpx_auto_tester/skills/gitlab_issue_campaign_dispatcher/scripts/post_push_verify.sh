@@ -4,9 +4,9 @@
 # subtrees and no `ifp_result/_dispatcher/` subtree. If verification
 # fails the executor must mark the issue blocked and skip MR creation.
 #
-# As of SKILL_VERSION 2026-05-07.0 the leak surface is `ifp_result/`
-# only — `hulat/`, `.claude/`, and `ifp_data/` are valid repo content
-# committed by the test team and are no longer rejected.
+# The leak surface is `ifp_result/` only — `hulat/`, `.claude/`, and
+# `ifp_data/` are valid repo content committed by the test team and are
+# not rejected.
 #
 # Required env vars:
 #   WORKTREE_DIR    git worktree (cwd; works because the worktree shares

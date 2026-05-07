@@ -10,7 +10,7 @@ There are three state files in this workspace:
 | `ifp_result/issue-<iid>/state.json`             | dispatcher (cross-attempt)     | persisted across attempts; one per IID        |
 | `ifp_result/issue-<iid>/attempt_state.json`     | dispatcher (per-attempt)       | overwritten on each new attempt               |
 
-**State-file write ownership (changed in SKILL_VERSION 2026-05-06.5):** the **dispatcher writes all state files**, including the terminal updates. The dispatcher's Phase 4 (per-IID prep) initializes the in-progress values in `issue-<iid>/state.json` and `issue-<iid>/attempt_state.json`. The subagent's compact JSON reply (see §Compact Subagent Reply below) carries every fact the dispatcher needs; the dispatcher's Phase 6 follow-up writes the terminal values from that reply. The subagent does NOT touch any state file.
+**State-file write ownership:** the **dispatcher writes all state files**, including the terminal updates. The dispatcher's Phase 4 (per-IID prep) initializes the in-progress values in `issue-<iid>/state.json` and `issue-<iid>/attempt_state.json`. The subagent's compact JSON reply (see §Compact Subagent Reply below) carries every fact the dispatcher needs; the dispatcher's Phase 6 follow-up writes the terminal values from that reply. The subagent does NOT touch any state file.
 
 ## campaign_state.json
 
@@ -53,13 +53,12 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `/data
   "failed_iids": [],
   "campaign_status": "waiting_for_callbacks",
   "quota_launched_this_tick": 2,
-  "skill_version": "2026-05-07.0",
   "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-20260507T100501Z.json",
-  "updated_at": "2026-05-06T10:05:30Z"
+  "updated_at": "2026-05-07T10:05:30Z"
 }
 ```
 
-### `pending_subagents` — async-callback bookkeeping (added in 2026-05-06.7)
+### `pending_subagents` — async-callback bookkeeping
 
 Map keyed by stringified IID. Each entry tracks one in-flight subagent from spawn (`sessions_spawn` launch ack) to drain (`RUN_CHILD_COMPLETION_CALLBACK` processed by Phase 6) or eviction (stuck-pending past `stuck_after_minutes`).
 
@@ -99,22 +98,18 @@ campaign_status           = running
 quota_launched_this_tick  = 0
 ```
 
-### Schema migration
+### Legacy on-disk shapes the loader must tolerate
 
-**`active_issue_iid` → `active_issue_iids` (SKILL_VERSION 2026-04-29.1):**
+Some on-disk files written by older deployments may be missing fields or use the old scalar shape. The loader normalizes them in memory and persists the current shape on the next write.
 
-- If the on-disk file has the legacy scalar `active_issue_iid` and no `active_issue_iids`, treat it as `active_issue_iids = [active_issue_iid]` (or `[]` if the scalar was `null`) in memory; persist the new array form on the next write.
-- Same applies to `active_issue_session` → `active_issue_sessions`.
-- If `max_concurrent_subagents` is missing, default to `1` and persist.
+- **Legacy scalar `active_issue_iid` / `active_issue_session`** — if present and no `active_issue_iids` / `active_issue_sessions` array exists, treat as `[scalar]` (or `[]` if the scalar was `null`). On the next write, persist only the array shape.
+- **Missing `pending_subagents`** — treat as `{}` in memory; persist on next write.
+- **Missing `max_concurrent_subagents`** — default to `1` and persist.
+- **Missing `stuck_after_minutes`** — default to `90` and persist.
+- **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
+- **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
 
-The dispatcher MUST NOT keep both the scalar and the array fields in the persisted file — pick one shape per write (the new array shape) and drop the legacy scalar from the JSON it writes.
-
-**`pending_subagents` introduction (SKILL_VERSION 2026-05-06.7):**
-
-- If the on-disk file is missing `pending_subagents`, treat as `{}` in memory and persist on the next write.
-- If the on-disk file is missing `stuck_after_minutes`, default to `90` and persist.
-- If the on-disk file is missing `quota_launched_this_tick`, default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
-- Legacy entries in `active_issue_iids` without matching `pending_subagents` keys are stale (the orchestrator was synchronous before; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
+The dispatcher MUST NOT keep both the scalar and the array fields in the persisted file — pick the array shape per write and drop the legacy scalars.
 
 ### Possible `campaign_status` values
 
@@ -128,7 +123,7 @@ The dispatcher MUST NOT keep both the scalar and the array fields in the persist
 
 Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
 
-Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before each spawn). The dispatcher's Phase 4 prep refreshes `status="in_progress"` / `mode` / `attempts_total` / `latest_attempt_*` / `skill_version` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `commit_sha` / `merge_request_url` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
+Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before each spawn). The dispatcher's Phase 4 prep refreshes `status="in_progress"` / `mode` / `attempts_total` / `latest_attempt_*` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `commit_sha` / `merge_request_url` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
 
 ```json
 {
@@ -143,8 +138,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
   "block_reason": null,
   "commit_sha": "abc1234...",
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-05-07.0",
-  "updated_at": "2026-05-06T10:00:00Z"
+  "updated_at": "2026-05-07T10:00:00Z"
 }
 ```
 
@@ -161,7 +155,6 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | `block_reason`          | string \| null  | Required when `status=blocked` or `failed`.                            |
 | `commit_sha`            | string \| null  | Latest pushed commit SHA when applicable.                              |
 | `merge_request_url`     | string \| null  | Strategy A: single MR per issue in fresh mode; rotated in continue mode. |
-| `skill_version`         | string          | Must equal the `SKILL_VERSION` in `SKILL.md`.                          |
 | `updated_at`            | ISO-8601 UTC    | Update at every major step.                                            |
 
 ### Possible `status` values
@@ -200,8 +193,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "status": "done",
   "block_reason": null,
   "summary_file": "/data/<project>/ifp_result/issue-14/summary.md",
-  "summary_posted_to_issue": true,
-  "skill_version": "2026-05-07.0"
+  "summary_posted_to_issue": true
 }
 ```
 
@@ -220,7 +212,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `summary_file`            | `${SUMMARY_FILE}` once `summarize_attempt.sh` has run                                     |
 | `summary_posted_to_issue` | true after the summary was successfully posted as a GitLab issue note                     |
 
-The dispatcher's Phase 4 prep initializes `attempt_started_at`, `mode_*`, `no_reviewer_comments`, `prior_attempt_count`, `local_branch`, `log_dir`, `status="in_progress"`, `skill_version` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `attempt_finished_at` / `commit_sha` / `wiki_artifacts_file` / `attempt_artifacts_posted_to_wiki` / `summary_posted_to_issue` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
+The dispatcher's Phase 4 prep initializes `attempt_started_at`, `mode_*`, `no_reviewer_comments`, `prior_attempt_count`, `local_branch`, `log_dir`, `status="in_progress"` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `attempt_finished_at` / `commit_sha` / `wiki_artifacts_file` / `attempt_artifacts_posted_to_wiki` / `summary_posted_to_issue` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
 
 ---
 
@@ -246,8 +238,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "labels_removed": ["doing"],
   "summary_posted": true,
   "block_reason": "",
-  "log_dir": "/data/<project>/ifp_result/issue-14/log/attempt-003",
-  "skill_version": "2026-05-07.0"
+  "log_dir": "/data/<project>/ifp_result/issue-14/log/attempt-003"
 }
 ```
 
@@ -270,7 +261,6 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `summary_posted`     | bool            | `true` iff `summarize_attempt.sh` exit 0.                              |
 | `block_reason`       | string          | Required non-empty when `status` is `blocked` or `failed`; empty `""` otherwise. |
 | `log_dir`            | string          | Absolute path; mirrors `${LOG_DIR}`. Helps the dispatcher locate logs without re-deriving paths. |
-| `skill_version`      | string          | The `SKILL_VERSION` literal echoed back. The dispatcher rejects mismatches as a stale subagent. |
 
 ### Tolerated variations
 
@@ -287,17 +277,15 @@ The compact reply arrives in two ways:
 
 The validation pipeline is the same in both paths:
 
-1. Parse `worker_result_json` (callback path) or use the synthesized object directly. On parse failure, treat as a synthetic blocked reply: `{"iid":<callback.iid>,"attempt_number":<callback.attempt_number>,"status":"blocked","block_reason":"callback worker_result_json not valid JSON: <first 200 chars>","skill_version":"<this version>"}` and continue with that.
+1. Parse `worker_result_json` (callback path) or use the synthesized object directly. On parse failure, treat as a synthetic blocked reply: `{"iid":<callback.iid>,"attempt_number":<callback.attempt_number>,"status":"blocked","block_reason":"callback worker_result_json not valid JSON: <first 200 chars>"}` and continue with that.
 2. **Match to a `pending_subagents` entry by `iid` + `attempt_number`.** This is the canonical identity check (replacing both session-name dedup AND the old "match against this batch's dispatch list").
    - Look up `pending_subagents[reply.iid]`. If the entry does not exist → return `"callback_status":"stale_or_already_drained"` (the IID was already drained by a prior callback / eviction). Do NOT mutate state files.
    - Verify `pending_subagents[reply.iid].attempt_number == reply.attempt_number`. Mismatch (most commonly: a stale callback for an older attempt) → return `"callback_status":"stale_or_already_drained"`. Do NOT mutate state files.
    - Optionally cross-check `pending_subagents[reply.iid].run_id` against `callback.run_id` (when present). Mismatch is logged but does not reject — the canonical identity is `iid + attempt_number`.
-3. Verify `reply.skill_version == ${SKILL_VERSION}`. Mismatch → mark `blocked` with `block_reason="subagent reply skill_version mismatch (reply=<x>, expected=<y>)"` (the deployed subagent prompt is stale; the in-flight subagent was launched against an older version of the rendered prompt).
-4. If `reply.status in {blocked, failed}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
-5. (Callback path only — the inline-synthesized path skips this since there is by definition exactly one synthesized reply per call.) Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
-6. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below).
-7. If `status=blocked` AND `retry_count >= blocked_retry_limit` (after incrementing), promote to `status=failed` and add to `failed_iids`.
-8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
+3. If `reply.status in {blocked, failed}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
+4. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
+5. If `status=blocked` AND `retry_count >= blocked_retry_limit` (after incrementing), promote to `status=failed` and add to `failed_iids`.
+6. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
 
 ### Phase 6 Write Mapping
 
@@ -312,7 +300,7 @@ The dispatcher takes the validated compact reply and writes:
 - `summary_file` ← `${SUMMARY_FILE}` if reply.summary_posted, else null
 - `summary_posted_to_issue` ← reply.summary_posted
 - `block_reason` ← reply.block_reason (empty → null)
-- preserve everything Phase 4 already wrote (`attempt_number`, `mode_*`, `local_branch`, `log_dir`, `skill_version`, `attempt_started_at`, `no_reviewer_comments`, `prior_attempt_count`)
+- preserve everything Phase 4 already wrote (`attempt_number`, `mode_*`, `local_branch`, `log_dir`, `attempt_started_at`, `no_reviewer_comments`, `prior_attempt_count`)
 
 **`${ISSUE_STATE_FILE}`** (overwrite):
 - `status` ← reply.status (after blocked→failed promotion check)
@@ -323,6 +311,5 @@ The dispatcher takes the validated compact reply and writes:
 - `merge_request_url` ← reply.merge_request_url (empty → null)
 - `retry_count` ← prior + 1 if reply.status in {blocked, failed}; else prior unchanged
 - `block_reason` ← reply.block_reason (empty → null)
-- `skill_version` ← reply.skill_version
 - `updated_at` ← ISO-8601 UTC now
 - preserve `iid`, `session`, `attempts_total` (already monotonically tracked in Phase 4)

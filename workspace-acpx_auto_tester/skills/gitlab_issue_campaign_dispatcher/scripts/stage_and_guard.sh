@@ -4,12 +4,12 @@
 # another issue's `ifp_result/` subtree (or the campaign-level
 # `ifp_result/_dispatcher/` subtree).
 #
-# As of SKILL_VERSION 2026-05-07.0:
+# Why this guard:
 #   - `hulat/`, `.claude/`, and `ifp_data/` are committed by the test
 #     team to master+dev. They are valid repo content. The guard does NOT
 #     reject changes inside them — if Claude edits them, that's a
 #     content concern (caught at MR review), not a repo-cleanliness
-#     concern. The leak guards no longer special-case these directories.
+#     concern.
 #   - The agent's runtime state lives at `${REPO_PATH}/ifp_result/...`
 #     OUTSIDE the worktree's path. Inside the worktree, `ifp_result/` is
 #     the project's own gitignored placeholder (since master/dev

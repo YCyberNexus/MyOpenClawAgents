@@ -6,7 +6,7 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 
 Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout.
 
-As of SKILL_VERSION 2026-05-07.0 the cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp_data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. The agent's own state and per-issue worktrees live under `${REPO_PATH}/ifp_result/`, whose contents are gitignored on master + dev so the main worktree's `git status` stays clean.
+The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp_data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. The agent's own state and per-issue worktrees live under `${REPO_PATH}/ifp_result/`, whose contents are gitignored on master + dev so the main worktree's `git status` stays clean.
 
 ```
 /data/${PROJECT}/                                        ← ${REPO_PATH}; the cloned project repo
@@ -109,11 +109,12 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}`. Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
 8. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
 9. **Leak surface.** The leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) reject staged paths matching `^ifp_result/_dispatcher/` (always) or `^ifp_result/issue-<N>/` where `<N> != ${ISSUE_IID}` (other-issue subtree). They do NOT reject `hulat/`, `.claude/`, or `ifp_data/` — those are tracked content owned by the test team. They do NOT reject the current issue's own `ifp_result/issue-<iid>/` if Claude somehow `git add -f`'d into it (rare in practice; `ifp_result/` is gitignored on every branch).
-10. **Layout migration from earlier SKILL_VERSIONs.** The OLD `/data/openclaw_work/${PROJECT}/...` subtree (campaign state, dispatcher logs, per-issue worktrees) is gone. Operators must move state files to the new in-repo location once during deployment of `2026-05-07.0`:
+10. **One-time migration from the old out-of-repo layout.** Some deployments still have a `/data/openclaw_work/${PROJECT}/...` subtree from before the agent moved into `ifp_result/`. Operators should either move it once during deployment:
     - `mv /data/openclaw_work/<project>/openclaw_state/campaign_state.json /data/<project>/ifp_result/_dispatcher/campaign_state.json`
     - `mv /data/openclaw_work/<project>/openclaw_log/dispatcher/* /data/<project>/ifp_result/_dispatcher/log/`
     - `mv /data/openclaw_work/<project>/issues/* /data/<project>/ifp_result/`
-    - Or simply delete the old subtree and let the new layout rebuild from GitLab labels (the agent's reconciliation will repopulate state from live label evidence).
+    
+    Or simply delete the old subtree and let reconciliation rebuild state from live GitLab labels.
 
 ## Core artifacts in `${LOG_DIR}`
 

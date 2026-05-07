@@ -23,7 +23,7 @@
 #   output) so each fresh attempt starts from zero. PRs still target
 #   BRANCH — only the source baseline changes.
 #
-# What this script does NOT do, as of SKILL_VERSION 2026-05-07.0:
+# What this script does NOT do:
 #   - It does NOT symlink hulat into the worktree. The test team committed
 #     `hulat/` to master+dev, so the worktree's checkout already contains it.
 #   - It does NOT copy a `.claude/` runtime config into the worktree. The

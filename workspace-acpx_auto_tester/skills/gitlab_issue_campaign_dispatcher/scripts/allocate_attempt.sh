@@ -55,8 +55,7 @@ else
     iid: $iid,
     status: "pending",
     mode: "fresh",
-    attempts_total: 0,
-    skill_version: "2026-05-07.0"
+    attempts_total: 0
   }' > "${STATE_FILE}"
 fi
 

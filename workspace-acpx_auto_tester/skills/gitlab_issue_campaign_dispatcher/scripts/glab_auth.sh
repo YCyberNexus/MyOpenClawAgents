@@ -28,7 +28,7 @@
 # and computes PROJECT_FULL / PROJECT_URI for the current shell. Do not call
 # this script separately and then hand-export derived project vars.
 #
-# IMPORTANT (2026-04-25.6+):
+# IMPORTANT:
 #   After this script runs, all subsequent `glab api` calls MUST rely on
 #   the GITLAB_HOST env var (which glab natively respects) and MUST NOT
 #   pass --hostname themselves. Passing --hostname with a "host:port"

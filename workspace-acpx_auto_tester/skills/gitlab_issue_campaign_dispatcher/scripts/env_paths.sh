@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# As of SKILL_VERSION 2026-05-07.0 the cloned project repo IS the agent's
-# entire workspace. The test team maintains `.claude/`, `hulat/`, and
-# `ifp_data/` inside the repo (committed to master + dev). The agent's own
-# state and per-issue subtrees live under `${REPO_PATH}/ifp_result/`,
-# whose contents are gitignored on master+dev so `git status` in the main
-# worktree stays clean.
+# The cloned project repo IS the agent's entire workspace. The test team
+# maintains `.claude/`, `hulat/`, and `ifp_data/` inside the repo
+# (committed to master + dev). The agent's own state and per-issue
+# subtrees live under `${REPO_PATH}/ifp_result/`, whose contents are
+# gitignored on master+dev so `git status` in the main worktree stays
+# clean.
 #
 # Disk layout produced by this file:
 #
@@ -54,8 +54,8 @@
 #   ISSUE_IID        integer issue IID                              (per-issue)
 #   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
 #
-# Note: HULAT_DIR is NO LONGER a trigger input. As of 2026-05-07.0 it is
-# derived as `${REPO_PATH}/hulat` because the test team committed the hulat
+# Note: HULAT_DIR is NOT a trigger input. It is derived as
+# `${REPO_PATH}/hulat` because the test team committed the hulat
 # materials into the repo. Triggers that still pass `hulat_dir=...` are
 # silently ignored (the override never reaches a script).
 #

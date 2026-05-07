@@ -18,12 +18,12 @@
 #   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH,
 #   UI_ACCOUNT, UI_PASSWORD
 #
-# `HULAT_DIR` is no longer a trigger input. As of 2026-05-07.0 the test
-# team commits `hulat/` to master+dev, so the worktree's checkout already
-# contains it at `${WORKTREE_DIR}/hulat`. env_paths.sh still exports
-# `HULAT_DIR=${REPO_PATH}/hulat` for any consumer that needs the absolute
-# path, but build_prompt.sh no longer surfaces the path in the prompt
-# (the agent reads from `hulat/` relative to the worktree).
+# `HULAT_DIR` is NOT a trigger input. The test team commits `hulat/` to
+# master+dev, so the worktree's checkout already contains it at
+# `${WORKTREE_DIR}/hulat`. env_paths.sh exports `HULAT_DIR=${REPO_PATH}/hulat`
+# for any consumer that needs the absolute path, but build_prompt.sh
+# does not surface the path in the prompt (the agent reads from `hulat/`
+# relative to the worktree).
 #
 # UI_ACCOUNT / UI_PASSWORD are the dispatcher-allocated test credentials for
 # this spawn. They are injected into the prompt's "# Working environment"

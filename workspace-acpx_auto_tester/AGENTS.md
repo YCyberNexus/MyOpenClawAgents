@@ -90,7 +90,7 @@ Behavioral rules (verification against trigger, token rotation, abort-on-mismatc
 
 ## Disk State Layout
 
-Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md). Workspace-level invariants (SKILL_VERSION 2026-05-07.0):
+Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md). Workspace-level invariants:
 
 - `/data/${PROJECT}/` — the cloned project repo (hosts linked worktrees; agent never edits its main working tree directly). The test team commits `.claude/`, `hulat/`, and `ifp_data/` to master+dev so a fresh clone already contains everything Claude Code needs at runtime.
 - `/data/${PROJECT}/ifp_result/` — agent runtime workspace, INSIDE the cloned repo. Gitignored on master+dev so the main worktree's `git status` stays clean. Holds:

@@ -2,7 +2,7 @@
 # summarize_attempt.sh — write a SHORT digest of this attempt to
 # ${SUMMARY_FILE} and post the same content as a GitLab issue comment.
 #
-# Design choice (2026-04-25.5+): the comment is intentionally short.
+# Design choice: the comment is intentionally short.
 # Detailed evidence (full claude_result.txt, full git_diff.patch,
 # acpx_raw.log, prompt.txt) lives on the runner under ${LOG_DIR}. On
 # push-ready attempts, prompt/result/report evidence is also published to

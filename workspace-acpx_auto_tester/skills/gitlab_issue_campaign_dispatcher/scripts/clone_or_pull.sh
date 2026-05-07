@@ -3,9 +3,9 @@
 # repo, with up-to-date refs, and create the agent's runtime subtree at
 # ${REPO_PATH}/ifp_result/.
 #
-# As of SKILL_VERSION 2026-05-07.0 the agent's state lives INSIDE the
-# cloned repo at `${REPO_PATH}/ifp_result/`. Before the first clone, that
-# subtree does not exist — the bootstrap order is:
+# The agent's state lives INSIDE the cloned repo at
+# `${REPO_PATH}/ifp_result/`. Before the first clone, that subtree does
+# not exist — the bootstrap order is:
 #
 #   1. Ensure /data exists.
 #   2. If repo is missing, acquire a tmpfs lock and `git clone`. We can't

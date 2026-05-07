@@ -142,13 +142,13 @@ All dispatcher paths are derived by sourcing:
 
 - `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`
 
-Current state paths (SKILL_VERSION 2026-05-07.0 — agent runtime files live INSIDE the cloned repo):
+Current state paths — agent runtime files live INSIDE the cloned repo:
 - `/data/<project>/ifp_result/_dispatcher/campaign_state.json`
 - `/data/<project>/ifp_result/_dispatcher/log/`
 - `/data/<project>/ifp_result/issue-<iid>/state.json`
 - `/data/<project>/ifp_result/issue-<iid>/attempt_state.json`
 
-Never hand-write `/data/openclaw_work/<project>/...` paths. Those belonged to the pre-2026-05-07.0 out-of-repo layout. Operators migrating from earlier versions can either move the files or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
+Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout. Operators migrating from older deployments can either move the files into `ifp_result/` or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
 
 ## Scheduling Model
 
@@ -233,7 +233,7 @@ The subagent emits **one compact JSON line on its last turn** per [`skills/gitla
 - `mode_actual`, `work_branch`, `local_branch`
 - `commit_sha`, `merge_request_url`, `mr_action` (`created` / `reused` / `rotated` / `none`)
 - `wiki_url`, `labels_added`, `labels_removed`
-- `summary_posted`, `block_reason`, `log_dir`, `skill_version`
+- `summary_posted`, `block_reason`, `log_dir`
 
 The subagent MUST NOT also write the state files — that is the orchestrator's job. The subagent MUST NOT emit anything else after the JSON line on its last turn (no logs, no diffs, no surrounding prose).
 
@@ -286,7 +286,7 @@ Typical callback-tick reply (one IID drained):
 Canonical schema lives in [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. Example:
 
 ```json
-{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","mr_action":"created","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/<project>/ifp_result/issue-14/log/attempt-003","skill_version":"2026-05-07.0"}
+{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","mr_action":"created","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/<project>/ifp_result/issue-14/log/attempt-003"}
 ```
 
 This single JSON line is the ONLY artifact the orchestrator reads from the subagent's reply. The orchestrator's Phase 6 owns all terminal state-file writes (`${ISSUE_STATE_FILE}`, `${ATTEMPT_STATE_FILE}`) and `campaign_state.json` updates from this reply.
