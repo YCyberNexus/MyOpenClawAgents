@@ -19,6 +19,10 @@ glab auth login \
 glab auth status --hostname "${GITLAB_HOST}"
 ```
 
+## Flag compatibility
+
+Every flag used in G1–G13 has been verified to exist on the runner's installed `glab`. Before adding a new flag — here, in `scripts/*.sh`, or in `references/executor_prompt.md` — run `glab <subcommand> --help` on the runner and confirm the flag is listed. The runner may lag mainstream releases: e.g. `--description-file` on `glab mr create` is documented upstream but missing on some runner installs, so G7 uses `--description "$(cat <file>)"` instead. Workspace-wide policy lives in [`SOUL.md`](../../../SOUL.md) §GitLab Access.
+
 ## Commands
 
 ### G1 — Read one issue (dispatcher prep + reconcile)
@@ -107,9 +111,11 @@ glab mr create \
   --source-branch "${WORK_BRANCH}" \
   --target-branch "${BRANCH}" \
   --title "Issue #${ISSUE_IID}: ${ISSUE_TITLE}" \
-  --description-file "${LOG_DIR}/mr_description.md" \
+  --description "$(cat "${LOG_DIR}/mr_description.md")" \
   --yes
 ```
+
+The inline `--description "$(cat ...)"` form is intentional. Some runner-installed `glab` versions don't recognize `--description-file`; the inline `--description` flag has been in glab since the beginning. See the "Flag compatibility" rule below.
 
 ### G8 — Look up the MR URL after creation (subagent)
 

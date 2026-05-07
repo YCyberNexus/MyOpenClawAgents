@@ -92,6 +92,8 @@ If `glab auth status` fails after `scripts/glab_auth.sh`, the affected unit of w
 
 **Do NOT pass `--hostname` to `glab api` calls.** `scripts/glab_auth.sh` exports `GITLAB_HOST` as an env var; glab reads that natively. Passing `--hostname` with a `host:port` value confuses glab's URL resolution for some subcommands and historically caused the agent to spin trying alternative invocations. The single allowed convention is: rely on the exported `GITLAB_HOST`, drop `--hostname` everywhere.
 
+**Verify glab flags on the runner before codifying new ones.** The runner's `glab` CLI may lag mainstream releases (observed: `--description-file` on `glab mr create` is missing on some installs even though it appears in current upstream docs). Before adding a flag to any script in `scripts/` or to G1–G13 in `references/glab_commands.md`, run `glab <subcommand> --help` on the runner and confirm the flag is listed. If it isn't, fall back to a long-standing equivalent — e.g. `--description "$(cat <file>)"` in place of `--description-file <file>`. This rule is workspace-wide; it applies to dispatcher prep scripts and subagent post-acpx scripts equally.
+
 ### GitLab Host Pinning
 
 The GitLab host and protocol are **pinned at deployment time in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every tick / run. See `<workspace>/config/README.md` for setup.

@@ -101,12 +101,16 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
   echo "Do not merge until reviewed."
 } > "${DESC_FILE}"
 
+# NOTE: --description (inline string) is used instead of --description-file
+# because some runner-installed glab versions don't recognize the latter.
+# See SOUL.md §GitLab Access — verify any new flag with `glab <subcmd> --help`
+# on the runner before adopting it.
 glab mr create \
   --repo "${PROJECT_FULL}" \
   --source-branch "${WORK_BRANCH}" \
   --target-branch "${BRANCH}" \
   --title "Issue #${ISSUE_IID} (attempt ${ATTEMPT_NUMBER_PADDED}): ${ISSUE_TITLE}" \
-  --description-file "${DESC_FILE}" \
+  --description "$(cat "${DESC_FILE}")" \
   --yes >/dev/null
 
 OPEN_JSON="$(
