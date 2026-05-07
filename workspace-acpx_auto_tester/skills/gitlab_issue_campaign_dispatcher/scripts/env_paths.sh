@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# As of SKILL_VERSION 2026-05-06.6 there is exactly ONE skill in the workspace
-# (the orchestrator), running 6 phases per scheduled tick. The orchestrator
-# does ALL preparation (Phases 1-4: parse, reconcile, eligibility, per-IID
-# prep — clone/pull, worktree, prompt build, label transitions, attempt
-# allocation, UI-account allocation, in-progress state-file init) and ALL
-# terminal bookkeeping (Phase 6: write terminal state files from the
-# subagent's compact JSON reply, classify into campaign_state lists).
-# The spawned subagent runs the technical workflow scripts
-# (stage/commit/push/wiki/MR/label/summarize) by absolute path against
+# As of SKILL_VERSION 2026-05-06.7 there is exactly ONE skill in the workspace
+# (the orchestrator), running an async-callback model with two execution paths.
+# Path A (RUN_SCHEDULED_ISSUE_CAMPAIGN): orchestrator runs Phases 1-4 (parse,
+# reconcile, eligibility, per-IID prep — clone/pull, worktree, prompt build,
+# label transitions, attempt allocation, UI-account allocation, in-progress
+# state-file init, pending_subagents placeholder) then Phase 5 fires anonymous
+# sessions_spawn calls (NO session name passed) and records each launch ack's
+# runId + childSessionKey into pending_subagents; orchestrator returns
+# waiting_for_callbacks and exits. Path B (RUN_CHILD_COMPLETION_CALLBACK):
+# orchestrator runs Phase 6 for the matched IID (validate compact JSON →
+# write terminal state files → drain pending entry → classify into
+# campaign_state lists). The spawned subagent runs the technical workflow
+# scripts (stage/commit/push/wiki/MR/label/summarize) by absolute path against
 # pre-rendered env vars; it does NOT load a SKILL and does NOT write any
 # state file.
 #

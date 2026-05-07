@@ -26,51 +26,103 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "max_runtime_minutes": 55,
   "blocked_retry_limit": 3,
   "blocked_cooldown_ticks": 1,
-  "max_concurrent_subagents": 1,
+  "max_concurrent_subagents": 2,
+  "stuck_after_minutes": 90,
   "next_new_issue_iid": 4,
-  "active_issue_iids": [],
-  "active_issue_sessions": [],
-  "unfinished_iids": [],
+  "active_issue_iids": [14, 15],
+  "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
+  "pending_subagents": {
+    "14": {
+      "attempt_number": 3,
+      "run_id": "9710b359-2f32-407b-8c54-5c995ba266dc",
+      "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-bcc8-4418-b401-c5f5f752609a",
+      "ui_account_index": 0,
+      "spawned_at": "2026-05-06T10:00:12Z"
+    },
+    "15": {
+      "attempt_number": 1,
+      "run_id": "1240c842-8c4d-4f8a-...",
+      "child_session_key": "agent:acpx_auto_tester:subagent:6fbc16ce-...",
+      "ui_account_index": 1,
+      "spawned_at": "2026-05-06T10:00:12Z"
+    }
+  },
+  "unfinished_iids": [9, 10, 14, 15],
   "completed_iids": [1, 2, 3],
   "blocked_iids": [],
   "failed_iids": [],
-  "campaign_status": "running",
-  "skill_version": "2026-05-06.6",
+  "campaign_status": "waiting_for_callbacks",
+  "quota_launched_this_tick": 2,
+  "skill_version": "2026-05-06.7",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260506T100501Z.json",
   "updated_at": "2026-05-06T10:05:30Z"
 }
 ```
+
+### `pending_subagents` — async-callback bookkeeping (added in 2026-05-06.7)
+
+Map keyed by stringified IID. Each entry tracks one in-flight subagent from spawn (`sessions_spawn` launch ack) to drain (`RUN_CHILD_COMPLETION_CALLBACK` processed by Phase 6) or eviction (stuck-pending past `stuck_after_minutes`).
+
+| Field                | Type   | Notes                                                                                          |
+| -------------------- | ------ | ---------------------------------------------------------------------------------------------- |
+| `attempt_number`     | int    | The attempt number allocated for this subagent. Phase 6 validates `callback.attempt_number == this` to reject stale callbacks. |
+| `run_id`             | string \| null | The `runId` returned by `sessions_spawn`. `null` only between Phase 4 step 5 (placeholder write) and Phase 5 step 2 (post-launch update); the orchestrator MUST NOT leave a `null` run_id once Phase 5 has finished. |
+| `child_session_key`  | string \| null | The anonymous `childSessionKey` returned by `sessions_spawn` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`). For runtime-side audit only; not used for matching callbacks. Same nullability rule as `run_id`. |
+| `ui_account_index`   | int    | The 0-based index in `<workspace>/config/ui_accounts.env` allocated to this subagent. The orchestrator's account-pool head-allocation policy must skip indices already in `pending_subagents[*].ui_account_index`. |
+| `spawned_at`         | ISO-8601 UTC \| null | The orchestrator's wall-clock timestamp when `sessions_spawn` returned its launch ack. Used for stuck-pending eviction (`now - spawned_at >= stuck_after_minutes`). `null` between placeholder write and launch ack receipt; an entry with `null` `spawned_at` past `Phase 5 → end-of-tick` is itself a stuck case and gets evicted on the next scheduled wake-up. |
+
+A `pending_subagents` entry with `placeholder: true` is a transient state during Phase 4 step 5 / Phase 5; it MUST NOT survive the end of the scheduled wake-up. If a crash leaves a placeholder behind, the next scheduled wake-up's stuck-pending eviction (which inspects `spawned_at`) treats it as stuck and synthesizes a blocked Phase 6 reply (`block_reason="placeholder pending entry survived: spawn was never observed to land"`).
+
+### `active_issue_iids` / `active_issue_sessions` semantics under async-callback
+
+These two arrays are now **redundant with `pending_subagents` keys** but retained for backward compatibility and cheap human-readable logging:
+
+- `active_issue_iids[k]` = the IID
+- `active_issue_sessions[k]` = the **logical** label `issue-<project>-<iid>` (NOT the runtime `child_session_key` — that lives in `pending_subagents[iid].child_session_key`)
+
+The orchestrator MUST keep these two arrays in lockstep with `pending_subagents` keys: write all three in one persist; drain all three in one persist.
 
 ### Fresh-init values (when the file does not exist)
 
 ```text
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
+stuck_after_minutes       = 90
 active_issue_iids         = []
 active_issue_sessions     = []
+pending_subagents         = {}
 unfinished_iids           = []
 completed_iids            = []
 blocked_iids              = []
 failed_iids               = []
 campaign_status           = running
+quota_launched_this_tick  = 0
 ```
 
-### Schema migration: `active_issue_iid` → `active_issue_iids`
+### Schema migration
 
-As of SKILL_VERSION 2026-04-29.1, the dispatcher tracks in-flight subagents as a list, not a scalar, to support `max_concurrent_subagents > 1`. On read:
+**`active_issue_iid` → `active_issue_iids` (SKILL_VERSION 2026-04-29.1):**
 
-- If the on-disk file has the legacy scalar `active_issue_iid` and no `active_issue_iids`, treat it as `active_issue_iids = [active_issue_iid]` (or `[]` if the scalar was `null`) for the in-memory state, and persist the new array form on the next write.
+- If the on-disk file has the legacy scalar `active_issue_iid` and no `active_issue_iids`, treat it as `active_issue_iids = [active_issue_iid]` (or `[]` if the scalar was `null`) in memory; persist the new array form on the next write.
 - Same applies to `active_issue_session` → `active_issue_sessions`.
-- If `max_concurrent_subagents` is missing on read, default it to `1` and persist on the next write.
+- If `max_concurrent_subagents` is missing, default to `1` and persist.
 
 The dispatcher MUST NOT keep both the scalar and the array fields in the persisted file — pick one shape per write (the new array shape) and drop the legacy scalar from the JSON it writes.
 
+**`pending_subagents` introduction (SKILL_VERSION 2026-05-06.7):**
+
+- If the on-disk file is missing `pending_subagents`, treat as `{}` in memory and persist on the next write.
+- If the on-disk file is missing `stuck_after_minutes`, default to `90` and persist.
+- If the on-disk file is missing `quota_launched_this_tick`, default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
+- Legacy entries in `active_issue_iids` without matching `pending_subagents` keys are stale (the orchestrator was synchronous before; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
+
 ### Possible `campaign_status` values
 
-- `running`
-- `completed`
+- `running` — between scheduled wake-ups, when no batch is in flight
+- `waiting_for_callbacks` — set by Phase 5 after spawning a batch; cleared back to `running` once the last pending entry drains (or all evicted)
+- `completed` — every IID in range terminal AND `pending_subagents` empty
 
-`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live state is `closed` OR live labels contain both `done` and `pr`) AND `needs_continue == false` in the evidence file.
+`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live state is `closed` OR live labels contain both `done` and `pr`) AND `needs_continue == false` in the evidence file AND `pending_subagents == {}`.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -91,7 +143,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
   "block_reason": null,
   "commit_sha": "abc1234...",
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-05-06.6",
+  "skill_version": "2026-05-06.7",
   "updated_at": "2026-05-06T10:00:00Z"
 }
 ```
@@ -149,7 +201,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-05-06.6"
+  "skill_version": "2026-05-06.7"
 }
 ```
 
@@ -195,7 +247,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "summary_posted": true,
   "block_reason": "",
   "log_dir": "/data/openclaw_work/<project>/issues/issue-14/log/attempt-003",
-  "skill_version": "2026-05-06.6"
+  "skill_version": "2026-05-06.7"
 }
 ```
 
@@ -228,15 +280,24 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 
 ### Dispatcher-side validation (Phase 6)
 
-For each compact reply returned by the parallel `sessions_spawn` block, the dispatcher MUST:
+The compact reply arrives in two ways:
 
-1. Parse the JSON; on parse failure, mark the IID `blocked` with `block_reason="subagent reply not valid JSON: <first 200 chars>"`. (Which IID? — the dispatcher matches reply ↔ dispatched-IID by the next rule, so a reply that fails to parse is attributed to the dispatched IID with no matching reply by the end of the batch.)
-2. **Match reply to dispatched IID by the `iid` field.** This is the canonical identity check, replacing the old session-name dedup. Verify `reply.iid` matches one of the IIDs dispatched in this batch and that `reply.attempt_number` equals the `${ATTEMPT_NUMBER}` allocated for that IID. Mismatch (`reply.iid` not in dispatched set, or attempt mismatch) → mark the OFFENDING dispatched IID `blocked` with `block_reason="reply iid <x> does not match any dispatched IID in batch"` or `"reply attempt_number mismatch (reply=<n>, dispatched=<m>)"`.
-3. Verify `skill_version == ${SKILL_VERSION}`. Mismatch → mark `blocked` with `block_reason="subagent reply skill_version mismatch (reply=<x>, expected=<y>)"` (the deployed subagent prompt is stale).
-4. If `status in {blocked, failed}`, require non-empty `block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
-5. After validation rounds 1–4, every dispatched IID in the batch should have exactly one validated reply OR a synthetic blocked reply (no reply / unparseable / unmatched). For each dispatched IID with no validated reply by this point, synthesize `{"iid":<iid>,"attempt_number":<N>,"status":"blocked","block_reason":"no compact JSON reply received from subagent","skill_version":"<this version>"}`.
-6. Use the validated (or synthesized) reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below).
+- **Callback path** — the runtime delivers `RUN_CHILD_COMPLETION_CALLBACK` carrying the full compact JSON in `worker_result_json`. One callback per subagent.
+- **Inline-synthesized path** — Phase 5 launch failure / stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot.
+
+The validation pipeline is the same in both paths:
+
+1. Parse `worker_result_json` (callback path) or use the synthesized object directly. On parse failure, treat as a synthetic blocked reply: `{"iid":<callback.iid>,"attempt_number":<callback.attempt_number>,"status":"blocked","block_reason":"callback worker_result_json not valid JSON: <first 200 chars>","skill_version":"<this version>"}` and continue with that.
+2. **Match to a `pending_subagents` entry by `iid` + `attempt_number`.** This is the canonical identity check (replacing both session-name dedup AND the old "match against this batch's dispatch list").
+   - Look up `pending_subagents[reply.iid]`. If the entry does not exist → return `"callback_status":"stale_or_already_drained"` (the IID was already drained by a prior callback / eviction). Do NOT mutate state files.
+   - Verify `pending_subagents[reply.iid].attempt_number == reply.attempt_number`. Mismatch (most commonly: a stale callback for an older attempt) → return `"callback_status":"stale_or_already_drained"`. Do NOT mutate state files.
+   - Optionally cross-check `pending_subagents[reply.iid].run_id` against `callback.run_id` (when present). Mismatch is logged but does not reject — the canonical identity is `iid + attempt_number`.
+3. Verify `reply.skill_version == ${SKILL_VERSION}`. Mismatch → mark `blocked` with `block_reason="subagent reply skill_version mismatch (reply=<x>, expected=<y>)"` (the deployed subagent prompt is stale; the in-flight subagent was launched against an older version of the rendered prompt).
+4. If `reply.status in {blocked, failed}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
+5. (Callback path only — the inline-synthesized path skips this since there is by definition exactly one synthesized reply per call.) Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
+6. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below).
 7. If `status=blocked` AND `retry_count >= blocked_retry_limit` (after incrementing), promote to `status=failed` and add to `failed_iids`.
+8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
 
 ### Phase 6 Write Mapping
 
