@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# As of SKILL_VERSION 2026-05-06.5 there is exactly ONE skill in the workspace
+# As of SKILL_VERSION 2026-05-06.6 there is exactly ONE skill in the workspace
 # (the orchestrator), running 6 phases per scheduled tick. The orchestrator
 # does ALL preparation (Phases 1-4: parse, reconcile, eligibility, per-IID
 # prep — clone/pull, worktree, prompt build, label transitions, attempt

@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-06.5] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with 6 phases: Parse, Reconcile, Eligibility, Per-IID Prep, Concurrent Spawn, Follow-up. The orchestrator does ALL preparation up front, spawns up to max_concurrent_subagents synchronous subagents in a single parallel sessions_spawn block, then in Phase 6 takes the subagents' compact JSON replies and owns ALL terminal bookkeeping (state files, campaign_state, label classification, optional notify). Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, synchronous bounded batches, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-05-06.6] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with 6 phases: Parse, Reconcile, Eligibility, Per-IID Prep, Concurrent Spawn, Follow-up. The orchestrator does ALL preparation up front, spawns up to max_concurrent_subagents synchronous subagents in a single parallel sessions_spawn block, then in Phase 6 takes the subagents' compact JSON replies and owns ALL terminal bookkeeping (state files, campaign_state, label classification, optional notify). Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. Subagent runtime session names MAY be anonymous on channels that do not support thread-bound named sessions (e.g., webchat); the orchestrator matches replies back to dispatched IIDs by the iid field of the compact JSON, and the active_issue_iids bookkeeping provides the structural same-IID-no-parallel guarantee. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, synchronous bounded batches, per-batch UI-account allocation from a deployment-pinned pool, persistent disk state, and compact orchestrator chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-05-06.5**
+**SKILL_VERSION: 2026-05-06.6**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.5` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.6` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
 
 ## Single-skill, six-phase model (read first)
 
@@ -60,7 +60,7 @@ Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No
 
 1. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass it (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops). Return a one-line status summary and exit.
 2. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT run the subagent's logic inline in the dispatcher session, spawn a non-dedicated session as a substitute, or retry by spawning a different session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
-3. If the runtime reports that the current channel cannot wait for child sessions, or if it returns only a push-based launch acknowledgement, the dispatcher MUST NOT switch to `mode=run`, `--no-wait`, anonymous subagents, or any other fire-and-forget fallback. Record spawn/wait as unsupported for the affected IID or tick.
+3. If the runtime reports that the current channel cannot wait for child sessions, or if it returns only a push-based launch acknowledgement (no terminal compact JSON), the dispatcher MUST NOT switch to `--no-wait` or any other fire-and-forget fallback. Record spawn/wait as unsupported for the affected IID or tick. (Anonymous synchronous subagents that DO return a terminal compact JSON are allowed — see Concurrency Policy "Subagent identity" below.)
 4. If a per-IID prep step fails (clone_or_pull, prepare_attempt, build_prompt, set_issue_label for `doing`, render), the dispatcher MUST NOT spawn that IID with a partial / improvised setup. Mark the IID `blocked` with the verbatim error as `block_reason` and continue with the OTHER batch members whose prep succeeded.
 5. If `ensure_labels.sh` fails, the dispatcher MUST treat that as a tick-level failure. Return a one-line summary; do NOT skip the call.
 6. **Phase 6 reply validation failures.** If a subagent's compact reply fails any validation rule in [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply (parse error, IID/attempt mismatch, skill_version mismatch, blocked/failed without block_reason), the dispatcher MUST mark the IID `blocked` with the corresponding `block_reason` and write that to the state files. Do NOT fabricate a "successful" reply on the subagent's behalf.
@@ -78,8 +78,8 @@ Universal contract (cap = `max_concurrent_subagents`, same-IID never parallel, b
 
 - **Batch shape.** Pick at most `max_concurrent_subagents` distinct IIDs (backlog-first, then fresh). Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call). Run per-IID prep (Phase 4) for each batch member. Phase 5 spawns the surviving batch as parallel `sessions_spawn` calls in a SINGLE tool-call block. With `max_concurrent_subagents=1` this degenerates to one spawn per block — legacy serial behavior.
 - **Spawn payload.** Each `sessions_spawn` call sends a fully-rendered fixed-format string built from [`references/executor_prompt.md`](references/executor_prompt.md). The rendered string is the entire spawn payload — no extra env-var injection at the OpenClaw layer, no skill load on the subagent side. Set `runTimeoutSeconds=3600`, `cleanup="keep"`. If the trigger supplied `--model` (reserved; not currently a trigger field), forward it.
-- **Spawn completion contract.** A spawn meets this contract only when it is a blocking dedicated-session spawn that returns the subagent's terminal compact JSON reply (see `references/state_schema.md` §Compact Subagent Reply). A `status=accepted`, `runId`, `childSessionKey`, session id, thread id, or "created" acknowledgement is NOT a terminal subagent reply. If the runtime returns only launch identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait as failed for this tick. Do NOT report "batch in flight" as complete, do NOT increment quota, and do NOT drain `active_issue_iids` or release the batch's UI accounts on the assumption that detached child sessions are running.
-- **Deterministic session names only.** Anonymous keys like `agent:<name>:subagent:<uuid>` are NOT dedicated issue sessions. A successful issue spawn MUST target / return `issue-<project>-<iid>` together with the subagent's terminal compact JSON. If the runtime creates an anonymous subagent instead, treat it as a spawn failure for that IID.
+- **Spawn completion contract.** A spawn meets this contract only when it is a blocking spawn that returns the subagent's terminal compact JSON reply (see `references/state_schema.md` §Compact Subagent Reply). A `status=accepted`, `runId`, `childSessionKey`, session id, thread id, or "created" acknowledgement WITHOUT the terminal compact JSON is NOT a terminal subagent reply. If the runtime returns only launch identifiers or reports that the current channel cannot wait for child sessions, treat the spawn/wait as failed for this tick. Do NOT report "batch in flight" as complete, do NOT increment quota, and do NOT drain `active_issue_iids` or release the batch's UI accounts on the assumption that detached child sessions are running.
+- **Subagent identity is the `iid` field of the compact JSON, not the runtime session name.** The dispatcher SHOULD request the deterministic session name `issue-<project>-<iid>` when the runtime supports it (it makes session-name dedup a free structural guarantee). When the channel does not support thread-bound named sessions (e.g., webchat returns `errorCode=thread_required`), the dispatcher MAY fall back to anonymous subagents (`mode="run"` or equivalent) AS LONG AS each anonymous spawn still synchronously returns a terminal compact JSON reply. The "same IID never runs twice in parallel" guarantee then comes from `active_issue_iids` bookkeeping (Phase 4 step 5 persists the IID before spawn, Phase 6 drains it after the reply); the "match reply to dispatched IID" guarantee comes from Phase 6 validation rule 2 (`reply.iid == dispatched.iid AND reply.attempt_number == dispatched.attempt_number`). A reply whose `iid` does not match any dispatched IID in this batch is rejected by Phase 6 (synthetic blocked classification). Anonymous spawns that return only launch acknowledgements (no terminal compact JSON) are still spawn failures.
 - **Time budget is checked between batches, not within a batch.** Once a batch is spawned, the dispatcher commits to waiting for all members; `max_runtime_minutes` is checked at the top of the next batch loop iteration. A slow IID in a batch can stall faster IIDs in the same batch — explicit trade-off for predictable time-budget accounting.
 - **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch, complete Phase 6 for all members, then form a fresh one. UI account safety relies on this rule.
 
@@ -171,14 +171,14 @@ If the lock cannot be acquired, return a one-line status summary and exit 0.
 
 ---
 
-## Per-Issue Session Rules
+## Per-Issue Subagent Rules
 
-Each issue uses its own dedicated session named `issue-<project>-<iid>`.
+Each issue uses its own subagent. The **logical** dedicated name is `issue-<project>-<iid>`. The **runtime** session name may be that exact string (when the runtime / channel supports thread-bound named sessions) or an anonymous key like `agent:<name>:subagent:<uuid>` (when the channel does not). Either is acceptable as long as the synchronous compact JSON reply contract holds — see Concurrency Policy "Subagent identity" above.
 
-1. Never reuse an issue session for a different issue.
-2. The dispatcher creates the session if it doesn't exist; otherwise resumes it.
+1. Never reuse a subagent run for a different issue. (The rendered prompt embeds the IID; reuse is structurally impossible because the work order is per-IID.)
+2. The dispatcher creates a fresh subagent for each spawn. Resume of a prior subagent is not part of this contract.
 3. The dispatcher sends each subagent the rendered `references/executor_prompt.md` string as the entire `sessions_spawn` payload. There is no separate trigger envelope — the rendered prompt IS the work order.
-4. **`active_issue_iids` is updated atomically per batch.** Before spawning a batch (start of Phase 5), append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. After Phase 6 has fully processed every batch member, drain the IIDs (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress` returns to backlog) and persist again. The list MUST never exceed `max_concurrent_subagents` entries. Launch acknowledgements such as `accepted`, `runId`, or `childSessionKey` are not a reason to drain this list.
+4. **`active_issue_iids` is updated atomically per batch and is the structural guarantee against same-IID parallelism.** Before spawning a batch (start of Phase 5), append every IID in the batch to `active_issue_iids` and persist `campaign_state.json`. After Phase 6 has fully processed every batch member, drain the IIDs (terminal IIDs go to the appropriate completed/blocked/failed list; `in_progress` returns to backlog) and persist again. The list MUST never exceed `max_concurrent_subagents` entries. Launch acknowledgements such as `accepted`, `runId`, or `childSessionKey` (without compact JSON) are not a reason to drain this list. **The dispatcher MUST NOT spawn a subagent for an IID that is already in `active_issue_iids`** — this is the rule that replaces the old session-name dedup.
 5. **No mid-batch top-up.** The dispatcher MUST NOT spawn a replacement subagent when a single IID in the batch returns early. Wait for the whole batch (Phase 5 → Phase 6 for all members), then form a fresh one.
 
 ---
@@ -263,7 +263,7 @@ For each batch iteration:
 2. **Form the next batch.** Compute `batch_size = min(max_concurrent_subagents, remaining_quota, remaining_eligible_iids)`. Pick `batch_size` distinct IIDs in the standard order: lowest-IID eligible backlog items first, then fresh IIDs from `next_new_issue_iid` upward. If `batch_size == 0`, break out of the loop.
 3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`.
 4. **Allocate UI accounts for the batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the batch (k=0..batch_size-1). On any non-zero exit code (10/11/12/13), abort the tick.
-5. **Update `active_issue_iids` + persist.** Append every IID in the batch (and the corresponding `issue-<project>-<iid>` session names) to `campaign_state.json`. Persist before any glab mutation so a crash mid-prep leaves an accurate cache.
+5. **Update `active_issue_iids` + persist.** Append every IID in the batch to `campaign_state.json.active_issue_iids` (and the logical names `issue-<project>-<iid>` to `active_issue_sessions` for human readability). Persist before any glab mutation so a crash mid-prep leaves an accurate cache. **This persist is the structural guarantee that another tick / another orchestrator instance does not double-spawn the same IID** — see §Per-Issue Subagent Rules.
 6. **Per-IID prep.** For each IID in the batch (sequentially or in parallel — preps are independent except for the shared `repo.lock` inside `prepare_attempt.sh`):
    1. Resolve `ISSUE_MODE` for this IID:
       - if reconciliation marked the IID `needs_continue == true`, OR per-issue state has `mode="continue"`, set `ISSUE_MODE=continue`
@@ -282,11 +282,17 @@ For each batch iteration:
 
 ### Phase 5 — Concurrent Spawn
 
-**Spawn the surviving batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID whose Phase 4 prep succeeded, all in the same parallel block. Each spawn MUST target the exact dedicated session name `issue-<project>-<iid>`; the entire payload is the rendered subagent prompt. With `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call.
+**Spawn the surviving batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID whose Phase 4 prep succeeded, all in the same parallel block. The entire payload is the rendered subagent prompt. With `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call.
 
-The dispatcher waits for ALL spawns in the block to return terminal subagent compact JSON replies. A push-based `accepted` / `runId` response is a spawn/wait failure — see Concurrency Policy above.
+**Spawn shape:**
+- **Preferred:** target the deterministic session name `issue-<project>-<iid>` (`mode="session"` or runtime equivalent). This gives free session-name dedup AND preserves attempt logs across resumes.
+- **Fallback (channel-driven):** if the runtime rejects deterministic names on the current channel (e.g., webchat `errorCode=thread_required`), the dispatcher MAY use anonymous spawns (`mode="run"` or runtime equivalent). The "same IID never runs twice" guarantee then comes from `active_issue_iids` bookkeeping (Phase 4 step 5) and Phase 6 reply matching by `iid`. Anonymous spawns MUST still synchronously return a terminal compact JSON reply — push-only / fire-and-forget remains forbidden.
 
-If `sessions_spawn` for an individual IID fails to return a terminal compact reply (timeout, runtime error, anonymous key, push-based ack), record that IID's outcome as a synthetic blocked reply: `{"iid":<iid>, "attempt_number":<N>, "status":"blocked", "block_reason":"sessions_spawn did not return terminal reply: <reason>", "skill_version":"<this version>"}`. Phase 6 then processes it the same way as a real reply.
+The dispatcher waits for ALL spawns in the block to return terminal subagent compact JSON replies. A push-based `accepted` / `runId` response WITHOUT compact JSON is a spawn/wait failure — see Concurrency Policy above.
+
+If `sessions_spawn` for an individual IID fails to return a terminal compact reply (timeout, runtime error, push-only ack, channel-rejects-named-and-anonymous-also-fails), record that IID's outcome as a synthetic blocked reply: `{"iid":<iid>, "attempt_number":<N>, "status":"blocked", "block_reason":"sessions_spawn did not return terminal reply: <reason>", "skill_version":"<this version>"}`. Phase 6 then processes it the same way as a real reply.
+
+**Reply-to-IID matching (when using anonymous spawns):** the parallel `sessions_spawn` block returns N replies; the dispatcher matches each reply to its dispatched IID by parsing the `iid` field of the compact JSON (Phase 6 validation rule 2). The runtime's order or session-key labels are not load-bearing — `iid` is. A reply whose `iid` does not match any dispatched IID in this batch is a Phase 6 validation failure (synthetic blocked classification: `block_reason="reply iid <x> does not match any dispatched IID in batch"`).
 
 ### Phase 6 — Follow-up (main agent owns ALL terminal bookkeeping)
 
@@ -341,7 +347,7 @@ Return a single compact JSON summary, e.g.:
 
 ```json
 {
-  "skill_version": "2026-05-06.5",
+  "skill_version": "2026-05-06.6",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],

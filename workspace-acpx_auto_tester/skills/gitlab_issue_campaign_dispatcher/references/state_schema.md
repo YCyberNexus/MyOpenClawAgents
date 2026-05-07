@@ -35,7 +35,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "running",
-  "skill_version": "2026-05-06.5",
+  "skill_version": "2026-05-06.6",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260506T100501Z.json",
   "updated_at": "2026-05-06T10:05:30Z"
 }
@@ -91,7 +91,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
   "block_reason": null,
   "commit_sha": "abc1234...",
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-05-06.5",
+  "skill_version": "2026-05-06.6",
   "updated_at": "2026-05-06T10:00:00Z"
 }
 ```
@@ -99,7 +99,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | Field                   | Type            | Notes                                                                  |
 | ----------------------- | --------------- | ---------------------------------------------------------------------- |
 | `iid`                   | int             | GitLab issue IID this session is bound to.                             |
-| `session`               | string          | Dedicated session name `issue-<project>-<iid>`.                        |
+| `session`               | string          | Logical session name `issue-<project>-<iid>` (used for `active_issue_sessions` bookkeeping and human-readable logging). The runtime session key MAY be anonymous on channels that do not support thread-bound named sessions; this field stores the logical name regardless. |
 | `status`                | string (enum)   | See "Possible status values" below. This is the latest attempt's terminal status (or `in_progress` mid-flight). |
 | `mode`                  | string (enum)   | `"fresh"` or `"continue"` for the latest attempt.                      |
 | `attempts_total`        | int             | Number of attempts ever launched for this IID.                         |
@@ -149,7 +149,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-05-06.5"
+  "skill_version": "2026-05-06.6"
 }
 ```
 
@@ -195,7 +195,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "summary_posted": true,
   "block_reason": "",
   "log_dir": "/data/openclaw_work/<project>/issues/issue-14/log/attempt-003",
-  "skill_version": "2026-05-06.5"
+  "skill_version": "2026-05-06.6"
 }
 ```
 
@@ -228,14 +228,15 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 
 ### Dispatcher-side validation (Phase 6)
 
-For each compact reply, the dispatcher MUST:
+For each compact reply returned by the parallel `sessions_spawn` block, the dispatcher MUST:
 
-1. Parse the JSON; on parse failure, mark the IID `blocked` with `block_reason="subagent reply not valid JSON: <first 200 chars>"`.
-2. Verify `iid` and `attempt_number` match what was dispatched. Mismatch → mark `blocked` with `block_reason="subagent reply mismatched dispatched (iid,attempt)"`.
-3. Verify `skill_version == ${SKILL_VERSION}`. Mismatch → mark `blocked` with `block_reason="subagent reply skill_version mismatch"` (the deployed subagent code is stale).
+1. Parse the JSON; on parse failure, mark the IID `blocked` with `block_reason="subagent reply not valid JSON: <first 200 chars>"`. (Which IID? — the dispatcher matches reply ↔ dispatched-IID by the next rule, so a reply that fails to parse is attributed to the dispatched IID with no matching reply by the end of the batch.)
+2. **Match reply to dispatched IID by the `iid` field.** This is the canonical identity check, replacing the old session-name dedup. Verify `reply.iid` matches one of the IIDs dispatched in this batch and that `reply.attempt_number` equals the `${ATTEMPT_NUMBER}` allocated for that IID. Mismatch (`reply.iid` not in dispatched set, or attempt mismatch) → mark the OFFENDING dispatched IID `blocked` with `block_reason="reply iid <x> does not match any dispatched IID in batch"` or `"reply attempt_number mismatch (reply=<n>, dispatched=<m>)"`.
+3. Verify `skill_version == ${SKILL_VERSION}`. Mismatch → mark `blocked` with `block_reason="subagent reply skill_version mismatch (reply=<x>, expected=<y>)"` (the deployed subagent prompt is stale).
 4. If `status in {blocked, failed}`, require non-empty `block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
-5. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below).
-6. If `status=blocked` AND `retry_count >= blocked_retry_limit` (after incrementing), promote to `status=failed` and add to `failed_iids`.
+5. After validation rounds 1–4, every dispatched IID in the batch should have exactly one validated reply OR a synthetic blocked reply (no reply / unparseable / unmatched). For each dispatched IID with no validated reply by this point, synthesize `{"iid":<iid>,"attempt_number":<N>,"status":"blocked","block_reason":"no compact JSON reply received from subagent","skill_version":"<this version>"}`.
+6. Use the validated (or synthesized) reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below).
+7. If `status=blocked` AND `retry_count >= blocked_retry_limit` (after incrementing), promote to `status=failed` and add to `failed_iids`.
 
 ### Phase 6 Write Mapping
 

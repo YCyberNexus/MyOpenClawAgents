@@ -8,7 +8,7 @@ This is **not** an application repo — it is the **deployment artifact for an O
 
 The agent itself runs at `/data/...` on the OpenClaw runner; nothing in this repo executes locally during development. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
 
-## Single-skill, six-phase execution model (SKILL_VERSION 2026-05-06.5)
+## Single-skill, six-phase execution model (SKILL_VERSION 2026-05-06.6)
 
 The agent has **one thick orchestrator session + one dedicated subagent session per GitLab issue**, structured as **6 phases per scheduled tick**. There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and runs only the technical workflow, returning ONE compact JSON line.
 
@@ -25,7 +25,7 @@ The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal
 | 5 Concurrent Spawn | single parallel `sessions_spawn` tool-call block; one subagent per IID; synchronously waits for every subagent's terminal compact JSON reply |
 | 6 Follow-up    | for each compact reply: validate per [`references/state_schema.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply → write **terminal** `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` from the reply → drain `active_issue_iids` → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if `retry_count > blocked_retry_limit`) → optional notify_channel → loop back to Phase 4 if quota and time budget remain |
 
-**Subagent (session name `issue-<project>-<iid>`)** receives the rendered fixed-format prompt and runs Steps 0–9 from the prompt's `<instructions>` block:
+**Subagent (logical name `issue-<project>-<iid>`; runtime session name may be anonymous on channels that do not support thread-bound named sessions, in which case the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–9 from the prompt's `<instructions>` block:
 
 1. SETUP: `cd ${WORKTREE_DIR}` and one-shot `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt`.
 2. `stage_and_guard.sh` (worktree leak guard).
@@ -40,7 +40,7 @@ The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal
 
 The subagent invokes scripts at `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts/<name>.sh` by absolute path (the orchestrator renders `{SCRIPTS_DIR}` into the prompt). It does NOT load any SKILL, NOT read `SOUL.md` / `AGENTS.md`, NOT call `sessions_spawn` / `sessions_history`, NOT write any state file. Its compact JSON reply is the single artifact the orchestrator reads from it.
 
-Spawn must be **synchronous and dedicated**: the orchestrator's `sessions_spawn` blocks until the subagent returns the terminal compact JSON. Push-based / `accepted` / `runId` / anonymous `agent:<name>:subagent:<uuid>` acknowledgements do **not** satisfy the contract — treat them as spawn failure. There is no fire-and-forget mode.
+Spawn must be **synchronous**: the orchestrator's `sessions_spawn` blocks until the subagent returns the terminal compact JSON. Push-only acknowledgements (`accepted` / `runId` / child-session ids WITHOUT compact JSON) do **not** satisfy the contract — treat them as spawn failure. There is no fire-and-forget mode. Anonymous synchronous subagents (e.g., `mode="run"` on channels that reject thread-bound named sessions) ARE acceptable as long as they synchronously return the compact JSON; the orchestrator routes each reply back to its dispatched IID by the `iid` field of the JSON, not by the runtime session-key label. The "same IID never runs twice" guarantee comes from the orchestrator's `active_issue_iids` bookkeeping (Phase 4 step 5 persists the IID before spawn, Phase 6 drains it after the reply).
 
 ## Concurrency and UI-account allocation
 
