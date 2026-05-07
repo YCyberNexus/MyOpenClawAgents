@@ -64,16 +64,18 @@ Description:
 
 # Working environment
 - Worktree (your cwd):        <worktree>
-- Hulat materials (symlink):  <worktree>/hulat → <hulat_dir>
-- Claude runtime config:      <worktree>/.claude (copied from <hulat_dir>/ifp-hulat/.claude; local-only)
+- Hulat materials:            <worktree>/hulat   (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Claude runtime config:      <worktree>/.claude (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Knowledge base:             <worktree>/ifp_data (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Agent runtime workspace:    <worktree>/ifp_result (gitignored on <branch>/<dev-branch>; do NOT touch)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/<work-branch>
 - Integration branch:         <branch>
 
 # Rules
 - Work only on this issue.
 - Modify content under <worktree> only. Do NOT write outside the worktree.
-- Read configuration from <worktree>/hulat (the symlink); do not modify hulat materials — they are shared, read-only.
-- Treat <worktree>/.claude as local Claude Code runtime config. Do not modify it or include it in issue output.
+- `hulat/`, `.claude/`, and `ifp_data/` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
+- Do NOT touch the `ifp_result/` subtree. It is the agent runtime's workspace (gitignored); writing into it has no effect and pollutes the audit trail.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```

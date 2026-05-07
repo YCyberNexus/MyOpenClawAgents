@@ -1,27 +1,38 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# As of SKILL_VERSION 2026-05-06.7 there is exactly ONE skill in the workspace
-# (the orchestrator), running an async-callback model with two execution paths.
-# Path A (RUN_SCHEDULED_ISSUE_CAMPAIGN): orchestrator runs Phases 1-4 (parse,
-# reconcile, eligibility, per-IID prep — clone/pull, worktree, prompt build,
-# label transitions, attempt allocation, UI-account allocation, in-progress
-# state-file init, pending_subagents placeholder) then Phase 5 fires anonymous
-# sessions_spawn calls (NO session name passed) and records each launch ack's
-# runId + childSessionKey into pending_subagents; orchestrator returns
-# waiting_for_callbacks and exits. Path B (RUN_CHILD_COMPLETION_CALLBACK):
-# orchestrator runs Phase 6 for the matched IID (validate compact JSON →
-# write terminal state files → drain pending entry → classify into
-# campaign_state lists). The spawned subagent runs the technical workflow
-# scripts (stage/commit/push/wiki/MR/label/summarize) by absolute path against
-# pre-rendered env vars; it does NOT load a SKILL and does NOT write any
-# state file.
+# As of SKILL_VERSION 2026-05-07.0 the cloned project repo IS the agent's
+# entire workspace. The test team maintains `.claude/`, `hulat/`, and
+# `ifp_data/` inside the repo (committed to master + dev). The agent's own
+# state and per-issue subtrees live under `${REPO_PATH}/ifp_result/`,
+# whose contents are gitignored on master+dev so `git status` in the main
+# worktree stays clean.
 #
-# Both halves source THIS file. Path derivation is layered:
+# Disk layout produced by this file:
+#
+#   ${REPO_PATH}/                        ← /data/${PROJECT}, the cloned repo
+#       .claude/                         (in master+dev, test-team owned)
+#       hulat/                           (in master+dev, test-team owned)
+#       ifp_data/                        (in master+dev, test-team owned)
+#       ifp_result/                      (gitignored content; agent state + worktrees)
+#           _dispatcher/                 ← campaign-level state + logs + locks
+#               campaign_state.json
+#               campaign.lock
+#               log/reconcile-<ts>.json
+#               locks/repo.lock
+#           issue-<iid>/                 ← per-issue subtree
+#               state.json
+#               attempt_state.json
+#               worktree/                ← linked git worktree (acpx cwd)
+#               log/attempt-NNN/
+#               summary.md
+#
+# Path derivation is layered:
 #
 #   - dispatcher level (always derived):  PROJECT, GROUP, GITLAB_TOKEN
-#       → REPO_PATH, WORK_ROOT, STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT,
-#         DISPATCHER_LOG_DIR, ISSUES_ROOT, LOCK_FILE
+#       → REPO_PATH, HULAT_DIR, RESULT_ROOT, WORK_ROOT, STATE_DIR,
+#         CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR, ISSUES_ROOT,
+#         LOCK_FILE
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
@@ -29,20 +40,24 @@
 #         ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
 #         LOCAL_ATTEMPT_BRANCH
 #
-# Why both layers in one file: a single env_paths.sh keeps the dispatcher's
+# Why a single layered file: a single env_paths.sh keeps the dispatcher's
 # prep scripts (which need attempt-level paths to call prepare_attempt.sh,
 # build_prompt.sh) and the subagent's post-acpx scripts (which also need
 # attempt-level paths) symmetric. Each Bash exec under OpenClaw is a fresh
 # shell, so every script must self-bootstrap; the same env_paths.sh works
 # for everyone.
 #
-# Required input env vars per Bash exec (caller must export — typically
-# straight from the trigger or from the dispatcher's spawn payload):
+# Required input env vars per Bash exec:
 #   PROJECT          project slug                                   (always)
 #   GROUP            GitLab group slug                              (always)
 #   GITLAB_TOKEN     GitLab access token                            (always)
 #   ISSUE_IID        integer issue IID                              (per-issue)
 #   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
+#
+# Note: HULAT_DIR is NO LONGER a trigger input. As of 2026-05-07.0 it is
+# derived as `${REPO_PATH}/hulat` because the test team committed the hulat
+# materials into the repo. Triggers that still pass `hulat_dir=...` are
+# silently ignored (the override never reaches a script).
 #
 # Outputs (exported into the calling shell): see lists above. Plus:
 #   GITLAB_HOST, GITLAB_API_PROTOCOL    (loaded via glab_auth.sh)
@@ -57,19 +72,27 @@ set -euo pipefail
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export REPO_PATH="/data/${PROJECT}"
-export WORK_ROOT="/data/openclaw_work/${PROJECT}"
-export STATE_DIR="${WORK_ROOT}/openclaw_state"
+export HULAT_DIR="${REPO_PATH}/hulat"
+export RESULT_ROOT="${REPO_PATH}/ifp_result"
+export WORK_ROOT="${RESULT_ROOT}/_dispatcher"
+export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
-export LOG_ROOT="${WORK_ROOT}/openclaw_log"
-export DISPATCHER_LOG_DIR="${LOG_ROOT}/dispatcher"
-export ISSUES_ROOT="${WORK_ROOT}/issues"
+export LOG_ROOT="${WORK_ROOT}/log"
+export DISPATCHER_LOG_DIR="${LOG_ROOT}"
+export ISSUES_ROOT="${RESULT_ROOT}"
 export LOCK_FILE="${STATE_DIR}/campaign.lock"
 
-mkdir -p \
-  "${STATE_DIR}" \
-  "${LOG_ROOT}" \
-  "${DISPATCHER_LOG_DIR}" \
-  "${ISSUES_ROOT}"
+# Only mkdir inside the repo if the repo has actually been cloned. Before
+# the first clone `${REPO_PATH}` does not exist; clone_or_pull.sh creates
+# the dispatcher subtree itself after cloning.
+if [ -d "${REPO_PATH}/.git" ]; then
+  mkdir -p \
+    "${WORK_ROOT}" \
+    "${STATE_DIR}" \
+    "${LOG_ROOT}" \
+    "${DISPATCHER_LOG_DIR}" \
+    "${ISSUES_ROOT}"
+fi
 
 issue_state_file_for() {
   local iid="$1"
@@ -85,7 +108,12 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
   export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
-  mkdir -p "${ISSUE_ROOT}"
+  # Same guard as above: only create the per-issue subtree once the repo
+  # exists. Phase 4 always runs after Phase 3's clone_or_pull, so the repo
+  # is guaranteed present by the time any per-issue script sources this.
+  if [ -d "${REPO_PATH}/.git" ]; then
+    mkdir -p "${ISSUE_ROOT}"
+  fi
 
   ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
   export ATTEMPT_NUMBER_PADDED
@@ -100,7 +128,9 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
-  mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+  if [ -d "${REPO_PATH}/.git" ]; then
+    mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+  fi
 fi
 
 # ─── 3. glab auth (idempotent — loads both HOST and PROTOCOL) ─────

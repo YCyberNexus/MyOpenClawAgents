@@ -15,7 +15,6 @@ group=<group>
 project=<project>
 branch=<branch>
 dev_branch=<dev_branch>
-hulat_dir=<hulat_dir>
 gitlab_token=<token>
 issue_min_iid=<min_iid>
 issue_max_iid=<max_iid>
@@ -29,7 +28,7 @@ scheduling_mode=quota_carryover
 blocked_policy=skip_and_retry
 ```
 
-Older triggers may also include `gitlab_address=...`. That is still accepted — see "Optional inputs" below.
+Older triggers may also include `gitlab_address=...` and/or `hulat_dir=...`. Both are still accepted but ignored — `gitlab_address` is now a verification-only field (see "Optional inputs" below), and as of `SKILL_VERSION 2026-05-07.0` `hulat_dir` is no longer used because the test team committed `hulat/` to the repo (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`). Schedulers do NOT need to be updated to drop the field.
 
 ## Required inputs
 
@@ -39,7 +38,6 @@ Older triggers may also include `gitlab_address=...`. That is still accepted —
 | `project`               | GitLab project slug                                                   |
 | `branch`                | **Integration / target branch** (typically `master`). MRs are opened against this branch; spec accumulation happens here. |
 | `dev_branch`            | **Clean baseline branch** (typically `dev`). Fresh-mode worktrees are checked out from `origin/${dev_branch}` so Claude Code starts from a clean tree without past spec accumulation. If the project does not maintain a separate clean baseline, set `dev_branch=<same-as-branch>` to fall back to single-branch behavior. |
-| `hulat_dir`             | String passed through to Claude Code prompt. **Not a working dir.**   |
 | `gitlab_token`          | Token used by `glab auth login` against the deployment-pinned host    |
 | `issue_min_iid`         | Integer, inclusive                                                    |
 | `issue_max_iid`         | Integer, inclusive                                                    |
@@ -121,7 +119,7 @@ worker_result_json=<the entire compact JSON line the subagent emitted>
 
 ### What the orchestrator does NOT need on the callback path
 
-The callback payload does NOT need to carry: `branch`, `dev_branch`, `hulat_dir`, `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`, `stuck_after_minutes`. Those are loaded from the persisted `${CAMPAIGN_STATE_FILE}`. The callback path does NOT apply trigger overrides.
+The callback payload does NOT need to carry: `branch`, `dev_branch`, `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`, `stuck_after_minutes`. Those are loaded from the persisted `${CAMPAIGN_STATE_FILE}`. The callback path does NOT apply trigger overrides.
 
 ### Behavior on missing / malformed callbacks
 

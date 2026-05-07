@@ -1,14 +1,16 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-06.7] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with async-callback subagent execution. Orchestrator runs Phases 1-5 (Parse, Reconcile, Eligibility, Per-IID Prep, Async Spawn) on every scheduled wake-up. Phase 5 issues anonymous sessions_spawn calls (NO session name passed — runtime returns runId/childSessionKey), records the (iid, runId, child_session_key) mapping into pending_subagents, and IMMEDIATELY returns waiting_for_callbacks. The runtime later pushes RUN_CHILD_COMPLETION_CALLBACK with each subagent's terminal compact JSON; the orchestrator wakes on each callback and runs Phase 6 (Follow-up) for the matched IID — validate compact reply by iid field, write terminal state files, drain pending entry, classify into campaign_state lists, optional notify. Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. The active_issue_iids bookkeeping (persisted before spawn) is the structural same-IID-no-parallel guarantee; replies are matched to dispatched IIDs by the iid field of the compact JSON, NOT by runtime session name. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool held until callback drains, persistent disk state, stuck-pending detection, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-05-07.0] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with async-callback subagent execution. Orchestrator runs Phases 1-5 (Parse, Reconcile, Eligibility, Per-IID Prep, Async Spawn) on every scheduled wake-up. Phase 5 issues anonymous sessions_spawn calls (NO session name passed — runtime returns runId/childSessionKey), records the (iid, runId, child_session_key) mapping into pending_subagents, and IMMEDIATELY returns waiting_for_callbacks. The runtime later pushes RUN_CHILD_COMPLETION_CALLBACK with each subagent's terminal compact JSON; the orchestrator wakes on each callback and runs Phase 6 (Follow-up) for the matched IID — validate compact reply by iid field, write terminal state files, drain pending entry, classify into campaign_state lists, optional notify. Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. The active_issue_iids bookkeeping (persisted before spawn) is the structural same-IID-no-parallel guarantee; replies are matched to dispatched IIDs by the iid field of the compact JSON, NOT by runtime session name. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool held until callback drains, persistent disk state, stuck-pending detection, and compact orchestrator chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-05-06.7**
+**SKILL_VERSION: 2026-05-07.0**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.7` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-07.0` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
+
+**Layout change in `2026-05-07.0`.** All agent runtime files (campaign state, dispatcher logs, locks, per-issue worktrees + state + logs + summaries) now live INSIDE the cloned repo at `${REPO_PATH}/ifp_result/...`. The test team commits `.claude/`, `hulat/`, and `ifp_data/` to master+dev, so worktree checkouts already contain those — `prepare_attempt.sh` no longer creates a `hulat` symlink or copies `.claude`. The `hulat_dir` trigger field is no longer used (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`). Old triggers that still pass it are silently accepted. See [`references/paths.md`](references/paths.md) for the complete new layout and the operator migration steps.
 
 ## Single-skill, async-callback model (read first)
 
@@ -51,7 +53,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/load_ui_accounts.sh` — Phase 4: read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
 - `scripts/clone_or_pull.sh` — Phase 3: keep the main repo's refs current. Run once per tick before the batch loop.
 - `scripts/ensure_labels.sh` — Phase 3: make sure the seven workflow labels (`todo doing pr done blocked failed continue`) exist. Run once per tick after auth.
-- `scripts/prepare_attempt.sh` — Phase 4: replace the issue's worktree, set up the `hulat` symlink and `.claude` runtime config, write `.git/info/exclude`, return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`.
+- `scripts/prepare_attempt.sh` — Phase 4: replace the issue's git worktree (a linked worktree at `${REPO_PATH}/ifp_result/issue-<iid>/worktree/`), return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`. As of `2026-05-07.0` it does NOT symlink hulat or copy `.claude` — both directories are committed in the test team's master+dev branches, so the worktree checkout already contains them.
 - `scripts/build_prompt.sh` — Phase 4: build the Claude Code prompt at `${LOG_DIR}/prompt.txt` (UI account injected; continue-mode summaries + reviewer comments included).
 - `scripts/set_issue_label.sh` — Phase 4 (dispatcher: doing transitions) + subagent (Step 6 + 7b: done/pr).
 - `scripts/stage_and_guard.sh`, `scripts/commit_and_push.sh`, `scripts/post_push_verify.sh`, `scripts/upload_attempt_artifacts.sh`, `scripts/create_mr.sh`, `scripts/summarize_attempt.sh` — invoked by the subagent (by absolute path) per [`references/executor_prompt.md`](references/executor_prompt.md) `<instructions>`.
@@ -210,7 +212,7 @@ Dispatcher's bash exec minimum (varies by script):
 - `allocate_attempt.sh`: also `IID`.
 - `load_ui_accounts.sh`: optional `BATCH_SIZE`.
 - `clone_or_pull.sh`: also `BRANCH`.
-- `prepare_attempt.sh`, `build_prompt.sh`: also `ISSUE_IID`, `ATTEMPT_NUMBER`, `BRANCH`, `DEV_BRANCH`, `HULAT_DIR`, `ISSUE_MODE` (and for `build_prompt.sh`: `UI_ACCOUNT`, `UI_PASSWORD`).
+- `prepare_attempt.sh`, `build_prompt.sh`: also `ISSUE_IID`, `ATTEMPT_NUMBER`, `BRANCH`, `DEV_BRANCH`, `ISSUE_MODE` (and for `build_prompt.sh`: `UI_ACCOUNT`, `UI_PASSWORD`). `HULAT_DIR` is derived inside `env_paths.sh` and does not need to be passed.
 - `set_issue_label.sh`, `ensure_labels.sh`: also `ISSUE_IID` (label.sh only).
 
 Recommended pattern:
@@ -218,7 +220,7 @@ Recommended pattern:
 ```bash
 cd "${SKILL_DIR}" && \
 PROJECT=px_ifp_hulat GROUP=claw_gitlab GITLAB_TOKEN=<token> \
-ISSUE_IID=14 ATTEMPT_NUMBER=3 BRANCH=master DEV_BRANCH=dev HULAT_DIR=/data/openclaw/bu_data/px_hulat \
+ISSUE_IID=14 ATTEMPT_NUMBER=3 BRANCH=master DEV_BRANCH=dev \
 ISSUE_MODE=fresh \
 bash scripts/<script>.sh
 ```
@@ -291,13 +293,13 @@ This phase runs ONCE per scheduled wake-up (no loop):
    1. Resolve `ISSUE_MODE` for this IID:
       - if reconciliation marked the IID `needs_continue == true`, OR per-issue state has `mode="continue"`, set `ISSUE_MODE=continue`
       - else `ISSUE_MODE=fresh`
-   2. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> HULAT_DIR=<hulat_dir> ISSUE_MODE=<mode> bash scripts/prepare_attempt.sh`. Capture `mode_actual` (line 1) and `LOCAL_ATTEMPT_BRANCH` (line 2). If `mode_actual=fresh` while `ISSUE_MODE=continue` was requested, record `mode_downgraded_from="continue"` later in the attempt state.
+   2. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> ISSUE_MODE=<mode> bash scripts/prepare_attempt.sh`. Capture `mode_actual` (line 1) and `LOCAL_ATTEMPT_BRANCH` (line 2). If `mode_actual=fresh` while `ISSUE_MODE=continue` was requested, record `mode_downgraded_from="continue"` later in the attempt state.
    3. Read the live issue title, URL, and labels via `glab api projects/${PROJECT_URI}/issues/${ISSUE_IID}` so the dispatcher can substitute `{ISSUE_TITLE}` / `{ISSUE_TITLE_QUOTED}` / `{ISSUE_URL}` / `{ISSUE_LABELS}` / `{ISSUE_BODY}` (truncated to ≤ 4 KB) into the executor prompt.
    4. **Transition to `doing`.** Use `scripts/set_issue_label.sh`:
       - fresh: remove `todo`, `blocked`, `done`, `pr` (each in its own exec; removes are idempotent), then add `doing`.
       - continue: remove `continue`, `blocked`, `done`, `pr`, then add `doing`.
       The dispatcher MUST NOT use `-f labels=...` (full-set overwrite) — it would wipe manually-added labels.
-   5. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> HULAT_DIR=<hulat_dir> ISSUE_MODE=<mode_actual> UI_ACCOUNT=<user> UI_PASSWORD=<pass> bash scripts/build_prompt.sh`. Writes `${LOG_DIR}/prompt.txt` with the issue body, working environment, and UI-account override block. Capture stderr (`CONTINUE_MODE_NO_REVIEWER_COMMENTS`, `CONTINUE_MODE_PRIOR_ATTEMPT_COUNT`) for the attempt state.
+   5. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> ISSUE_MODE=<mode_actual> UI_ACCOUNT=<user> UI_PASSWORD=<pass> bash scripts/build_prompt.sh`. Writes `${LOG_DIR}/prompt.txt` with the issue body, working environment, and UI-account override block. Capture stderr (`CONTINUE_MODE_NO_REVIEWER_COMMENTS`, `CONTINUE_MODE_PRIOR_ATTEMPT_COUNT`) for the attempt state.
    6. **Initialize state files.** Write/refresh `${ATTEMPT_STATE_FILE}` with `{iid, attempt_number, attempt_started_at, mode_requested, mode_actual, mode_downgraded_from, no_reviewer_comments, prior_attempt_count, local_branch, log_dir, status:"in_progress", skill_version}`. Write/refresh `${ISSUE_STATE_FILE}` with `{iid, session, status:"in_progress", mode:<mode_actual>, attempts_total:<N_iid>, latest_attempt_number:<N_iid>, latest_attempt_dir, retry_count:<from prior>, skill_version, updated_at}`.
    7. **Render the executor prompt.** Substitute every `{...}` placeholder in `references/executor_prompt.md` with the per-IID values; verify no unsubstituted placeholders remain. If render fails (missing variable, unsubstituted token), mark the IID `blocked` with `block_reason="prompt template render incomplete: <name>"` and skip this IID for the batch.
 
@@ -402,7 +404,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-07.0",
   "campaign_status": "waiting_for_callbacks",
   "active_issue_iids": [14, 15],
   "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
@@ -416,7 +418,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 2,
   "quota_target": 10,
-  "last_reconcile_evidence": "/data/openclaw_work/<project>/openclaw_log/dispatcher/reconcile-<ts>.json"
+  "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-<ts>.json"
 }
 ```
 
@@ -424,7 +426,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-07.0",
   "callback_status": "handled",
   "iid": 14,
   "attempt_number": 3,
@@ -441,7 +443,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-07.0",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],
@@ -452,7 +454,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 0,
   "quota_target": 10,
-  "last_reconcile_evidence": "/data/openclaw_work/<project>/openclaw_log/dispatcher/reconcile-<ts>.json",
+  "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-<ts>.json",
   "tick_outcome_per_iid": {
     "14": "done",
     "15": "blocked: subagent reply skill_version mismatch"

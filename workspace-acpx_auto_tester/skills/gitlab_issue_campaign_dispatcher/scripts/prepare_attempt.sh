@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# prepare_attempt.sh — replace the issue's git worktree for this attempt,
-# base it on the right starting point, set up the hulat symlink, copy
-# Claude Code's local runtime config, and write the .git/info/exclude for
-# the worktree.
+# prepare_attempt.sh — replace the issue's git worktree for this attempt
+# and base it on the right starting point.
 #
 # Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
@@ -25,10 +23,21 @@
 #   output) so each fresh attempt starts from zero. PRs still target
 #   BRANCH — only the source baseline changes.
 #
+# What this script does NOT do, as of SKILL_VERSION 2026-05-07.0:
+#   - It does NOT symlink hulat into the worktree. The test team committed
+#     `hulat/` to master+dev, so the worktree's checkout already contains it.
+#   - It does NOT copy a `.claude/` runtime config into the worktree. The
+#     test team committed `.claude/` to master+dev, so the worktree's
+#     checkout already contains that too.
+#   - It does NOT write `.git/info/exclude`. There is nothing local-only
+#     in the worktree any more — every directory the agent touches is
+#     either a tracked repo path or under the gitignored `ifp_result/`
+#     subtree (the latter only used by the dispatcher OUTSIDE this worktree).
+#
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
 #   REPO_PATH, BRANCH, DEV_BRANCH, ISSUE_IID, ISSUE_MODE,
 #   ATTEMPT_DIR, WORKTREE_DIR, LOG_DIR, ATTEMPT_NUMBER_PADDED,
-#   WORK_BRANCH, LOCAL_ATTEMPT_BRANCH, HULAT_DIR
+#   WORK_BRANCH, LOCAL_ATTEMPT_BRANCH
 #
 # Output (to stdout, two lines):
 #   <actual-mode>           "fresh" or "continue"
@@ -42,7 +51,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${REPO_PATH:?}" "${WORK_ROOT:?}" "${BRANCH:?}" "${DEV_BRANCH:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
   "${ATTEMPT_DIR:?}" "${WORKTREE_DIR:?}" "${LOG_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
-  "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}" "${HULAT_DIR:?}"
+  "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -114,36 +123,6 @@ fi
 mkdir -p "${ATTEMPT_DIR}"
 git worktree add -b "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 flock -u 8
-
-# Set up hulat symlink inside the worktree (zero-cost shared read-only
-# config), and copy Claude Code's local runtime config into the cwd used
-# by acpx. Both are local-only and excluded via the worktree's own
-# .git/info/exclude.
-cd "${WORKTREE_DIR}"
-if [ -e "hulat" ] && [ ! -L "hulat" ]; then
-  echo "prepare_attempt: cannot create hulat symlink; path already exists in worktree: ${WORKTREE_DIR}/hulat" >&2
-  exit 7
-fi
-ln -sfn "${HULAT_DIR}" "hulat"
-
-CLAUDE_CONFIG_SRC="${HULAT_DIR}/ifp-hulat/.claude"
-CLAUDE_CONFIG_DST="${WORKTREE_DIR}/.claude"
-if [ ! -d "${CLAUDE_CONFIG_SRC}" ]; then
-  echo "prepare_attempt: required Claude Code config directory missing: ${CLAUDE_CONFIG_SRC}" >&2
-  exit 6
-fi
-rm -rf "${CLAUDE_CONFIG_DST}"
-cp -a "${CLAUDE_CONFIG_SRC}" "${CLAUDE_CONFIG_DST}"
-
-# .git in a worktree is a file pointing to ../../.git/worktrees/<name>;
-# `git rev-parse --git-path info/exclude` resolves to the right place.
-EXCLUDE_FILE="$(git rev-parse --git-path info/exclude)"
-mkdir -p "$(dirname "${EXCLUDE_FILE}")"
-{
-  echo "# managed by prepare_attempt.sh"
-  echo "/hulat"
-  echo "/.claude"
-} > "${EXCLUDE_FILE}"
 
 echo "${ACTUAL_MODE}"
 echo "${LOCAL_ATTEMPT_BRANCH}"

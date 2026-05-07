@@ -111,7 +111,7 @@ OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports do NOT survive
 The exact minimum env list is layered (see SKILL "Per-Exec Env Contract"):
 
 - Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`).
-- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `HULAT_DIR` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`).
+- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 The universal rule: every Bash exec MUST export the minimum vars at the front of the command line. Never rely on exports from a previous Bash tool call. The rendered subagent prompt repeats these env vars at every step so the subagent gets it right by following the prompt verbatim.
 
@@ -142,13 +142,13 @@ All dispatcher paths are derived by sourcing:
 
 - `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`
 
-Current state paths:
-- `/data/openclaw_work/<project>/openclaw_state/campaign_state.json`
-- `/data/openclaw_work/<project>/openclaw_log/dispatcher/`
-- `/data/openclaw_work/<project>/issues/issue-<iid>/state.json`
-- `/data/openclaw_work/<project>/issues/issue-<iid>/attempt_state.json`
+Current state paths (SKILL_VERSION 2026-05-07.0 — agent runtime files live INSIDE the cloned repo):
+- `/data/<project>/ifp_result/_dispatcher/campaign_state.json`
+- `/data/<project>/ifp_result/_dispatcher/log/`
+- `/data/<project>/ifp_result/issue-<iid>/state.json`
+- `/data/<project>/ifp_result/issue-<iid>/attempt_state.json`
 
-Never hand-write `/data/<project>/openclaw_state`, `/data/<project>/openclaw_state/issues`, or `/data/<project>/openclaw_log/issue-<iid>` paths. Those belonged to the removed flat layout.
+Never hand-write `/data/openclaw_work/<project>/...` paths. Those belonged to the pre-2026-05-07.0 out-of-repo layout. Operators migrating from earlier versions can either move the files or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
 
 ## Scheduling Model
 
@@ -286,7 +286,7 @@ Typical callback-tick reply (one IID drained):
 Canonical schema lives in [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. Example:
 
 ```json
-{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","mr_action":"created","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/openclaw_work/<project>/issues/issue-14/log/attempt-003","skill_version":"2026-05-06.7"}
+{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","mr_action":"created","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/<project>/ifp_result/issue-14/log/attempt-003","skill_version":"2026-05-07.0"}
 ```
 
 This single JSON line is the ONLY artifact the orchestrator reads from the subagent's reply. The orchestrator's Phase 6 owns all terminal state-file writes (`${ISSUE_STATE_FILE}`, `${ATTEMPT_STATE_FILE}`) and `campaign_state.json` updates from this reply.

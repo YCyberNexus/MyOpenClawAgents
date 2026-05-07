@@ -90,11 +90,13 @@ Behavioral rules (verification against trigger, token rotation, abort-on-mismatc
 
 ## Disk State Layout
 
-Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md). Workspace-level invariants:
+Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md). Workspace-level invariants (SKILL_VERSION 2026-05-07.0):
 
-- `/data/${PROJECT}/` — main git repo (hosts worktrees; agent never edits its working tree directly).
-- `/data/openclaw_work/${PROJECT}/` — all agent-owned files (campaign state, logs, per-issue worktrees, summaries). **Outside the repo** so `git add` cannot sweep agent artifacts into a commit.
-- Per-issue subtree: `${WORK_ROOT}/issues/issue-<iid>/` (state.json, attempt_state.json, worktree/, log/attempt-NNN/, summary.md). Every retry replaces `worktree/` and writes a new `log/attempt-NNN/`; historical attempt logs are preserved.
-- `hulat_dir` is shared, read-only, single source. Each attempt symlinks it as `hulat` inside the worktree and copies `${HULAT_DIR}/ifp-hulat/.claude` to `${WORKTREE_DIR}/.claude` for Claude Code's local runtime config. Both are git-excluded and rejected by leak guards.
+- `/data/${PROJECT}/` — the cloned project repo (hosts linked worktrees; agent never edits its main working tree directly). The test team commits `.claude/`, `hulat/`, and `ifp_data/` to master+dev so a fresh clone already contains everything Claude Code needs at runtime.
+- `/data/${PROJECT}/ifp_result/` — agent runtime workspace, INSIDE the cloned repo. Gitignored on master+dev so the main worktree's `git status` stays clean. Holds:
+  - `_dispatcher/` — campaign-level state (`campaign_state.json`, `campaign.lock`), dispatcher logs (`log/reconcile-<ts>.json`), and locks (`locks/repo.lock`).
+  - `issue-<iid>/` — per-issue subtree (`state.json`, `attempt_state.json`, `worktree/` linked git worktree, `log/attempt-NNN/`, `summary.md`). Every retry replaces `worktree/` and writes a new `log/attempt-NNN/`; historical attempt logs are preserved.
+- `hulat/`, `.claude/`, `ifp_data/` are READ-ONLY references inside every worktree (committed by the test team). The agent does NOT symlink `hulat/` and does NOT copy `.claude/` any more — both are simply present in the worktree's branch checkout. Leak guards no longer special-case these directories.
+- The `hulat_dir` trigger field is no longer used. The dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`. Old triggers that still pass `hulat_dir=...` are silently accepted (the override never reaches a script).
 
 Claude Code invocation contract and Wiki-evidence publication contract live in [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) and in the SKILL's §Dispatcher Algorithm.

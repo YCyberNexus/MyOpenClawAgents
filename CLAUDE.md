@@ -8,7 +8,7 @@ This is **not** an application repo — it is the **deployment artifact for an O
 
 The agent itself runs at `/data/...` on the OpenClaw runner; nothing in this repo executes locally during development. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
 
-## Single-skill, async-callback execution model (SKILL_VERSION 2026-05-06.7)
+## Single-skill, async-callback execution model (SKILL_VERSION 2026-05-07.0)
 
 The agent has **one thick orchestrator session + one anonymous subagent run per IID**. There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
 
@@ -23,7 +23,7 @@ The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal
 | 1 Parse        | bootstrap, flock, load + override `campaign_state.json` from trigger; **stuck-pending eviction** (synthesizes Phase 6 blocked replies for any pending entries past `stuck_after_minutes`) |
 | 2 Reconcile    | mandatory `reconcile.sh` against GitLab; correct disk cache from evidence file (no evidence = tick failed) |
 | 3 Eligibility  | if `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (`ensure_labels.sh`, `clone_or_pull.sh`); form bounded batch under `min(max_concurrent_subagents, hourly_issue_quota, eligible_iids)` |
-| 4 Per-IID Prep | for each batch member: `allocate_attempt.sh` → load UI account from `<workspace>/config/ui_accounts.env` → `prepare_attempt.sh` (replaces worktree, sets up `hulat` symlink + `.claude` runtime) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
+| 4 Per-IID Prep | for each batch member: `allocate_attempt.sh` → load UI account from `<workspace>/config/ui_accounts.env` → `prepare_attempt.sh` (replaces worktree at `${REPO_PATH}/ifp_result/issue-<iid>/worktree/`; the test team's `hulat/`, `.claude/`, `ifp_data/` are already in the branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
 | 5 Async Spawn  | single parallel **anonymous** `sessions_spawn` tool-call block (NO session name passed — runtime returns `runId` + `childSessionKey` like `agent:acpx_auto_tester:subagent:<uuid>`). Records each launch ack into `pending_subagents[iid]`. Returns `waiting_for_callbacks` and exits. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures). |
 
 ### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
@@ -63,7 +63,7 @@ Bounded-batch loop (per tick): pick `min(max_concurrent_subagents, remaining_quo
 
 ## Source of truth
 
-GitLab live labels are the source of truth for per-issue workflow state. Disk state (`campaign_state.json`, `issues/issue-<iid>/state.json`, `issues/issue-<iid>/attempt_state.json`) is only the dispatcher's progress cache. Every tick MUST run `scripts/reconcile.sh` and write a `reconcile-<ts>.json` evidence file before any "already done / skip / early-return" decision. **No evidence file = the tick is failed.**
+GitLab live labels are the source of truth for per-issue workflow state. Disk state (`ifp_result/_dispatcher/campaign_state.json`, `ifp_result/issue-<iid>/state.json`, `ifp_result/issue-<iid>/attempt_state.json`) is only the dispatcher's progress cache. Every tick MUST run `scripts/reconcile.sh` and write a `reconcile-<ts>.json` evidence file before any "already done / skip / early-return" decision. **No evidence file = the tick is failed.**
 
 Key reconciled signals: `is_closed_on_gitlab` (closed = hard terminal skip, never schedule), `has_done_pr` (both `done` and `pr` labels present = completed), `needs_continue` (opened + has `continue` = reviewer wants resume; wins over cached done state), `user_reopened` (opened + missing `done`+`pr` + no `failed`/`blocked`/`continue`).
 
@@ -72,23 +72,30 @@ Disk cache is corrected to match GitLab — never the other way around.
 ## Disk state layout
 
 ```
-/data/${PROJECT}/                              ← main git repo (host of git worktrees)
-/data/openclaw_work/${PROJECT}/                ← all agent-owned files (OUTSIDE the repo)
-    openclaw_state/campaign_state.json         ← dispatcher cache (NOT source of truth)
-    openclaw_state/campaign.lock               ← flock target
-    openclaw_log/dispatcher/reconcile-<ts>.json
-    issues/issue-<iid>/
-        state.json                             ← cross-attempt per-issue state
-        attempt_state.json                     ← current attempt; overwritten each attempt
-        worktree/                              ← acpx cwd; replaced every attempt
-            hulat -> ${HULAT_DIR}              ← symlink, .git/info/exclude'd
-            .claude/                           ← copy of ${HULAT_DIR}/ifp-hulat/.claude
-        log/attempt-NNN/                       ← preserved logs per attempt
-        summary.md
-    locks/repo.lock                            ← flock target for prepare_attempt.sh
+/data/${PROJECT}/                              ← ${REPO_PATH}; the cloned project repo
+    .claude/                                   ← in master+dev (test-team owned, READ-ONLY)
+    hulat/                                     ← in master+dev (was the legacy ${HULAT_DIR}; READ-ONLY)
+    ifp_data/                                  ← in master+dev (knowledge base, READ-ONLY)
+    ifp_result/                                ← agent runtime workspace; gitignored on master+dev
+        _dispatcher/
+            campaign_state.json                ← dispatcher cache (NOT source of truth)
+            campaign.lock                      ← flock target
+            log/reconcile-<ts>.json            ← reconciliation evidence files
+            locks/repo.lock                    ← flock target for clone_or_pull / prepare_attempt
+        issue-<iid>/
+            state.json                         ← cross-attempt per-issue state
+            attempt_state.json                 ← current attempt; overwritten each attempt
+            worktree/                          ← acpx cwd; linked git worktree, replaced every attempt
+                .claude/                       ← (already in branch checkout; READ-ONLY)
+                hulat/                         ← (already in branch checkout; READ-ONLY)
+                ifp_data/                      ← (already in branch checkout; READ-ONLY)
+                hulat-spec-issue<iid>/         ← Claude Code's spec output (committed; lands in MR)
+                ...other repo files...
+            log/attempt-NNN/                   ← preserved logs per attempt
+            summary.md
 ```
 
-`${WORK_ROOT}` is intentionally outside the repo so `git add` cannot sweep agent artifacts into commits. `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) are leak guards — they reject `openclaw_log/`, `openclaw_state/`, `hulat`, `.claude` in staged tree or remote branch. If either trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
+`ifp_result/*` MUST be gitignored on master+dev so the main worktree's `git status` stays clean and a `git add -A` cannot sweep agent artifacts into a commit. `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) are leak guards — they reject staged paths matching `^ifp_result/_dispatcher/` (always) and `^ifp_result/issue-<other-iid>/` (foreign-issue subtree). They no longer reject `hulat/` or `.claude/` (those are valid repo content owned by the test team). If either guard trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
 
 ## Two-branch model
 
@@ -117,14 +124,14 @@ OpenClaw runs each Bash tool call in a **fresh shell**. Exports do NOT survive t
 `env_paths.sh` is **layered**: it always derives dispatcher-level paths, and additionally derives per-issue + attempt-level paths when `ISSUE_IID` is set (then `ATTEMPT_NUMBER` is also required).
 
 - Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN`. Some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`.
-- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER`. Some scripts add `BRANCH` / `DEV_BRANCH` / `HULAT_DIR` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`.
+- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER`. Some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`. `HULAT_DIR` is derived inside `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 Always prefix Bash invocations with the minimum vars on the same line — never rely on prior exports. The recommended pattern:
 
 ```bash
 cd "${SKILL_DIR}" && \
 PROJECT=px_ifp_hulat GROUP=claw_gitlab GITLAB_TOKEN=<token> \
-ISSUE_IID=14 ATTEMPT_NUMBER=3 BRANCH=master DEV_BRANCH=dev HULAT_DIR=/data/openclaw/bu_data/px_hulat \
+ISSUE_IID=14 ATTEMPT_NUMBER=3 BRANCH=master DEV_BRANCH=dev \
 ISSUE_MODE=fresh \
 bash scripts/<script>.sh
 ```

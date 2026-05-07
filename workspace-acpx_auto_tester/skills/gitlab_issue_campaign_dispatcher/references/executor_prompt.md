@@ -28,10 +28,9 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
-| `{HULAT_DIR}`            | trigger                                                                                 |
 | `{WORKTREE_DIR}`         | `{ISSUE_ROOT}/worktree`                                                                 |
 | `{LOG_DIR}`              | `{ISSUE_ROOT}/log/attempt-{ATTEMPT_NUMBER_PADDED}`                                      |
-| `{ISSUE_ROOT}`           | `{WORK_ROOT}/issues/issue-{ISSUE_IID}`                                                  |
+| `{ISSUE_ROOT}`           | `/data/{PROJECT}/ifp_result/issue-{ISSUE_IID}`                                          |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
@@ -71,8 +70,7 @@ BRANCH={BRANCH}                             # integration / target branch (MR op
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher for fresh-mode worktree)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
-HULAT_DIR={HULAT_DIR}
-WORKTREE_DIR={WORKTREE_DIR}                 # acpx cwd; populated with hulat symlink + .claude runtime
+WORKTREE_DIR={WORKTREE_DIR}                 # acpx cwd; .claude/, hulat/, ifp_data/ are already in the checkout (test-team committed)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
@@ -103,7 +101,7 @@ Follow steps 0-9 in order. Capture the variables marked CAPTURE — they go into
 
 Step 0 — SETUP
   cd {WORKTREE_DIR}
-  Confirm the worktree exists and contains the `hulat` symlink. If not → FAIL status=blocked block_reason="worktree missing or symlink absent".
+  Confirm the worktree exists and the test-team-committed `hulat/`, `.claude/`, and `ifp_data/` directories are present at the worktree root. If any is missing → FAIL status=blocked block_reason="worktree missing or test-team committed directories absent".
 
 Step 1 — EXECUTE acpx (one-shot, synchronous)
   acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \

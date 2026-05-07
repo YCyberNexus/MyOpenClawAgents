@@ -4,17 +4,17 @@ Disk state is a **cache**, not source of truth. GitLab is the source of truth (s
 
 There are three state files in this workspace:
 
-| File                                       | Owner                          | Lifecycle                                     |
-| ------------------------------------------ | ------------------------------ | --------------------------------------------- |
-| `campaign_state.json`                      | dispatcher (campaign-level)    | persisted across ticks; mutated each tick     |
-| `issues/issue-<iid>/state.json`            | dispatcher (cross-attempt)     | persisted across attempts; one per IID        |
-| `issues/issue-<iid>/attempt_state.json`    | dispatcher (per-attempt)       | overwritten on each new attempt               |
+| File                                            | Owner                          | Lifecycle                                     |
+| ----------------------------------------------- | ------------------------------ | --------------------------------------------- |
+| `_dispatcher/campaign_state.json`               | dispatcher (campaign-level)    | persisted across ticks; mutated each tick     |
+| `ifp_result/issue-<iid>/state.json`             | dispatcher (cross-attempt)     | persisted across attempts; one per IID        |
+| `ifp_result/issue-<iid>/attempt_state.json`     | dispatcher (per-attempt)       | overwritten on each new attempt               |
 
 **State-file write ownership (changed in SKILL_VERSION 2026-05-06.5):** the **dispatcher writes all state files**, including the terminal updates. The dispatcher's Phase 4 (per-IID prep) initializes the in-progress values in `issue-<iid>/state.json` and `issue-<iid>/attempt_state.json`. The subagent's compact JSON reply (see §Compact Subagent Reply below) carries every fact the dispatcher needs; the dispatcher's Phase 6 follow-up writes the terminal values from that reply. The subagent does NOT touch any state file.
 
 ## campaign_state.json
 
-Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state.json`)
+Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `/data/${PROJECT}/ifp_result/_dispatcher/campaign_state.json`)
 
 ```json
 {
@@ -53,8 +53,8 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "failed_iids": [],
   "campaign_status": "waiting_for_callbacks",
   "quota_launched_this_tick": 2,
-  "skill_version": "2026-05-06.7",
-  "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260506T100501Z.json",
+  "skill_version": "2026-05-07.0",
+  "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-20260507T100501Z.json",
   "updated_at": "2026-05-06T10:05:30Z"
 }
 ```
@@ -138,12 +138,12 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
   "mode": "continue",
   "attempts_total": 2,
   "latest_attempt_number": 2,
-  "latest_attempt_dir": "/data/openclaw_work/.../issues/issue-14",
+  "latest_attempt_dir": "/data/<project>/ifp_result/issue-14",
   "retry_count": 1,
   "block_reason": null,
   "commit_sha": "abc1234...",
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-07.0",
   "updated_at": "2026-05-06T10:00:00Z"
 }
 ```
@@ -193,15 +193,15 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "no_reviewer_comments": false,
   "prior_attempt_count": 1,
   "local_branch": "issue/14-auto-fix-att002",
-  "log_dir": "/data/openclaw_work/.../issues/issue-14/log/attempt-002",
+  "log_dir": "/data/<project>/ifp_result/issue-14/log/attempt-002",
   "commit_sha": "abc1234...",
-  "wiki_artifacts_file": "/data/openclaw_work/.../issues/issue-14/log/attempt-002/wiki_artifacts.md",
+  "wiki_artifacts_file": "/data/<project>/ifp_result/issue-14/log/attempt-002/wiki_artifacts.md",
   "attempt_artifacts_posted_to_wiki": true,
   "status": "done",
   "block_reason": null,
-  "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
+  "summary_file": "/data/<project>/ifp_result/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-05-06.7"
+  "skill_version": "2026-05-07.0"
 }
 ```
 
@@ -246,8 +246,8 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "labels_removed": ["doing"],
   "summary_posted": true,
   "block_reason": "",
-  "log_dir": "/data/openclaw_work/<project>/issues/issue-14/log/attempt-003",
-  "skill_version": "2026-05-06.7"
+  "log_dir": "/data/<project>/ifp_result/issue-14/log/attempt-003",
+  "skill_version": "2026-05-07.0"
 }
 ```
 

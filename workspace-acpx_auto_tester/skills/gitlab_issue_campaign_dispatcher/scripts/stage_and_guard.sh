@@ -1,22 +1,41 @@
 #!/usr/bin/env bash
 # stage_and_guard.sh — stage Claude's repo changes inside the issue
-# worktree and guard against agent artifacts, the hulat symlink, or
-# local Claude Code config leaking into the work branch.
+# worktree and guard against this issue's commit accidentally pulling in
+# another issue's `ifp_result/` subtree (or the campaign-level
+# `ifp_result/_dispatcher/` subtree).
+#
+# As of SKILL_VERSION 2026-05-07.0:
+#   - `hulat/`, `.claude/`, and `ifp_data/` are committed by the test
+#     team to master+dev. They are valid repo content. The guard does NOT
+#     reject changes inside them — if Claude edits them, that's a
+#     content concern (caught at MR review), not a repo-cleanliness
+#     concern. The leak guards no longer special-case these directories.
+#   - The agent's runtime state lives at `${REPO_PATH}/ifp_result/...`
+#     OUTSIDE the worktree's path. Inside the worktree, `ifp_result/` is
+#     the project's own gitignored placeholder (since master/dev
+#     gitignore ifp_result content). Anything staged under
+#     `ifp_result/_dispatcher/` or another issue's
+#     `ifp_result/issue-<other-iid>/` is a structural leak — almost
+#     certainly the result of a `git add -f` past gitignore — and is
+#     blocked.
 #
 # Required env vars:
 #   WORKTREE_DIR    git worktree (set by env_paths.sh)
 #   LOG_DIR         where to write evidence files (under ISSUE_ROOT/log/attempt-NNN)
+#   ISSUE_IID       current issue IID (used to whitelist the matching
+#                   ifp_result subdir)
 #
 # Exit codes:
 #   0   normal staging completed; check stdout marker
-#   3   agent artifacts leaked into the worktree; caller must mark issue blocked
+#   3   another-issue / dispatcher ifp_result subtree leaked into the
+#       worktree's staged changes; caller must mark issue blocked
 #
 # Stdout markers (one of these is printed):
 #   STAGED_OK       there are staged changes ready to commit
 #   NO_CHANGES      Claude produced no diff; caller writes status=no_changes
 #
 # Stderr on leak:
-#   AGENT_ARTIFACTS_LEAKED followed by the offending paths
+#   FOREIGN_IFP_RESULT_LEAKED followed by the offending paths
 
 set -euo pipefail
 
@@ -24,7 +43,7 @@ set -euo pipefail
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
-: "${WORKTREE_DIR:?}" "${LOG_DIR:?}"
+: "${WORKTREE_DIR:?}" "${LOG_DIR:?}" "${ISSUE_IID:?}"
 
 cd "${WORKTREE_DIR}"
 
@@ -34,9 +53,11 @@ git diff > "${LOG_DIR}/git_diff.patch"
 git add -A
 
 LEAKED="$(git diff --cached --name-only \
-  | grep -E '^(openclaw_log/|openclaw_state/|hulat(/|$)|\.claude(/|$))' || true)"
+  | grep -E '^ifp_result/(_dispatcher/|issue-[0-9]+/)' \
+  | grep -vE "^ifp_result/issue-${ISSUE_IID}/" \
+  || true)"
 if [ -n "${LEAKED}" ]; then
-  echo "AGENT_ARTIFACTS_LEAKED" >&2
+  echo "FOREIGN_IFP_RESULT_LEAKED" >&2
   echo "${LEAKED}" >&2
   exit 3
 fi

@@ -15,8 +15,15 @@
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
-#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH, HULAT_DIR,
+#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH,
 #   UI_ACCOUNT, UI_PASSWORD
+#
+# `HULAT_DIR` is no longer a trigger input. As of 2026-05-07.0 the test
+# team commits `hulat/` to master+dev, so the worktree's checkout already
+# contains it at `${WORKTREE_DIR}/hulat`. env_paths.sh still exports
+# `HULAT_DIR=${REPO_PATH}/hulat` for any consumer that needs the absolute
+# path, but build_prompt.sh no longer surfaces the path in the prompt
+# (the agent reads from `hulat/` relative to the worktree).
 #
 # UI_ACCOUNT / UI_PASSWORD are the dispatcher-allocated test credentials for
 # this spawn. They are injected into the prompt's "# Working environment"
@@ -42,7 +49,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" \
-  "${BRANCH:?}" "${DEV_BRANCH:?}" "${HULAT_DIR:?}"
+  "${BRANCH:?}" "${DEV_BRANCH:?}"
 
 # UI account is allocated by the dispatcher per-batch from the pool pinned
 # at <workspace>/config/ui_accounts.env; both fields are required so the
@@ -167,8 +174,10 @@ EOF
   cat <<EOF
 # Working environment
 - Worktree (your cwd):        ${WORKTREE_DIR}
-- Hulat materials (symlink):  ${WORKTREE_DIR}/hulat → ${HULAT_DIR}
-- Claude runtime config:      ${WORKTREE_DIR}/.claude (copied from ${HULAT_DIR}/ifp-hulat/.claude; local-only)
+- Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
+- Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
+- Knowledge base:             ${WORKTREE_DIR}/ifp_data (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
+- Agent runtime workspace:    ${WORKTREE_DIR}/ifp_result (gitignored on ${BRANCH}/${DEV_BRANCH}; do NOT touch)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
@@ -187,8 +196,8 @@ both runs to log each other out of the system under test.
 - Work only on this issue.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`hulat-spec-issue${ISSUE_IID}/\` at the worktree root. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the worktree.
-- Read configuration from ${WORKTREE_DIR}/hulat (the symlink); do not modify hulat materials — they are shared, read-only.
-- Treat ${WORKTREE_DIR}/.claude as local Claude Code runtime config. Do not modify it or include it in issue output.
+- \`hulat/\`, \`.claude/\`, and \`ifp_data/\` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
+- Do NOT touch the \`ifp_result/\` subtree. It is the agent runtime's workspace (gitignored); writing into it has no effect and pollutes the audit trail.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
 EOF

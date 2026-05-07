@@ -6,25 +6,33 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 
 Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout.
 
+As of SKILL_VERSION 2026-05-07.0 the cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp_data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. The agent's own state and per-issue worktrees live under `${REPO_PATH}/ifp_result/`, whose contents are gitignored on master + dev so the main worktree's `git status` stays clean.
+
 ```
-/data/${PROJECT}/                                         ← main git repo (host of worktrees)
-/data/openclaw_work/${PROJECT}/                           ← all agent-owned files (OUTSIDE the repo)
-    openclaw_state/
-        campaign_state.json                               ← campaign-level cache (NOT source of truth)
-        campaign.lock                                     ← flock target
-    openclaw_log/
-        dispatcher/
-            reconcile-<ts>.json                           ← reconciliation evidence files
-    issues/
-        issue-<iid>/                                      ← per-issue subtree, written by dispatcher prep + subagent
-            state.json                                    (cross-attempt)
-            attempt_state.json                            (current attempt; overwritten each attempt)
-            worktree/                                     ← acpx cwd; replaced every attempt
-                hulat → ${HULAT_DIR}                      (symlink, .git/info/exclude'd)
-                .claude/                                  (copy of ${HULAT_DIR}/ifp-hulat/.claude, .git/info/exclude'd)
-                ...repo files...
+/data/${PROJECT}/                                        ← ${REPO_PATH}; the cloned project repo
+    .claude/                                             (in master+dev, test-team owned)
+    hulat/                                               (in master+dev, test-team owned; was the legacy ${HULAT_DIR})
+    ifp_data/                                            (in master+dev, test-team owned; knowledge base)
+    ifp_result/                                          ← ${RESULT_ROOT}; gitignored content. Agent runtime workspace.
+        _dispatcher/                                     ← campaign-level state + logs + locks
+            campaign_state.json                          ← campaign-level cache (NOT source of truth)
+            campaign.lock                                ← flock target for the orchestrator
             log/
-                attempt-001/                              ← preserved logs per attempt
+                reconcile-<ts>.json                      ← reconciliation evidence files
+            locks/
+                repo.lock                                ← flock target for clone_or_pull / prepare_attempt
+        issue-<iid>/                                     ← per-issue subtree
+            state.json                                   (cross-attempt)
+            attempt_state.json                           (current attempt; overwritten each attempt)
+            worktree/                                    ← linked git worktree; acpx cwd. Replaced every attempt.
+                .claude/                                 (already in the branch checkout; READ-ONLY)
+                hulat/                                   (already in the branch checkout; READ-ONLY)
+                ifp_data/                                (already in the branch checkout; READ-ONLY)
+                ifp_result/                              (the branch's own placeholder; gitignored content)
+                hulat-spec-issue<iid>/                   ← Claude Code's spec output for this issue (committed; lands in MR)
+                ...other repo files...
+            log/
+                attempt-001/                             ← preserved logs per attempt
                     prompt.txt
                     claude_result.txt
                     acpx_raw.log
@@ -35,10 +43,16 @@ Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State
                     wiki_artifact_responses.jsonl
                 attempt-002/
                     ...
-            summary.md                                    (latest summary; mirror of GitLab issue comment)
-    locks/
-        repo.lock                                         (flock target for prepare_attempt.sh)
+            summary.md                                   (latest summary; mirror of GitLab issue comment)
 ```
+
+The first-time clone bootstrap order (handled by `scripts/clone_or_pull.sh`):
+
+1. `git clone -b ${BRANCH}` into `${REPO_PATH}` (uses a tmpfs lock at `/tmp/acpx_auto_tester.clone.${PROJECT}.lock` since the in-repo lock dir does not exist yet).
+2. `mkdir -p` the dispatcher subtree (`_dispatcher/`, `_dispatcher/log/`, `_dispatcher/locks/`) and `ifp_result/`.
+3. Acquire the in-repo flock at `${RESULT_ROOT}/_dispatcher/locks/repo.lock` and run `git fetch --prune` + `git worktree prune`.
+
+Subsequent ticks skip step 1 and go straight to step 3.
 
 ## Variables exported by env_paths.sh
 
@@ -46,20 +60,22 @@ Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State
 
 | Variable                | Value                                                | Purpose                                                          |
 | ----------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- |
-| `REPO_PATH`             | `/data/${PROJECT}`                                   | main git repo, hosts worktrees. Agent never edits its working tree. |
-| `WORK_ROOT`             | `/data/openclaw_work/${PROJECT}`                     | all agent-owned files. **Outside** the repo.                     |
-| `STATE_DIR`             | `${WORK_ROOT}/openclaw_state`                        | campaign-level state ONLY.                                       |
-| `CAMPAIGN_STATE_FILE`   | `${STATE_DIR}/campaign_state.json`                   | campaign progress cache.                                         |
-| `LOG_ROOT`              | `${WORK_ROOT}/openclaw_log`                          | log subtree root.                                                |
-| `DISPATCHER_LOG_DIR`    | `${LOG_ROOT}/dispatcher`                             | `reconcile-<ts>.json` evidence files.                            |
-| `ISSUES_ROOT`           | `${WORK_ROOT}/issues`                                | per-issue subtrees.                                              |
+| `REPO_PATH`             | `/data/${PROJECT}`                                   | The cloned project repo. Hosts linked worktrees.                |
+| `HULAT_DIR`             | `${REPO_PATH}/hulat`                                 | Derived (NOT a trigger input). Test-team-committed; READ-ONLY.  |
+| `RESULT_ROOT`           | `${REPO_PATH}/ifp_result`                            | Agent runtime workspace root. Gitignored on master+dev.         |
+| `WORK_ROOT`             | `${RESULT_ROOT}/_dispatcher`                         | Campaign-level agent state.                                     |
+| `STATE_DIR`             | `${WORK_ROOT}`                                       | Campaign state file lives directly here (no further nesting).   |
+| `CAMPAIGN_STATE_FILE`   | `${STATE_DIR}/campaign_state.json`                   | Campaign progress cache.                                         |
+| `LOG_ROOT`              | `${WORK_ROOT}/log`                                   | Dispatcher log subtree root.                                    |
+| `DISPATCHER_LOG_DIR`    | `${LOG_ROOT}`                                        | `reconcile-<ts>.json` evidence files. Same dir as LOG_ROOT.     |
+| `ISSUES_ROOT`           | `${RESULT_ROOT}`                                     | Parent of `issue-<iid>/` subtrees.                              |
 | `LOCK_FILE`             | `${STATE_DIR}/campaign.lock`                         | flock target.                                                    |
 
 To find a specific issue's state file from dispatcher code, use the helper:
 
 ```bash
 ISSUE_STATE="$(issue_state_file_for "${IID}")"
-# → /data/openclaw_work/${PROJECT}/issues/issue-${IID}/state.json
+# → /data/${PROJECT}/ifp_result/issue-${IID}/state.json
 ```
 
 ### Per-issue + attempt-level (exported only when `ISSUE_IID` is in env)
@@ -73,7 +89,7 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 | `WORK_BRANCH`             | `issue/${ISSUE_IID}-auto-fix`                                    | the SINGLE remote branch (Strategy A)                          |
 | `ATTEMPT_NUMBER_PADDED`   | e.g. "001"                                                       | zero-padded for labels, MR titles, comments, local branches    |
 | `ATTEMPT_DIR`             | `${ISSUE_ROOT}`                                                  | compatibility alias; no per-attempt subdirectory exists        |
-| `WORKTREE_DIR`            | `${ATTEMPT_DIR}/worktree`                                        | acpx cwd (created by `prepare_attempt.sh`)                     |
+| `WORKTREE_DIR`            | `${ATTEMPT_DIR}/worktree`                                        | acpx cwd (created by `prepare_attempt.sh`); a linked worktree   |
 | `ISSUE_LOG_ROOT`          | `${ATTEMPT_DIR}/log`                                             | parent of per-attempt log directories                          |
 | `LOG_DIR`                 | `${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}`             | current-attempt log files; preserved after the attempt          |
 | `ATTEMPT_STATE_FILE`      | `${ATTEMPT_DIR}/attempt_state.json`                              | current-attempt metadata; overwritten each attempt             |
@@ -84,15 +100,20 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 
 ## Hard rules
 
-1. `REPO_PATH`'s **working tree** is never edited. The agent uses `git worktree add` to create the issue worktree at `${WORKTREE_DIR}`, replacing it at the start of each attempt.
-2. All agent-owned files (logs, prompts, state, summaries) live under `${ISSUE_ROOT}` for per-issue work, and under `${STATE_DIR}` / `${LOG_ROOT}` for campaign-level work. None of them go inside `${WORKTREE_DIR}`. The only local-only non-repo content allowed in the worktree is the `hulat` symlink and `.claude` runtime config; leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) keep both out of commits.
-3. **`hulat_dir` is shared, read-only, single source.** Each attempt creates a symlink at `${WORKTREE_DIR}/hulat` pointing to `${HULAT_DIR}`. `hulat` is excluded from the worktree's git via `.git/info/exclude` and explicitly rejected by both leak guards. Do NOT modify anything under `${HULAT_DIR}` from inside an attempt.
-4. Claude Code runtime config is the only copied Hulat material: `${HULAT_DIR}/ifp-hulat/.claude` is copied to `${WORKTREE_DIR}/.claude` before `acpx` runs. `.claude` is local-only, excluded from git, and rejected by both leak guards.
+1. **`REPO_PATH`'s main working tree is never edited by the agent.** The agent uses `git worktree add` to create the issue worktree at `${WORKTREE_DIR}` (a linked worktree inside `${RESULT_ROOT}/issue-<iid>/`), replacing it at the start of each attempt. The main worktree at `${REPO_PATH}` remains on `${BRANCH}` and is touched only for `git fetch` / `git worktree add|remove|prune`.
+2. **Agent runtime files live under `${RESULT_ROOT}` (= `${REPO_PATH}/ifp_result/`).** Both the dispatcher subtree (`_dispatcher/...`) and per-issue subtrees (`issue-<iid>/...`). The project's master + dev branches MUST gitignore the contents of `ifp_result/` so the main worktree's `git status` stays clean and a developer's `git add -A` cannot sweep agent artifacts into a commit. The presence of `ifp_result/` itself in the branch (as an empty placeholder) is fine; only its contents are ignored.
+3. **`hulat/`, `.claude/`, and `ifp_data/` are READ-ONLY.** They are committed to master + dev by the test team. Each issue worktree's checkout already contains them — the agent does NOT symlink `hulat/` and does NOT copy `.claude/`. Treat them as configuration; the agent must not edit them. (Leak guards no longer special-case these directories — they are valid repo content.)
+4. **Per-issue spec output goes to `${WORKTREE_DIR}/hulat-spec-issue<iid>/` only.** `build_prompt.sh` injects this rule into the Claude Code prompt. Multiple MRs into master never collide because each issue writes into a distinct subdirectory.
 5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt replaces `${WORKTREE_DIR}`, recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/`; historical summaries are preserved as GitLab issue notes.
 6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
 7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}`. Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
 8. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
-9. The OLD per-issue location `${STATE_DIR}/issues/issue-<iid>.json` is gone. The new path is `${ISSUES_ROOT}/issue-<iid>/state.json`. Old files, if any, should be migrated by the operator (the agent does not auto-migrate).
+9. **Leak surface.** The leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) reject staged paths matching `^ifp_result/_dispatcher/` (always) or `^ifp_result/issue-<N>/` where `<N> != ${ISSUE_IID}` (other-issue subtree). They do NOT reject `hulat/`, `.claude/`, or `ifp_data/` — those are tracked content owned by the test team. They do NOT reject the current issue's own `ifp_result/issue-<iid>/` if Claude somehow `git add -f`'d into it (rare in practice; `ifp_result/` is gitignored on every branch).
+10. **Layout migration from earlier SKILL_VERSIONs.** The OLD `/data/openclaw_work/${PROJECT}/...` subtree (campaign state, dispatcher logs, per-issue worktrees) is gone. Operators must move state files to the new in-repo location once during deployment of `2026-05-07.0`:
+    - `mv /data/openclaw_work/<project>/openclaw_state/campaign_state.json /data/<project>/ifp_result/_dispatcher/campaign_state.json`
+    - `mv /data/openclaw_work/<project>/openclaw_log/dispatcher/* /data/<project>/ifp_result/_dispatcher/log/`
+    - `mv /data/openclaw_work/<project>/issues/* /data/<project>/ifp_result/`
+    - Or simply delete the old subtree and let the new layout rebuild from GitLab labels (the agent's reconciliation will repopulate state from live label evidence).
 
 ## Core artifacts in `${LOG_DIR}`
 
@@ -116,4 +137,4 @@ When a new MR is created (rather than an existing fresh-mode MR being reused), t
 
 These files NEVER go into the work branch — they live under this attempt's `${LOG_DIR}`.
 
-`scripts/upload_attempt_artifacts.sh` publishes the required `prompt.txt` and `claude_result.txt`, plus the first `report.html` found anywhere under `${WORKTREE_DIR}` when present, to project Wiki pages under `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/`. If no `report.html` exists under the worktree, no report Wiki page is published.
+`scripts/upload_attempt_artifacts.sh` publishes the required `prompt.txt` and `claude_result.txt`, plus the first `report.html` found anywhere under `${WORKTREE_DIR}` (excluding the test-team-committed `hulat/`, `.claude/`, `ifp_data/` and the gitignored `ifp_result/`), to project Wiki pages under `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/`. If no `report.html` exists under the worktree, no report Wiki page is published.
