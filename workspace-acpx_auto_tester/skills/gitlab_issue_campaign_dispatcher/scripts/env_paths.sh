@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# As of SKILL_VERSION 2026-05-08.1 there is exactly ONE skill in the workspace
-# (the orchestrator), running an async-callback model with two execution paths.
+# There is exactly ONE skill in the workspace (the orchestrator), running an
+# async-callback model with two execution paths.
 # Path A (RUN_SCHEDULED_ISSUE_CAMPAIGN): orchestrator runs Phases 1-4 (parse,
 # reconcile, eligibility, per-IID prep — clone/pull, worktree, prompt build,
 # label transitions, attempt allocation, UI-account allocation, in-progress

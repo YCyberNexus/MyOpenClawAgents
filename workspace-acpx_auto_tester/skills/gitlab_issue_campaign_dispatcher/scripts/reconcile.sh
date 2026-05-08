@@ -4,7 +4,7 @@
 # evidence required by the Source-of-Truth Policy: if this file was not
 # produced this tick, reconciliation did not happen.
 #
-# Two invocation shapes (added 2026-05-08.1):
+# Two invocation shapes:
 #   - Range mode (default):  set MIN_IID + MAX_IID. Iterates seq MIN_IID MAX_IID.
 #   - List mode:             set IID_LIST="14,17,20" (comma-separated, whitespace
 #                            tolerated). MIN_IID/MAX_IID are ignored when

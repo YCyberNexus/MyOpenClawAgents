@@ -6,10 +6,6 @@ allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-05-08.1**
-
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-08.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
-
 ## Single-skill, async-callback model (read first)
 
 This workspace has exactly **one SKILL** (this file). The dispatcher runs in **two distinct execution paths**:
@@ -73,10 +69,10 @@ Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No
 
 1. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass it (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops). Return a one-line status summary and exit.
 2. If `sessions_spawn` for an issue session fails or times out, the dispatcher MUST NOT run the subagent's logic inline in the dispatcher session, spawn a non-dedicated session as a substitute, or retry by spawning a different session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
-3. **Anonymous async-callback spawns are the contract** (see Concurrency Policy below). `sessions_spawn` returns a launch acknowledgement (`accepted` + `runId` + `childSessionKey`); the orchestrator records that ack into `pending_subagents` and exits. The terminal compact JSON arrives later inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator MUST NOT pass any session name (`mode="session"` / `name=...`) — historically that triggered runtime `errorCode=thread_required` on channels that don't support thread-bound named sessions. The orchestrator MUST NOT switch to a "wait inline for the spawn to return compact JSON" mode (no synchronous batch wait) — that contract was retired in `2026-05-06.7`. Fire-and-forget WITHOUT a callback is still forbidden — if the runtime cannot deliver `RUN_CHILD_COMPLETION_CALLBACK` for this deployment, that is a tick-level failure (record as deployment incompatibility and abort).
+3. **Anonymous async-callback spawns are the contract** (see Concurrency Policy below). `sessions_spawn` returns a launch acknowledgement (`accepted` + `runId` + `childSessionKey`); the orchestrator records that ack into `pending_subagents` and exits. The terminal compact JSON arrives later inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator MUST NOT pass any session name (`mode="session"` / `name=...`) — that triggers runtime `errorCode=thread_required` on channels that don't support thread-bound named sessions. The orchestrator MUST NOT switch to a "wait inline for the spawn to return compact JSON" mode (no synchronous batch wait). Fire-and-forget WITHOUT a callback is still forbidden — if the runtime cannot deliver `RUN_CHILD_COMPLETION_CALLBACK` for this deployment, that is a tick-level failure (record as deployment incompatibility and abort).
 4. If a per-IID prep step fails (clone_or_pull, prepare_attempt, build_prompt, set_issue_label for `doing`, render), the dispatcher MUST NOT spawn that IID with a partial / improvised setup. Mark the IID `blocked` with the verbatim error as `block_reason` and continue with the OTHER batch members whose prep succeeded.
 5. If `ensure_labels.sh` fails, the dispatcher MUST treat that as a tick-level failure. Return a one-line summary; do NOT skip the call.
-6. **Phase 6 reply validation failures.** If a subagent's compact reply fails any validation rule in [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply (parse error, IID/attempt mismatch, skill_version mismatch, blocked/failed without block_reason), the dispatcher MUST mark the IID `blocked` with the corresponding `block_reason` and write that to the state files. Do NOT fabricate a "successful" reply on the subagent's behalf.
+6. **Phase 6 reply validation failures.** If a subagent's compact reply fails any validation rule in [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply (parse error, IID/attempt mismatch, blocked/failed without block_reason), the dispatcher MUST mark the IID `blocked` with the corresponding `block_reason` and write that to the state files. Do NOT fabricate a "successful" reply on the subagent's behalf.
 
 On failure:
 
@@ -169,7 +165,7 @@ See `references/trigger_command.md` for the full trigger spec, required fields, 
 Key requirements:
 
 - All scalar trigger inputs (`issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`) are authoritative for this tick. Overwrite the disk copy in `campaign_state.json` before running the algorithm.
-- The optional filter fields (`issue_iids`, `require_labels`, `require_labels_match`, added 2026-05-08.1) follow the same trigger-authoritative rule. Each tick's trigger value (or its absence) wins; the dispatcher does NOT carry stale filter values forward when the next trigger drops the field. See `references/trigger_command.md` for the parse / validation contract and Phase 1 step 2 for how the dispatcher applies them.
+- The optional filter fields (`issue_iids`, `require_labels`, `require_labels_match`) follow the same trigger-authoritative rule. Each tick's trigger value (or its absence) wins; the dispatcher does NOT carry stale filter values forward when the next trigger drops the field. See `references/trigger_command.md` for the parse / validation contract and Phase 1 step 2 for how the dispatcher applies them.
 - `non_interactive=true`, `session_mode=per_issue`, `scheduling_mode=quota_carryover`, `blocked_policy=skip_and_retry` are required fixed values; abort if missing.
 
 ---
@@ -251,9 +247,9 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - If the lock cannot be acquired, return a one-line `"lock_held"` summary and exit 0.
 2. **Load + override campaign state.**
    - Read `${CAMPAIGN_STATE_FILE}`, or initialize using fresh-init values from `references/state_schema.md` if absent.
-   - Apply schema migration if the on-disk file uses the legacy scalar `active_issue_iid` / `active_issue_session` — see `references/state_schema.md` "Schema migration" for the rule. Default `max_concurrent_subagents` to `1` if missing. If `pending_subagents` is missing (legacy file), initialize to `{}`. If `issue_iids_whitelist` / `require_labels` / `require_labels_match` are missing (pre-2026-05-08.1 file), initialize to `[]` / `[]` / `"or"`.
+   - Normalize legacy on-disk shapes per `references/state_schema.md` "Legacy on-disk shapes the loader must tolerate" (legacy scalar `active_issue_iid` → `active_issue_iids`; missing `pending_subagents` → `{}`; missing `max_concurrent_subagents` → `1`; missing `issue_iids_whitelist` / `require_labels` / `require_labels_match` → `[]` / `[]` / `"or"`).
    - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`, and (optionally) `stuck_after_minutes` with the trigger values. When the trigger omits `max_concurrent_subagents`, default it to `1` for the tick AND persist that default. When the trigger omits `stuck_after_minutes`, default to `90` and persist.
-   - **Optional filter override (added 2026-05-08.1).**
+   - **Optional filter override.**
      - `issue_iids` (trigger field, comma-separated integers). Parse, trim whitespace, drop empty tokens. If any token is non-integer, abort the tick with `"invalid_issue_iids"`. Persist the parsed list (possibly `[]`) into `issue_iids_whitelist`. The trigger's authoritative voice means: if the trigger omits the field OR sends an empty string, `issue_iids_whitelist` is overwritten to `[]` (whitelist disabled this tick) — stale values from disk are NOT carried forward.
      - `require_labels` (trigger field, comma-separated label names). Parse, trim whitespace around commas, drop empty tokens. Persist into `require_labels`. Same trigger-authoritative semantics as above.
      - `require_labels_match` (trigger field, `or` / `and`). If `require_labels` is empty, normalize to `"or"` (and the field is ignored downstream). If `require_labels` is non-empty: when the trigger omits the field, default to `"or"`; when the trigger supplies a value, accept exactly `"or"` or `"and"` (case-sensitive); any other value → abort the tick with `"invalid_require_labels_match"`. Persist.
@@ -285,7 +281,7 @@ If `reconcile.sh` fails or no evidence file is produced, abort the tick with `"r
    - every IID in range has `needs_continue == false` in it
    - `unfinished_iids` is empty and `campaign_status = completed`
    - `issue_iids_whitelist` is empty (whitelist active = partial reconcile evidence; cannot make a "whole range completed" claim — see Phase 2's interaction note)
-4. **Apply `require_labels` filter to the eligibility candidates (added 2026-05-08.1).** When `require_labels` is non-empty, walk the reconcile evidence file and drop any IID whose live `labels` array does not satisfy the match:
+4. **Apply `require_labels` filter to the eligibility candidates.** When `require_labels` is non-empty, walk the reconcile evidence file and drop any IID whose live `labels` array does not satisfy the match:
    - `require_labels_match == "or"`: keep if `labels ∩ require_labels` is non-empty (at least one match).
    - `require_labels_match == "and"`: keep if `require_labels ⊆ labels` (every required label present).
    - An IID with `missing == true` in the evidence file (glab GET failed) is dropped from this tick's candidates regardless — no live labels available.
@@ -314,7 +310,7 @@ This phase runs ONCE per scheduled wake-up (no loop):
       - continue: remove `continue`, `blocked`, `done`, `pr`, then add `doing`.
       The dispatcher MUST NOT use `-f labels=...` (full-set overwrite) — it would wipe manually-added labels.
    5. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> HULAT_DIR=<hulat_dir> ISSUE_MODE=<mode_actual> UI_ACCOUNT=<user> UI_PASSWORD=<pass> bash scripts/build_prompt.sh`. Writes `${LOG_DIR}/prompt.txt` with the issue body, working environment, and UI-account override block. Capture stderr (`CONTINUE_MODE_NO_REVIEWER_COMMENTS`, `CONTINUE_MODE_PRIOR_ATTEMPT_COUNT`) for the attempt state.
-   6. **Initialize state files.** Write/refresh `${ATTEMPT_STATE_FILE}` with `{iid, attempt_number, attempt_started_at, mode_requested, mode_actual, mode_downgraded_from, no_reviewer_comments, prior_attempt_count, local_branch, log_dir, status:"in_progress", skill_version}`. Write/refresh `${ISSUE_STATE_FILE}` with `{iid, session, status:"in_progress", mode:<mode_actual>, attempts_total:<N_iid>, latest_attempt_number:<N_iid>, latest_attempt_dir, retry_count:<from prior>, skill_version, updated_at}`.
+   6. **Initialize state files.** Write/refresh `${ATTEMPT_STATE_FILE}` with `{iid, attempt_number, attempt_started_at, mode_requested, mode_actual, mode_downgraded_from, no_reviewer_comments, prior_attempt_count, local_branch, log_dir, status:"in_progress"}`. Write/refresh `${ISSUE_STATE_FILE}` with `{iid, session, status:"in_progress", mode:<mode_actual>, attempts_total:<N_iid>, latest_attempt_number:<N_iid>, latest_attempt_dir, retry_count:<from prior>, updated_at}`.
    7. **Render the executor prompt.** Substitute every `{...}` placeholder in `references/executor_prompt.md` with the per-IID values; verify no unsubstituted placeholders remain. If render fails (missing variable, unsubstituted token), mark the IID `blocked` with `block_reason="prompt template render incomplete: <name>"` and skip this IID for the batch.
 
    If any sub-step fails for an IID, mark that IID `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and skip it for the batch — but DO continue prep for the OTHER batch members. The UI account allocated to a dropped IID returns to the pool (no persistence).
@@ -353,7 +349,7 @@ Phase 6 runs in two contexts:
 
 In both contexts:
 
-1. **Validate the compact reply** per `references/state_schema.md` §Compact Subagent Reply → "Dispatcher-side validation". Validation failures (parse error, iid mismatch, attempt mismatch, skill_version mismatch, blocked-without-reason) produce a synthetic blocked classification with the appropriate `block_reason` — do not silently accept malformed replies.
+1. **Validate the compact reply** per `references/state_schema.md` §Compact Subagent Reply → "Dispatcher-side validation". Validation failures (parse error, iid mismatch, attempt mismatch, blocked-without-reason) produce a synthetic blocked classification with the appropriate `block_reason` — do not silently accept malformed replies.
 2. **Match to a `pending_subagents` entry by `iid` + `attempt_number`.** If `pending_subagents[reply.iid]` does not exist, OR `pending_subagents[reply.iid].attempt_number != reply.attempt_number`, treat as stale / late callback: drop with chat summary `"callback_status":"stale_or_already_drained"` and return. Do NOT mutate state files.
 3. **Write the terminal state files** per `references/state_schema.md` §Phase 6 Write Mapping. The dispatcher writes BOTH `${ATTEMPT_STATE_FILE}` and `${ISSUE_STATE_FILE}` from the compact reply. The subagent does not touch them.
 4. **Promote `blocked → failed` if retry budget exhausted.** Increment `retry_count` first if `status in {blocked, failed}`. If `retry_count > blocked_retry_limit`, set `status=failed` in both state files and add to `failed_iids`.
@@ -418,7 +414,6 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-08.1",
   "campaign_status": "waiting_for_callbacks",
   "active_issue_iids": [14, 15],
   "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
@@ -439,11 +434,10 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 }
 ```
 
-**Scheduled wake-up with whitelist + label filter (added 2026-05-08.1):**
+**Scheduled wake-up with whitelist + label filter:**
 
 ```json
 {
-  "skill_version": "2026-05-08.1",
   "campaign_status": "waiting_for_callbacks",
   "active_issue_iids": [14],
   "active_issue_sessions": ["issue-px_ifp_hulat-14"],
@@ -472,7 +466,6 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-08.1",
   "callback_status": "handled",
   "iid": 14,
   "attempt_number": 3,
@@ -489,7 +482,6 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-08.1",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],
@@ -506,7 +498,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "last_reconcile_evidence": "/data/openclaw_work/<project>/openclaw_log/dispatcher/reconcile-<ts>.json",
   "tick_outcome_per_iid": {
     "14": "done",
-    "15": "blocked: subagent reply skill_version mismatch"
+    "15": "blocked: subagent reply missing block_reason"
   }
 }
 ```

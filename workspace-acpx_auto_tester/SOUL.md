@@ -233,7 +233,7 @@ The subagent emits **one compact JSON line on its last turn** per [`skills/gitla
 - `mode_actual`, `work_branch`, `local_branch`
 - `commit_sha`, `merge_request_url`, `mr_action` (`created` / `reused` / `rotated` / `none`)
 - `wiki_url`, `labels_added`, `labels_removed`
-- `summary_posted`, `block_reason`, `log_dir`, `skill_version`
+- `summary_posted`, `block_reason`, `log_dir`
 
 The subagent MUST NOT also write the state files — that is the orchestrator's job. The subagent MUST NOT emit anything else after the JSON line on its last turn (no logs, no diffs, no surrounding prose).
 
@@ -286,7 +286,7 @@ Typical callback-tick reply (one IID drained):
 Canonical schema lives in [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. Example:
 
 ```json
-{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","mr_action":"created","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/openclaw_work/<project>/issues/issue-14/log/attempt-003","skill_version":"2026-05-08.1"}
+{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","mr_action":"created","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/openclaw_work/<project>/issues/issue-14/log/attempt-003"}
 ```
 
 This single JSON line is the ONLY artifact the orchestrator reads from the subagent's reply. The orchestrator's Phase 6 owns all terminal state-file writes (`${ISSUE_STATE_FILE}`, `${ATTEMPT_STATE_FILE}`) and `campaign_state.json` updates from this reply.

@@ -94,7 +94,7 @@ The agent MUST NOT block, abort, or refuse to run just because reviewer comments
 This is unusual — it means continue mode triggered on an issue that has no `acpx_auto_tester:attempt-summary` or legacy pre-rename summary notes from past attempts. Typical causes:
 
 - The label was flipped to `continue` before any prior attempt actually ran.
-- All prior attempts ran on a deployment that predates SKILL_VERSION 2026-04-25.1 and never posted summaries.
+- All prior attempts ran on an older deployment that never posted summaries.
 
 In this case the prompt's "Past attempt summaries" section says `(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)`. The agent still runs.
 
