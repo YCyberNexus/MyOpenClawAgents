@@ -28,6 +28,9 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 2,
   "stuck_after_minutes": 90,
+  "issue_iids_whitelist": [14, 17, 20],
+  "require_labels": ["acpx-auto", "priority::high"],
+  "require_labels_match": "and",
   "next_new_issue_iid": 4,
   "active_issue_iids": [14, 15],
   "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
@@ -53,7 +56,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/openclaw_state/campaign_state
   "failed_iids": [],
   "campaign_status": "waiting_for_callbacks",
   "quota_launched_this_tick": 2,
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-08.1",
   "last_reconcile_evidence": "/data/openclaw_work/.../openclaw_log/dispatcher/reconcile-20260506T100501Z.json",
   "updated_at": "2026-05-06T10:05:30Z"
 }
@@ -88,6 +91,9 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 stuck_after_minutes       = 90
+issue_iids_whitelist      = []
+require_labels            = []
+require_labels_match      = "or"
 active_issue_iids         = []
 active_issue_sessions     = []
 pending_subagents         = {}
@@ -98,6 +104,14 @@ failed_iids               = []
 campaign_status           = running
 quota_launched_this_tick  = 0
 ```
+
+### Optional filter fields (added in SKILL_VERSION 2026-05-08.1)
+
+| Field                   | Type            | Notes                                                                 |
+| ----------------------- | --------------- | --------------------------------------------------------------------- |
+| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
+| `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
+| `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
 
 ### Schema migration
 
@@ -115,6 +129,11 @@ The dispatcher MUST NOT keep both the scalar and the array fields in the persist
 - If the on-disk file is missing `stuck_after_minutes`, default to `90` and persist.
 - If the on-disk file is missing `quota_launched_this_tick`, default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
 - Legacy entries in `active_issue_iids` without matching `pending_subagents` keys are stale (the orchestrator was synchronous before; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
+
+**`issue_iids_whitelist` / `require_labels` / `require_labels_match` introduction (SKILL_VERSION 2026-05-08.1):**
+
+- If any of the three is missing on disk, default per "Fresh-init values" above (`[]` / `[]` / `"or"`) and persist on the next write.
+- These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
 
 ### Possible `campaign_status` values
 
@@ -143,7 +162,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
   "block_reason": null,
   "commit_sha": "abc1234...",
   "merge_request_url": "http://gitlab.example.com/.../merge_requests/15",
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-08.1",
   "updated_at": "2026-05-06T10:00:00Z"
 }
 ```
@@ -201,7 +220,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "block_reason": null,
   "summary_file": "/data/openclaw_work/.../issues/issue-14/summary.md",
   "summary_posted_to_issue": true,
-  "skill_version": "2026-05-06.7"
+  "skill_version": "2026-05-08.1"
 }
 ```
 
@@ -247,7 +266,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "summary_posted": true,
   "block_reason": "",
   "log_dir": "/data/openclaw_work/<project>/issues/issue-14/log/attempt-003",
-  "skill_version": "2026-05-06.7"
+  "skill_version": "2026-05-08.1"
 }
 ```
 

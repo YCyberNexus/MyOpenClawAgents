@@ -286,7 +286,7 @@ Typical callback-tick reply (one IID drained):
 Canonical schema lives in [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. Example:
 
 ```json
-{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","mr_action":"created","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/openclaw_work/<project>/issues/issue-14/log/attempt-003","skill_version":"2026-05-06.7"}
+{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","mr_action":"created","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/openclaw_work/<project>/issues/issue-14/log/attempt-003","skill_version":"2026-05-08.1"}
 ```
 
 This single JSON line is the ONLY artifact the orchestrator reads from the subagent's reply. The orchestrator's Phase 6 owns all terminal state-file writes (`${ISSUE_STATE_FILE}`, `${ATTEMPT_STATE_FILE}`) and `campaign_state.json` updates from this reply.

@@ -8,7 +8,7 @@ This is **not** an application repo — it is the **deployment artifact for an O
 
 The agent itself runs at `/data/...` on the OpenClaw runner; nothing in this repo executes locally during development. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
 
-## Single-skill, async-callback execution model (SKILL_VERSION 2026-05-06.7)
+## Single-skill, async-callback execution model (SKILL_VERSION 2026-05-08.1)
 
 The agent has **one thick orchestrator session + one anonymous subagent run per IID**. There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
 

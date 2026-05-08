@@ -1,15 +1,24 @@
 #!/usr/bin/env bash
-# reconcile.sh — query GitLab for every IID in [MIN_IID, MAX_IID] and write
-# a single evidence JSON file the dispatcher can grep + jq later. This is the
-# fail-closed evidence required by the Source-of-Truth Policy: if this file
-# was not produced this tick, reconciliation did not happen.
+# reconcile.sh — query GitLab for a set of IIDs and write a single evidence
+# JSON file the dispatcher can grep + jq later. This is the fail-closed
+# evidence required by the Source-of-Truth Policy: if this file was not
+# produced this tick, reconciliation did not happen.
+#
+# Two invocation shapes (added 2026-05-08.1):
+#   - Range mode (default):  set MIN_IID + MAX_IID. Iterates seq MIN_IID MAX_IID.
+#   - List mode:             set IID_LIST="14,17,20" (comma-separated, whitespace
+#                            tolerated). MIN_IID/MAX_IID are ignored when
+#                            IID_LIST is set (even when empty string).
+#                            IID_LIST="" (set but empty) is the legitimate
+#                            "filter narrowed to zero IIDs" case → write [].
 #
 # Required env vars:
 #   GITLAB_HOST           resolved hostname (output of glab_auth.sh)
 #   PROJECT_FULL          "<group>/<project>"
-#   MIN_IID               inclusive
-#   MAX_IID               inclusive
 #   DISPATCHER_LOG_DIR    where to put reconcile-<ts>.json
+#   one of:
+#     MIN_IID + MAX_IID   (range mode)
+#     IID_LIST            (list mode; takes precedence when set, even when empty)
 #
 # Output:
 #   Prints the absolute path of the evidence file to stdout.
@@ -47,16 +56,54 @@ set -euo pipefail
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
-: "${GITLAB_HOST:?}" "${PROJECT_FULL:?}" "${MIN_IID:?}" "${MAX_IID:?}" "${DISPATCHER_LOG_DIR:?}"
+: "${GITLAB_HOST:?}" "${PROJECT_FULL:?}" "${DISPATCHER_LOG_DIR:?}"
+
+# Resolve the IID iteration set: list mode takes precedence over range mode
+# whenever IID_LIST is set (including the deliberate empty string for
+# "narrowed to zero IIDs").
+IIDS=()
+if [ "${IID_LIST+set}" = "set" ]; then
+  # Tokenize on commas, trim whitespace per token, drop empty tokens.
+  # An entirely empty/whitespace-only IID_LIST yields an empty array → empty
+  # evidence file, which is the legitimate "filter matched nothing" case.
+  __raw_tokens=()
+  IFS=',' read -r -a __raw_tokens <<< "${IID_LIST}"
+  # nounset-safe expansion: ${arr[@]+"${arr[@]}"} stays empty when arr is unset
+  for tok in ${__raw_tokens[@]+"${__raw_tokens[@]}"}; do
+    tok="${tok#"${tok%%[![:space:]]*}"}"   # ltrim
+    tok="${tok%"${tok##*[![:space:]]}"}"   # rtrim
+    [ -z "${tok}" ] && continue
+    if ! [[ "${tok}" =~ ^[0-9]+$ ]]; then
+      echo "reconcile.sh: IID_LIST token is not a non-negative integer: '${tok}'" >&2
+      exit 14
+    fi
+    IIDS+=("${tok}")
+  done
+else
+  : "${MIN_IID:?reconcile.sh: MIN_IID must be set when IID_LIST is unset}"
+  : "${MAX_IID:?reconcile.sh: MAX_IID must be set when IID_LIST is unset}"
+  while IFS= read -r iid; do
+    IIDS+=("${iid}")
+  done < <(seq "${MIN_IID}" "${MAX_IID}")
+fi
 
 mkdir -p "${DISPATCHER_LOG_DIR}"
 TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_FILE="${DISPATCHER_LOG_DIR}/reconcile-${TS}.json"
 PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
 
+# Empty IID set → write a degenerate but well-formed empty array so the
+# evidence-file-must-exist invariant still holds. The dispatcher treats this
+# as "filter narrowed to zero IIDs", which is distinct from "reconcile failed".
+if [ "${#IIDS[@]}" -eq 0 ]; then
+  printf "[]\n" > "${OUT_FILE}"
+  echo "${OUT_FILE}"
+  exit 0
+fi
+
 echo "[" > "${OUT_FILE}"
 first=1
-for iid in $(seq "${MIN_IID}" "${MAX_IID}"); do
+for iid in "${IIDS[@]}"; do
   if body="$(glab api "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null)"; then
     digest="$(echo "${body}" | jq -c --argjson iid "${iid}" '
       . as $issue |

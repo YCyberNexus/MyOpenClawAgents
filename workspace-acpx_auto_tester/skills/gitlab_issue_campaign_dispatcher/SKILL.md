@@ -1,14 +1,14 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-06.7] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with async-callback subagent execution. Orchestrator runs Phases 1-5 (Parse, Reconcile, Eligibility, Per-IID Prep, Async Spawn) on every scheduled wake-up. Phase 5 issues anonymous sessions_spawn calls (NO session name passed — runtime returns runId/childSessionKey), records the (iid, runId, child_session_key) mapping into pending_subagents, and IMMEDIATELY returns waiting_for_callbacks. The runtime later pushes RUN_CHILD_COMPLETION_CALLBACK with each subagent's terminal compact JSON; the orchestrator wakes on each callback and runs Phase 6 (Follow-up) for the matched IID — validate compact reply by iid field, write terminal state files, drain pending entry, classify into campaign_state lists, optional notify. Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. The active_issue_iids bookkeeping (persisted before spawn) is the structural same-IID-no-parallel guarantee; replies are matched to dispatched IIDs by the iid field of the compact JSON, NOT by runtime session name. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool held until callback drains, persistent disk state, stuck-pending detection, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-05-08.1] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with async-callback subagent execution. Orchestrator runs Phases 1-5 (Parse, Reconcile, Eligibility, Per-IID Prep, Async Spawn) on every scheduled wake-up. Phase 5 issues anonymous sessions_spawn calls (NO session name passed — runtime returns runId/childSessionKey), records the (iid, runId, child_session_key) mapping into pending_subagents, and IMMEDIATELY returns waiting_for_callbacks. The runtime later pushes RUN_CHILD_COMPLETION_CALLBACK with each subagent's terminal compact JSON; the orchestrator wakes on each callback and runs Phase 6 (Follow-up) for the matched IID — validate compact reply by iid field, write terminal state files, drain pending entry, classify into campaign_state lists, optional notify. Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. The active_issue_iids bookkeeping (persisted before spawn) is the structural same-IID-no-parallel guarantee; replies are matched to dispatched IIDs by the iid field of the compact JSON, NOT by runtime session name. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool held until callback drains, persistent disk state, stuck-pending detection, optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
 
-**SKILL_VERSION: 2026-05-06.7**
+**SKILL_VERSION: 2026-05-08.1**
 
-On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-06.7` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
+On every wake-up, the dispatcher MUST echo the literal string `SKILL_VERSION=2026-05-08.1` in its compact chat summary (add a `"skill_version"` field to the returned JSON). This lets the operator verify which version of the skill is actually loaded. The dispatcher MUST also reject subagent compact replies whose `skill_version` does not equal this literal — see [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply.
 
 ## Single-skill, async-callback model (read first)
 
@@ -156,7 +156,7 @@ Concrete rules:
    - Else if `needs_continue == true`: remove from `completed_iids`/`failed_iids`; add to `unfinished_iids`; per-issue state `status=pending`, `mode="continue"` (leave `attempts_total` untouched); force `campaign_status=running`; persist.
    - Else if disk says finished but `user_reopened == true`: same as above but `mode="fresh"`.
    - If disk says unfinished but `is_done_on_gitlab == true` AND `needs_continue == false`, mark it finished on disk and skip.
-5. An "already completed" reply is allowed only when the evidence file from this tick exists AND every IID in range has `is_done_on_gitlab == true` AND `needs_continue == false` in it.
+5. An "already completed" reply is allowed only when the evidence file from this tick exists AND every IID in range has `is_done_on_gitlab == true` AND `needs_continue == false` in it AND `issue_iids_whitelist` is empty for this tick (a whitelist narrows reconcile to a subset of the range, so the evidence file cannot speak for the whole range — see Phase 2).
 
 In short: **trust the evidence file, not the JSON cache. If you didn't run `reconcile.sh` this tick, you have no right to say anything is done.**
 
@@ -169,6 +169,7 @@ See `references/trigger_command.md` for the full trigger spec, required fields, 
 Key requirements:
 
 - All scalar trigger inputs (`issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`) are authoritative for this tick. Overwrite the disk copy in `campaign_state.json` before running the algorithm.
+- The optional filter fields (`issue_iids`, `require_labels`, `require_labels_match`, added 2026-05-08.1) follow the same trigger-authoritative rule. Each tick's trigger value (or its absence) wins; the dispatcher does NOT carry stale filter values forward when the next trigger drops the field. See `references/trigger_command.md` for the parse / validation contract and Phase 1 step 2 for how the dispatcher applies them.
 - `non_interactive=true`, `session_mode=per_issue`, `scheduling_mode=quota_carryover`, `blocked_policy=skip_and_retry` are required fixed values; abort if missing.
 
 ---
@@ -206,7 +207,7 @@ Universal frame: [`SOUL.md`](../../SOUL.md) §Per-Exec Env Contract. Each Bash e
 Dispatcher's bash exec minimum (varies by script):
 
 - Always: `PROJECT`, `GROUP`, `GITLAB_TOKEN`.
-- `reconcile.sh`: also `MIN_IID`, `MAX_IID`.
+- `reconcile.sh`: either `MIN_IID` + `MAX_IID` (range mode), OR `IID_LIST` (list mode, comma-separated; takes precedence over `MIN_IID`/`MAX_IID` when non-empty). When `IID_LIST` is the empty string and `MIN_IID`/`MAX_IID` are unset, the script writes an empty evidence array and exits 0.
 - `allocate_attempt.sh`: also `IID`.
 - `load_ui_accounts.sh`: optional `BATCH_SIZE`.
 - `clone_or_pull.sh`: also `BRANCH`.
@@ -250,18 +251,27 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
    - If the lock cannot be acquired, return a one-line `"lock_held"` summary and exit 0.
 2. **Load + override campaign state.**
    - Read `${CAMPAIGN_STATE_FILE}`, or initialize using fresh-init values from `references/state_schema.md` if absent.
-   - Apply schema migration if the on-disk file uses the legacy scalar `active_issue_iid` / `active_issue_session` — see `references/state_schema.md` "Schema migration" for the rule. Default `max_concurrent_subagents` to `1` if missing. If `pending_subagents` is missing (legacy file), initialize to `{}`.
+   - Apply schema migration if the on-disk file uses the legacy scalar `active_issue_iid` / `active_issue_session` — see `references/state_schema.md` "Schema migration" for the rule. Default `max_concurrent_subagents` to `1` if missing. If `pending_subagents` is missing (legacy file), initialize to `{}`. If `issue_iids_whitelist` / `require_labels` / `require_labels_match` are missing (pre-2026-05-08.1 file), initialize to `[]` / `[]` / `"or"`.
    - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`, and (optionally) `stuck_after_minutes` with the trigger values. When the trigger omits `max_concurrent_subagents`, default it to `1` for the tick AND persist that default. When the trigger omits `stuck_after_minutes`, default to `90` and persist.
+   - **Optional filter override (added 2026-05-08.1).**
+     - `issue_iids` (trigger field, comma-separated integers). Parse, trim whitespace, drop empty tokens. If any token is non-integer, abort the tick with `"invalid_issue_iids"`. Persist the parsed list (possibly `[]`) into `issue_iids_whitelist`. The trigger's authoritative voice means: if the trigger omits the field OR sends an empty string, `issue_iids_whitelist` is overwritten to `[]` (whitelist disabled this tick) — stale values from disk are NOT carried forward.
+     - `require_labels` (trigger field, comma-separated label names). Parse, trim whitespace around commas, drop empty tokens. Persist into `require_labels`. Same trigger-authoritative semantics as above.
+     - `require_labels_match` (trigger field, `or` / `and`). If `require_labels` is empty, normalize to `"or"` (and the field is ignored downstream). If `require_labels` is non-empty: when the trigger omits the field, default to `"or"`; when the trigger supplies a value, accept exactly `"or"` or `"and"` (case-sensitive); any other value → abort the tick with `"invalid_require_labels_match"`. Persist.
    - Persist.
-3. **Stuck-pending eviction.** Before Phase 2, scan `pending_subagents`. For each entry where `(now - spawned_at) >= stuck_after_minutes`, synthesize a Phase 6 blocked reply (`block_reason="no callback received within stuck_after_minutes (<X> min)"`) and process it inline (write terminal state files, classify into blocked_iids, drain the pending entry). After eviction, `pending_subagents` may be empty (allowing a new batch this tick) or still non-empty (waiting on younger callbacks).
+3. **Stuck-pending eviction (NOT subject to the new whitelist / label filter).** Before Phase 2, scan `pending_subagents`. For each entry where `(now - spawned_at) >= stuck_after_minutes`, synthesize a Phase 6 blocked reply (`block_reason="no callback received within stuck_after_minutes (<X> min)"`) and process it inline (write terminal state files, classify into blocked_iids, drain the pending entry). The eviction iterates over `pending_subagents` keys regardless of whether those IIDs are in `issue_iids_whitelist` or satisfy `require_labels` — already-in-flight subagents reflect resources that must be cleaned up no matter what the new tick's filter says. After eviction, `pending_subagents` may be empty (allowing a new batch this tick) or still non-empty (waiting on younger callbacks).
+4. **Compute `effective_iid_universe` for this tick.** Let `range = [issue_min_iid, issue_max_iid]`. If `issue_iids_whitelist` is empty, `effective_iid_universe = range`. Otherwise, `effective_iid_universe = sorted(set(issue_iids_whitelist) ∩ set(range))` — IIDs outside the range are silently dropped (this is the "whitelist on top of range" semantic; if the operator wants IIDs outside the range, they must adjust the range). `effective_iid_universe` may be empty (then Phase 2 reconcile produces a degenerate evidence file with zero entries, and Phase 3 returns `"no_eligible_iids"`). The `require_labels` filter is NOT applied at this phase — it requires GitLab data and is applied in Phase 3 against the reconcile evidence file.
 
 ### Phase 2 — Reconcile (mandatory, always runs)
 
-1. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> MIN_IID=... MAX_IID=... bash scripts/reconcile.sh`.
-2. Apply disk cache correction per the Source-of-Truth Policy above.
+1. **Reconcile against the `effective_iid_universe` from Phase 1 step 4.** Two invocation shapes are supported:
+   - **Range mode** (whitelist empty — current default behavior): `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> MIN_IID=<min> MAX_IID=<max> bash scripts/reconcile.sh`.
+   - **List mode** (whitelist non-empty): `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> IID_LIST="<comma-separated effective_iid_universe>" bash scripts/reconcile.sh`. When `IID_LIST` is non-empty, the script ignores `MIN_IID` / `MAX_IID` and queries exactly the listed IIDs. If `effective_iid_universe == []`, pass `IID_LIST=""`; the script writes an evidence file containing an empty JSON array.
+2. Apply disk cache correction per the Source-of-Truth Policy above. **When in list mode, only IIDs present in the evidence file are corrected** — IIDs in `[issue_min_iid, issue_max_iid]` that are outside `effective_iid_universe` are intentionally NOT inspected this tick (their disk cache stays as-is; they will be reconciled on a future tick whose trigger does not narrow them out).
 3. Record the evidence file path into `campaign_state.json.last_reconcile_evidence`.
 
 If `reconcile.sh` fails or no evidence file is produced, abort the tick with `"reconcile_failed"`. Do NOT early-return as completed.
+
+**Source-of-Truth Policy interaction with whitelist.** The "early-return as completed" rule (every IID in range is `is_done_on_gitlab && !needs_continue`) requires evidence for **every IID in the configured range**, not just the whitelist. When `issue_iids_whitelist` is non-empty, the evidence file is by construction a partial view of the range, so the dispatcher MUST NOT set `campaign_status="completed"` on this tick. It returns `"running"` (or `"waiting_for_callbacks"` if a batch fires) and lets a future tick without the whitelist make the completion call.
 
 ### Phase 3 — Eligibility + tick-level prep
 
@@ -274,7 +284,13 @@ If `reconcile.sh` fails or no evidence file is produced, abort the tick with `"r
    - every IID in range has `is_done_on_gitlab == true` in it
    - every IID in range has `needs_continue == false` in it
    - `unfinished_iids` is empty and `campaign_status = completed`
-4. `quota_launched_this_tick = 0`; record `tick_start_time`.
+   - `issue_iids_whitelist` is empty (whitelist active = partial reconcile evidence; cannot make a "whole range completed" claim — see Phase 2's interaction note)
+4. **Apply `require_labels` filter to the eligibility candidates (added 2026-05-08.1).** When `require_labels` is non-empty, walk the reconcile evidence file and drop any IID whose live `labels` array does not satisfy the match:
+   - `require_labels_match == "or"`: keep if `labels ∩ require_labels` is non-empty (at least one match).
+   - `require_labels_match == "and"`: keep if `require_labels ⊆ labels` (every required label present).
+   - An IID with `missing == true` in the evidence file (glab GET failed) is dropped from this tick's candidates regardless — no live labels available.
+   The label filter is applied AFTER the standard "is this IID schedulable" gates (closed → skip; `is_done_on_gitlab && !needs_continue` → skip; blocked-cooldown → skip), not before — i.e., it only narrows the otherwise-eligible set, it does not promote terminal IIDs back into eligibility. When `require_labels` is empty, this step is a no-op.
+5. `quota_launched_this_tick = 0`; record `tick_start_time`.
 
 In the async-callback model **the scheduled wake-up forms exactly one batch** (no inner loop). Phase 4 runs once, Phase 5 fires the spawns, and the wake-up exits. Subsequent batches are formed by future scheduled wake-ups (after callbacks have drained the previous batch's `pending_subagents`).
 
@@ -402,7 +418,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-08.1",
   "campaign_status": "waiting_for_callbacks",
   "active_issue_iids": [14, 15],
   "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
@@ -412,6 +428,9 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   },
   "max_concurrent_subagents": 2,
   "ui_account_pool_size": 4,
+  "issue_iids_whitelist": [],
+  "require_labels": [],
+  "require_labels_match": "or",
   "unfinished_iids": [9, 10, 14, 15],
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 2,
@@ -420,11 +439,40 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 }
 ```
 
+**Scheduled wake-up with whitelist + label filter (added 2026-05-08.1):**
+
+```json
+{
+  "skill_version": "2026-05-08.1",
+  "campaign_status": "waiting_for_callbacks",
+  "active_issue_iids": [14],
+  "active_issue_sessions": ["issue-px_ifp_hulat-14"],
+  "pending_subagents": {
+    "14": {"attempt_number": 1, "run_id": "...", "child_session_key": "...", "ui_account_index": 0, "spawned_at": "2026-05-08T09:10:00Z"}
+  },
+  "max_concurrent_subagents": 2,
+  "ui_account_pool_size": 4,
+  "issue_iids_whitelist": [14, 17, 20],
+  "require_labels": ["acpx-auto", "priority::high"],
+  "require_labels_match": "and",
+  "effective_iid_universe": [14, 17, 20],
+  "label_filtered_in": [14],
+  "label_filtered_out": [17, 20],
+  "unfinished_iids": [14, 17, 20],
+  "next_new_issue_iid": 19,
+  "quota_launched_this_tick": 1,
+  "quota_target": 10,
+  "last_reconcile_evidence": "/data/openclaw_work/<project>/openclaw_log/dispatcher/reconcile-<ts>.json"
+}
+```
+
+`effective_iid_universe`, `label_filtered_in`, `label_filtered_out` are optional but recommended fields when filters are active — they let the operator see exactly which IIDs the filters narrowed down to. Omit them when both filters are inactive.
+
 **Callback wake-up — typical (one IID drained):**
 
 ```json
 {
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-08.1",
   "callback_status": "handled",
   "iid": 14,
   "attempt_number": 3,
@@ -441,13 +489,16 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 
 ```json
 {
-  "skill_version": "2026-05-06.7",
+  "skill_version": "2026-05-08.1",
   "campaign_status": "running",
   "active_issue_iids": [],
   "active_issue_sessions": [],
   "pending_subagents": {},
   "max_concurrent_subagents": 2,
   "ui_account_pool_size": 4,
+  "issue_iids_whitelist": [],
+  "require_labels": [],
+  "require_labels_match": "or",
   "unfinished_iids": [9, 10, 14],
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 0,
