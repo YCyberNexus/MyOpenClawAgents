@@ -95,11 +95,10 @@ Used by `scripts/create_mr.sh` to detect "MR already exists for this branch" bef
 glab mr list \
   --repo "${PROJECT_FULL}" \
   --source-branch "${WORK_BRANCH}" \
-  --state opened \
   --output json
 ```
 
-Returns a JSON array. Use `jq -r 'if length > 0 then .[0].web_url else "" end'` to extract the URL.
+Returns a JSON array. Do not add `--state opened`: runner-installed `glab 1.93.0` does not recognize that flag, and `glab mr list` already defaults to open MRs. `scripts/create_mr.sh` also filters the JSON with `jq '[.[] | select((.state // "opened") == "opened")]'` as a guard. Use `jq -r 'if length > 0 then .[0].web_url else "" end'` to extract the URL.
 
 ### G7 — Create a merge request (subagent)
 

@@ -47,15 +47,19 @@ case "${ISSUE_MODE}" in
     ;;
 esac
 
-# Look up any open MR currently pointing at this branch.
-EXISTING_JSON="$(
+list_open_mrs_for_work_branch() {
+  # glab 1.93.0 does not recognize `glab mr list --state opened`.
+  # The default list scope is open MRs; keep a jq filter as a guard in case a
+  # future glab changes the default or includes closed MRs in JSON output.
   glab mr list \
     --repo "${PROJECT_FULL}" \
     --source-branch "${WORK_BRANCH}" \
-    --state opened \
-    --output json 2>/dev/null \
-  || echo '[]'
-)"
+    --output json |
+    jq '[.[] | select((.state // "opened") == "opened")]'
+}
+
+# Look up any open MR currently pointing at this branch.
+EXISTING_JSON="$(list_open_mrs_for_work_branch 2>/dev/null || echo '[]')"
 EXISTING_URL="$(echo "${EXISTING_JSON}" | jq -r 'if length > 0 then .[0].web_url else "" end')"
 EXISTING_COUNT="$(echo "${EXISTING_JSON}" | jq -r 'length')"
 
@@ -114,11 +118,7 @@ glab mr create \
   --yes >/dev/null
 
 OPEN_JSON="$(
-  glab mr list \
-    --repo "${PROJECT_FULL}" \
-    --source-branch "${WORK_BRANCH}" \
-    --state opened \
-    --output json
+  list_open_mrs_for_work_branch
 )"
 OPEN_COUNT="$(echo "${OPEN_JSON}" | jq -r 'length')"
 if [ "${OPEN_COUNT}" -ne 1 ]; then
