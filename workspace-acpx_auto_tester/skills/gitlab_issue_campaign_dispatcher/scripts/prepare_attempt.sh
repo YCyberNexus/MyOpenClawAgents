@@ -31,7 +31,7 @@
 #     checkout already contains that too.
 #   - It does NOT write `.git/info/exclude`. There is nothing local-only
 #     in the worktree any more — every directory the agent touches is
-#     either a tracked repo path or under the gitignored `ifp_result/`
+#     either a tracked repo path or under the gitignored `ifp-result/`
 #     subtree (the latter only used by the dispatcher OUTSIDE this worktree).
 #
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):

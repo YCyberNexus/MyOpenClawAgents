@@ -1,21 +1,21 @@
 #!/usr/bin/env bash
 # clone_or_pull.sh — ensure ${REPO_PATH} exists as a clone of the project
 # repo, with up-to-date refs, and create the agent's runtime subtree at
-# ${REPO_PATH}/ifp_result/.
+# ${REPO_PATH}/ifp-result/.
 #
 # The agent's state lives INSIDE the cloned repo at
-# `${REPO_PATH}/ifp_result/`. Before the first clone, that subtree does
+# `${REPO_PATH}/ifp-result/`. Before the first clone, that subtree does
 # not exist — the bootstrap order is:
 #
 #   1. Ensure /data exists.
 #   2. If repo is missing, acquire a tmpfs lock and `git clone`. We can't
 #      use the in-repo lock yet because the repo doesn't exist.
 #   3. After clone, create the dispatcher subtree (_dispatcher/log,
-#      _dispatcher/locks) and the issue subtree root (ifp_result/).
+#      _dispatcher/locks) and the issue subtree root (ifp-result/).
 #   4. Acquire the in-repo flock and run `git fetch` + `git worktree prune`.
 #
 # The MAIN repo's working tree is not used for issue work — each issue
-# gets a separate git worktree at `${REPO_PATH}/ifp_result/issue-<iid>/worktree/`
+# gets a separate git worktree at `${REPO_PATH}/ifp-result/issue-<iid>/worktree/`
 # that is replaced for every attempt. The main worktree is only needed
 # because `git worktree add` requires an existing repo to host links
 # from.
@@ -57,7 +57,7 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
   if [ ! -d "${REPO_PATH}/.git" ]; then  # re-check after acquiring lock
     if [ -d "${REPO_PATH}" ]; then
       # Partial state from a prior interrupted bootstrap (e.g. env_paths.sh
-      # mkdir'd the ifp_result subtree before we got here on a previous
+      # mkdir'd the ifp-result subtree before we got here on a previous
       # tick that crashed before clone). git clone refuses a non-empty
       # target, so wipe and retry. Safe because no .git/ means no real
       # work is in this directory.

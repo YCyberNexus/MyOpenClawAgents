@@ -176,8 +176,8 @@ EOF
 - Worktree (your cwd):        ${WORKTREE_DIR}
 - Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
-- Knowledge base:             ${WORKTREE_DIR}/ifp_data (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
-- Agent runtime workspace:    ${WORKTREE_DIR}/ifp_result (gitignored on ${BRANCH}/${DEV_BRANCH}; do NOT touch)
+- Knowledge base:             ${WORKTREE_DIR}/ifp-data (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
+- Agent runtime workspace:    ${WORKTREE_DIR}/ifp-result (gitignored on ${BRANCH}/${DEV_BRANCH}; do NOT touch)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
@@ -196,8 +196,8 @@ both runs to log each other out of the system under test.
 - Work only on this issue.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`hulat-spec-issue${ISSUE_IID}/\` at the worktree root. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the worktree.
-- \`hulat/\`, \`.claude/\`, and \`ifp_data/\` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
-- Do NOT touch the \`ifp_result/\` subtree. It is the agent runtime's workspace (gitignored); writing into it has no effect and pollutes the audit trail.
+- \`hulat/\`, \`.claude/\`, and \`ifp-data/\` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
+- Do NOT touch the \`ifp-result/\` subtree. It is the agent runtime's workspace (gitignored); writing into it has no effect and pollutes the audit trail.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
 EOF

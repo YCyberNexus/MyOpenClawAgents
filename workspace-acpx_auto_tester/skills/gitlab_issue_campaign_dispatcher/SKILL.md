@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 
 # GitLab Issue Campaign Dispatcher Skill
 
-All agent runtime files live INSIDE the cloned repo at `${REPO_PATH}/ifp_result/...` — campaign state, dispatcher logs, locks, per-issue worktrees + state + logs + summaries. The test team commits `.claude/`, `hulat/`, and `ifp_data/` to master+dev, so worktree checkouts already contain those: `prepare_attempt.sh` does NOT create a `hulat` symlink and does NOT copy `.claude`. The `hulat_dir` trigger field is no longer used (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`); old triggers that still pass it are silently accepted. See [`references/paths.md`](references/paths.md) for the complete layout.
+All agent runtime files live INSIDE the cloned repo at `${REPO_PATH}/ifp-result/...` — campaign state, dispatcher logs, locks, per-issue worktrees + state + logs + summaries. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to master+dev, so worktree checkouts already contain those: `prepare_attempt.sh` does NOT create a `hulat` symlink and does NOT copy `.claude`. The `hulat_dir` trigger field is no longer used (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`); old triggers that still pass it are silently accepted. See [`references/paths.md`](references/paths.md) for the complete layout.
 
 ## Single-skill, async-callback model (read first)
 
@@ -49,7 +49,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/load_ui_accounts.sh` — Phase 4: read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
 - `scripts/clone_or_pull.sh` — Phase 3: keep the main repo's refs current. Run once per tick before the batch loop.
 - `scripts/ensure_labels.sh` — Phase 3: make sure the seven workflow labels (`todo doing pr done blocked failed continue`) exist. Run once per tick after auth.
-- `scripts/prepare_attempt.sh` — Phase 4: replace the issue's git worktree (a linked worktree at `${REPO_PATH}/ifp_result/issue-<iid>/worktree/`), return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`. Does NOT symlink hulat or copy `.claude` — both directories are committed in the test team's master+dev branches, so the worktree checkout already contains them.
+- `scripts/prepare_attempt.sh` — Phase 4: replace the issue's git worktree (a linked worktree at `${REPO_PATH}/ifp-result/issue-<iid>/worktree/`), return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`. Does NOT symlink hulat or copy `.claude` — both directories are committed in the test team's master+dev branches, so the worktree checkout already contains them.
 - `scripts/build_prompt.sh` — Phase 4: build the Claude Code prompt at `${LOG_DIR}/prompt.txt` (UI account injected; continue-mode summaries + reviewer comments included).
 - `scripts/set_issue_label.sh` — Phase 4 (dispatcher: doing transitions) + subagent (Step 6 + 7b: done/pr).
 - `scripts/stage_and_guard.sh`, `scripts/commit_and_push.sh`, `scripts/post_push_verify.sh`, `scripts/upload_attempt_artifacts.sh`, `scripts/create_mr.sh`, `scripts/summarize_attempt.sh` — invoked by the subagent (by absolute path) per [`references/executor_prompt.md`](references/executor_prompt.md) `<instructions>`.
@@ -432,7 +432,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 2,
   "quota_target": 10,
-  "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-<ts>.json"
+  "last_reconcile_evidence": "/data/<project>/ifp-result/_dispatcher/log/reconcile-<ts>.json"
 }
 ```
 
@@ -458,7 +458,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 1,
   "quota_target": 10,
-  "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-<ts>.json"
+  "last_reconcile_evidence": "/data/<project>/ifp-result/_dispatcher/log/reconcile-<ts>.json"
 }
 ```
 
@@ -497,7 +497,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "next_new_issue_iid": 19,
   "quota_launched_this_tick": 0,
   "quota_target": 10,
-  "last_reconcile_evidence": "/data/<project>/ifp_result/_dispatcher/log/reconcile-<ts>.json",
+  "last_reconcile_evidence": "/data/<project>/ifp-result/_dispatcher/log/reconcile-<ts>.json",
   "tick_outcome_per_iid": {
     "14": "done",
     "15": "blocked: subagent reply missing block_reason"

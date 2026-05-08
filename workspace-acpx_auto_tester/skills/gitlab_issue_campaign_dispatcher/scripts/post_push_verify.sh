@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # post_push_verify.sh — confirm the remote ${WORK_BRANCH} contains only
-# this issue's content, with no foreign `ifp_result/issue-<other-iid>/`
-# subtrees and no `ifp_result/_dispatcher/` subtree. If verification
+# this issue's content, with no foreign `ifp-result/issue-<other-iid>/`
+# subtrees and no `ifp-result/_dispatcher/` subtree. If verification
 # fails the executor must mark the issue blocked and skip MR creation.
 #
-# The leak surface is `ifp_result/` only — `hulat/`, `.claude/`, and
-# `ifp_data/` are valid repo content committed by the test team and are
+# The leak surface is `ifp-result/` only — `hulat/`, `.claude/`, and
+# `ifp-data/` are valid repo content committed by the test team and are
 # not rejected.
 #
 # Required env vars:
@@ -13,12 +13,12 @@
 #                   the main repo's refs)
 #   WORK_BRANCH     "issue/<iid>-auto-fix"
 #   ISSUE_IID       current issue IID (used to whitelist its own
-#                   ifp_result subdir; everything else under ifp_result/
+#                   ifp-result subdir; everything else under ifp-result/
 #                   is treated as foreign)
 #
 # Exit codes:
 #   0   remote is clean; safe to create / keep MR
-#   4   remote contains foreign ifp_result subtree(s); caller must mark
+#   4   remote contains foreign ifp-result subtree(s); caller must mark
 #       issue blocked
 
 set -euo pipefail
@@ -34,8 +34,8 @@ git fetch origin "${WORK_BRANCH}"
 
 POLLUTED="$(
   git ls-tree -r --name-only "origin/${WORK_BRANCH}" \
-    | grep -E '^ifp_result/(_dispatcher/|issue-[0-9]+/)' \
-    | grep -vE "^ifp_result/issue-${ISSUE_IID}/" \
+    | grep -E '^ifp-result/(_dispatcher/|issue-[0-9]+/)' \
+    | grep -vE "^ifp-result/issue-${ISSUE_IID}/" \
     || true
 )"
 

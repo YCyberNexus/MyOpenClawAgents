@@ -2,9 +2,9 @@
 # env_paths.sh — single bootstrap for every script in this skill.
 #
 # The cloned project repo IS the agent's entire workspace. The test team
-# maintains `.claude/`, `hulat/`, and `ifp_data/` inside the repo
+# maintains `.claude/`, `hulat/`, and `ifp-data/` inside the repo
 # (committed to master + dev). The agent's own state and per-issue
-# subtrees live under `${REPO_PATH}/ifp_result/`, whose contents are
+# subtrees live under `${REPO_PATH}/ifp-result/`, whose contents are
 # gitignored on master+dev so `git status` in the main worktree stays
 # clean.
 #
@@ -13,8 +13,8 @@
 #   ${REPO_PATH}/                        ← /data/${PROJECT}, the cloned repo
 #       .claude/                         (in master+dev, test-team owned)
 #       hulat/                           (in master+dev, test-team owned)
-#       ifp_data/                        (in master+dev, test-team owned)
-#       ifp_result/                      (gitignored content; agent state + worktrees)
+#       ifp-data/                        (in master+dev, test-team owned)
+#       ifp-result/                      (gitignored content; agent state + worktrees)
 #           _dispatcher/                 ← campaign-level state + logs + locks
 #               campaign_state.json
 #               campaign.lock
@@ -73,7 +73,7 @@ set -euo pipefail
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export REPO_PATH="/data/${PROJECT}"
 export HULAT_DIR="${REPO_PATH}/hulat"
-export RESULT_ROOT="${REPO_PATH}/ifp_result"
+export RESULT_ROOT="${REPO_PATH}/ifp-result"
 export WORK_ROOT="${RESULT_ROOT}/_dispatcher"
 export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"

@@ -23,7 +23,7 @@ The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal
 | 1 Parse        | bootstrap, flock, load + override `campaign_state.json` from trigger; **stuck-pending eviction** (synthesizes Phase 6 blocked replies for any pending entries past `stuck_after_minutes`) |
 | 2 Reconcile    | mandatory `reconcile.sh` against GitLab; correct disk cache from evidence file (no evidence = tick failed) |
 | 3 Eligibility  | if `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (`ensure_labels.sh`, `clone_or_pull.sh`); form bounded batch under `min(max_concurrent_subagents, hourly_issue_quota, eligible_iids)` |
-| 4 Per-IID Prep | for each batch member: `allocate_attempt.sh` → load UI account from `<workspace>/config/ui_accounts.env` → `prepare_attempt.sh` (replaces worktree at `${REPO_PATH}/ifp_result/issue-<iid>/worktree/`; the test team's `hulat/`, `.claude/`, `ifp_data/` are already in the branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
+| 4 Per-IID Prep | for each batch member: `allocate_attempt.sh` → load UI account from `<workspace>/config/ui_accounts.env` → `prepare_attempt.sh` (replaces worktree at `${REPO_PATH}/ifp-result/issue-<iid>/worktree/`; the test team's `hulat/`, `.claude/`, `ifp-data/` are already in the branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
 | 5 Async Spawn  | single parallel **anonymous** `sessions_spawn` tool-call block (NO session name passed — runtime returns `runId` + `childSessionKey` like `agent:acpx_auto_tester:subagent:<uuid>`). Records each launch ack into `pending_subagents[iid]`. Returns `waiting_for_callbacks` and exits. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures). |
 
 ### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
@@ -63,7 +63,7 @@ Scheduled wake-up batch shape: pick `min(max_concurrent_subagents, remaining lau
 
 ## Source of truth
 
-GitLab live labels are the source of truth for per-issue workflow state. Disk state (`ifp_result/_dispatcher/campaign_state.json`, `ifp_result/issue-<iid>/state.json`, `ifp_result/issue-<iid>/attempt_state.json`) is only the dispatcher's progress cache. Every tick MUST run `scripts/reconcile.sh` and write a `reconcile-<ts>.json` evidence file before any "already done / skip / early-return" decision. **No evidence file = the tick is failed.**
+GitLab live labels are the source of truth for per-issue workflow state. Disk state (`ifp-result/_dispatcher/campaign_state.json`, `ifp-result/issue-<iid>/state.json`, `ifp-result/issue-<iid>/attempt_state.json`) is only the dispatcher's progress cache. Every tick MUST run `scripts/reconcile.sh` and write a `reconcile-<ts>.json` evidence file before any "already done / skip / early-return" decision. **No evidence file = the tick is failed.**
 
 Key reconciled signals: `is_closed_on_gitlab` (closed = hard terminal skip, never schedule), `has_done_pr` (both `done` and `pr` labels present = completed), `needs_continue` (opened + has `continue` = reviewer wants resume; wins over cached done state), `user_reopened` (opened + missing `done`+`pr` + no `failed`/`blocked`/`continue`).
 
@@ -75,8 +75,8 @@ Disk cache is corrected to match GitLab — never the other way around.
 /data/${PROJECT}/                              ← ${REPO_PATH}; the cloned project repo
     .claude/                                   ← in master+dev (test-team owned, READ-ONLY)
     hulat/                                     ← in master+dev (was the legacy ${HULAT_DIR}; READ-ONLY)
-    ifp_data/                                  ← in master+dev (knowledge base, READ-ONLY)
-    ifp_result/                                ← agent runtime workspace; gitignored on master+dev
+    ifp-data/                                  ← in master+dev (knowledge base, READ-ONLY)
+    ifp-result/                                ← agent runtime workspace; gitignored on master+dev
         _dispatcher/
             campaign_state.json                ← dispatcher cache (NOT source of truth)
             campaign.lock                      ← flock target
@@ -88,14 +88,14 @@ Disk cache is corrected to match GitLab — never the other way around.
             worktree/                          ← acpx cwd; linked git worktree, replaced every attempt
                 .claude/                       ← (already in branch checkout; READ-ONLY)
                 hulat/                         ← (already in branch checkout; READ-ONLY)
-                ifp_data/                      ← (already in branch checkout; READ-ONLY)
+                ifp-data/                      ← (already in branch checkout; READ-ONLY)
                 hulat-spec-issue<iid>/         ← Claude Code's spec output (committed; lands in MR)
                 ...other repo files...
             log/attempt-NNN/                   ← preserved logs per attempt
             summary.md
 ```
 
-`ifp_result/*` MUST be gitignored on master+dev so the main worktree's `git status` stays clean and a `git add -A` cannot sweep agent artifacts into a commit. `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) are leak guards — they reject staged paths matching `^ifp_result/_dispatcher/` (always) and `^ifp_result/issue-<other-iid>/` (foreign-issue subtree). They no longer reject `hulat/` or `.claude/` (those are valid repo content owned by the test team). If either guard trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
+`ifp-result/*` MUST be gitignored on master+dev so the main worktree's `git status` stays clean and a `git add -A` cannot sweep agent artifacts into a commit. `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) are leak guards — they reject staged paths matching `^ifp-result/_dispatcher/` (always) and `^ifp-result/issue-<other-iid>/` (foreign-issue subtree). They no longer reject `hulat/` or `.claude/` (those are valid repo content owned by the test team). If either guard trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
 
 ## Two-branch model
 
