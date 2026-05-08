@@ -160,7 +160,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | Field                   | Type            | Notes                                                                  |
 | ----------------------- | --------------- | ---------------------------------------------------------------------- |
 | `iid`                   | int             | GitLab issue IID this session is bound to.                             |
-| `session`               | string          | Logical session name `issue-<project>-<iid>` (used for `active_issue_sessions` bookkeeping and human-readable logging). The runtime session key MAY be anonymous on channels that do not support thread-bound named sessions; this field stores the logical name regardless. |
+| `session`               | string          | Logical issue label `issue-<project>-<iid>` (used for `active_issue_sessions` bookkeeping and human-readable logging). The runtime subagent key is anonymous; this field stores the logical label only. |
 | `status`                | string (enum)   | See "Possible status values" below. This is the latest attempt's terminal status (or `in_progress` mid-flight). |
 | `mode`                  | string (enum)   | `"fresh"` or `"continue"` for the latest attempt.                      |
 | `attempts_total`        | int             | Number of attempts ever launched for this IID.                         |

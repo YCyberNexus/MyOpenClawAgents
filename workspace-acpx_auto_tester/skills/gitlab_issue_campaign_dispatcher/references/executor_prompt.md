@@ -1,6 +1,6 @@
 # Executor Prompt Template (Subagent Task)
 
-The dispatcher renders this template into a single string and ships it as the entire `sessions_spawn` payload to the dedicated issue session `issue-${PROJECT}-${ISSUE_IID}`. The subagent **does NOT load any SKILL, SOUL.md, or AGENTS.md**. Everything it needs is in the rendered prompt below.
+The dispatcher extracts the fenced "Rendered Prompt" block below, renders it into a single string, and ships that string as the entire anonymous `sessions_spawn` payload for the issue. The subagent **does NOT load any SKILL, SOUL.md, or AGENTS.md**. Everything it needs is in the rendered prompt below.
 
 The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
 
@@ -8,7 +8,7 @@ The dispatcher has already completed all preparation. The subagent runs the tech
 
 ## Template Variables
 
-The dispatcher substitutes these before passing the rendered string to `sessions_spawn`. Every `{NAME}` placeholder below MUST be filled in; nothing in the rendered prompt should still look like a template.
+The dispatcher substitutes these before passing the rendered string to `sessions_spawn`. Every uppercase brace placeholder in the rendered block MUST be filled in; nothing in the rendered prompt should still look like a template.
 
 | Placeholder              | Source                                                                                  |
 | ------------------------ | --------------------------------------------------------------------------------------- |
@@ -22,7 +22,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ISSUE_TITLE_QUOTED}`   | shell-safe single-quoted form of the title (for env-var passing on script invocations)  |
 | `{ISSUE_URL}`            | `{GITLAB_API_PROTOCOL}://{GITLAB_HOST}/{GROUP}/{PROJECT}/-/issues/{ISSUE_IID}`           |
 | `{ISSUE_LABELS}`         | comma-joined labels from the live issue (snapshot)                                      |
-| `{ISSUE_BODY}`           | issue body (already in `${LOG_DIR}/prompt.txt`; for the `<issue>` block only — keep ≤ 4 KB) |
+| `{ISSUE_BODY}`           | issue body (already in `{LOG_DIR}/prompt.txt`; for the `<issue>` block only — keep ≤ 4 KB) |
 | `{ISSUE_MODE}`           | `fresh` or `continue`; what `prepare_attempt.sh` actually used (`mode_actual`)          |
 | `{BRANCH}`               | trigger (integration / target branch)                                                   |
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
@@ -39,7 +39,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 
 `{GITLAB_TOKEN}` is sensitive. The rendered prompt is the only place it appears in subagent context; do not log or echo it.
 
-`{ISSUE_BODY}` is for human context only. The dispatcher has already written the full `prompt.txt` to `${LOG_DIR}/prompt.txt`; the subagent feeds *that file* (not this snippet) to acpx. Truncate the snippet here at ~4 KB if necessary; do not inflate spawn payloads.
+`{ISSUE_BODY}` is for human context only. The dispatcher has already written the full `prompt.txt` to `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* (not this snippet) to acpx. Truncate the snippet here at ~4 KB if necessary; do not inflate spawn payloads.
 
 ---
 
@@ -81,12 +81,12 @@ Title:  {ISSUE_TITLE}
 URL:    {ISSUE_URL}
 Labels: {ISSUE_LABELS}
 Mode:   {ISSUE_MODE}
-Body (first ~4KB; full prompt is at ${LOG_DIR}/prompt.txt):
+Body (first ~4KB; full prompt is at {LOG_DIR}/prompt.txt):
 {ISSUE_BODY}
 </issue>
 
 <env_contract>
-Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix the minimum env vars on every script invocation. The minimum for any {SCRIPTS}/*.sh exec is:
+Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix the minimum env vars on every script invocation. The minimum for any {SCRIPTS_DIR}/*.sh exec is:
 
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
   ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER}
@@ -118,7 +118,7 @@ Step 1 — EXECUTE acpx (one-shot, synchronous)
 Step 2 — STAGE + leak guard
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/stage_and_guard.sh
+    bash {SCRIPTS_DIR}/stage_and_guard.sh
   CAPTURE: stage_status (one of: STAGED_OK, NO_CHANGES).
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
   exit 0, stdout "NO_CHANGES" → set ATTEMPT_STATUS=no_changes; jump to Step 8 (summarize), then assemble REPLY.
@@ -129,7 +129,7 @@ Step 3 — COMMIT + force-push (Strategy A)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-    bash {SCRIPTS}/commit_and_push.sh
+    bash {SCRIPTS_DIR}/commit_and_push.sh
   CAPTURE: commit_sha (printed by the script).
   Non-zero exit → FAIL status=blocked block_reason="git push failed: <last stderr line>".
   Do NOT retry with --force outside this script. Do NOT rebase + re-push. Do NOT push to a different branch name.
@@ -137,14 +137,14 @@ Step 3 — COMMIT + force-push (Strategy A)
 Step 4 — POST-PUSH verify
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/post_push_verify.sh
+    bash {SCRIPTS_DIR}/post_push_verify.sh
   exit 0 → continue.
   exit 4 → FAIL status=blocked block_reason="remote branch polluted with agent artifacts".
 
 Step 5 — WIKI evidence (must land before `done`)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/upload_attempt_artifacts.sh
+    bash {SCRIPTS_DIR}/upload_attempt_artifacts.sh
   CAPTURE: wiki_url (printed by the script — first wiki page URL; empty on failure).
   Non-zero exit → FAIL status=blocked block_reason="attempt wiki artifact publication failed: <last stderr line>".
   Do NOT skip Wiki and proceed to `done`.
@@ -152,10 +152,10 @@ Step 5 — WIKI evidence (must land before `done`)
 Step 6 — TRANSITION doing → done
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/set_issue_label.sh remove doing
+    bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/set_issue_label.sh add done
+    bash {SCRIPTS_DIR}/set_issue_label.sh add done
   Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
 
 Step 7 — CREATE / rotate the MR
@@ -163,7 +163,7 @@ Step 7 — CREATE / rotate the MR
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
-    bash {SCRIPTS}/create_mr.sh
+    bash {SCRIPTS_DIR}/create_mr.sh
   CAPTURE: merge_request_url (printed), mr_action (printed; one of: created, reused, rotated).
   Non-zero exit → FAIL status=blocked block_reason="MR creation failed: <last stderr line>".
 
@@ -176,7 +176,7 @@ Step 7 — CREATE / rotate the MR
 Step 7b — ADD `pr` label
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/set_issue_label.sh add pr
+    bash {SCRIPTS_DIR}/set_issue_label.sh add pr
   Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
 
   After this step the live issue should carry both `done` and `pr`. Set ATTEMPT_STATUS=done.
@@ -187,7 +187,7 @@ Step 8 — SUMMARIZE
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed}> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    bash {SCRIPTS}/summarize_attempt.sh
+    bash {SCRIPTS_DIR}/summarize_attempt.sh
   CAPTURE: summary_posted (true if exit 0; false otherwise).
   Run this on EVERY terminal path — done, no_changes, blocked, failed.
 
@@ -205,13 +205,13 @@ Step 9 — REPLY
   - mr_action = none when no MR step ran (no_changes / blocked before Step 7).
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
-  This single JSON line is the ONLY artifact the dispatcher reads from your reply. Do NOT additionally write the terminal state files yourself; the dispatcher (Phase 6) writes ${ISSUE_STATE_FILE} and ${ATTEMPT_STATE_FILE} from this JSON.
+  This single JSON line is the ONLY artifact the dispatcher reads from your reply. Do NOT additionally write the terminal issue state or attempt state files yourself; the dispatcher (Phase 6) writes those files from this JSON.
 </instructions>
 
 <constraints>
-- No-fallback. If any {SCRIPTS}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead.
+- No-fallback. If any {SCRIPTS_DIR}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead.
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
-- Strategy A force-push lives inside {SCRIPTS}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
+- Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
 - Hard timeout: 60 minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded 60-minute soft cap".
 - Never paste full diffs, full claude_result.txt, or long issue bodies into chat.
@@ -233,7 +233,7 @@ Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → f
 ## Rendering Notes (for the Dispatcher)
 
 - The placeholder `{ISSUE_TITLE_QUOTED}` is the shell-quoted form of the issue title (single quotes around it; embedded `'` replaced with `'\''`). The plain `{ISSUE_TITLE}` is for the `<issue>` block only — do not inject it raw into a shell command.
-- `{ISSUE_BODY}` is for the `<issue>` block only. Truncate to ≤ 4 KB. The full body is already on disk at `${LOG_DIR}/prompt.txt`; the subagent feeds *that file* to acpx.
+- `{ISSUE_BODY}` is for the `<issue>` block only. Truncate to ≤ 4 KB. The full body is already on disk at `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* to acpx.
 - The dispatcher MUST verify all placeholders have been substituted before calling `sessions_spawn`. A literal `{` followed by an uppercase identifier in the rendered string is a missed substitution; abort the IID with `block_reason="prompt template render incomplete: <placeholder>"`.
 - The dispatcher passes the rendered string as the entire spawn payload. There are no additional env-var injections at the OpenClaw layer — the subagent reads everything from this prompt.
 - `runTimeoutSeconds` for the spawn: 3600. `cleanup`: `keep`. If the trigger supplies `--model` (reserved; not currently a trigger field), forward it.

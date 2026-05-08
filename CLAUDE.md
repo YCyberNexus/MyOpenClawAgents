@@ -59,7 +59,7 @@ Spawn is **anonymous + async-callback**: `sessions_spawn` is called WITHOUT any 
 
 Because the system under test logs out an account when it logs in twice, the dispatcher MUST hand each concurrent subagent a distinct UI account from the pool pinned at `workspace-acpx_auto_tester/config/ui_accounts.env`. Pool-too-small is a tick-level failure — never share an account, never shrink the batch. The UI account is injected into the **Claude Code prompt** (`${LOG_DIR}/prompt.txt`) by `build_prompt.sh`; the subagent never sees the credentials directly.
 
-Bounded-batch loop (per tick): pick `min(max_concurrent_subagents, remaining_quota, eligible_iids)` IIDs → run all per-IID prep → spawn the surviving batch in **one parallel tool-call block** → wait for all terminal replies → re-read each per-issue state → form the next batch. No mid-batch top-up. Time budget is checked between batches, not within a batch.
+Scheduled wake-up batch shape: pick `min(max_concurrent_subagents, remaining launch quota, eligible_iids)` IIDs → run all per-IID prep → spawn the surviving batch in **one anonymous parallel tool-call block** → record launch acknowledgements → return `waiting_for_callbacks`. Terminal replies arrive later through `RUN_CHILD_COMPLETION_CALLBACK`; the next scheduled wake-up forms another batch only after `pending_subagents` is empty or evicted. No mid-batch top-up.
 
 ## Source of truth
 
