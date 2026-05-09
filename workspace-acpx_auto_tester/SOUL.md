@@ -150,6 +150,8 @@ Current state paths — agent runtime files live INSIDE the cloned repo:
 
 Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout. Operators migrating from older deployments can either move the files into `ifp-result/` or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
 
+`ifp-result` and `ifp-data` are default basenames. Projects that ship `result_basename` / `data_basename` in the trigger get a different runtime-root / knowledge-dir name (e.g. `pts-result` / `pts-data`); the overrides are persisted in `campaign_state.json` with carry-forward semantics. `env_paths.sh` exposes them as `RESULT_BASENAME` / `DATA_BASENAME`, and the orchestrator forwards both on every script exec. See `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md` and `references/paths.md`.
+
 ## Scheduling Model
 
 This workspace uses **quota-carryover scheduling with blocked skip-and-retry**.

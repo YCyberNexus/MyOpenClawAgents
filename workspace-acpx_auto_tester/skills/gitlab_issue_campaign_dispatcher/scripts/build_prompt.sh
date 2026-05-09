@@ -177,8 +177,8 @@ EOF
 - Output directory:           ${OUTPUT_DIR} (primary result area for this issue)
 - Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
-- Knowledge base:             ${WORKTREE_DIR}/ifp-data (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
-- Agent runtime workspace:    ${WORKTREE_DIR}/ifp-result (runtime state/logs live here; touch ONLY the output directory above)
+- Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
+- Agent runtime workspace:    ${WORKTREE_DIR}/${RESULT_BASENAME} (runtime state/logs live here; touch ONLY the output directory above)
 - Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline branch:     ${DEV_BRANCH}  (where this checkout was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
@@ -197,8 +197,8 @@ both runs to log each other out of the system under test.
 - Work only on this issue.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the repo.
-- Treat \`hulat/\`, \`.claude/\`, and \`ifp-data/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- \`ifp-result/_dispatcher/\` and other issues' \`ifp-result/issue-*/\` subtrees are dispatcher runtime state. There is no script-level lock-out, but the dispatcher updates these files concurrently with your run, so writing into them risks racing the dispatcher and corrupting the campaign. Touch them only if a fix genuinely demands it; otherwise keep your edits under \`${OUTPUT_DIR}\`.
+- Treat \`hulat/\`, \`.claude/\`, and \`${DATA_BASENAME}/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
+- \`${RESULT_BASENAME}/_dispatcher/\` and other issues' \`${RESULT_BASENAME}/issue-*/\` subtrees are dispatcher runtime state. There is no script-level lock-out, but the dispatcher updates these files concurrently with your run, so writing into them risks racing the dispatcher and corrupting the campaign. Touch them only if a fix genuinely demands it; otherwise keep your edits under \`${OUTPUT_DIR}\`.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
 EOF

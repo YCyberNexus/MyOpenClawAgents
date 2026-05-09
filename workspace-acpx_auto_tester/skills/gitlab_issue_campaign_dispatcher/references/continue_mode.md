@@ -64,20 +64,22 @@ Description:
 
 # Working environment
 - Repository cwd:             <repo-root>
-- Output directory:           <repo-root>/ifp-result/issue-<iid>/hulat-spec-issue<iid>
+- Output directory:           <repo-root>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
 - Hulat materials:            <repo-root>/hulat   (committed in <branch>/<dev-branch>, available in checkout)
 - Claude runtime config:      <repo-root>/.claude (committed in <branch>/<dev-branch>, available in checkout)
-- Knowledge base:             <repo-root>/ifp-data (committed in <branch>/<dev-branch>, available in checkout)
-- Agent runtime workspace:    <repo-root>/ifp-result (touch ONLY the output directory above)
+- Knowledge base:             <repo-root>/<DATA_BASENAME> (committed in <branch>/<dev-branch>, available in checkout)
+- Agent runtime workspace:    <repo-root>/<RESULT_BASENAME> (touch ONLY the output directory above)
 - Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/<work-branch>
 - Integration branch:         <branch>
+
+`<RESULT_BASENAME>` and `<DATA_BASENAME>` default to `ifp-result` / `ifp-data` and are overridden per-project by the `result_basename` / `data_basename` trigger fields (see `trigger_command.md`); `build_prompt.sh` substitutes the live values when rendering this template.
 
 # Rules
 - Work only on this issue.
 - Place spec / report / artifact output under the output directory only.
 - Modify content under <repo-root> only. Do NOT write outside the repo.
-- Treat `hulat/`, `.claude/`, and `ifp-data/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- `ifp-result/_dispatcher/` and other issues' subtrees are dispatcher runtime state — no script blocks edits, but the dispatcher writes them concurrently, so touching them risks corrupting the campaign. Keep changes under your output directory unless a fix genuinely requires more.
+- Treat `hulat/`, `.claude/`, and `<DATA_BASENAME>/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
+- `<RESULT_BASENAME>/_dispatcher/` and other issues' subtrees are dispatcher runtime state — no script blocks edits, but the dispatcher writes them concurrently, so touching them risks corrupting the campaign. Keep changes under your output directory unless a fix genuinely requires more.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```

@@ -94,6 +94,8 @@ Disk cache is corrected to match GitLab — never the other way around.
 
 `clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed), so per-project runtime-root names are handled by the agent without requiring the test team to maintain a `.gitignore` rule on master + dev. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`), bypassing both `.gitignore` and `info/exclude`. There is no path-based reject in either `stage_and_guard.sh` or `post_push_verify.sh`: any file Claude produced or that ships with the base branch is allowed through to the issue MR.
 
+The directory names `ifp-result` and `ifp-data` are defaults. They can be overridden per project by the trigger fields `result_basename` / `data_basename` (carry-forward semantics — once set, persisted in `campaign_state.json` until the trigger replaces them). When overridden, every layer adapts automatically: `env_paths.sh` derives `RESULT_ROOT` / `DATA_DIR` from the basenames, `clone_or_pull.sh` writes the right name into `.git/info/exclude`, and `build_prompt.sh` substitutes the values into the executor prompt. Path examples in this document keep the `ifp-*` defaults for readability; see `references/trigger_command.md` for the override contract.
+
 ## Two-branch model
 
 - `branch` (typically `master`) — **integration / target** branch. MRs are opened against it. Each issue's spec output lives under `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` so MRs into master never collide.

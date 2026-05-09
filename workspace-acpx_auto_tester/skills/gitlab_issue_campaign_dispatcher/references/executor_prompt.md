@@ -31,10 +31,12 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{WORKTREE_DIR}`         | `/data/{PROJECT}` (repo root; acpx cwd)                                                  |
 | `{OUTPUT_DIR}`           | `{ISSUE_ROOT}/hulat-spec-issue{ISSUE_IID}`                                               |
 | `{LOG_DIR}`              | `{ISSUE_ROOT}/log/attempt-{ATTEMPT_NUMBER_PADDED}`                                      |
-| `{ISSUE_ROOT}`           | `/data/{PROJECT}/ifp-result/issue-{ISSUE_IID}`                                          |
+| `{ISSUE_ROOT}`           | `/data/{PROJECT}/{RESULT_BASENAME}/issue-{ISSUE_IID}`                                    |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
+| `{RESULT_BASENAME}`      | optional trigger field `result_basename`; defaults to `ifp-result` (basename of agent runtime root) |
+| `{DATA_BASENAME}`        | optional trigger field `data_basename`; defaults to `ifp-data` (basename of test-team knowledge dir) |
 
 `{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
 
@@ -70,11 +72,13 @@ BRANCH={BRANCH}                             # integration / target branch (MR op
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher for fresh-mode checkout)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
-WORKTREE_DIR={WORKTREE_DIR}                 # repo root / acpx cwd; .claude/, hulat/, ifp-data/ are already in the checkout
+WORKTREE_DIR={WORKTREE_DIR}                 # repo root / acpx cwd; .claude/, hulat/, {DATA_BASENAME}/ are already in the checkout
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
+RESULT_BASENAME={RESULT_BASENAME}           # basename of agent runtime root in the repo (default: ifp-result)
+DATA_BASENAME={DATA_BASENAME}               # basename of test-team knowledge dir in the repo (default: ifp-data)
 </config>
 
 <issue>
@@ -91,9 +95,10 @@ Body (first ~4KB; full prompt is at {LOG_DIR}/prompt.txt):
 Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix the minimum env vars on every script invocation. The minimum for any {SCRIPTS_DIR}/*.sh exec is:
 
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-  ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER}
+  ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+  RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME}
 
-Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
+`RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
 </env_contract>
 
 <instructions>
@@ -101,7 +106,7 @@ Follow steps 0-9 in order. Capture the variables marked CAPTURE — they go into
 
 Step 0 — SETUP
   cd {WORKTREE_DIR}
-  Confirm the repo root exists and the test-team-committed `hulat/`, `.claude/`, and `ifp-data/` directories are present at the repo root. Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="repo root missing or required directories absent".
+  Confirm the repo root exists and the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at the repo root. Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="repo root missing or required directories absent".
 
 Step 1 — EXECUTE acpx (one-shot, long-running)
   acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # clone_or_pull.sh — ensure ${REPO_PATH} exists as a clone of the project
 # repo, with up-to-date refs, and create the agent's runtime subtree at
-# ${REPO_PATH}/${RESULT_ROOT_NAME}/ (currently `ifp-result/`).
+# ${REPO_PATH}/${RESULT_BASENAME}/ (default `ifp-result/`; per-project
+# overridable via the `result_basename` trigger field).
 #
 # The agent's state lives INSIDE the cloned repo at `${RESULT_ROOT}`.
 # Before the first clone, that subtree does not exist — the bootstrap

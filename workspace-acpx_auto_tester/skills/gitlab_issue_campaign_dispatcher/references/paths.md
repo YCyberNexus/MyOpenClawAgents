@@ -8,6 +8,8 @@ Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State
 
 The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. Claude Code runs from the main repo root `${REPO_PATH}`. Runtime state/logs and each issue's committed output directory live under `${REPO_PATH}/ifp-result/`; the dispatcher's `.git/info/exclude` keeps untracked runtime files out of `git add -A`, and `stage_and_guard.sh` force-adds only the current issue's output directory. There is no path-based reject — anything that ends up in the staged/MR diff is allowed through.
 
+**Per-project basename overrides.** The directory names `ifp-result` and `ifp-data` are defaults; they can be replaced per-project via the `result_basename` / `data_basename` trigger fields (carry-forward into `campaign_state.json`; see `trigger_command.md`). When set, `env_paths.sh` exports `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}` and `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`, and every downstream rule below — including `.git/info/exclude`, the executor prompt, and continue-mode template — picks up the override automatically. The path examples in this document use the defaults for readability.
+
 ```
 /data/${PROJECT}/                                        ← ${REPO_PATH}; the cloned project repo
     .claude/                                             (in master+dev, test-team owned)
@@ -57,7 +59,10 @@ Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), an
 | ----------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- |
 | `REPO_PATH`             | `/data/${PROJECT}`                                   | The cloned project repo and acpx cwd.                           |
 | `HULAT_DIR`             | `${REPO_PATH}/hulat`                                 | Derived (NOT a trigger input). Test-team-committed.             |
-| `RESULT_ROOT`           | `${REPO_PATH}/ifp-result`                            | Agent runtime workspace + issue output root.                    |
+| `RESULT_BASENAME`       | `ifp-result` (default) or trigger override           | Basename of the agent runtime root. Override via trigger field `result_basename`. |
+| `DATA_BASENAME`         | `ifp-data` (default) or trigger override             | Basename of the test-team knowledge dir. Override via trigger field `data_basename`. |
+| `RESULT_ROOT`           | `${REPO_PATH}/${RESULT_BASENAME}`                    | Agent runtime workspace + issue output root.                    |
+| `DATA_DIR`              | `${REPO_PATH}/${DATA_BASENAME}`                      | Test-team-committed knowledge directory (agent never writes here, but the prompt names this path). |
 | `WORK_ROOT`             | `${RESULT_ROOT}/_dispatcher`                         | Campaign-level agent state.                                     |
 | `STATE_DIR`             | `${WORK_ROOT}`                                       | Campaign state file lives directly here (no further nesting).   |
 | `CAMPAIGN_STATE_FILE`   | `${STATE_DIR}/campaign_state.json`                   | Campaign progress cache.                                         |

@@ -2,19 +2,26 @@
 # env_paths.sh — single bootstrap for every script in this skill.
 #
 # The cloned project repo IS the agent's entire workspace. The test team
-# maintains `.claude/`, `hulat/`, and `ifp-data/` inside the repo
-# (committed to master + dev). The agent's own state and per-issue
-# subtrees live under `${REPO_PATH}/ifp-result/`. Runtime state/log files
-# stay uncommitted there; each issue's committed output is force-added
-# from its own `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` directory.
+# maintains `.claude/`, `hulat/`, and the knowledge-base directory
+# (default `ifp-data/`) inside the repo (committed to master + dev). The
+# agent's own state and per-issue subtrees live under the runtime root
+# (default `${REPO_PATH}/ifp-result/`). Runtime state/log files stay
+# uncommitted there; each issue's committed output is force-added from
+# its own `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/` directory.
 #
-# Disk layout produced by this file:
+# The basenames of the runtime root and knowledge-base directory are
+# overridable per project via optional trigger fields `result_basename`
+# and `data_basename` (forwarded as RESULT_BASENAME / DATA_BASENAME env
+# vars). Defaults are `ifp-result` / `ifp-data` for projects that never
+# ship the new fields.
+#
+# Disk layout produced by this file (with default basenames):
 #
 #   ${REPO_PATH}/                        ← /data/${PROJECT}, the cloned repo
 #       .claude/                         (in master+dev, test-team owned)
 #       hulat/                           (in master+dev, test-team owned)
-#       ifp-data/                        (in master+dev, test-team owned)
-#       ifp-result/                      (agent state/logs + committed per-issue output)
+#       ${DATA_BASENAME}/                (in master+dev, test-team owned; default ifp-data)
+#       ${RESULT_BASENAME}/              (agent state/logs + committed per-issue output; default ifp-result)
 #           _dispatcher/                 ← campaign-level state + logs + locks
 #               campaign_state.json
 #               campaign.lock
@@ -30,9 +37,10 @@
 # Path derivation is layered:
 #
 #   - dispatcher level (always derived):  PROJECT, GROUP, GITLAB_TOKEN
-#       → REPO_PATH, HULAT_DIR, RESULT_ROOT, WORK_ROOT, STATE_DIR,
-#         CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR, ISSUES_ROOT,
-#         LOCK_FILE
+#                                         (+ optional RESULT_BASENAME, DATA_BASENAME)
+#       → REPO_PATH, HULAT_DIR, DATA_DIR, RESULT_ROOT, WORK_ROOT,
+#         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
+#         ISSUES_ROOT, LOCK_FILE
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
@@ -54,6 +62,11 @@
 #   ISSUE_IID        integer issue IID                              (per-issue)
 #   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
 #
+# Optional input env vars (forwarded by the orchestrator from trigger
+# fields of the same names; defaults preserve legacy ifp-* layout):
+#   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
+#   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
+#
 # Note: HULAT_DIR is NOT a trigger input. It is derived as
 # `${REPO_PATH}/hulat` because the test team committed the hulat
 # materials into the repo. Triggers that still pass `hulat_dir=...` are
@@ -70,10 +83,20 @@ set -euo pipefail
 
 : "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
 
+# Per-project basenames. Optional trigger fields `result_basename` /
+# `data_basename` let the orchestrator override the runtime-root and
+# knowledge-base directory names without code changes (see
+# references/trigger_command.md). Defaults preserve legacy behavior for
+# projects that never ship the new fields.
+: "${RESULT_BASENAME:=ifp-result}"
+: "${DATA_BASENAME:=ifp-data}"
+export RESULT_BASENAME DATA_BASENAME
+
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export REPO_PATH="/data/${PROJECT}"
 export HULAT_DIR="${REPO_PATH}/hulat"
-export RESULT_ROOT="${REPO_PATH}/ifp-result"
+export DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
+export RESULT_ROOT="${REPO_PATH}/${RESULT_BASENAME}"
 export WORK_ROOT="${RESULT_ROOT}/_dispatcher"
 export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
@@ -120,7 +143,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
 
   # ATTEMPT_DIR is a compatibility alias for ISSUE_ROOT — there is no
   # per-attempt subtree. Claude runs at the repo root, while this issue's
-  # committed output is force-added from OUTPUT_DIR under ifp-result/.
+  # committed output is force-added from OUTPUT_DIR under ${RESULT_BASENAME}/.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${REPO_PATH}"
   export OUTPUT_DIR="${ISSUE_ROOT}/hulat-spec-issue${ISSUE_IID}"

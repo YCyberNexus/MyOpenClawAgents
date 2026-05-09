@@ -4,8 +4,10 @@
 # All path-based protection has been removed: any file Claude wrote (or
 # any file already tracked on the base branch) goes through. The script
 # still force-adds the current issue's ${OUTPUT_DIR} so it survives the
-# `ifp-result/` line in `.git/info/exclude`, and still distinguishes
-# STAGED_OK from NO_CHANGES so the caller can short-circuit empty diffs.
+# `${RESULT_BASENAME}/` line in `.git/info/exclude` (default `ifp-result/`,
+# overridable per project via the `result_basename` trigger field), and
+# still distinguishes STAGED_OK from NO_CHANGES so the caller can short-
+# circuit empty diffs.
 #
 # Required env vars:
 #   WORKTREE_DIR    repo root cwd (set by env_paths.sh)
