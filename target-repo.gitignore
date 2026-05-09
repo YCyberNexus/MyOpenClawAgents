@@ -1,0 +1,17 @@
+# ─── acpx_auto_tester agent runtime ─────────────────────────────
+# All agent runtime files (campaign state, locks, dispatcher logs,
+# per-issue state.json / attempt_state.json / log/ / summary.md) live
+# under ifp-result/ and must NEVER be committed.
+#
+# The ONLY exception is each issue's output directory
+# `ifp-result/issue-<iid>/hulat-spec-issue<iid>/`, which the agent
+# explicitly force-adds via `git add -f` in stage_and_guard.sh —
+# that bypasses this gitignore for the single allowed path.
+ifp-result/
+
+# ─── Common local noise ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
