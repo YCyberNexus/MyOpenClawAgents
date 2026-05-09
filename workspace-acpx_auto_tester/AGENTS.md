@@ -40,9 +40,9 @@ The runtime delivers ONE callback per subagent termination. Each callback wakes 
 The subagent (one anonymous run per IID per spawn) receives the rendered fixed-format prompt and runs only the technical workflow (Steps 0–9 in the prompt's `<instructions>` block):
 
 - Step 1: one-shot `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt` from inside `${WORKTREE_DIR}`
-- Step 2: `stage_and_guard.sh` (leak guard for staged repo-root changes)
+- Step 2: `stage_and_guard.sh` (stage repo-root changes, force-add the issue's `${OUTPUT_DIR}`, emit STAGED_OK / NO_CHANGES — no path-based reject)
 - Step 3: `commit_and_push.sh` (Strategy A — force-push the per-attempt local branch to the single fixed `${WORK_BRANCH}`)
-- Step 4: `post_push_verify.sh` (leak guard for the remote branch)
+- Step 4: `post_push_verify.sh` (post-push fetch sanity — no path-based reject)
 - Step 5: `upload_attempt_artifacts.sh` (publish prompt/result/optional report.html to project Wiki and link from issue)
 - Step 6: `set_issue_label.sh` to transition `doing → done`
 - Step 7: `create_mr.sh` (mode-dependent rotation: fresh = reuse single MR; continue = close prior open MRs and create a fresh one referencing them)

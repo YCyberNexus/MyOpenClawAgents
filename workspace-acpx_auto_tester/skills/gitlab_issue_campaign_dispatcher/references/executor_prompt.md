@@ -71,7 +71,7 @@ DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 WORKTREE_DIR={WORKTREE_DIR}                 # repo root / acpx cwd; .claude/, hulat/, ifp-data/ are already in the checkout
-OUTPUT_DIR={OUTPUT_DIR}                     # only allowed result directory under ifp-result/ for this issue
+OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
@@ -123,7 +123,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - do not substitute another LLM CLI (`openai` / `gemini` / `ollama` / etc.)
   - if acpx fails, preserve all of {LOG_DIR}; do NOT delete partial logs
 
-Step 2 — STAGE + leak guard
+Step 2 — STAGE
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -131,7 +131,7 @@ Step 2 — STAGE + leak guard
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
   exit 0, stdout "NO_CHANGES" → FAIL status=blocked block_reason="Claude produced no staged changes".
                                 Do NOT push. Do NOT create an MR.
-  exit 3                      → FAIL status=blocked block_reason="protected runtime paths leaked into staged changes".
+  any other non-zero exit     → FAIL status=blocked block_reason="stage step failed: <last stderr line>".
 
 Step 3 — COMMIT + force-push (Strategy A)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
@@ -147,8 +147,7 @@ Step 4 — POST-PUSH verify
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   exit 0 → continue.
-  exit 4 → FAIL status=blocked block_reason="remote branch polluted with protected runtime paths".
-  any other non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
+  any non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
 
 Step 5 — WIKI evidence (must land before `done`)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \

@@ -77,7 +77,7 @@ Description:
 - Place spec / report / artifact output under the output directory only.
 - Modify content under <repo-root> only. Do NOT write outside the repo.
 - Treat `hulat/`, `.claude/`, and `ifp-data/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- Do NOT touch `ifp-result/_dispatcher/`, state files, summaries, logs, or other issue directories.
+- `ifp-result/_dispatcher/` and other issues' subtrees are dispatcher runtime state — no script blocks edits, but the dispatcher writes them concurrently, so touching them risks corrupting the campaign. Keep changes under your output directory unless a fix genuinely requires more.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```

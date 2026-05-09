@@ -198,7 +198,7 @@ both runs to log each other out of the system under test.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the repo.
 - Treat \`hulat/\`, \`.claude/\`, and \`ifp-data/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- Do NOT touch \`ifp-result/_dispatcher/\`, \`ifp-result/issue-*/state.json\`, \`ifp-result/issue-*/attempt_state.json\`, \`ifp-result/issue-*/summary.md\`, or \`ifp-result/issue-*/log/\`. Under \`ifp-result/\`, ONLY \`${OUTPUT_DIR}\` is allowed.
+- \`ifp-result/_dispatcher/\` and other issues' \`ifp-result/issue-*/\` subtrees are dispatcher runtime state. There is no script-level lock-out, but the dispatcher updates these files concurrently with your run, so writing into them risks racing the dispatcher and corrupting the campaign. Touch them only if a fix genuinely demands it; otherwise keep your edits under \`${OUTPUT_DIR}\`.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
 EOF

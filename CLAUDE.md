@@ -39,9 +39,9 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 **Subagent (anonymous runtime session; the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–9 from the prompt's `<instructions>` block:
 
 1. SETUP: `cd ${WORKTREE_DIR}` and one-shot `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt`.
-2. `stage_and_guard.sh` (repo-root staged-path leak guard).
+2. `stage_and_guard.sh` (stage repo-root changes; force-add the issue's `${OUTPUT_DIR}`; emit STAGED_OK / NO_CHANGES — no path-based reject).
 3. `commit_and_push.sh` (Strategy A force-push to single fixed `${WORK_BRANCH}`).
-4. `post_push_verify.sh` (remote-branch leak guard).
+4. `post_push_verify.sh` (post-push fetch sanity — no path-based reject).
 5. `upload_attempt_artifacts.sh` (publish prompt/result/optional report.html to project Wiki, link from issue).
 6. `set_issue_label.sh` `doing → done`.
 7. `create_mr.sh` (mode-dependent: fresh = reuse single MR; continue = close prior open MRs and create a fresh one).
@@ -92,7 +92,7 @@ Disk cache is corrected to match GitLab — never the other way around.
             summary.md
 ```
 
-`clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed), so per-project runtime-root names are handled by the agent without requiring the test team to maintain a `.gitignore` rule on master + dev. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`), bypassing both `.gitignore` and `info/exclude`. `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) reject protected runtime paths: `ifp-result/_dispatcher/` and any non-output path under `ifp-result/issue-*`. If either guard trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
+`clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed), so per-project runtime-root names are handled by the agent without requiring the test team to maintain a `.gitignore` rule on master + dev. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`), bypassing both `.gitignore` and `info/exclude`. There is no path-based reject in either `stage_and_guard.sh` or `post_push_verify.sh`: any file Claude produced or that ships with the base branch is allowed through to the issue MR.
 
 ## Two-branch model
 

@@ -171,7 +171,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | ------------- | ---------------------------------------------------------------------------- | --------- |
 | `pending`     | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
 | `in_progress` | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
-| `blocked`     | Retryable failure (auth, runtime mismatch, leak guard tripped, dispatcher prep failed for this IID, etc.). | no |
+| `blocked`     | Retryable failure (auth, runtime mismatch, dispatcher prep failed for this IID, post-push fetch failed, etc.). | no |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
 | `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes |
 | `no_changes`  | Legacy compact-reply value for `stage_and_guard.sh` `NO_CHANGES`; new prompts normalize this to `blocked` because no MR / `pr` label can be produced. | no |
