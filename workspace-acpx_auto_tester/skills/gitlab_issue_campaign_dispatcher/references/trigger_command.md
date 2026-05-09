@@ -51,7 +51,8 @@ Older triggers may also include `gitlab_address=...` and/or `hulat_dir=...`. Bot
 | Field                       | Notes                                                                                                                                              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gitlab_address`            | Pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; it is never derived from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. New triggers should omit this field. |
-| `max_concurrent_subagents`  | Compatibility field. Must be omitted or set to `1`. Any value other than `1` is a tick-level configuration error because all attempts share the main repo checkout at `/data/${PROJECT}`. |
+| `repo_path`                 | Optional absolute path for the cloned project repo. Forwarded as `REPO_PATH=...` to every script; `env_paths.sh` defaults it to `/data/${project}` when omitted. Must point at a concrete repo directory, not a broad parent such as `/`, `/data`, or `/tmp`; values with `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]` are rejected with `"invalid_repo_path"`. Non-default deployments MUST include the same value on every scheduled trigger and callback because the dispatcher needs it before it can locate `${CAMPAIGN_STATE_FILE}`. |
+| `max_concurrent_subagents`  | Compatibility field. Must be omitted or set to `1`. Any value other than `1` is a tick-level configuration error because all attempts share the main repo checkout at `${REPO_PATH}`. |
 | `stuck_after_minutes`       | Integer ≥ 5, defaults to `210`. A pending subagent that has not received a `RUN_CHILD_COMPLETION_CALLBACK` within this many minutes of `spawned_at` is evicted at the top of the next scheduled wake-up (synthesized as a Phase 6 blocked reply with `block_reason="no callback received within stuck_after_minutes"`). Bumping this number is appropriate when subagent runs are routinely close to `runTimeoutSeconds=10800` (180 minutes). Set lower (e.g. 30) only if you are confident the runtime delivers callbacks within seconds of subagent termination. |
 | `issue_iids`                | Comma-separated integers (e.g. `14,17,20`). Optional whitelist applied **on top of** `[issue_min_iid, issue_max_iid]`. When non-empty, the effective IID universe for this tick = `[issue_min_iid, issue_max_iid] ∩ issue_iids`. IIDs in `issue_iids` that fall outside the range are silently dropped. Whitespace around commas is tolerated. When omitted or empty, no whitelist is applied (the full range is used — current default behavior). **Stuck-pending eviction is NOT subject to this filter** — already in-flight subagents are always evicted by the `stuck_after_minutes` rule regardless of whether their IID is still in the whitelist. |
 | `require_labels`            | Comma-separated GitLab label names (e.g. `acpx-auto,priority::high`). Optional inclusion filter on live GitLab labels (read from the Phase 2 reconcile evidence file). When non-empty, only IIDs whose live labels satisfy the match (combined with `require_labels_match` below) are considered for batching in Phase 3. Match is case-sensitive (GitLab labels are case-sensitive). Whitespace around commas is tolerated; whitespace inside a label name is preserved. When omitted or empty, no label filter is applied — current default behavior. **Does not affect stuck-pending eviction.** |
@@ -80,6 +81,8 @@ This applies in particular to: `issue_min_iid`, `issue_max_iid`, `hourly_issue_q
 
 `gitlab_address` (when supplied) is NOT applied as an override — it is used only for the cross-check above. The pin in `<workspace>/config/gitlab.env` is the single source of truth for host / protocol.
 
+`repo_path` is a bootstrap path input, not a carry-forward value. When the trigger supplies it, validate that it is an absolute repo directory path (reject `/`, broad shared parents such as `/data` / `/tmp`, dot segments, whitespace, and shell-unsafe characters outside `[A-Za-z0-9_./-]`; abort with `"invalid_repo_path"` on violation) and forward it as `REPO_PATH=...` to every script. When the trigger omits it, the tick uses the legacy default `/data/${project}`. Because `repo_path` determines where `${CAMPAIGN_STATE_FILE}` lives, a non-default deployment must keep passing it on every scheduled trigger and callback.
+
 `stuck_after_minutes` (when supplied) overrides the persisted value the same way `max_concurrent_subagents` does.
 
 `issue_iids`, `require_labels`, and `require_labels_match` (when supplied) override the persisted values the same way the other scalars do — each tick takes whatever the trigger says (or "unset / empty" when the trigger omits the field). The dispatcher persists the post-override values into `campaign_state.json.issue_iids_whitelist` / `.require_labels` / `.require_labels_match` for audit, but does NOT carry a stale whitelist forward when the next trigger drops the field. Stuck-pending eviction is performed BEFORE the new whitelist takes effect, so an in-flight subagent whose IID is removed from the whitelist on this tick still gets its eviction processed (it is NOT silently abandoned).
@@ -99,6 +102,7 @@ RUN_CHILD_COMPLETION_CALLBACK
 project=<project>
 group=<group>
 gitlab_token=<token>
+repo_path=<same non-default repo_path, when used by the scheduled trigger>
 iid=<iid>
 attempt_number=<attempt_number>
 run_id=<runId from the launch ack>
@@ -125,6 +129,7 @@ worker_result_json=<the entire compact JSON line the subagent emitted>
 | `run_id`              | Must equal `pending_subagents[iid].run_id`. Mismatch → log a warning but still process by `iid`+`attempt_number` (the runtime may have allocated multiple runIds during retries — `iid`+`attempt_number` is the canonical identity). |
 | `child_session_key`   | For audit / debugging only. Not load-bearing.                                                  |
 | `worker_status`       | The `status` field from `worker_result_json`, hoisted for routing convenience. The orchestrator MUST still parse `worker_result_json` for the canonical value. |
+| `repo_path`           | Required when the scheduled trigger used a non-default clone path. Forward as `REPO_PATH=...` before sourcing `env_paths.sh`; when omitted, the callback path uses `/data/${project}`. |
 
 ### What the orchestrator does NOT need on the callback path
 

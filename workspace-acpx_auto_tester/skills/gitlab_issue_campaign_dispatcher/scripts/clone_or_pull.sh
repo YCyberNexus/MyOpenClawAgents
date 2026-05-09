@@ -8,7 +8,7 @@
 # Before the first clone, that subtree does not exist — the bootstrap
 # order is:
 #
-#   1. Ensure /data exists.
+#   1. Ensure the parent directory of ${REPO_PATH} exists.
 #   2. If repo is missing, acquire a tmpfs lock and `git clone`. We can't
 #      use the in-repo lock yet because the repo doesn't exist.
 #   3. After clone, create the dispatcher subtree (_dispatcher/log,
@@ -29,7 +29,7 @@
 # checkout onto a per-attempt local branch before acpx runs.
 #
 # Required env vars:
-#   REPO_PATH               from env_paths.sh
+#   REPO_PATH               from env_paths.sh (default /data/${PROJECT}, or trigger override)
 #   BRANCH                  integration / target branch (typically "master")
 #   GROUP                   from trigger
 #   PROJECT                 from trigger

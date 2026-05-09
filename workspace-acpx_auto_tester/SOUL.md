@@ -110,7 +110,7 @@ OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports do NOT survive
 
 The exact minimum env list is layered (see SKILL "Per-Exec Env Contract"):
 
-- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`).
+- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PATH` when the trigger uses non-default `repo_path`; some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`).
 - Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 The universal rule: every Bash exec MUST export the minimum vars at the front of the command line. Never rely on exports from a previous Bash tool call. The rendered subagent prompt repeats these env vars at every step so the subagent gets it right by following the prompt verbatim.
@@ -142,15 +142,15 @@ All dispatcher paths are derived by sourcing:
 
 - `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`
 
-Current state paths — agent runtime files live INSIDE the cloned repo:
-- `/data/<project>/ifp-result/_dispatcher/campaign_state.json`
-- `/data/<project>/ifp-result/_dispatcher/log/`
-- `/data/<project>/ifp-result/issue-<iid>/state.json`
-- `/data/<project>/ifp-result/issue-<iid>/attempt_state.json`
+Current state paths — agent runtime files live INSIDE the cloned repo. The repo defaults to `/data/<project>` unless the trigger supplies `repo_path`:
+- `${REPO_PATH}/ifp-result/_dispatcher/campaign_state.json`
+- `${REPO_PATH}/ifp-result/_dispatcher/log/`
+- `${REPO_PATH}/ifp-result/issue-<iid>/state.json`
+- `${REPO_PATH}/ifp-result/issue-<iid>/attempt_state.json`
 
 Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout. Operators migrating from older deployments can either move the files into `ifp-result/` or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
 
-`ifp-result` and `ifp-data` are default basenames. Projects that ship `result_basename` / `data_basename` in the trigger get a different runtime-root / knowledge-dir name (e.g. `pts-result` / `pts-data`); the overrides are persisted in `campaign_state.json` with carry-forward semantics. `env_paths.sh` exposes them as `RESULT_BASENAME` / `DATA_BASENAME`, and the orchestrator forwards both on every script exec. See `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md` and `references/paths.md`.
+`repo_path` is the optional trigger field for the clone target; if omitted, `env_paths.sh` uses `/data/${PROJECT}`. Non-default deployments must pass it on every scheduled trigger and callback. `ifp-result` and `ifp-data` are default basenames. Projects that ship `result_basename` / `data_basename` in the trigger get a different runtime-root / knowledge-dir name (e.g. `pts-result` / `pts-data`); the overrides are persisted in `campaign_state.json` with carry-forward semantics. `env_paths.sh` exposes them as `RESULT_BASENAME` / `DATA_BASENAME`, and the orchestrator forwards both on every script exec. See `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md` and `references/paths.md`.
 
 ## Scheduling Model
 
@@ -203,7 +203,7 @@ Rules:
 - The **logical** name is `issue-<project>-<iid>` (used only for `active_issue_sessions` bookkeeping and human-readable logging).
 - The **runtime** session name is always anonymous (`agent:<name>:subagent:<uuid>` or runtime equivalent). The orchestrator MUST NOT pass `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter.
 - Per-IID identity in replies is carried by the `iid` field of the compact JSON, NOT by the runtime session name. The orchestrator MUST match replies to dispatched IIDs by `iid` (Phase 6 validation).
-- Claude Code is invoked per attempt as a one-shot `acpx --auth-policy skip claude exec -f` run inside the main repo checkout (`/data/${PROJECT}`). Persistent / named acpx sessions (`-s`) are forbidden because they do not terminate cleanly under the non-interactive scheduler — cross-attempt context is reinjected via the prompt instead.
+- Claude Code is invoked per attempt as a one-shot `acpx --auth-policy skip claude exec -f` run inside the main repo checkout (`${REPO_PATH}`, default `/data/${PROJECT}`). Persistent / named acpx sessions (`-s`) are forbidden because they do not terminate cleanly under the non-interactive scheduler — cross-attempt context is reinjected via the prompt instead.
 - The orchestrator must never reuse one subagent run for another issue (the rendered prompt embeds the IID, so reuse is structurally impossible).
 
 ## Trigger Commands

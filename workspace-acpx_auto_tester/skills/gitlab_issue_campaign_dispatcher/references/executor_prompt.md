@@ -28,10 +28,10 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
-| `{WORKTREE_DIR}`         | `/data/{PROJECT}` (repo root; acpx cwd)                                                  |
+| `{WORKTREE_DIR}`         | `${REPO_PATH}` (repo root; acpx cwd; defaults to `/data/{PROJECT}`)                      |
 | `{OUTPUT_DIR}`           | `{ISSUE_ROOT}/hulat-spec-issue{ISSUE_IID}`                                               |
 | `{LOG_DIR}`              | `{ISSUE_ROOT}/log/attempt-{ATTEMPT_NUMBER_PADDED}`                                      |
-| `{ISSUE_ROOT}`           | `/data/{PROJECT}/{RESULT_BASENAME}/issue-{ISSUE_IID}`                                    |
+| `{ISSUE_ROOT}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}`                                     |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
@@ -72,6 +72,7 @@ BRANCH={BRANCH}                             # integration / target branch (MR op
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher for fresh-mode checkout)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
+REPO_PATH={WORKTREE_DIR}
 WORKTREE_DIR={WORKTREE_DIR}                 # repo root / acpx cwd; .claude/, hulat/, {DATA_BASENAME}/ are already in the checkout
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
@@ -96,9 +97,10 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
 
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
   ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+  REPO_PATH={WORKTREE_DIR} \
   RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME}
 
-`RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
+`REPO_PATH` carries the repo clone target selected by the trigger (default `/data/{PROJECT}`). `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
 </env_contract>
 
 <instructions>
@@ -131,6 +133,8 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
 Step 2 — STAGE
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
   CAPTURE: stage_status (one of: STAGED_OK, NO_CHANGES).
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
@@ -141,6 +145,8 @@ Step 2 — STAGE
 Step 3 — COMMIT + force-push (Strategy A)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     bash {SCRIPTS_DIR}/commit_and_push.sh
   CAPTURE: commit_sha (printed by the script).
@@ -150,6 +156,8 @@ Step 3 — COMMIT + force-push (Strategy A)
 Step 4 — POST-PUSH verify
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   exit 0 → continue.
   any non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
@@ -157,6 +165,8 @@ Step 4 — POST-PUSH verify
 Step 5 — WIKI evidence (must land before `done`)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/upload_attempt_artifacts.sh
   CAPTURE: wiki_url (printed by the script — first wiki page URL; empty on failure).
   Non-zero exit → FAIL status=blocked block_reason="attempt wiki artifact publication failed: <last stderr line>".
@@ -165,9 +175,13 @@ Step 5 — WIKI evidence (must land before `done`)
 Step 6 — TRANSITION doing → done
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add done
   Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
   CAPTURE labels_removed includes "doing"; labels_added includes "done".
@@ -175,6 +189,8 @@ Step 6 — TRANSITION doing → done
 Step 7 — CREATE / rotate the MR
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
     bash {SCRIPTS_DIR}/create_mr.sh
@@ -190,6 +206,8 @@ Step 7 — CREATE / rotate the MR
 Step 7b — ADD `pr` label
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add pr
   Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
 
@@ -201,6 +219,8 @@ Step 8 — SUMMARIZE
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed}> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={WORKTREE_DIR} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
   CAPTURE: summary_posted (true if exit 0; false otherwise).
   Run this on EVERY terminal path — done, no_changes, blocked, failed.

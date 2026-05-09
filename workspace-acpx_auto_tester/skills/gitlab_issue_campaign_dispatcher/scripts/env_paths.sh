@@ -9,11 +9,12 @@
 # uncommitted there; each issue's committed output is force-added from
 # its own `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/` directory.
 #
-# The basenames of the runtime root and knowledge-base directory are
-# overridable per project via optional trigger fields `result_basename`
-# and `data_basename` (forwarded as RESULT_BASENAME / DATA_BASENAME env
-# vars). Defaults are `ifp-result` / `ifp-data` for projects that never
-# ship the new fields.
+# The repo clone target and the basenames of the runtime root and
+# knowledge-base directory are overridable per project via optional trigger
+# fields `repo_path`, `result_basename`, and `data_basename` (forwarded as
+# REPO_PATH / RESULT_BASENAME / DATA_BASENAME env vars). Defaults preserve
+# legacy behavior: `/data/${PROJECT}`, `ifp-result`, and `ifp-data` for
+# projects that never ship the new fields.
 #
 # Disk layout produced by this file (with default basenames):
 #
@@ -37,7 +38,8 @@
 # Path derivation is layered:
 #
 #   - dispatcher level (always derived):  PROJECT, GROUP, GITLAB_TOKEN
-#                                         (+ optional RESULT_BASENAME, DATA_BASENAME)
+#                                         (+ optional REPO_PATH,
+#                                            RESULT_BASENAME, DATA_BASENAME)
 #       → REPO_PATH, HULAT_DIR, DATA_DIR, RESULT_ROOT, WORK_ROOT,
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
 #         ISSUES_ROOT, LOCK_FILE
@@ -64,6 +66,7 @@
 #
 # Optional input env vars (forwarded by the orchestrator from trigger
 # fields of the same names; defaults preserve legacy ifp-* layout):
+#   REPO_PATH        absolute clone target path (default: /data/${PROJECT})
 #   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
 #   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
 #
@@ -83,6 +86,47 @@ set -euo pipefail
 
 : "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
 
+# Optional trigger field `repo_path` lets the orchestrator place the clone
+# outside `/data/${PROJECT}` without code changes. Defaults preserve legacy
+# behavior for projects that never ship the field.
+: "${REPO_PATH:=/data/${PROJECT}}"
+
+# Normalize one or more trailing slashes, except for root itself.
+while [ "${REPO_PATH}" != "/" ] && [ "${REPO_PATH%/}" != "${REPO_PATH}" ]; do
+  REPO_PATH="${REPO_PATH%/}"
+done
+
+# Guard against unsafe clone targets. clone_or_pull.sh may remove a
+# non-git directory at REPO_PATH when recovering from an interrupted first
+# clone, so REPO_PATH must be a concrete absolute repo directory, not a
+# filesystem root or broad shared parent.
+case "${REPO_PATH}" in
+  /*) ;;
+  *)
+    echo "env_paths.sh: invalid_repo_path: REPO_PATH must be absolute" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PATH}" in
+  "/"|"/data"|"/tmp"|"/var"|"/home"|"/Users"|"/private"|"/private/tmp"|"/private/var")
+    echo "env_paths.sh: invalid_repo_path: REPO_PATH must point at a repo directory, not ${REPO_PATH}" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PATH}" in
+  *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+    echo "env_paths.sh: invalid_repo_path: REPO_PATH must not contain dot segments or whitespace" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PATH}" in
+  *[!A-Za-z0-9_./-]*)
+    echo "env_paths.sh: invalid_repo_path: REPO_PATH contains unsupported characters" >&2
+    exit 2
+    ;;
+esac
+export REPO_PATH
+
 # Per-project basenames. Optional trigger fields `result_basename` /
 # `data_basename` let the orchestrator override the runtime-root and
 # knowledge-base directory names without code changes (see
@@ -93,7 +137,6 @@ set -euo pipefail
 export RESULT_BASENAME DATA_BASENAME
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
-export REPO_PATH="/data/${PROJECT}"
 export HULAT_DIR="${REPO_PATH}/hulat"
 export DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
 export RESULT_ROOT="${REPO_PATH}/${RESULT_BASENAME}"

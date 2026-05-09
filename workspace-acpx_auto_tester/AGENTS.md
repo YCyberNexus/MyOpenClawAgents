@@ -2,7 +2,7 @@
 
 This workspace implements a quota-carryover GitLab issue campaign with blocked skip-and-retry, executed as **one thick orchestrator session + one anonymous subagent run per IID**, in an **async-callback model** (see [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm). There is exactly ONE skill in this workspace (the orchestrator); the subagent never loads a skill — it receives a fully-rendered self-contained fixed-format prompt as its `sessions_spawn` payload and emits one compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
 
-The repo follows a **two-branch model**: a clean baseline branch (typically `dev`, passed as `dev_branch=`) from which fresh attempts are checked out, and an integration branch (typically `master`, passed as `branch=`) that accumulates spec output via merge requests. Claude Code runs at the main repo root `/data/${PROJECT}`. Each issue's spec output is required to live under `ifp-result/issue-<iid>/hulat-spec-issue<iid>/`, so MRs into `master` never collide on file paths.
+The repo follows a **two-branch model**: a clean baseline branch (typically `dev`, passed as `dev_branch=`) from which fresh attempts are checked out, and an integration branch (typically `master`, passed as `branch=`) that accumulates spec output via merge requests. Claude Code runs at the main repo root `${REPO_PATH}` (default `/data/${PROJECT}`, override via trigger `repo_path`). Each issue's spec output is required to live under `ifp-result/issue-<iid>/hulat-spec-issue<iid>/`, so MRs into `master` never collide on file paths.
 
 ## Agent Identity
 
@@ -94,12 +94,13 @@ Behavioral rules (verification against trigger, token rotation, abort-on-mismatc
 
 Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md). Workspace-level invariants:
 
-- `/data/${PROJECT}/` — the cloned project repo and Claude Code cwd. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to master+dev so a fresh clone already contains everything Claude Code needs at runtime.
-- `/data/${PROJECT}/ifp-result/` — agent runtime workspace and issue output root, INSIDE the cloned repo. Holds:
+- `${REPO_PATH}/` — the cloned project repo and Claude Code cwd. Defaults to `/data/${PROJECT}`; trigger `repo_path` can set another absolute clone target. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to master+dev so a fresh clone already contains everything Claude Code needs at runtime.
+- `${REPO_PATH}/ifp-result/` — agent runtime workspace and issue output root, INSIDE the cloned repo. Holds:
   - `_dispatcher/` — campaign-level state (`campaign_state.json`, `campaign.lock`), dispatcher logs (`log/reconcile-<ts>.json`), and locks (`locks/repo.lock`).
   - `issue-<iid>/` — per-issue subtree (`state.json`, `attempt_state.json`, `hulat-spec-issue<iid>/` committed output, `log/attempt-NNN/`, `summary.md`). Every retry writes a new `log/attempt-NNN/`; historical attempt logs are preserved.
 - `hulat/`, `.claude/`, `ifp-data/` are shared repository content at the repo root (committed by the test team). The agent does NOT symlink `hulat/` and does NOT copy `.claude/` any more — both are simply present in the branch checkout. They may be changed when an issue genuinely requires it; avoid unrelated edits.
 - `ifp-result` and `ifp-data` are default basenames. Per-project overrides come from the trigger fields `result_basename` / `data_basename` (carry-forward, persisted in `campaign_state.json`); when set, `env_paths.sh` exports them as `RESULT_BASENAME` / `DATA_BASENAME` and derives `RESULT_ROOT` / `DATA_DIR` from there. Path examples in this document use the defaults. See `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`.
+- Non-default `repo_path` must be present on every scheduled trigger and callback because it is needed before the dispatcher can find `campaign_state.json`.
 - The `hulat_dir` trigger field is no longer used. The dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`. Old triggers that still pass `hulat_dir=...` are silently accepted (the override never reaches a script).
 
 Claude Code invocation contract and Wiki-evidence publication contract live in [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) and in the SKILL's §Dispatcher Algorithm.
