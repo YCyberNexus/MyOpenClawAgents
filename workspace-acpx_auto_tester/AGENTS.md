@@ -98,7 +98,7 @@ Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign
 - `/data/${PROJECT}/ifp-result/` — agent runtime workspace and issue output root, INSIDE the cloned repo. Holds:
   - `_dispatcher/` — campaign-level state (`campaign_state.json`, `campaign.lock`), dispatcher logs (`log/reconcile-<ts>.json`), and locks (`locks/repo.lock`).
   - `issue-<iid>/` — per-issue subtree (`state.json`, `attempt_state.json`, `hulat-spec-issue<iid>/` committed output, `log/attempt-NNN/`, `summary.md`). Every retry writes a new `log/attempt-NNN/`; historical attempt logs are preserved.
-- `hulat/`, `.claude/`, `ifp-data/` are READ-ONLY references at the repo root (committed by the test team). The agent does NOT symlink `hulat/` and does NOT copy `.claude/` any more — both are simply present in the branch checkout. Leak guards reject staged changes under these directories.
+- `hulat/`, `.claude/`, `ifp-data/` are shared repository content at the repo root (committed by the test team). The agent does NOT symlink `hulat/` and does NOT copy `.claude/` any more — both are simply present in the branch checkout. They may be changed when an issue genuinely requires it; avoid unrelated edits.
 - The `hulat_dir` trigger field is no longer used. The dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`. Old triggers that still pass `hulat_dir=...` are silently accepted (the override never reaches a script).
 
 Claude Code invocation contract and Wiki-evidence publication contract live in [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) and in the SKILL's §Dispatcher Algorithm.

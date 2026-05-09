@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # stage_and_guard.sh — stage Claude's repo changes from the main repo root
-# and guard against committing runtime state or protected test-team inputs.
+# and guard against committing protected runtime state.
 #
 # Why this guard:
-#   - `hulat/`, `.claude/`, and `ifp-data/` are committed by the test
-#     team to master+dev. They are READ-ONLY inputs for the agent and must
-#     never be part of an issue MR.
 #   - The only committable path under `ifp-result/` is this issue's
 #     `${OUTPUT_DIR}`. Dispatcher state, logs, summaries, and other issue
 #     subtrees are runtime/audit data and must never enter the work branch.
@@ -18,7 +15,7 @@
 #
 # Exit codes:
 #   0   normal staging completed; check stdout marker
-#   3   protected runtime/input paths leaked into staged changes; caller
+#   3   protected runtime paths leaked into staged changes; caller
 #       must mark issue blocked
 #
 # Stdout markers (one of these is printed):
@@ -52,7 +49,7 @@ fi
 ALLOWED_OUTPUT_RE="^ifp-result/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}(/|$)"
 LEAKED="$(
   git diff --cached --name-only \
-    | { grep -E '^(ifp-result/|\.claude(/|$)|hulat(/|$)|ifp-data(/|$))' || true; } \
+    | { grep -E '^(ifp-result/)' || true; } \
     | { grep -vE "${ALLOWED_OUTPUT_RE}" || true; }
 )"
 if [ -n "${LEAKED}" ]; then

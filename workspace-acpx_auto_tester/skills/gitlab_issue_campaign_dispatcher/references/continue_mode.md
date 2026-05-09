@@ -65,9 +65,9 @@ Description:
 # Working environment
 - Repository cwd:             <repo-root>
 - Output directory:           <repo-root>/ifp-result/issue-<iid>/hulat-spec-issue<iid>
-- Hulat materials:            <repo-root>/hulat   (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
-- Claude runtime config:      <repo-root>/.claude (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
-- Knowledge base:             <repo-root>/ifp-data (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Hulat materials:            <repo-root>/hulat   (committed in <branch>/<dev-branch>, available in checkout)
+- Claude runtime config:      <repo-root>/.claude (committed in <branch>/<dev-branch>, available in checkout)
+- Knowledge base:             <repo-root>/ifp-data (committed in <branch>/<dev-branch>, available in checkout)
 - Agent runtime workspace:    <repo-root>/ifp-result (touch ONLY the output directory above)
 - Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/<work-branch>
 - Integration branch:         <branch>
@@ -76,7 +76,7 @@ Description:
 - Work only on this issue.
 - Place spec / report / artifact output under the output directory only.
 - Modify content under <repo-root> only. Do NOT write outside the repo.
-- `hulat/`, `.claude/`, and `ifp-data/` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
+- Treat `hulat/`, `.claude/`, and `ifp-data/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
 - Do NOT touch `ifp-result/_dispatcher/`, state files, summaries, logs, or other issue directories.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.

@@ -131,7 +131,7 @@ Step 2 — STAGE + leak guard
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
   exit 0, stdout "NO_CHANGES" → FAIL status=blocked block_reason="Claude produced no staged changes".
                                 Do NOT push. Do NOT create an MR.
-  exit 3                      → FAIL status=blocked block_reason="protected runtime/input paths leaked into staged changes".
+  exit 3                      → FAIL status=blocked block_reason="protected runtime paths leaked into staged changes".
 
 Step 3 — COMMIT + force-push (Strategy A)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
@@ -147,7 +147,7 @@ Step 4 — POST-PUSH verify
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   exit 0 → continue.
-  exit 4 → FAIL status=blocked block_reason="remote branch polluted with protected runtime/input paths".
+  exit 4 → FAIL status=blocked block_reason="remote branch polluted with protected runtime paths".
   any other non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
 
 Step 5 — WIKI evidence (must land before `done`)

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # post_push_verify.sh — confirm the remote ${WORK_BRANCH}'s MR diff contains
 # only allowed issue output under ifp-result/, with no dispatcher state,
-# logs, other issue subtrees, or protected test-team inputs. If verification
+# logs, or other issue subtrees. If verification
 # fails the executor must mark the issue blocked and skip MR creation.
 #
 # The committed output path is:
@@ -18,7 +18,7 @@
 #
 # Exit codes:
 #   0   remote is clean; safe to create / keep MR
-#   4   remote MR diff contains protected paths; caller must mark issue blocked
+#   4   remote MR diff contains protected runtime paths; caller must mark issue blocked
 
 set -euo pipefail
 
@@ -35,7 +35,7 @@ git fetch origin "${BRANCH}"
 ALLOWED_OUTPUT_RE="^ifp-result/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}(/|$)"
 POLLUTED="$(
   git diff --name-only "origin/${BRANCH}...origin/${WORK_BRANCH}" \
-    | { grep -E '^(ifp-result/|\.claude(/|$)|hulat(/|$)|ifp-data(/|$))' || true; } \
+    | { grep -E '^(ifp-result/)' || true; } \
     | { grep -vE "${ALLOWED_OUTPUT_RE}" || true; }
 )"
 

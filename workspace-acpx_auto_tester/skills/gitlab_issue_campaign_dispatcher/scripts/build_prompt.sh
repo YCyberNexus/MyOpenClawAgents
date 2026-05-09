@@ -174,10 +174,10 @@ EOF
   cat <<EOF
 # Working environment
 - Repository cwd:             ${WORKTREE_DIR}
-- Output directory:           ${OUTPUT_DIR} (ONLY writable result area for this issue)
-- Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
-- Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
-- Knowledge base:             ${WORKTREE_DIR}/ifp-data (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
+- Output directory:           ${OUTPUT_DIR} (primary result area for this issue)
+- Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
+- Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
+- Knowledge base:             ${WORKTREE_DIR}/ifp-data (committed in ${BRANCH}/${DEV_BRANCH}, available in checkout)
 - Agent runtime workspace:    ${WORKTREE_DIR}/ifp-result (runtime state/logs live here; touch ONLY the output directory above)
 - Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline branch:     ${DEV_BRANCH}  (where this checkout was branched from in fresh mode)
@@ -197,7 +197,7 @@ both runs to log each other out of the system under test.
 - Work only on this issue.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside the repo.
-- \`hulat/\`, \`.claude/\`, and \`ifp-data/\` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
+- Treat \`hulat/\`, \`.claude/\`, and \`ifp-data/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
 - Do NOT touch \`ifp-result/_dispatcher/\`, \`ifp-result/issue-*/state.json\`, \`ifp-result/issue-*/attempt_state.json\`, \`ifp-result/issue-*/summary.md\`, or \`ifp-result/issue-*/log/\`. Under \`ifp-result/\`, ONLY \`${OUTPUT_DIR}\` is allowed.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
