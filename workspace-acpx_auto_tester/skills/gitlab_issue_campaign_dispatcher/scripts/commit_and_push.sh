@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# commit_and_push.sh — commit the staged changes inside the worktree and
+# commit_and_push.sh — commit the staged changes inside the repo root and
 # force-push the per-attempt local branch to the SINGLE fixed remote
 # branch ${WORK_BRANCH} (Strategy A).
 #
 # Required env vars:
-#   WORKTREE_DIR             git worktree (cwd for git commands)
+#   WORKTREE_DIR             repo root cwd for git commands
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
 #   LOCAL_ATTEMPT_BRANCH     "issue/<iid>-auto-fix-att<NNN>"

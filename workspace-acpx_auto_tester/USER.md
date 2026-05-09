@@ -8,7 +8,8 @@ Send the same dispatcher command every tick. Command name: `RUN_SCHEDULED_ISSUE_
 
 Notes:
 
-- `branch` is the **integration / target** branch (typically `master`); `dev_branch` is the **clean baseline** (typically `dev`) used to check out fresh-mode worktrees so Claude Code does not see past issues' spec accumulation. If your project has no separate baseline, set `dev_branch=<same-as-branch>`.
+- `branch` is the **integration / target** branch (typically `master`); `dev_branch` is the **clean baseline** (typically `dev`) used to reset fresh-mode repo checkouts so Claude Code does not see past issues' spec accumulation. If your project has no separate baseline, set `dev_branch=<same-as-branch>`.
+- `max_concurrent_subagents` must be omitted or set to `1`; repo-root execution cannot safely run multiple issue branches at once.
 - `gitlab_address` is no longer required (the host is pinned at `<workspace>/config/gitlab.env`). If supplied, it is treated as a verification value — see [`SOUL.md`](SOUL.md) §GitLab Host Pinning.
 
 ## Expected Behavior

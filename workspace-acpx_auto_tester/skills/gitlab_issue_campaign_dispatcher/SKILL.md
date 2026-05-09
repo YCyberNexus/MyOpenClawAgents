@@ -6,7 +6,7 @@ allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
 
 # GitLab Issue Campaign Dispatcher Skill
 
-All agent runtime files live INSIDE the cloned repo at `${REPO_PATH}/ifp-result/...` — campaign state, dispatcher logs, locks, per-issue worktrees + state + logs + summaries. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to master+dev, so worktree checkouts already contain those: `prepare_attempt.sh` does NOT create a `hulat` symlink and does NOT copy `.claude`. The `hulat_dir` trigger field is no longer used (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`); old triggers that still pass it are silently accepted. See [`references/paths.md`](references/paths.md) for the complete layout.
+All agent runtime files live INSIDE the cloned repo at `${REPO_PATH}/ifp-result/...` — campaign state, dispatcher logs, locks, per-issue state/logs/summaries, and each issue's committed output directory `${REPO_PATH}/ifp-result/issue-<iid>/hulat-spec-issue<iid>/`. Claude Code runs from the main repo root `${REPO_PATH}`, not from a linked worktree, so this deployment is strictly serial: `max_concurrent_subagents` MUST be `1`. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to master+dev, so the repo checkout already contains those: `prepare_attempt.sh` does NOT create a `hulat` symlink and does NOT copy `.claude`. The `hulat_dir` trigger field is no longer used (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`); old triggers that still pass it are silently accepted. See [`references/paths.md`](references/paths.md) for the complete layout.
 
 ## Single-skill, async-callback model (read first)
 
@@ -18,7 +18,7 @@ This workspace has exactly **one SKILL** (this file). The dispatcher runs in **t
 | ----- | ----------------- | ------------ |
 | 1     | Parse             | bootstrap, flock, load + override `campaign_state.json` |
 | 2     | Reconcile         | mandatory `reconcile.sh` against GitLab; correct disk cache |
-| 3     | Eligibility       | tick-level prep (clone/pull, ensure_labels), form bounded batch under `max_concurrent_subagents` / launch budget / time budget |
+| 3     | Eligibility       | tick-level prep (clone/pull, ensure_labels), form a serial batch (`max_concurrent_subagents` must be `1`) under launch budget / time budget |
 | 4     | Per-IID Prep      | for each batch member: allocate_attempt → load_ui_accounts → prepare_attempt → build_prompt → label `doing` → init state files (status=in_progress) → render fixed-format prompt |
 | 5     | Async Spawn       | issue one **anonymous** `sessions_spawn` per IID (NO session name passed — runtime returns `runId`/`childSessionKey`). Persist `(iid, attempt_number, run_id, child_session_key, ui_account_index, spawned_at)` into `campaign_state.json.pending_subagents`. Return a `waiting_for_callbacks` summary and exit. **Does NOT wait for subagent completion.** |
 
@@ -49,7 +49,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/load_ui_accounts.sh` — Phase 4: read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
 - `scripts/clone_or_pull.sh` — Phase 3: keep the main repo's refs current. Run once per tick before the batch loop.
 - `scripts/ensure_labels.sh` — Phase 3: make sure the seven workflow labels (`todo doing pr done blocked failed continue`) exist. Run once per tick after auth.
-- `scripts/prepare_attempt.sh` — Phase 4: replace the issue's git worktree (a linked worktree at `${REPO_PATH}/ifp-result/issue-<iid>/worktree/`), return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`. Does NOT symlink hulat or copy `.claude` — both directories are committed in the test team's master+dev branches, so the worktree checkout already contains them.
+- `scripts/prepare_attempt.sh` — Phase 4: switch the main repo checkout at `${REPO_PATH}` to the per-attempt local branch, return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`. Does NOT symlink hulat or copy `.claude` — both directories are committed in the test team's master+dev branches, so the repo checkout already contains them.
 - `scripts/build_prompt.sh` — Phase 4: build the Claude Code prompt at `${LOG_DIR}/prompt.txt` (UI account injected; continue-mode summaries + reviewer comments included).
 - `scripts/set_issue_label.sh` — Phase 4 (dispatcher: doing transitions) + subagent (Step 6 + 7b: done/pr).
 - `scripts/stage_and_guard.sh`, `scripts/commit_and_push.sh`, `scripts/post_push_verify.sh`, `scripts/upload_attempt_artifacts.sh`, `scripts/create_mr.sh`, `scripts/summarize_attempt.sh` — invoked by the subagent (by absolute path) per [`references/executor_prompt.md`](references/executor_prompt.md) `<instructions>`.
@@ -72,7 +72,7 @@ Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No
 1. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass it (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops). Return a one-line status summary and exit.
 2. If `sessions_spawn` for an issue subagent run fails or times out, the dispatcher MUST NOT run the subagent's logic inline in the dispatcher session, spawn a substitute run, or retry by adding a session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
 3. **Anonymous async-callback spawns are the contract** (see Concurrency Policy below). `sessions_spawn` returns a launch acknowledgement (`accepted` + `runId` + `childSessionKey`); the orchestrator records that ack into `pending_subagents` and exits. The terminal compact JSON arrives later inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator MUST NOT pass any session name (`mode="session"` / `name=...`) — that triggers runtime `errorCode=thread_required` on channels that don't support thread-bound named sessions. The orchestrator MUST NOT switch to a "wait inline for the spawn to return compact JSON" mode (no synchronous batch wait). Fire-and-forget WITHOUT a callback is still forbidden — if the runtime cannot deliver `RUN_CHILD_COMPLETION_CALLBACK` for this deployment, that is a tick-level failure (record as deployment incompatibility and abort).
-4. If a per-IID prep step fails (clone_or_pull, prepare_attempt, build_prompt, set_issue_label for `doing`, render), the dispatcher MUST NOT spawn that IID with a partial / improvised setup. Mark the IID `blocked` with the verbatim error as `block_reason` and continue with the OTHER batch members whose prep succeeded.
+4. If a per-IID prep step fails (clone_or_pull, prepare_attempt, build_prompt, set_issue_label for `doing`, render), the dispatcher MUST NOT spawn that IID with a partial / improvised setup. Mark the IID `blocked` with the verbatim error as `block_reason` and end this serial batch.
 5. If `ensure_labels.sh` fails, the dispatcher MUST treat that as a tick-level failure. Return a one-line summary; do NOT skip the call.
 6. **Phase 6 reply validation failures.** If a subagent's compact reply fails any validation rule in [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply (parse error, IID/attempt mismatch, blocked/failed without block_reason), the dispatcher MUST mark the IID `blocked` with the corresponding `block_reason` and write that to the state files. Do NOT fabricate a "successful" reply on the subagent's behalf.
 
@@ -85,9 +85,9 @@ On failure:
 
 ## Concurrency Policy (Dispatcher-Specific)
 
-Universal contract (cap = `max_concurrent_subagents`, same-IID never parallel, async-callback delivery): [`SOUL.md`](../../SOUL.md) §Subagent Concurrency Policy. Dispatcher-specific operational details:
+Universal contract (serial repo-root execution, same-IID never parallel, async-callback delivery): [`SOUL.md`](../../SOUL.md) §Subagent Concurrency Policy. Dispatcher-specific operational details:
 
-- **Batch shape (scheduled wake-up only).** Pick at most `min(max_concurrent_subagents - len(pending_subagents), launch_budget_remaining, eligible_iids_remaining)` distinct IIDs (backlog-first, then fresh). Allocate attempt numbers SEQUENTIALLY (`scripts/allocate_attempt.sh` per IID, one fresh Bash exec per call). Run per-IID prep (Phase 4) for each batch member. Phase 5 spawns the surviving batch as parallel `sessions_spawn` calls in a SINGLE tool-call block. With `max_concurrent_subagents=1` this degenerates to one spawn per block.
+- **Serial-only batch shape (scheduled wake-up only).** Because all attempts share the main repo checkout, `max_concurrent_subagents` MUST be exactly `1`; any trigger value greater than `1` is a tick-level configuration error. Pick at most one IID (`min(1, launch_budget_remaining, eligible_iids_remaining)`) in the standard backlog-first order. Allocate one attempt number, one UI account, run prep for that IID, and Phase 5 issues exactly one anonymous `sessions_spawn`.
 - **No new spawn while pending non-empty (single-batch-in-flight invariant).** The orchestrator MUST NOT form a new batch on a scheduled wake-up while `pending_subagents` is non-empty. UI account safety depends on this — accounts allocated to in-flight subagents stay in `pending_subagents[*].ui_account_index` until the corresponding callback drains them. If a scheduled wake-up arrives while pending_subagents is non-empty, return a `waiting_for_callbacks` summary and exit. The next batch forms only after every prior pending entry has been drained by callbacks (or evicted by stuck-pending detection).
 - **Spawn shape — anonymous, no name (HARD).** Each `sessions_spawn` call sends a fully-rendered fixed-format string built from [`references/executor_prompt.md`](references/executor_prompt.md) as the entire payload. **Pass NO session name to `sessions_spawn`.** Do NOT pass `name=`, `mode="session"`, or any "deterministic session name" parameter — historically that triggered runtime `errorCode=thread_required` on channels (e.g. webchat) that don't support thread-bound named sessions. The runtime is free to pick `mode="run"` or any anonymous mode and return `runId` + `childSessionKey` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`). Set `timeoutSeconds=30` (launch-ack wait — without this the harness/gateway defaults to ~10s and has been observed to time out before the runtime returns the ack, leaving an orphaned `childSessionKey` with no real subagent behind it), `runTimeoutSeconds=3600` (subagent runtime cap), `cleanup="keep"`. If the trigger supplied `--model` (reserved; not currently a trigger field), forward it.
 - **Launch acknowledgement contract.** `sessions_spawn` MUST return a launch ack containing both `runId` AND `childSessionKey` (the runtime may also return `status=accepted`, `mode`, etc. — those are informational). Record the ack into `pending_subagents` (see [`references/state_schema.md`](references/state_schema.md)). A response missing both `runId` and `childSessionKey` is a launch failure for that IID — synthesize a Phase 6 blocked reply (`block_reason="sessions_spawn returned no runId/childSessionKey"`) and process it on the spot before exiting the scheduled wake-up.
@@ -111,7 +111,7 @@ The dispatcher MUST therefore allocate a **distinct UI account per IID** for eve
    - exits 11 if the pool is empty;
    - exits 12 if a pool line is malformed;
    - exits 13 if the pool is smaller than `BATCH_SIZE`.
-3. **Pool-too-small is a tick-level failure.** If `load_ui_accounts.sh` exits 13, the dispatcher MUST abort the tick with a one-line summary (`"ui_account_pool_too_small: pool=<size> batch=<n>"`). It MUST NOT shrink the batch, retry with a smaller `max_concurrent_subagents`, or share an account between IIDs. The operator's options are: enlarge the pool in `<workspace>/config/ui_accounts.env`, or lower `max_concurrent_subagents` in the trigger.
+3. **Pool-too-small is a tick-level failure.** If `load_ui_accounts.sh` exits 13, the dispatcher MUST abort the tick with a one-line summary (`"ui_account_pool_too_small: pool=<size> batch=<n>"`). It MUST NOT share an account between IIDs. In this repo-root execution model the batch size is always 1, so this means the deployment has no usable account in `<workspace>/config/ui_accounts.env`.
 4. **Allocation is per-batch and persisted into `pending_subagents` until callback drains.** The dispatcher binds one account to each IID in the batch, in iteration order (`account[k]` → `k`-th IID). The pair `(UI_ACCOUNT, UI_PASSWORD)` is passed to `scripts/build_prompt.sh` as env vars; the script appends the credentials to the Claude Code prompt's `# Working environment` section. The `ui_account_index` (k) is recorded in `pending_subagents[iid].ui_account_index` along with `runId` / `childSessionKey` at spawn time. The account is considered "in use" until the matching `RUN_CHILD_COMPLETION_CALLBACK` arrives and Phase 6 drains the pending entry, OR until stuck-pending eviction releases it. Because §Concurrency Policy's single-batch-in-flight invariant + stuck-pending eviction at the top of every scheduled wake-up together guarantee `pending_subagents` is empty when a new batch forms, the next batch's accounts are always drawn fresh from the pool head — no persistent allocation table needed across ticks.
 5. **Forbidden workarounds.** The dispatcher MUST NOT:
    - default a missing account from the pool by reusing one already assigned to another IID in the same batch
@@ -130,7 +130,7 @@ Universal rules (`glab`-only, forbidden libraries, `--hostname` rule, host pinni
 
 Failure mapping:
 
-- If a per-IID prep call to glab fails (e.g. `build_prompt.sh` cannot read the issue, `set_issue_label.sh` cannot transition), mark that IID `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and continue with other batch members.
+- If a per-IID prep call to glab fails (e.g. `build_prompt.sh` cannot read the issue, `set_issue_label.sh` cannot transition), mark that IID `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and end this serial batch.
 - If `glab auth status` fails after `scripts/glab_auth.sh`, or `scripts/glab_auth.sh` itself exits 10/11/12 (deployment-pin missing/malformed) or 13 (trigger mismatch), abort the tick with a one-line summary.
 
 ---
@@ -166,7 +166,7 @@ See `references/trigger_command.md` for the full trigger spec, required fields, 
 
 Key requirements:
 
-- All scalar trigger inputs (`issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`) are authoritative for this tick. Overwrite the disk copy in `campaign_state.json` before running the algorithm.
+- All scalar trigger inputs (`issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`) are authoritative for this tick. Overwrite the disk copy in `campaign_state.json` before running the algorithm. `max_concurrent_subagents` must be exactly `1`; abort the tick if the trigger sets it higher.
 - The optional filter fields (`issue_iids`, `require_labels`, `require_labels_match`) follow the same trigger-authoritative rule. Each tick's trigger value (or its absence) wins; the dispatcher does NOT carry stale filter values forward when the next trigger drops the field. See `references/trigger_command.md` for the parse / validation contract and Phase 1 step 2 for how the dispatcher applies them.
 - `non_interactive=true`, `session_mode=per_issue`, `scheduling_mode=quota_carryover`, `blocked_policy=skip_and_retry` are required fixed values; abort if missing.
 
@@ -250,7 +250,7 @@ When a step below says `bash scripts/X.sh`, that is shorthand for the script act
 2. **Load + override campaign state.**
    - Read `${CAMPAIGN_STATE_FILE}`, or initialize using fresh-init values from `references/state_schema.md` if absent.
    - Apply schema migration if the on-disk file uses the legacy scalar `active_issue_iid` / `active_issue_session` — see `references/state_schema.md` "Legacy on-disk shapes the loader must tolerate" for the rule. Default `max_concurrent_subagents` to `1` if missing. If `pending_subagents` is missing (legacy file), initialize to `{}`. If `issue_iids_whitelist` / `require_labels` / `require_labels_match` are missing (older file), initialize to `[]` / `[]` / `"or"`.
-   - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`, and (optionally) `stuck_after_minutes` with the trigger values. When the trigger omits `max_concurrent_subagents`, default it to `1` for the tick AND persist that default. When the trigger omits `stuck_after_minutes`, default to `90` and persist.
+   - Apply trigger-input override: overwrite `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`, `max_concurrent_subagents`, and (optionally) `stuck_after_minutes` with the trigger values. When the trigger omits `max_concurrent_subagents`, default it to `1` for the tick AND persist that default. If the post-override value is anything other than `1`, abort the tick with `"invalid_max_concurrent_subagents_for_repo_root: expected 1"`. When the trigger omits `stuck_after_minutes`, default to `90` and persist.
    - **Optional filter override.**
      - `issue_iids` (trigger field, comma-separated integers). Parse, trim whitespace, drop empty tokens. If any token is non-integer, abort the tick with `"invalid_issue_iids"`. Persist the parsed list (possibly `[]`) into `issue_iids_whitelist`. The trigger's authoritative voice means: if the trigger omits the field OR sends an empty string, `issue_iids_whitelist` is overwritten to `[]` (whitelist disabled this tick) — stale values from disk are NOT carried forward.
      - `require_labels` (trigger field, comma-separated label names). Parse, trim whitespace around commas, drop empty tokens. Persist into `require_labels`. Same trigger-authoritative semantics as above.
@@ -297,11 +297,11 @@ In the async-callback model **the scheduled wake-up forms exactly one batch** (n
 This phase runs ONCE per scheduled wake-up (no loop):
 
 1. **Check time budget.** If `now - tick_start_time >= max_runtime_minutes`, return `"campaign_status":"running","reason":"time_budget"` and exit. (Time is checked once at the top of Phase 4. Once Phase 5 fires, the tick is over regardless of remaining budget — the budget governs *spawning*, not *waiting for callbacks*.)
-2. **Form this tick's batch.** Compute `batch_size = min(max_concurrent_subagents - len(pending_subagents), hourly_issue_quota - quota_launched_this_tick, remaining_eligible_iids)`. Pick `batch_size` distinct IIDs in the standard order: lowest-IID eligible backlog items first, then fresh IIDs from `next_new_issue_iid` upward. If `batch_size == 0`, return `"campaign_status":"running","reason":"no_eligible_iids"` (or `"completed"` if every IID in range is terminal) and exit.
+2. **Form this tick's serial batch.** Because Phase 1 already enforced `max_concurrent_subagents=1` and Phase 3 returned early if `pending_subagents` was non-empty, compute `batch_size = min(1, hourly_issue_quota - quota_launched_this_tick, remaining_eligible_iids)`. Pick at most one IID in the standard order: lowest-IID eligible backlog item first, then the next fresh IID from `next_new_issue_iid` upward. If `batch_size == 0`, return `"campaign_status":"running","reason":"no_eligible_iids"` (or `"completed"` if every IID in range is terminal) and exit.
 3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`.
 4. **Allocate UI accounts for the batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the batch (k=0..batch_size-1). Record `ui_account_index=k` for the IID — this is what goes into `pending_subagents[iid].ui_account_index`. On any non-zero exit code (10/11/12/13), abort the tick.
 5. **Pre-spawn persist.** For every IID in the batch, write a placeholder pending entry: `pending_subagents[iid] = {attempt_number: N_iid, run_id: null, child_session_key: null, ui_account_index: k, spawned_at: null, placeholder: true}` and append `iid` to `active_issue_iids` (and a human-readable label `issue-<project>-<iid>` to `active_issue_sessions` for logging). Persist `campaign_state.json` BEFORE any glab mutation. **This persist is the structural guarantee that the orchestrator does not double-spawn the same IID across crashes / concurrent ticks** — see §Per-Issue Subagent Rules. Phase 5 replaces the placeholder with the real `run_id` / `child_session_key` / `spawned_at` after `sessions_spawn` returns its launch ack.
-6. **Per-IID prep.** For each IID in the batch (sequentially or in parallel — preps are independent except for the shared `repo.lock` inside `prepare_attempt.sh`):
+6. **Per-IID prep.** For the single IID in the batch:
    1. Resolve `ISSUE_MODE` for this IID:
       - if reconciliation marked the IID `needs_continue == true`, OR per-issue state has `mode="continue"`, set `ISSUE_MODE=continue`
       - else `ISSUE_MODE=fresh`
@@ -315,11 +315,11 @@ This phase runs ONCE per scheduled wake-up (no loop):
    6. **Initialize state files.** Write/refresh `${ATTEMPT_STATE_FILE}` with `{iid, attempt_number, attempt_started_at, mode_requested, mode_actual, mode_downgraded_from, no_reviewer_comments, prior_attempt_count, local_branch, log_dir, status:"in_progress"}`. Write/refresh `${ISSUE_STATE_FILE}` with `{iid, session, status:"in_progress", mode:<mode_actual>, attempts_total:<N_iid>, latest_attempt_number:<N_iid>, latest_attempt_dir, retry_count:<from prior>, updated_at}`.
    7. **Render the executor prompt.** Substitute every `{...}` placeholder in `references/executor_prompt.md` with the per-IID values; verify no unsubstituted placeholders remain. If render fails (missing variable, unsubstituted token), mark the IID `blocked` with `block_reason="prompt template render incomplete: <name>"` and skip this IID for the batch.
 
-   If any sub-step fails for an IID, mark that IID `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and skip it for the batch — but DO continue prep for the OTHER batch members. The UI account allocated to a dropped IID returns to the pool (no persistence).
+   If any sub-step fails for the IID, mark it `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and skip spawning it. The allocated UI account returns to the pool (no persistence).
 
 ### Phase 5 — Async Spawn (fire-and-record)
 
-**Spawn the surviving batch in a SINGLE tool-call block.** Issue one `sessions_spawn` per IID whose Phase 4 prep succeeded, all in the same parallel block. The entire payload is the rendered subagent prompt. With `max_concurrent_subagents=1` this block contains exactly one `sessions_spawn` call.
+**Spawn the surviving serial batch.** Issue exactly one `sessions_spawn` if Phase 4 prep succeeded. The entire payload is the rendered subagent prompt.
 
 **Spawn shape (HARD):** anonymous, no name passed.
 - Do NOT pass a session-name parameter (no `name=`, no `session_name=`, no `mode="session"`, no thread-bound flag). Earlier deployments hit `errorCode=thread_required` on channels that don't support thread bindings; passing no name avoids that path entirely.
@@ -328,7 +328,7 @@ This phase runs ONCE per scheduled wake-up (no loop):
 
 **The dispatcher does NOT wait for the subagent to finish.** Each `sessions_spawn` returns a launch ack within seconds. For each ack:
 
-1. Validate the ack contains both `runId` and `childSessionKey`. Missing → synthesize a Phase 6 blocked reply for THIS IID immediately (`block_reason="sessions_spawn returned no runId/childSessionKey: <raw response>"`), process it on the spot (write terminal state files, classify), and DO NOT add to `pending_subagents`. Continue with other batch members.
+1. Validate the ack contains both `runId` and `childSessionKey`. Missing → synthesize a Phase 6 blocked reply for THIS IID immediately (`block_reason="sessions_spawn returned no runId/childSessionKey: <raw response>"`), process it on the spot (write terminal state files, classify), and DO NOT add to `pending_subagents`.
 2. Populate `pending_subagents[iid]` with `{attempt_number, run_id, child_session_key, ui_account_index, spawned_at: <ISO-8601 UTC now>}`. The placeholder entry written before spawn (Phase 4 step 5) is replaced.
 3. Persist `campaign_state.json`.
 
@@ -339,7 +339,7 @@ After all `sessions_spawn` calls in the block return their acks (this is fast �
 
 If the runtime returns an error on `sessions_spawn` (e.g., `gateway timeout`, channel-rejects-spawn), the affected IID is treated as a launch failure per step 1 above — Phase 6 blocked is processed on the spot. Other IIDs in the batch whose acks succeeded still go to `pending_subagents`.
 
-**Spawn-time concurrency note.** OpenClaw runtime gateways may serialize concurrent `sessions_spawn` calls; if the parallel tool-call block hits gateway timeouts on later IIDs, those IIDs become Phase 6 blocked while earlier IIDs proceed. The dispatcher MUST NOT retry the failed launches inside this tick — they are blocked-cooldown'd and the next scheduled wake-up reschedules them.
+**Spawn-time failure note.** The dispatcher MUST NOT retry a failed launch inside this tick. The IID is blocked/cooldown'd and the next scheduled wake-up may reschedule it.
 
 ### Phase 6 — Follow-up (orchestrator owns ALL terminal bookkeeping)
 
@@ -417,20 +417,19 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
 ```json
 {
   "campaign_status": "waiting_for_callbacks",
-  "active_issue_iids": [14, 15],
-  "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
+  "active_issue_iids": [14],
+  "active_issue_sessions": ["issue-px_ifp_hulat-14"],
   "pending_subagents": {
-    "14": {"attempt_number": 3, "run_id": "9710b359-...", "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-...", "ui_account_index": 0, "spawned_at": "2026-05-07T13:42:01Z"},
-    "15": {"attempt_number": 1, "run_id": "...", "child_session_key": "...", "ui_account_index": 1, "spawned_at": "2026-05-07T13:42:01Z"}
+    "14": {"attempt_number": 3, "run_id": "9710b359-...", "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-...", "ui_account_index": 0, "spawned_at": "2026-05-07T13:42:01Z"}
   },
-  "max_concurrent_subagents": 2,
+  "max_concurrent_subagents": 1,
   "ui_account_pool_size": 4,
   "issue_iids_whitelist": [],
   "require_labels": [],
   "require_labels_match": "or",
   "unfinished_iids": [9, 10, 14, 15],
   "next_new_issue_iid": 19,
-  "quota_launched_this_tick": 2,
+  "quota_launched_this_tick": 1,
   "quota_target": 10,
   "last_reconcile_evidence": "/data/<project>/ifp-result/_dispatcher/log/reconcile-<ts>.json"
 }
@@ -446,7 +445,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "pending_subagents": {
     "14": {"attempt_number": 1, "run_id": "...", "child_session_key": "...", "ui_account_index": 0, "spawned_at": "2026-05-08T09:10:00Z"}
   },
-  "max_concurrent_subagents": 2,
+  "max_concurrent_subagents": 1,
   "ui_account_pool_size": 4,
   "issue_iids_whitelist": [14, 17, 20],
   "require_labels": ["acpx-auto", "priority::high"],
@@ -473,7 +472,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "attempt_number": 3,
   "terminal_status": "done",
   "merge_request_url": "https://gitlab.example.com/.../merge_requests/123",
-  "remaining_pending_iids": [15],
+  "remaining_pending_iids": [],
   "campaign_status": "running"
 }
 ```
@@ -488,7 +487,7 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "active_issue_iids": [],
   "active_issue_sessions": [],
   "pending_subagents": {},
-  "max_concurrent_subagents": 2,
+  "max_concurrent_subagents": 1,
   "ui_account_pool_size": 4,
   "issue_iids_whitelist": [],
   "require_labels": [],

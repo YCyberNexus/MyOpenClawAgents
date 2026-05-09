@@ -12,7 +12,7 @@ This document is the workspace-wide reference for issue workflow labels. Both ha
 - `done`
 - `blocked`
 - `failed`
-- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` + `pr` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and prepares the next attempt's worktree from the existing work branch (continue mode). **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
+- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` + `pr` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and prepares the next attempt's repo checkout from the existing work branch (continue mode). **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
 
 ## Transition diagram
 

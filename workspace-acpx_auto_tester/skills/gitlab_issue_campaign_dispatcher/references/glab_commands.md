@@ -160,7 +160,7 @@ Used by `scripts/upload_attempt_artifacts.sh` when G11 reports the page is absen
 
 - `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/prompt.txt`
 - `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/claude_result.txt`
-- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/report.html` when a `report.html` exists under `${WORKTREE_DIR}`
+- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/report.html` when a `report.html` exists under `${OUTPUT_DIR}`
 
 ```bash
 glab api --method POST \

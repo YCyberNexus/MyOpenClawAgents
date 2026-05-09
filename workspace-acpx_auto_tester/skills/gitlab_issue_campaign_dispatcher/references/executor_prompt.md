@@ -28,7 +28,8 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
-| `{WORKTREE_DIR}`         | `{ISSUE_ROOT}/worktree`                                                                 |
+| `{WORKTREE_DIR}`         | `/data/{PROJECT}` (repo root; acpx cwd)                                                  |
+| `{OUTPUT_DIR}`           | `{ISSUE_ROOT}/hulat-spec-issue{ISSUE_IID}`                                               |
 | `{LOG_DIR}`              | `{ISSUE_ROOT}/log/attempt-{ATTEMPT_NUMBER_PADDED}`                                      |
 | `{ISSUE_ROOT}`           | `/data/{PROJECT}/ifp-result/issue-{ISSUE_IID}`                                          |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
@@ -66,10 +67,11 @@ ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}                     # fresh | continue
 BRANCH={BRANCH}                             # integration / target branch (MR opens against this)
-DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher for fresh-mode worktree)
+DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher for fresh-mode checkout)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
-WORKTREE_DIR={WORKTREE_DIR}                 # acpx cwd; .claude/, hulat/, ifp-data/ are already in the checkout (test-team committed)
+WORKTREE_DIR={WORKTREE_DIR}                 # repo root / acpx cwd; .claude/, hulat/, ifp-data/ are already in the checkout
+OUTPUT_DIR={OUTPUT_DIR}                     # only allowed result directory under ifp-result/ for this issue
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
@@ -99,7 +101,7 @@ Follow steps 0-9 in order. Capture the variables marked CAPTURE — they go into
 
 Step 0 — SETUP
   cd {WORKTREE_DIR}
-  Confirm the worktree exists and the test-team-committed `hulat/`, `.claude/`, and `ifp-data/` directories are present at the worktree root. If any is missing → FAIL status=blocked block_reason="worktree missing or test-team committed directories absent".
+  Confirm the repo root exists and the test-team-committed `hulat/`, `.claude/`, and `ifp-data/` directories are present at the repo root. Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="repo root missing or required directories absent".
 
 Step 1 — EXECUTE acpx (one-shot, synchronous)
   acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \
@@ -123,7 +125,7 @@ Step 2 — STAGE + leak guard
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
   exit 0, stdout "NO_CHANGES" → set ATTEMPT_STATUS=no_changes; jump to Step 8 (summarize), then assemble REPLY.
                                 Do NOT push. Do NOT create an MR. Do NOT change the `doing` label.
-  exit 3                      → FAIL status=blocked block_reason="agent artifacts leaked into worktree".
+  exit 3                      → FAIL status=blocked block_reason="protected runtime/input paths leaked into staged changes".
 
 Step 3 — COMMIT + force-push (Strategy A)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
@@ -136,10 +138,11 @@ Step 3 — COMMIT + force-push (Strategy A)
 
 Step 4 — POST-PUSH verify
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   exit 0 → continue.
-  exit 4 → FAIL status=blocked block_reason="remote branch polluted with agent artifacts".
+  exit 4 → FAIL status=blocked block_reason="remote branch polluted with protected runtime/input paths".
+  any other non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
 
 Step 5 — WIKI evidence (must land before `done`)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \

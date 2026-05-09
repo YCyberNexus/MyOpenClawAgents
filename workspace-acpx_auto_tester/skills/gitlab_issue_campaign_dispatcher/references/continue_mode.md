@@ -16,7 +16,7 @@ The next dispatcher tick will pick the issue up and re-run.
 
 In continue mode:
 
-1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to replace the git worktree at `${WORKTREE_DIR}` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `worktree/`, `attempt_state.json`, and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
+1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to switch the main repo checkout `${WORKTREE_DIR}` (`/data/${PROJECT}`) based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
 2. **Dispatcher prep:** Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
 3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`E1b`) and **partitions them in two buckets**:
    - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
@@ -39,7 +39,7 @@ This is a CONTINUE-MODE re-run of GitLab issue #<iid>.
 
 A prior run on this issue produced a merge request and was marked `done` + `pr`,
 but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside a fresh git worktree at <worktree>, branched from
+You are running inside the main repo checkout at <repo-root>, branched from
 `origin/<work-branch>` (the work-in-progress branch from the prior run).
 Read what's already there, then continue or correct it according to the
 past-attempt summaries and reviewer guidance below.
@@ -63,19 +63,21 @@ Description:
 ...
 
 # Working environment
-- Worktree (your cwd):        <worktree>
-- Hulat materials:            <worktree>/hulat   (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
-- Claude runtime config:      <worktree>/.claude (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
-- Knowledge base:             <worktree>/ifp-data (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
-- Agent runtime workspace:    <worktree>/ifp-result (gitignored on <branch>/<dev-branch>; do NOT touch)
-- Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/<work-branch>
+- Repository cwd:             <repo-root>
+- Output directory:           <repo-root>/ifp-result/issue-<iid>/hulat-spec-issue<iid>
+- Hulat materials:            <repo-root>/hulat   (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Claude runtime config:      <repo-root>/.claude (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Knowledge base:             <repo-root>/ifp-data (committed in <branch>/<dev-branch>, test-team owned, READ-ONLY)
+- Agent runtime workspace:    <repo-root>/ifp-result (touch ONLY the output directory above)
+- Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/<work-branch>
 - Integration branch:         <branch>
 
 # Rules
 - Work only on this issue.
-- Modify content under <worktree> only. Do NOT write outside the worktree.
+- Place spec / report / artifact output under the output directory only.
+- Modify content under <repo-root> only. Do NOT write outside the repo.
 - `hulat/`, `.claude/`, and `ifp-data/` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
-- Do NOT touch the `ifp-result/` subtree. It is the agent runtime's workspace (gitignored); writing into it has no effect and pollutes the audit trail.
+- Do NOT touch `ifp-result/_dispatcher/`, state files, summaries, logs, or other issue directories.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```

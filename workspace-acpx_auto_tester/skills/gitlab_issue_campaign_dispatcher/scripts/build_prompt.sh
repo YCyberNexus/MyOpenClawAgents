@@ -15,15 +15,15 @@
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
-#   LOG_DIR, REPO_PATH, WORKTREE_DIR, WORK_BRANCH, BRANCH, DEV_BRANCH,
-#   UI_ACCOUNT, UI_PASSWORD
+#   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH,
+#   DEV_BRANCH, UI_ACCOUNT, UI_PASSWORD
 #
 # `HULAT_DIR` is NOT a trigger input. The test team commits `hulat/` to
-# master+dev, so the worktree's checkout already contains it at
-# `${WORKTREE_DIR}/hulat`. env_paths.sh exports `HULAT_DIR=${REPO_PATH}/hulat`
+# master+dev, so the repo checkout already contains it at
+# `${REPO_PATH}/hulat`. env_paths.sh exports `HULAT_DIR=${REPO_PATH}/hulat`
 # for any consumer that needs the absolute path, but build_prompt.sh
 # does not surface the path in the prompt (the agent reads from `hulat/`
-# relative to the worktree).
+# relative to the repo root).
 #
 # UI_ACCOUNT / UI_PASSWORD are the dispatcher-allocated test credentials for
 # this spawn. They are injected into the prompt's "# Working environment"
@@ -48,7 +48,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${GITLAB_HOST:?run scripts/glab_auth.sh first}"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
-  "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" \
+  "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
 # UI account is allocated by the dispatcher per-batch from the pool pinned
@@ -133,7 +133,7 @@ This is a CONTINUE-MODE re-run of GitLab issue #${ISSUE_IID}.
 
 A prior run on this issue produced a merge request and was marked \`done\` + \`pr\`,
 but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside a fresh git worktree at ${WORKTREE_DIR}, branched
+You are running inside the main repo working tree at ${WORKTREE_DIR}, branched
 from \`origin/${WORK_BRANCH}\` (the work-in-progress branch from the prior
 run). Read what's already there, then continue or correct it according to
 the past-attempt summaries and reviewer guidance below.
@@ -142,11 +142,11 @@ EOF
   else
     cat <<EOF
 You are working on GitLab issue #${ISSUE_IID}. Implement the change
-requested in the issue description. You are running inside a fresh git
-worktree at ${WORKTREE_DIR}, branched from \`origin/${DEV_BRANCH}\`
+requested in the issue description. You are running inside the main repo
+working tree at ${WORKTREE_DIR}, branched from \`origin/${DEV_BRANCH}\`
 (the clean baseline). The integration branch \`${BRANCH}\` already
 contains spec output from previously completed issues, but you should
-NOT see that here — your worktree starts clean.
+NOT see that here when ${DEV_BRANCH} is kept clean.
 
 EOF
   fi
@@ -173,13 +173,14 @@ EOF
 
   cat <<EOF
 # Working environment
-- Worktree (your cwd):        ${WORKTREE_DIR}
+- Repository cwd:             ${WORKTREE_DIR}
+- Output directory:           ${OUTPUT_DIR} (ONLY writable result area for this issue)
 - Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
 - Knowledge base:             ${WORKTREE_DIR}/ifp-data (committed in ${BRANCH}/${DEV_BRANCH}, test-team owned, READ-ONLY)
-- Agent runtime workspace:    ${WORKTREE_DIR}/ifp-result (gitignored on ${BRANCH}/${DEV_BRANCH}; do NOT touch)
-- Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
-- Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
+- Agent runtime workspace:    ${WORKTREE_DIR}/ifp-result (runtime state/logs live here; touch ONLY the output directory above)
+- Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/${WORK_BRANCH}
+- Source baseline branch:     ${DEV_BRANCH}  (where this checkout was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
 # UI test account (dispatcher-allocated — overrides any account in the issue body)
@@ -194,10 +195,10 @@ both runs to log each other out of the system under test.
 
 # Rules
 - Work only on this issue.
-- **Output isolation.** Place all spec / report / artifact output for this issue under \`hulat-spec-issue${ISSUE_IID}/\` at the worktree root. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
-- Modify content under ${WORKTREE_DIR} only. Do NOT write outside the worktree.
+- **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
+- Modify content under ${WORKTREE_DIR} only. Do NOT write outside the repo.
 - \`hulat/\`, \`.claude/\`, and \`ifp-data/\` are committed by the test team and are READ-ONLY references for you. Do NOT edit them.
-- Do NOT touch the \`ifp-result/\` subtree. It is the agent runtime's workspace (gitignored); writing into it has no effect and pollutes the audit trail.
+- Do NOT touch \`ifp-result/_dispatcher/\`, \`ifp-result/issue-*/state.json\`, \`ifp-result/issue-*/attempt_state.json\`, \`ifp-result/issue-*/summary.md\`, or \`ifp-result/issue-*/log/\`. Under \`ifp-result/\`, ONLY \`${OUTPUT_DIR}\` is allowed.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
 EOF

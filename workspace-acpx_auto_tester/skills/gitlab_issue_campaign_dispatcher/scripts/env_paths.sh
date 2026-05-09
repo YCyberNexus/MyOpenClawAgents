@@ -4,9 +4,9 @@
 # The cloned project repo IS the agent's entire workspace. The test team
 # maintains `.claude/`, `hulat/`, and `ifp-data/` inside the repo
 # (committed to master + dev). The agent's own state and per-issue
-# subtrees live under `${REPO_PATH}/ifp-result/`, whose contents are
-# gitignored on master+dev so `git status` in the main worktree stays
-# clean.
+# subtrees live under `${REPO_PATH}/ifp-result/`. Runtime state/log files
+# stay uncommitted there; each issue's committed output is force-added
+# from its own `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` directory.
 #
 # Disk layout produced by this file:
 #
@@ -14,7 +14,7 @@
 #       .claude/                         (in master+dev, test-team owned)
 #       hulat/                           (in master+dev, test-team owned)
 #       ifp-data/                        (in master+dev, test-team owned)
-#       ifp-result/                      (gitignored content; agent state + worktrees)
+#       ifp-result/                      (agent state/logs + committed per-issue output)
 #           _dispatcher/                 ← campaign-level state + logs + locks
 #               campaign_state.json
 #               campaign.lock
@@ -23,7 +23,7 @@
 #           issue-<iid>/                 ← per-issue subtree
 #               state.json
 #               attempt_state.json
-#               worktree/                ← linked git worktree (acpx cwd)
+#               hulat-spec-issue<iid>/   ← Claude Code output (committed to MR)
 #               log/attempt-NNN/
 #               summary.md
 #
@@ -36,7 +36,7 @@
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
-#         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR,
+#         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
 #         ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
 #         LOCAL_ATTEMPT_BRANCH
 #
@@ -119,9 +119,11 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export ATTEMPT_NUMBER_PADDED
 
   # ATTEMPT_DIR is a compatibility alias for ISSUE_ROOT — there is no
-  # per-attempt subtree. Logs are attempt-scoped under log/attempt-NNN.
+  # per-attempt subtree. Claude runs at the repo root, while this issue's
+  # committed output is force-added from OUTPUT_DIR under ifp-result/.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
-  export WORKTREE_DIR="${ATTEMPT_DIR}/worktree"
+  export WORKTREE_DIR="${REPO_PATH}"
+  export OUTPUT_DIR="${ISSUE_ROOT}/hulat-spec-issue${ISSUE_IID}"
   export ISSUE_LOG_ROOT="${ATTEMPT_DIR}/log"
   export LOG_DIR="${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
@@ -129,7 +131,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
   if [ -d "${REPO_PATH}/.git" ]; then
-    mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+    mkdir -p "${ATTEMPT_DIR}" "${OUTPUT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
   fi
 fi
 

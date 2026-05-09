@@ -14,11 +14,9 @@
 #      _dispatcher/locks) and the issue subtree root (ifp-result/).
 #   4. Acquire the in-repo flock and run `git fetch` + `git worktree prune`.
 #
-# The MAIN repo's working tree is not used for issue work — each issue
-# gets a separate git worktree at `${REPO_PATH}/ifp-result/issue-<iid>/worktree/`
-# that is replaced for every attempt. The main worktree is only needed
-# because `git worktree add` requires an existing repo to host links
-# from.
+# The MAIN repo's working tree is the only issue execution cwd. The
+# dispatcher serializes issue attempts, and prepare_attempt.sh switches this
+# checkout onto a per-attempt local branch before acpx runs.
 #
 # Required env vars:
 #   REPO_PATH               from env_paths.sh
@@ -80,7 +78,7 @@ mkdir -p \
   "${WORK_ROOT}/locks"
 
 # Acquire the in-repo lock for fetch + worktree prune. This is the same
-# lock prepare_attempt.sh uses, so concurrent fetch + worktree-add are
+# lock prepare_attempt.sh uses, so concurrent fetch + branch checkout are
 # serialized.
 LOCK_DIR="${WORK_ROOT}/locks"
 exec 8>"${LOCK_DIR}/repo.lock"
@@ -90,6 +88,5 @@ cd "${REPO_PATH}"
 git remote set-url origin "${AUTHED_REMOTE_URL}"
 git fetch --prune origin
 
-# Prune any stale worktree entries — worktree dirs deleted out-of-band
-# leave records in .git/worktrees that interfere with `worktree add`.
+# Prune stale linked-worktree metadata left by older deployments.
 git worktree prune

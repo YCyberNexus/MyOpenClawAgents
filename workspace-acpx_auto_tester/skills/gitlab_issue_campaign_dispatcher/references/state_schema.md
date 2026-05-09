@@ -26,27 +26,20 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `/data
   "max_runtime_minutes": 55,
   "blocked_retry_limit": 3,
   "blocked_cooldown_ticks": 1,
-  "max_concurrent_subagents": 2,
+  "max_concurrent_subagents": 1,
   "stuck_after_minutes": 90,
   "issue_iids_whitelist": [14, 17, 20],
   "require_labels": ["acpx-auto", "priority::high"],
   "require_labels_match": "and",
   "next_new_issue_iid": 4,
-  "active_issue_iids": [14, 15],
-  "active_issue_sessions": ["issue-px_ifp_hulat-14", "issue-px_ifp_hulat-15"],
+  "active_issue_iids": [14],
+  "active_issue_sessions": ["issue-px_ifp_hulat-14"],
   "pending_subagents": {
     "14": {
       "attempt_number": 3,
       "run_id": "9710b359-2f32-407b-8c54-5c995ba266dc",
       "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-bcc8-4418-b401-c5f5f752609a",
       "ui_account_index": 0,
-      "spawned_at": "2026-05-06T10:00:12Z"
-    },
-    "15": {
-      "attempt_number": 1,
-      "run_id": "1240c842-8c4d-4f8a-...",
-      "child_session_key": "agent:acpx_auto_tester:subagent:6fbc16ce-...",
-      "ui_account_index": 1,
       "spawned_at": "2026-05-06T10:00:12Z"
     }
   },
@@ -55,7 +48,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `/data
   "blocked_iids": [],
   "failed_iids": [],
   "campaign_status": "waiting_for_callbacks",
-  "quota_launched_this_tick": 2,
+  "quota_launched_this_tick": 1,
   "last_reconcile_evidence": "/data/<project>/ifp-result/_dispatcher/log/reconcile-20260507T100501Z.json",
   "updated_at": "2026-05-07T10:05:30Z"
 }
@@ -70,7 +63,7 @@ Map keyed by stringified IID. Each entry tracks one in-flight subagent from spaw
 | `attempt_number`     | int    | The attempt number allocated for this subagent. Phase 6 validates `callback.attempt_number == this` to reject stale callbacks. |
 | `run_id`             | string \| null | The `runId` returned by `sessions_spawn`. `null` only between Phase 4 step 5 (placeholder write) and Phase 5 step 2 (post-launch update); the orchestrator MUST NOT leave a `null` run_id once Phase 5 has finished. |
 | `child_session_key`  | string \| null | The anonymous `childSessionKey` returned by `sessions_spawn` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`). For runtime-side audit only; not used for matching callbacks. Same nullability rule as `run_id`. |
-| `ui_account_index`   | int    | The 0-based index in `<workspace>/config/ui_accounts.env` allocated to this subagent. The orchestrator's account-pool head-allocation policy must skip indices already in `pending_subagents[*].ui_account_index`. |
+| `ui_account_index`   | int    | The 0-based index in `<workspace>/config/ui_accounts.env` allocated to this subagent. In repo-root serial mode this is normally `0`. |
 | `spawned_at`         | ISO-8601 UTC \| null | The orchestrator's wall-clock timestamp when `sessions_spawn` returned its launch ack. Used for stuck-pending eviction (`now - spawned_at >= stuck_after_minutes`). `null` between placeholder write and launch ack receipt; an entry with `null` `spawned_at` past `Phase 5 → end-of-tick` is itself a stuck case and gets evicted on the next scheduled wake-up. |
 
 A `pending_subagents` entry with `placeholder: true` is a transient state during Phase 4 step 5 / Phase 5; it MUST NOT survive the end of the scheduled wake-up. If a crash leaves a placeholder behind, the next scheduled wake-up's stuck-pending eviction (which inspects `spawned_at`) treats it as stuck and synthesizes a blocked Phase 6 reply (`block_reason="placeholder pending entry survived: spawn was never observed to land"`).
@@ -177,7 +170,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | Status        | When written                                                                 | Terminal? |
 | ------------- | ---------------------------------------------------------------------------- | --------- |
 | `pending`     | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
-| `in_progress` | After dispatcher prep finishes (worktree + prompt ready); during Claude execution and post-acpx subagent flow. | no |
+| `in_progress` | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
 | `blocked`     | Retryable failure (auth, runtime mismatch, leak guard tripped, dispatcher prep failed for this IID, etc.). | no |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
 | `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes |
@@ -233,7 +226,7 @@ The dispatcher's Phase 4 prep initializes `attempt_started_at`, `mode_*`, `no_re
 
 ## Compact Subagent Reply
 
-The subagent returns a single compact JSON line on the LAST line of its turn. The dispatcher (Phase 6 of the algorithm) reads this reply and uses it to write the terminal `issue-<iid>/state.json` and `issue-<iid>/attempt_state.json`, drain the IID from `active_issue_iids`, classify the IID into the right `campaign_state.json` list, and (optionally) post a per-batch summary to a notification channel.
+The subagent returns a single compact JSON line on the LAST line of its turn. The dispatcher (Phase 6 of the algorithm) reads this reply and uses it to write the terminal `issue-<iid>/state.json` and `issue-<iid>/attempt_state.json`, drain the IID from `active_issue_iids`, classify the IID into the right `campaign_state.json` list, and (optionally) post a per-IID summary to a notification channel.
 
 ### Schema
 
