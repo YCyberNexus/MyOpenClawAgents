@@ -90,7 +90,7 @@ Disk cache is corrected to match GitLab — never the other way around.
             summary.md
 ```
 
-`ifp-result/*` may be gitignored on master+dev, but `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`). `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) reject protected paths: `ifp-result/_dispatcher/`, any non-output path under `ifp-result/issue-*`, and `.claude/`, `hulat/`, `ifp-data/`. If either guard trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
+`clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed), so per-project runtime-root names are handled by the agent without requiring the test team to maintain a `.gitignore` rule on master + dev. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`), bypassing both `.gitignore` and `info/exclude`. `stage_and_guard.sh` (exit 3) and `post_push_verify.sh` (exit 4) reject protected paths: `ifp-result/_dispatcher/`, any non-output path under `ifp-result/issue-*`, and `.claude/`, `hulat/`, `ifp-data/`. If either guard trips, mark `blocked` — do **not** `git rm` the leaked paths and retry.
 
 ## Two-branch model
 

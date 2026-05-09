@@ -45,8 +45,9 @@ The first-time clone bootstrap order (handled by `scripts/clone_or_pull.sh`):
 1. `git clone -b ${BRANCH}` into `${REPO_PATH}` (uses a tmpfs lock at `/tmp/acpx_auto_tester.clone.${PROJECT}.lock` since the in-repo lock dir does not exist yet).
 2. `mkdir -p` the dispatcher subtree (`_dispatcher/`, `_dispatcher/log/`, `_dispatcher/locks/`) and `ifp-result/`.
 3. Acquire the in-repo flock at `${RESULT_ROOT}/_dispatcher/locks/repo.lock` and run `git fetch --prune` + `git worktree prune` (the prune is only for legacy linked-worktree metadata).
+4. Idempotently append `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude`. This is the agent's local-only equivalent of a `.gitignore` rule; `.git/info/exclude` is never committed/pushed, so per-project runtime-root names (`ifp-result/`, `<project>-result/`, …) are handled here without requiring the test team to maintain a tracked `.gitignore` rule on master + dev. The current issue's `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which bypasses `.gitignore` and `info/exclude` alike), so the single committable path stays committable.
 
-Subsequent ticks skip step 1 and go straight to step 3.
+Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), and go straight through step 3.
 
 ## Variables exported by env_paths.sh
 

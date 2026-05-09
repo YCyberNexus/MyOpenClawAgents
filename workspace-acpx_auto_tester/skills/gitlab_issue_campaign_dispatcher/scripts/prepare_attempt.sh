@@ -31,9 +31,11 @@
 #   - It does NOT copy a `.claude/` runtime config into the repo. The
 #     test team committed `.claude/` to master+dev, so the checkout
 #     already contains that too.
-#   - It does NOT write `.git/info/exclude`. Runtime state/logs stay under
-#     gitignored `ifp-result/`; the current issue's output directory is
-#     force-added explicitly by stage_and_guard.sh.
+#   - It does NOT write `.git/info/exclude`. That is `clone_or_pull.sh`'s
+#     responsibility (it appends `/<basename RESULT_ROOT>/` once per clone).
+#     Runtime state/logs therefore stay locally git-ignored; the current
+#     issue's output directory is force-added explicitly by
+#     stage_and_guard.sh, which bypasses the exclude.
 #
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
 #   REPO_PATH, BRANCH, DEV_BRANCH, ISSUE_IID, ISSUE_MODE,

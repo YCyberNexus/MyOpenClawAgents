@@ -1,18 +1,27 @@
 #!/usr/bin/env bash
 # clone_or_pull.sh — ensure ${REPO_PATH} exists as a clone of the project
 # repo, with up-to-date refs, and create the agent's runtime subtree at
-# ${REPO_PATH}/ifp-result/.
+# ${REPO_PATH}/${RESULT_ROOT_NAME}/ (currently `ifp-result/`).
 #
-# The agent's state lives INSIDE the cloned repo at
-# `${REPO_PATH}/ifp-result/`. Before the first clone, that subtree does
-# not exist — the bootstrap order is:
+# The agent's state lives INSIDE the cloned repo at `${RESULT_ROOT}`.
+# Before the first clone, that subtree does not exist — the bootstrap
+# order is:
 #
 #   1. Ensure /data exists.
 #   2. If repo is missing, acquire a tmpfs lock and `git clone`. We can't
 #      use the in-repo lock yet because the repo doesn't exist.
 #   3. After clone, create the dispatcher subtree (_dispatcher/log,
-#      _dispatcher/locks) and the issue subtree root (ifp-result/).
+#      _dispatcher/locks) and the issue subtree root.
 #   4. Acquire the in-repo flock and run `git fetch` + `git worktree prune`.
+#   5. Idempotently append `/<basename RESULT_ROOT>/` to
+#      `${REPO_PATH}/.git/info/exclude` so the runtime root is git-ignored
+#      locally. `.git/info/exclude` is NEVER committed/pushed, so this
+#      handles per-project naming (`ifp-result/`, `<project>-result/`, …)
+#      without requiring the test team to maintain a `.gitignore` rule
+#      in master + dev for every project. The current issue's
+#      `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which
+#      bypasses both gitignore and info/exclude), so the single
+#      committable path is unaffected.
 #
 # The MAIN repo's working tree is the only issue execution cwd. The
 # dispatcher serializes issue attempts, and prepare_attempt.sh switches this
@@ -90,3 +99,17 @@ git fetch --prune origin
 
 # Prune stale linked-worktree metadata left by older deployments.
 git worktree prune
+
+# Ensure the agent runtime root is locally ignored. `.git/info/exclude`
+# has identical semantics to `.gitignore` but is never committed/pushed,
+# so per-project runtime-root names (e.g. `ifp-result/`,
+# `<project>-result/`) are handled here without touching the project's
+# tracked `.gitignore`. Idempotent: a fixed-string match prevents
+# duplicate appends across ticks.
+RUNTIME_IGNORE_LINE="/$(basename "${RESULT_ROOT}")/"
+EXCLUDE_FILE="${REPO_PATH}/.git/info/exclude"
+mkdir -p "$(dirname "${EXCLUDE_FILE}")"
+if [ ! -f "${EXCLUDE_FILE}" ] || ! grep -Fxq "${RUNTIME_IGNORE_LINE}" "${EXCLUDE_FILE}"; then
+  printf '\n# acpx_auto_tester runtime root (managed by clone_or_pull.sh)\n%s\n' \
+    "${RUNTIME_IGNORE_LINE}" >> "${EXCLUDE_FILE}"
+fi
