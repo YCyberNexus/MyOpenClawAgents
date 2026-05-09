@@ -9,12 +9,13 @@
 # uncommitted there; each issue's committed output is force-added from
 # its own `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/` directory.
 #
-# The repo clone target and the basenames of the runtime root and
+# The repo clone parent and the basenames of the runtime root and
 # knowledge-base directory are overridable per project via optional trigger
 # fields `repo_path`, `result_basename`, and `data_basename` (forwarded as
-# REPO_PATH / RESULT_BASENAME / DATA_BASENAME env vars). Defaults preserve
-# legacy behavior: `/data/${PROJECT}`, `ifp-result`, and `ifp-data` for
-# projects that never ship the new fields.
+# REPO_PARENT_PATH / RESULT_BASENAME / DATA_BASENAME env vars). Defaults
+# preserve legacy behavior: repo parent `/data`, final clone target
+# `/data/${PROJECT}`, `ifp-result`, and `ifp-data` for projects that never
+# ship the new fields.
 #
 # Disk layout produced by this file (with default basenames):
 #
@@ -38,7 +39,7 @@
 # Path derivation is layered:
 #
 #   - dispatcher level (always derived):  PROJECT, GROUP, GITLAB_TOKEN
-#                                         (+ optional REPO_PATH,
+#                                         (+ optional REPO_PARENT_PATH or REPO_PATH,
 #                                            RESULT_BASENAME, DATA_BASENAME)
 #       → REPO_PATH, HULAT_DIR, DATA_DIR, RESULT_ROOT, WORK_ROOT,
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
@@ -65,8 +66,10 @@
 #   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
 #
 # Optional input env vars (forwarded by the orchestrator from trigger
-# fields of the same names; defaults preserve legacy ifp-* layout):
-#   REPO_PATH        absolute clone target path (default: /data/${PROJECT})
+# fields; defaults preserve legacy ifp-* layout):
+#   REPO_PARENT_PATH absolute parent for project clones (default: /data)
+#   REPO_PATH        final clone target path. Compatibility input only when
+#                    REPO_PARENT_PATH is unset; normally exported by this file.
 #   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
 #   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
 #
@@ -86,46 +89,80 @@ set -euo pipefail
 
 : "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
 
-# Optional trigger field `repo_path` lets the orchestrator place the clone
-# outside `/data/${PROJECT}` without code changes. Defaults preserve legacy
-# behavior for projects that never ship the field.
-: "${REPO_PATH:=/data/${PROJECT}}"
+# Optional trigger field `repo_path` lets the orchestrator place clones under
+# a parent directory other than `/data`. The trigger value is forwarded as
+# REPO_PARENT_PATH; the final repo root remains `${REPO_PARENT_PATH}/${PROJECT}`.
+# REPO_PATH is still accepted as a final repo-root compatibility input for
+# subagent prompts and direct script invocations.
+: "${REPO_PARENT_PATH:=}"
+if [ -n "${REPO_PARENT_PATH}" ]; then
+  # If the trigger supplied a parent with trailing slashes, recompute the final
+  # repo path after parent normalization so `/data/foo/` and `/data/foo` match.
+  while [ "${REPO_PARENT_PATH}" != "/" ] && [ "${REPO_PARENT_PATH%/}" != "${REPO_PARENT_PATH}" ]; do
+    REPO_PARENT_PATH="${REPO_PARENT_PATH%/}"
+  done
+  REPO_PATH="${REPO_PARENT_PATH}/${PROJECT}"
+  while [ "${REPO_PATH}" != "/" ] && [ "${REPO_PATH%/}" != "${REPO_PATH}" ]; do
+    REPO_PATH="${REPO_PATH%/}"
+  done
+else
+  : "${REPO_PATH:=/data/${PROJECT}}"
+  # For the compatibility REPO_PATH input, normalize first and then derive its
+  # parent so `/data/foo/A/` exports parent `/data/foo`.
+  while [ "${REPO_PATH}" != "/" ] && [ "${REPO_PATH%/}" != "${REPO_PATH}" ]; do
+    REPO_PATH="${REPO_PATH%/}"
+  done
+  REPO_PARENT_PATH="${REPO_PATH%/*}"
+  if [ -z "${REPO_PARENT_PATH}" ] || [ "${REPO_PARENT_PATH}" = "${REPO_PATH}" ]; then
+    REPO_PARENT_PATH="/"
+  fi
+  while [ "${REPO_PARENT_PATH}" != "/" ] && [ "${REPO_PARENT_PATH%/}" != "${REPO_PARENT_PATH}" ]; do
+    REPO_PARENT_PATH="${REPO_PARENT_PATH%/}"
+  done
+fi
 
-# Normalize one or more trailing slashes, except for root itself.
-while [ "${REPO_PATH}" != "/" ] && [ "${REPO_PATH%/}" != "${REPO_PATH}" ]; do
-  REPO_PATH="${REPO_PATH%/}"
-done
-
-# Guard against unsafe clone targets. clone_or_pull.sh may remove a
-# non-git directory at REPO_PATH when recovering from an interrupted first
-# clone, so REPO_PATH must be a concrete absolute repo directory, not a
-# filesystem root or broad shared parent.
-case "${REPO_PATH}" in
+# Guard against unsafe clone parents and targets. clone_or_pull.sh may remove
+# a non-git directory at REPO_PATH when recovering from an interrupted first
+# clone, so REPO_PATH must be a concrete repo directory derived from a safe
+# parent.
+case "${REPO_PARENT_PATH}" in
   /*) ;;
   *)
-    echo "env_paths.sh: invalid_repo_path: REPO_PATH must be absolute" >&2
+    echo "env_paths.sh: invalid_repo_path: repo_path must be absolute" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PARENT_PATH}" in
+  "/")
+    echo "env_paths.sh: invalid_repo_path: repo_path must not be filesystem root" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PARENT_PATH}" in
+  *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+    echo "env_paths.sh: invalid_repo_path: repo_path must not contain dot segments or whitespace" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PARENT_PATH}" in
+  *[!A-Za-z0-9_./-]*)
+    echo "env_paths.sh: invalid_repo_path: repo_path contains unsupported characters" >&2
     exit 2
     ;;
 esac
 case "${REPO_PATH}" in
   "/"|"/data"|"/tmp"|"/var"|"/home"|"/Users"|"/private"|"/private/tmp"|"/private/var")
-    echo "env_paths.sh: invalid_repo_path: REPO_PATH must point at a repo directory, not ${REPO_PATH}" >&2
+    echo "env_paths.sh: invalid_repo_path: final REPO_PATH must point at a repo directory, not ${REPO_PATH}" >&2
     exit 2
     ;;
 esac
 case "${REPO_PATH}" in
-  *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
-    echo "env_paths.sh: invalid_repo_path: REPO_PATH must not contain dot segments or whitespace" >&2
+  *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
+    echo "env_paths.sh: invalid_repo_path: final REPO_PATH is not a safe repo directory" >&2
     exit 2
     ;;
 esac
-case "${REPO_PATH}" in
-  *[!A-Za-z0-9_./-]*)
-    echo "env_paths.sh: invalid_repo_path: REPO_PATH contains unsupported characters" >&2
-    exit 2
-    ;;
-esac
-export REPO_PATH
+export REPO_PARENT_PATH REPO_PATH
 
 # Per-project basenames. Optional trigger fields `result_basename` /
 # `data_basename` let the orchestrator override the runtime-root and

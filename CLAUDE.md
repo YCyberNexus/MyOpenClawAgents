@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is **not** an application repo — it is the **deployment artifact for an OpenClaw agent** named `acpx_auto_tester`. It contains the agent's prompt contracts (`SOUL.md`, `AGENTS.md`, `USER.md`), one SKILL (`gitlab_issue_campaign_dispatcher`), and the bash scripts that SKILL invokes. There is no build, no test runner, no package manifest. Changes here are deployed by syncing this workspace to the runner.
 
-The agent itself runs on the OpenClaw runner with repo clones defaulting to `/data/...` unless trigger `repo_path` overrides the clone target; nothing in this repo executes locally during development. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
+The agent itself runs on the OpenClaw runner with repo clone parents defaulting to `/data` unless trigger `repo_path` overrides that parent; nothing in this repo executes locally during development. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
 
 ## Single-skill, async-callback execution model
 
@@ -74,7 +74,7 @@ Disk cache is corrected to match GitLab — never the other way around.
 ## Disk state layout
 
 ```
-${REPO_PATH}/                                  ← cloned project repo (default /data/${PROJECT})
+${REPO_PATH}/                                  ← cloned project repo (default /data/${PROJECT}; repo_path=/data/ifp1 gives /data/ifp1/${PROJECT})
     .claude/                                   ← in master+dev (test-team maintained)
     hulat/                                     ← in master+dev (was the legacy ${HULAT_DIR})
     ifp-data/                                  ← in master+dev (knowledge base)
@@ -94,7 +94,7 @@ ${REPO_PATH}/                                  ← cloned project repo (default 
 
 `clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed), so per-project runtime-root names are handled by the agent without requiring the test team to maintain a `.gitignore` rule on master + dev. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`), bypassing both `.gitignore` and `info/exclude`. There is no path-based reject in either `stage_and_guard.sh` or `post_push_verify.sh`: any file Claude produced or that ships with the base branch is allowed through to the issue MR.
 
-The clone target defaults to `/data/${PROJECT}` and can be overridden by trigger `repo_path`; non-default deployments must pass it on every scheduled trigger and callback. The directory names `ifp-result` and `ifp-data` are defaults. They can be overridden per project by the trigger fields `result_basename` / `data_basename` (carry-forward semantics — once set, persisted in `campaign_state.json` until the trigger replaces them). When overridden, every layer adapts automatically: `env_paths.sh` derives `RESULT_ROOT` / `DATA_DIR` from the basenames, `clone_or_pull.sh` writes the right name into `.git/info/exclude`, and `build_prompt.sh` substitutes the values into the executor prompt. Path examples in this document keep the `ifp-*` defaults for readability; see `references/trigger_command.md` for the override contract.
+The clone parent defaults to `/data`; trigger `repo_path` overrides that parent, and the final clone target is `${repo_path}/${PROJECT}`. Non-default deployments must pass `repo_path` on every scheduled trigger and callback. The directory names `ifp-result` and `ifp-data` are defaults. They can be overridden per project by the trigger fields `result_basename` / `data_basename` (carry-forward semantics — once set, persisted in `campaign_state.json` until the trigger replaces them). When overridden, every layer adapts automatically: `env_paths.sh` derives `RESULT_ROOT` / `DATA_DIR` from the basenames, `clone_or_pull.sh` writes the right name into `.git/info/exclude`, and `build_prompt.sh` substitutes the values into the executor prompt. Path examples in this document keep the `ifp-*` defaults for readability; see `references/trigger_command.md` for the override contract.
 
 ## Two-branch model
 
@@ -122,7 +122,7 @@ OpenClaw runs each Bash tool call in a **fresh shell**. Exports do NOT survive t
 
 `env_paths.sh` is **layered**: it always derives dispatcher-level paths, and additionally derives per-issue + attempt-level paths when `ISSUE_IID` is set (then `ATTEMPT_NUMBER` is also required).
 
-- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PATH` when trigger `repo_path` is non-default). Some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`.
+- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when trigger `repo_path` is non-default). Some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`.
 - Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER`. Some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`. `HULAT_DIR` is derived inside `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 Always prefix Bash invocations with the minimum vars on the same line — never rely on prior exports. The recommended pattern:
@@ -130,7 +130,7 @@ Always prefix Bash invocations with the minimum vars on the same line — never 
 ```bash
 cd "${SKILL_DIR}" && \
 PROJECT=px_ifp_hulat GROUP=claw_gitlab GITLAB_TOKEN=<token> \
-REPO_PATH=/data/px_ifp_hulat \
+REPO_PARENT_PATH=/data \
 ISSUE_IID=14 ATTEMPT_NUMBER=3 BRANCH=master DEV_BRANCH=dev \
 ISSUE_MODE=fresh \
 bash scripts/<script>.sh

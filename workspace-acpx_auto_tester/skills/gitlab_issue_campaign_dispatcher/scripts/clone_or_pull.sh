@@ -29,7 +29,8 @@
 # checkout onto a per-attempt local branch before acpx runs.
 #
 # Required env vars:
-#   REPO_PATH               from env_paths.sh (default /data/${PROJECT}, or trigger override)
+#   REPO_PATH               from env_paths.sh (default /data/${PROJECT}; trigger
+#                           repo_path overrides the parent)
 #   BRANCH                  integration / target branch (typically "master")
 #   GROUP                   from trigger
 #   PROJECT                 from trigger

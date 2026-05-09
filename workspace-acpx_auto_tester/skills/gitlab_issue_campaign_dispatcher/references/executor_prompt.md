@@ -28,7 +28,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
-| `{WORKTREE_DIR}`         | `${REPO_PATH}` (repo root; acpx cwd; defaults to `/data/{PROJECT}`)                      |
+| `{WORKTREE_DIR}`         | final `${REPO_PATH}` (repo root; acpx cwd; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`) |
 | `{OUTPUT_DIR}`           | `{ISSUE_ROOT}/hulat-spec-issue{ISSUE_IID}`                                               |
 | `{LOG_DIR}`              | `{ISSUE_ROOT}/log/attempt-{ATTEMPT_NUMBER_PADDED}`                                      |
 | `{ISSUE_ROOT}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}`                                     |
@@ -100,7 +100,7 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
   REPO_PATH={WORKTREE_DIR} \
   RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME}
 
-`REPO_PATH` carries the repo clone target selected by the trigger (default `/data/{PROJECT}`). `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
+`REPO_PATH` carries the final repo root derived by the dispatcher (default `/data/{PROJECT}`; with trigger `repo_path=/data/ifp1`, `/data/ifp1/{PROJECT}`). `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
 </env_contract>
 
 <instructions>

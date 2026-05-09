@@ -6,9 +6,9 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 
 Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout.
 
-The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. Claude Code runs from the main repo root `${REPO_PATH}`. By default `${REPO_PATH}=/data/${PROJECT}`; the optional trigger field `repo_path` can set a different absolute clone target. Runtime state/logs and each issue's committed output directory live under `${REPO_PATH}/ifp-result/`; the dispatcher's `.git/info/exclude` keeps untracked runtime files out of `git add -A`, and `stage_and_guard.sh` force-adds only the current issue's output directory. There is no path-based reject — anything that ends up in the staged/MR diff is allowed through.
+The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. Claude Code runs from the main repo root `${REPO_PATH}`. By default `${REPO_PARENT_PATH}=/data` and `${REPO_PATH}=/data/${PROJECT}`; the optional trigger field `repo_path` can set a different absolute clone parent, with the final repo root derived as `${repo_path}/${PROJECT}`. Runtime state/logs and each issue's committed output directory live under `${REPO_PATH}/ifp-result/`; the dispatcher's `.git/info/exclude` keeps untracked runtime files out of `git add -A`, and `stage_and_guard.sh` force-adds only the current issue's output directory. There is no path-based reject — anything that ends up in the staged/MR diff is allowed through.
 
-**Repo path override.** `repo_path` is forwarded to scripts as `REPO_PATH`. When omitted, `env_paths.sh` uses `/data/${PROJECT}` exactly as older deployments did. Non-default deployments must pass the same `repo_path` on every scheduled trigger and callback because the campaign state file itself lives under that path and cannot be discovered from disk before `env_paths.sh` runs. The value must be an absolute concrete repo directory; root/shared parents such as `/`, `/data`, and `/tmp`, dot segments, whitespace, and shell-unsafe characters outside `[A-Za-z0-9_./-]` are rejected.
+**Repo path override.** `repo_path` is forwarded to dispatcher scripts as `REPO_PARENT_PATH`. When omitted, `env_paths.sh` uses parent `/data` exactly as older deployments did. For example, `project=A` with `repo_path=/data/ifp1` derives final `${REPO_PATH}` as `/data/ifp1/A`. Non-default deployments must pass the same `repo_path` on every scheduled trigger and callback because the campaign state file itself lives under the derived path and cannot be discovered from disk before `env_paths.sh` runs. The value must be an absolute parent directory; `/`, dot segments, whitespace, and shell-unsafe characters outside `[A-Za-z0-9_./-]` are rejected.
 
 **Per-project basename overrides.** The directory names `ifp-result` and `ifp-data` are defaults; they can be replaced per-project via the `result_basename` / `data_basename` trigger fields (carry-forward into `campaign_state.json`; see `trigger_command.md`). When set, `env_paths.sh` exports `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}` and `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`, and every downstream rule below — including `.git/info/exclude`, the executor prompt, and continue-mode template — picks up the override automatically. The path examples in this document use the defaults for readability.
 
@@ -59,7 +59,8 @@ Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), an
 
 | Variable                | Value                                                | Purpose                                                          |
 | ----------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- |
-| `REPO_PATH`             | `/data/${PROJECT}` (default) or trigger `repo_path`  | The cloned project repo and acpx cwd.                           |
+| `REPO_PARENT_PATH`      | `/data` (default) or trigger `repo_path`             | Parent directory under which the project repo is cloned.        |
+| `REPO_PATH`             | `${REPO_PARENT_PATH}/${PROJECT}`                     | The cloned project repo and acpx cwd.                           |
 | `HULAT_DIR`             | `${REPO_PATH}/hulat`                                 | Derived (NOT a trigger input). Test-team-committed.             |
 | `RESULT_BASENAME`       | `ifp-result` (default) or trigger override           | Basename of the agent runtime root. Override via trigger field `result_basename`. |
 | `DATA_BASENAME`         | `ifp-data` (default) or trigger override             | Basename of the test-team knowledge dir. Override via trigger field `data_basename`. |
@@ -78,7 +79,7 @@ To find a specific issue's state file from dispatcher code, use the helper:
 ```bash
 ISSUE_STATE="$(issue_state_file_for "${IID}")"
 # → /data/${PROJECT}/ifp-result/issue-${IID}/state.json
-# (or ${REPO_PATH}/ifp-result/issue-${IID}/state.json when repo_path is set)
+# (or ${REPO_PARENT_PATH}/${PROJECT}/ifp-result/issue-${IID}/state.json when repo_path is set)
 ```
 
 ### Per-issue + attempt-level (exported only when `ISSUE_IID` is in env)
