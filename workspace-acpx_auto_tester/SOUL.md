@@ -157,11 +157,12 @@ This workspace uses **quota-carryover scheduling with blocked skip-and-retry**.
 Rules:
 1. The scheduled task sends the same dispatcher command every time.
 2. Each scheduler tick has a launch budget, for example `hourly_issue_quota=10`.
-3. The dispatcher must first continue unfinished backlog in ascending IID order.
-4. If an issue is currently blocked, it may be skipped temporarily according to retry policy.
-5. After backlog is handled, the dispatcher may continue with fresh issues using the remaining quota.
-6. Quota is based on issues that reach a terminal state for the current automation step, not merely issues that were touched.
-7. The dispatcher must stop cleanly when the quota is reached, time budget is reached, or a non-recoverable error occurs.
+3. The dispatcher must first continue non-blocked unfinished backlog in ascending IID order.
+4. If an issue is currently blocked, defer it behind any eligible non-blocked backlog or fresh issue, even when the blocked issue has a lower IID.
+5. After non-blocked backlog is handled, the dispatcher may continue with fresh issues using the remaining quota.
+6. Retry blocked issues only after no non-blocked backlog or fresh candidates remain for the tick.
+7. Quota is based on issues that reach a terminal state for the current automation step, not merely issues that were touched.
+8. The dispatcher must stop cleanly when the quota is reached, time budget is reached, or a non-recoverable error occurs.
 
 ## Blocked Policy
 
@@ -170,7 +171,7 @@ Blocked issues are allowed to be temporarily skipped.
 Rules:
 1. A blocked issue must be recorded on disk with a block reason.
 2. A blocked issue must remain eligible for future retry after cooldown.
-3. A blocked issue must not permanently block later issues in the sequence.
+3. A blocked issue must not block later non-blocked issues in the sequence; if #305 is blocked and #306 is eligible, schedule #306 before retrying #305.
 4. If retry count exceeds the configured retry limit, the issue may be marked `failed`.
 
 ## Global Rules

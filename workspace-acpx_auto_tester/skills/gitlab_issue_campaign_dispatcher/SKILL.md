@@ -287,7 +287,7 @@ If `reconcile.sh` fails or no evidence file is produced, abort the tick with `"r
    - `require_labels_match == "or"`: keep if `labels ∩ require_labels` is non-empty (at least one match).
    - `require_labels_match == "and"`: keep if `require_labels ⊆ labels` (every required label present).
    - An IID with `missing == true` in the evidence file (glab GET failed) is dropped from this tick's candidates regardless — no live labels available.
-   The label filter is applied AFTER the standard "is this IID schedulable" gates (closed → skip; `is_done_on_gitlab && !needs_continue` → skip; blocked-cooldown → skip), not before — i.e., it only narrows the otherwise-eligible set, it does not promote terminal IIDs back into eligibility. When `require_labels` is empty, this step is a no-op.
+   The label filter is applied AFTER the standard "is this IID schedulable" gates (closed → skip; `is_done_on_gitlab && !needs_continue` → skip; blocked deferral / retry policy → maybe skip), not before — i.e., it only narrows the otherwise-eligible set, it does not promote terminal IIDs back into eligibility. When `require_labels` is empty, this step is a no-op.
 5. `quota_launched_this_tick = 0`; record `tick_start_time`.
 
 In the async-callback model **the scheduled wake-up forms exactly one batch** (no inner loop). Phase 4 runs once, Phase 5 fires the spawns, and the wake-up exits. Subsequent batches are formed by future scheduled wake-ups (after callbacks have drained the previous batch's `pending_subagents`).
@@ -297,7 +297,12 @@ In the async-callback model **the scheduled wake-up forms exactly one batch** (n
 This phase runs ONCE per scheduled wake-up (no loop):
 
 1. **Check time budget.** If `now - tick_start_time >= max_runtime_minutes`, return `"campaign_status":"running","reason":"time_budget"` and exit. (Time is checked once at the top of Phase 4. Once Phase 5 fires, the tick is over regardless of remaining budget — the budget governs *spawning*, not *waiting for callbacks*.)
-2. **Form this tick's serial batch.** Because Phase 1 already enforced `max_concurrent_subagents=1` and Phase 3 returned early if `pending_subagents` was non-empty, compute `batch_size = min(1, hourly_issue_quota - quota_launched_this_tick, remaining_eligible_iids)`. Pick at most one IID in the standard order: lowest-IID eligible backlog item first, then the next fresh IID from `next_new_issue_iid` upward. If `batch_size == 0`, return `"campaign_status":"running","reason":"no_eligible_iids"` (or `"completed"` if every IID in range is terminal) and exit.
+2. **Form this tick's serial batch.** Because Phase 1 already enforced `max_concurrent_subagents=1` and Phase 3 returned early if `pending_subagents` was non-empty, compute `batch_size = min(1, hourly_issue_quota - quota_launched_this_tick, remaining_eligible_iids)`. Pick at most one IID in this strict order:
+   1. lowest-IID non-blocked unfinished backlog item (`todo`, `retry`, `new`, `continue`, `contiune`, `user_reopened`, or required trigger label);
+   2. lowest-IID fresh item from `next_new_issue_iid` upward;
+   3. lowest-IID retryable blocked item, only when there are no non-blocked backlog or fresh candidates left for this tick.
+
+   A lower-numbered `blocked` IID must not be selected ahead of a higher-numbered non-blocked IID. For example, if #305 is `blocked` and #306 is otherwise eligible, the next scheduled wake-up must choose #306 before retrying #305. If `batch_size == 0`, return `"campaign_status":"running","reason":"no_eligible_iids"` (or `"completed"` if every IID in range is terminal) and exit.
 3. **Allocate attempt numbers SEQUENTIALLY.** For each IID in the batch, run `IID=<iid> bash scripts/allocate_attempt.sh` in its own Bash exec, capturing the printed number `N_iid`.
 4. **Allocate UI accounts for the batch.** Run `BATCH_SIZE=<batch_size> bash scripts/load_ui_accounts.sh` in a single Bash exec, capturing exactly `batch_size` lines of `user:pass` form. Bind `account[k]` to the `k`-th IID of the batch (k=0..batch_size-1). Record `ui_account_index=k` for the IID — this is what goes into `pending_subagents[iid].ui_account_index`. On any non-zero exit code (10/11/12/13), abort the tick.
 5. **Pre-spawn persist.** For every IID in the batch, write a placeholder pending entry: `pending_subagents[iid] = {attempt_number: N_iid, run_id: null, child_session_key: null, ui_account_index: k, spawned_at: null, placeholder: true}` and append `iid` to `active_issue_iids` (and a human-readable label `issue-<project>-<iid>` to `active_issue_sessions` for logging). Persist `campaign_state.json` BEFORE any glab mutation. **This persist is the structural guarantee that the orchestrator does not double-spawn the same IID across crashes / concurrent ticks** — see §Per-Issue Subagent Rules. Phase 5 replaces the placeholder with the real `run_id` / `child_session_key` / `spawned_at` after `sessions_spawn` returns its launch ack.
@@ -402,7 +407,7 @@ The callback path **never spawns a new subagent.** Even if the IID just drained 
 1. Blocked issues record `block_reason` in their per-issue state file.
 2. A blocked issue is retryable only after `blocked_cooldown_ticks` ticks have elapsed since the last attempt.
 3. If `retry_count > blocked_retry_limit` (after Phase 6 increment), the issue is promoted to `failed`.
-4. A blocked issue must not permanently block later issues from using remaining quota.
+4. A blocked issue must not block later non-blocked issues from using quota. Even after cooldown, blocked retries are selected only after all currently eligible non-blocked backlog and fresh candidates have been launched or ruled out.
 
 ---
 

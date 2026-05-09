@@ -30,7 +30,7 @@ When the scheduled trigger supplies `require_labels`, those labels are also trea
              ──► doing ──► done ──► done+pr                 │
                 │                                           │
                 ▼                                           │
-              blocked ──► doing  (after cooldown / retry) ──┘
+              blocked ──► doing  (after cooldown, and only after non-blocked candidates) ──┘
                 │
                 ▼
               failed   (retry exhausted, terminal)
@@ -57,7 +57,7 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 | `done`     | `done+pr`  | subagent   | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr`                                           |
 | `doing`    | `blocked`  | subagent   | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
 | `done`     | `done+blocked` | subagent | retryable failure after Wiki evidence and `done`, before `pr` can be added | `set_issue_label.sh add blocked`; do NOT add `pr`                     |
-| `blocked`  | `doing`    | dispatcher | retry begins on a later tick                         | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
+| `blocked`  | `doing`    | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
 | `blocked`  | `failed`   | dispatcher | `retry_count > blocked_retry_limit` during Phase 6   | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
 | `done+pr`  | `continue` | **human reviewer** | reviewer notices the prior run was incomplete and wants the agent to re-run on the existing branch | manual on the GitLab UI; the agent does NOT make this transition itself |
 
