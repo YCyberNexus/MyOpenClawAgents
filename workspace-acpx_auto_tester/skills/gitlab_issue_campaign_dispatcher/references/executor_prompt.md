@@ -103,11 +103,17 @@ Step 0 — SETUP
   cd {WORKTREE_DIR}
   Confirm the repo root exists and the test-team-committed `hulat/`, `.claude/`, and `ifp-data/` directories are present at the repo root. Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="repo root missing or required directories absent".
 
-Step 1 — EXECUTE acpx (one-shot, synchronous)
+Step 1 — EXECUTE acpx (one-shot, long-running)
   acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \
     1>{LOG_DIR}/claude_result.txt 2>{LOG_DIR}/acpx_raw.log
   CAPTURE: acpx_exit (the exit code).
   If acpx_exit != 0 → FAIL status=blocked block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
+
+  Tool-exec requirements for Step 1:
+  - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
+  - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 10800 seconds.
+  - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
+  - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
   - no `-s` (persistent / named acpx session)
@@ -217,7 +223,7 @@ Step 9 — REPLY
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
 - Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
-- Hard timeout: 60 minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded 60-minute soft cap".
+- Hard timeout: 180 minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded 180-minute soft cap".
 - Never paste full diffs, full claude_result.txt, or long issue bodies into chat.
 </constraints>
 
@@ -247,7 +253,7 @@ Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → f
 - The dispatcher MUST verify all placeholders have been substituted before calling `sessions_spawn`. A literal `{` followed by an uppercase identifier in the rendered string is a missed substitution; abort the IID with `block_reason="prompt template render incomplete: <placeholder>"`.
 - The dispatcher passes the rendered string as the entire spawn payload. There are no additional env-var injections at the OpenClaw layer — the subagent reads everything from this prompt.
 - `timeoutSeconds` for the launch-ack wait: 30. Without this, the harness/gateway defaults to ~10s and has been observed to return only a `childSessionKey` placeholder with no `runId` (no real subagent behind it). 30 gives the runtime enough headroom to return a complete launch ack on a normal day.
-- `runTimeoutSeconds` for the subagent runtime cap: 3600. `cleanup`: `keep`. If the trigger supplies `--model` (reserved; not currently a trigger field), forward it.
+- `runTimeoutSeconds` for the subagent runtime cap: 10800. `cleanup`: `keep`. If the trigger supplies `--model` (reserved; not currently a trigger field), forward it.
 - **Spawn anonymously, do NOT pass any session name (HARD).** The orchestrator's `sessions_spawn` call MUST NOT include `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter. Earlier deployments hit `errorCode=thread_required` on channels that don't support thread bindings; passing no name avoids that entirely. The runtime returns `runId` + `childSessionKey` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`) — the orchestrator records both into `campaign_state.json.pending_subagents[iid]` for audit + stuck-pending detection. The runtime session-key label is NOT used to match replies — that's done by the `iid` field of the compact JSON (Phase 6 validation rule 2 in `references/state_schema.md` §Compact Subagent Reply). The rendered prompt's `iid` field MUST be correct.
 - **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via the runtime's `RUN_CHILD_COMPLETION_CALLBACK` trigger, NOT via the synchronous return value of `sessions_spawn`. The subagent itself does not need to know about the callback mechanism — it just emits the compact JSON line on its last turn and stops, exactly as the `<instructions>` Step 9 says. The runtime captures that final line and forwards it inside `worker_result_json` of the callback payload.
 - The subagent's compact JSON reply is canonical; the dispatcher uses it for Phase 6 follow-up bookkeeping (state file writes, campaign_state updates, summary aggregation, optional notify). The subagent does NOT write the terminal `issue/state.json` or `issue/attempt_state.json` itself — see `references/state_schema.md` §Compact Subagent Reply and §Phase 6 Write Mapping.
