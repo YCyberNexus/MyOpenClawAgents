@@ -69,7 +69,7 @@ glab api --method POST \
 
 ### G4 — Add a single label (dispatcher prep + subagent)
 
-Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition to `doing` (and `add` is also used by the subagent for `done`/`pr`/`blocked`/`failed`).
+Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing` and to re-apply final callback labels (`done` + `pr`, `blocked`, or `failed`). The subagent also uses it for immediate `done` / `pr` / `blocked` updates during the post-acpx flow.
 
 ```bash
 glab api --method PUT \

@@ -99,7 +99,7 @@ iid=<iid>
 attempt_number=<attempt_number>
 run_id=<runId from the launch ack>
 child_session_key=<childSessionKey from the launch ack>
-worker_status=<done|no_changes|blocked|failed>
+worker_status=<done|blocked|failed>   # no_changes is accepted only for legacy callbacks and normalized to blocked
 worker_result_json=<the entire compact JSON line the subagent emitted>
 ```
 

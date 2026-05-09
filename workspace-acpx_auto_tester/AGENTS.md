@@ -22,7 +22,7 @@ The orchestrator handles two trigger commands and runs different phases on each:
 | 1 Parse        | bootstrap, flock, load + override `campaign_state.json`. Stuck-pending eviction (synthesizes Phase 6 blocked replies for any pending entries past `stuck_after_minutes`). |
 | 2 Reconcile    | mandatory `reconcile.sh` against GitLab; correct disk cache from evidence file. |
 | 3 Eligibility  | If `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (clone/pull, ensure_labels), validate `max_concurrent_subagents=1`, and form one serial IID under launch quota. |
-| 4 Per-IID Prep | allocate_attempt → load_ui_accounts → prepare_attempt → build_prompt → label `doing` → init `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` (in_progress) → write `pending_subagents[iid]` placeholder → render fixed-format prompt. |
+| 4 Per-IID Prep | allocate_attempt → load_ui_accounts → prepare_attempt → read issue labels → transition entry labels (`todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger labels) to `doing` → build_prompt → init `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` (in_progress) → write `pending_subagents[iid]` placeholder → render fixed-format prompt. |
 | 5 Async Spawn  | single **anonymous** `sessions_spawn` call (NO session name passed); record the launch ack's `runId` + `childSessionKey` into `pending_subagents[iid]`; persist; return `waiting_for_callbacks`. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures). |
 
 ### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
@@ -33,7 +33,7 @@ The runtime delivers ONE callback per subagent termination. Each callback wakes 
 | ----- | ---- |
 | 1 Parse     | bootstrap, flock, load `campaign_state.json` (no trigger override on callback path). |
 | 2 Reconcile | narrow reconcile against GitLab (single-IID range when feasible). |
-| 6 Follow-up | parse + validate the callback's compact JSON → match to `pending_subagents[reply.iid]` (Phase 6 validation rule 2; reply.attempt_number must equal pending entry's) → write **terminal** `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` → drain pending entry → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if retry exhausted) → optional notify_channel → return. The callback path does NOT spawn a replacement subagent — the next scheduled wake-up forms the next batch. |
+| 6 Follow-up | parse + validate the callback's compact JSON → match to `pending_subagents[reply.iid]` (Phase 6 validation rule 2; reply.attempt_number must equal pending entry's) → synchronize live labels (`done` + `pr`, `blocked`, or `failed`) → write **terminal** `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` → drain pending entry → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if retry exhausted) → optional notify_channel → return. The callback path does NOT spawn a replacement subagent — the next scheduled wake-up forms the next batch. |
 
 ### Subagent
 
@@ -49,6 +49,8 @@ The subagent (one anonymous run per IID per spawn) receives the rendered fixed-f
 - Step 7b: `set_issue_label.sh add pr` after MR creation succeeds
 - Step 8: `summarize_attempt.sh` posts a per-attempt summary back to the issue
 - Step 9: emit ONE compact JSON line per [`references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply, then stop
+
+On any subagent FAIL path, the subagent removes `doing` and adds `blocked` before posting the summary and compact JSON. Phase 6 re-applies the final label state idempotently after the callback is received.
 
 The subagent invokes scripts at `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts/<name>.sh` by absolute path (the orchestrator renders `{SCRIPTS_DIR}` into the prompt). **The subagent NEVER loads this SKILL, NEVER reads SOUL.md / AGENTS.md, NEVER calls sessions_spawn / sessions_history, NEVER writes any state file.** All terminal state-file writes are owned by the orchestrator's Phase 6, fed by the compact JSON reply.
 

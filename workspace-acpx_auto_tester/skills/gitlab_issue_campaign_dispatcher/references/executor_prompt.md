@@ -123,8 +123,8 @@ Step 2 — STAGE + leak guard
     bash {SCRIPTS_DIR}/stage_and_guard.sh
   CAPTURE: stage_status (one of: STAGED_OK, NO_CHANGES).
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
-  exit 0, stdout "NO_CHANGES" → set ATTEMPT_STATUS=no_changes; jump to Step 8 (summarize), then assemble REPLY.
-                                Do NOT push. Do NOT create an MR. Do NOT change the `doing` label.
+  exit 0, stdout "NO_CHANGES" → FAIL status=blocked block_reason="Claude produced no staged changes".
+                                Do NOT push. Do NOT create an MR.
   exit 3                      → FAIL status=blocked block_reason="protected runtime/input paths leaked into staged changes".
 
 Step 3 — COMMIT + force-push (Strategy A)
@@ -160,6 +160,7 @@ Step 6 — TRANSITION doing → done
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add done
   Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
+  CAPTURE labels_removed includes "doing"; labels_added includes "done".
 
 Step 7 — CREATE / rotate the MR
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
@@ -182,7 +183,7 @@ Step 7b — ADD `pr` label
     bash {SCRIPTS_DIR}/set_issue_label.sh add pr
   Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
 
-  After this step the live issue should carry both `done` and `pr`. Set ATTEMPT_STATUS=done.
+  After this step the live issue should carry both `done` and `pr`. Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr".
 
 Step 8 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
@@ -201,10 +202,10 @@ Step 9 — REPLY
 
   Field rules:
   - status = done           when Steps 0-7b all succeeded.
-  - status = no_changes     when Step 2 returned NO_CHANGES (and Steps 3-7b were skipped).
+  - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
   - status = blocked        when any FAIL flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
-  - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For no_changes / blocked / failed: typically [], [].
+  - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr".
   - mr_action = none when no MR step ran (no_changes / blocked before Step 7).
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
@@ -223,9 +224,15 @@ Step 9 — REPLY
 <fail_flow>
 When any step instructs "FAIL with status=X, block_reason=Y":
   1. Stop the algorithm at this step. Do NOT continue to later steps.
-  2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
-  3. Run Step 8 (summarize) with ATTEMPT_STATUS / BLOCK_REASON.
-  4. Output the compact JSON per Step 9 with status=X and block_reason=Y filled in.
+  2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
+  3. Immediately sync the live issue label to blocked before summarizing:
+     - Run `set_issue_label.sh remove doing` in its own Bash exec.
+     - Run `set_issue_label.sh add blocked` in its own Bash exec.
+     - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
+     - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked` and without `pr`.
+  4. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
+  5. Run Step 8 (summarize) with ATTEMPT_STATUS / BLOCK_REASON.
+  6. Output the compact JSON per Step 9 with status=X and block_reason=Y filled in.
 
 Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.
 </fail_flow>

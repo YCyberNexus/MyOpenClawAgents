@@ -8,7 +8,7 @@ When you find an issue whose MR was created but the work is incomplete or wrong,
 
 1. **Read the latest auto-posted attempt summary on the issue.** The agent posts a short comment after every attempt with the marker `<!-- acpx_auto_tester:attempt-summary v2 ... -->`. This tells you the attempt status, commit SHA when available, MR URL when available, changed-file count / preview, and the runner evidence path for full logs and diffs. For successful push-ready attempts, the agent also posts `<!-- acpx_auto_tester:attempt-wiki-artifacts v1 ... -->` before MR creation with links to the Wiki pages for prompt/result logs and optional report. Continue mode also recognizes legacy pre-rename markers from earlier runs.
 2. **Leave a comment on the issue describing what to do on the next run.** The comment is freeform — write whatever the next Claude Code run needs. Include file paths, env requirements, acceptance criteria, or "do not do X" cautions.
-3. **Flip the issue's label from `done` / `pr` to `continue`.** The agent only triggers continue mode on the `continue` label.
+3. **Flip the issue's label from `done` / `pr` to `continue`.** The agent triggers continue mode on the `continue` label. It also tolerates the legacy misspelling `contiune`, but new human action should use `continue`.
 
 The next dispatcher tick will pick the issue up and re-run.
 
@@ -23,7 +23,7 @@ In continue mode:
    - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- acpx_auto_tester:attempt-wiki-artifacts ... -->`) and legacy pre-rename Wiki artifact notes. This is where humans write supplemental instructions.
 4. **Dispatcher prep:** `build_prompt.sh` writes the Claude Code prompt at `${LOG_DIR}/prompt.txt` with both buckets, in chronological order, in distinct sections (see template below).
 5. **Subagent:** Runs Claude Code via the same one-shot invocation used in fresh mode: `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from `${WORKTREE_DIR}`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the prompt's "Past attempt summaries" section, not from a persistent Claude session.
-6. **Subagent:** After the attempt finishes (terminal status, any of done / no_changes / blocked / failed), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
+6. **Subagent:** After the attempt finishes (terminal status, any of done / blocked / failed; legacy no_changes is normalized to blocked), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
 7. **Subagent — MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
    - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
    - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record

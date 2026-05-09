@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# ensure_labels.sh — make sure the seven workflow labels exist in the project.
+# ensure_labels.sh — make sure the workflow labels exist in the project.
 # Only creates labels that are missing; never modifies existing ones.
 #
 # Required env vars:
 #   GITLAB_HOST    from glab_auth.sh
 #   PROJECT_URI    URI-encoded "${GROUP}/${PROJECT}"
 #
-# Workflow labels: todo doing pr done blocked failed continue
+# Workflow labels: todo retry new doing pr done blocked failed continue
 #
 # `continue` is a human-applied review label. Reviewers set it on an issue
 # whose MR was created and labeled `done` + `pr` by the agent, but where the
@@ -23,7 +23,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}"
 
-REQUIRED_LABELS=(todo doing pr done blocked failed continue)
+REQUIRED_LABELS=(todo retry new doing pr done blocked failed continue)
 
 existing="$(
   glab api --paginate \

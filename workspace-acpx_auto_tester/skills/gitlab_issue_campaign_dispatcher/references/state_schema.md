@@ -174,7 +174,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | `blocked`     | Retryable failure (auth, runtime mismatch, leak guard tripped, dispatcher prep failed for this IID, etc.). | no |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
 | `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes |
-| `no_changes`  | Claude produced no diff (`stage_and_guard.sh` printed `NO_CHANGES`).         | yes       |
+| `no_changes`  | Legacy compact-reply value for `stage_and_guard.sh` `NO_CHANGES`; new prompts normalize this to `blocked` because no MR / `pr` label can be produced. | no |
 
 ## issue-<iid>/attempt_state.json — current-attempt state
 
@@ -256,7 +256,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | -------------------- | --------------- | ---------------------------------------------------------------------- |
 | `iid`                | int             | Must match the dispatched IID. The dispatcher rejects mismatches.      |
 | `attempt_number`     | int             | Must match `${ATTEMPT_NUMBER}` from the rendered prompt.               |
-| `status`             | string (enum)   | `done` / `no_changes` / `blocked` / `failed`. See §Possible status values above. The subagent prefers `blocked` — the dispatcher promotes `blocked → failed` in Phase 6 when retry budget exhausted. |
+| `status`             | string (enum)   | `done` / `no_changes` / `blocked` / `failed`. See §Possible status values above. New subagent prompts convert no-diff outcomes to `blocked`; `no_changes` is accepted only for legacy replies and normalized by the dispatcher. The subagent prefers `blocked` — the dispatcher promotes `blocked → failed` in Phase 6 when retry budget exhausted. |
 | `mode_actual`        | string (enum)   | `fresh` / `continue` — what `prepare_attempt.sh` actually ran (continue can downgrade to fresh inside `prepare_attempt.sh`). |
 | `work_branch`        | string          | `issue/<iid>-auto-fix` — the single force-pushed remote branch.        |
 | `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` — per-attempt local branch kept for audit.   |
@@ -264,8 +264,8 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `merge_request_url`  | string          | Empty `""` if Step 7 did not run.                                      |
 | `mr_action`          | string (enum)   | `created` / `reused` / `rotated` / `none`. `none` when Step 7 did not run. |
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |
-| `labels_added`       | array of string | The labels the subagent ADDED in Steps 6 / 7b (e.g. `["done","pr"]`). Empty `[]` for non-done terminals. |
-| `labels_removed`     | array of string | The labels the subagent REMOVED in Step 6 (e.g. `["doing"]`).         |
+| `labels_added`       | array of string | The labels the subagent ADDED in Steps 6 / 7b or fail-flow label sync (e.g. `["done","pr"]` for done, `["blocked"]` for a blocked failure before done). |
+| `labels_removed`     | array of string | The labels the subagent REMOVED in Step 6 or fail-flow label sync (e.g. `["doing"]`). |
 | `summary_posted`     | bool            | `true` iff `summarize_attempt.sh` exit 0.                              |
 | `block_reason`       | string          | Required non-empty when `status` is `blocked` or `failed`; empty `""` otherwise. |
 | `log_dir`            | string          | Absolute path; mirrors `${LOG_DIR}`. Helps the dispatcher locate logs without re-deriving paths. |
@@ -273,7 +273,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 ### Tolerated variations
 
 - The subagent may emit `null` instead of `""` for empty string fields. The dispatcher normalizes both to empty.
-- The subagent may omit `labels_added` / `labels_removed` for non-done terminals — the dispatcher treats omission as `[]`.
+- The subagent may omit `labels_added` / `labels_removed` for legacy non-done terminals — the dispatcher treats omission as `[]` and still performs Phase 6 live-label synchronization.
 - Trailing whitespace / a single trailing newline after the JSON line is OK; nothing else may appear after the JSON on the subagent's last turn.
 
 ### Dispatcher-side validation (Phase 6)
@@ -290,34 +290,36 @@ The validation pipeline is the same in both paths:
    - Look up `pending_subagents[reply.iid]`. If the entry does not exist → return `"callback_status":"stale_or_already_drained"` (the IID was already drained by a prior callback / eviction). Do NOT mutate state files.
    - Verify `pending_subagents[reply.iid].attempt_number == reply.attempt_number`. Mismatch (most commonly: a stale callback for an older attempt) → return `"callback_status":"stale_or_already_drained"`. Do NOT mutate state files.
    - Optionally cross-check `pending_subagents[reply.iid].run_id` against `callback.run_id` (when present). Mismatch is logged but does not reject — the canonical identity is `iid + attempt_number`.
-3. If `reply.status in {blocked, failed}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
-4. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
-5. If `status=blocked` AND `retry_count >= blocked_retry_limit` (after incrementing), promote to `status=failed` and add to `failed_iids`.
-6. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
+3. Normalize legacy `reply.status="no_changes"` to `status="blocked"` and set `block_reason="subagent produced no staged changes"` when the reply did not provide a reason.
+4. If `reply.status in {blocked, failed}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
+5. Synchronize live GitLab workflow labels from the final status with `scripts/set_issue_label.sh`: `done` ends as `done` + `pr`, `blocked` ends as no `doing` + `blocked`, and `failed` ends as no `doing` / `blocked` + `failed`. Any required live-label sync failure converts a non-failed result to `blocked` with `block_reason` appended.
+6. If `status=blocked` AND `retry_count > blocked_retry_limit` (after incrementing), promote to `status=failed`, add to `failed_iids`, and run failed-label sync.
+7. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
+8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
 
 ### Phase 6 Write Mapping
 
 The dispatcher takes the validated compact reply and writes:
 
 **`${ATTEMPT_STATE_FILE}`** (overwrite):
-- `status` ← reply.status
+- `status` ← final status after validation / live-label sync / legacy `no_changes` normalization / blocked→failed promotion
 - `attempt_finished_at` ← ISO-8601 UTC now
 - `commit_sha` ← reply.commit_sha (empty → null)
 - `wiki_artifacts_file` ← `${LOG_DIR}/wiki_artifacts.md` if reply.wiki_url is non-empty, else null
 - `attempt_artifacts_posted_to_wiki` ← reply.wiki_url is non-empty
 - `summary_file` ← `${SUMMARY_FILE}` if reply.summary_posted, else null
 - `summary_posted_to_issue` ← reply.summary_posted
-- `block_reason` ← reply.block_reason (empty → null)
+- `block_reason` ← final block_reason after validation / label-sync errors (empty → null)
 - preserve everything Phase 4 already wrote (`attempt_number`, `mode_*`, `local_branch`, `log_dir`, `attempt_started_at`, `no_reviewer_comments`, `prior_attempt_count`)
 
 **`${ISSUE_STATE_FILE}`** (overwrite):
-- `status` ← reply.status (after blocked→failed promotion check)
+- `status` ← final status after validation / live-label sync / legacy `no_changes` normalization / blocked→failed promotion
 - `mode` ← reply.mode_actual
 - `latest_attempt_number` ← reply.attempt_number
 - `latest_attempt_dir` ← `${ISSUE_ROOT}` (canonical)
 - `commit_sha` ← reply.commit_sha (empty → null)
 - `merge_request_url` ← reply.merge_request_url (empty → null)
-- `retry_count` ← prior + 1 if reply.status in {blocked, failed}; else prior unchanged
-- `block_reason` ← reply.block_reason (empty → null)
+- `retry_count` ← prior + 1 if final status in {blocked, failed}; else prior unchanged
+- `block_reason` ← final block_reason after validation / label-sync errors (empty → null)
 - `updated_at` ← ISO-8601 UTC now
 - preserve `iid`, `session`, `attempts_total` (already monotonically tracked in Phase 4)

@@ -23,7 +23,7 @@
 #
 # Stdout markers (one of these is printed):
 #   STAGED_OK       there are staged changes ready to commit
-#   NO_CHANGES      Claude produced no diff; caller writes status=no_changes
+#   NO_CHANGES      Claude produced no diff; caller marks the issue blocked
 #
 # Stderr on leak:
 #   PROTECTED_PATHS_LEAKED followed by the offending paths

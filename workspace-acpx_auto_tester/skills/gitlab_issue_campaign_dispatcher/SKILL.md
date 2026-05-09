@@ -19,7 +19,7 @@ This workspace has exactly **one SKILL** (this file). The dispatcher runs in **t
 | 1     | Parse             | bootstrap, flock, load + override `campaign_state.json` |
 | 2     | Reconcile         | mandatory `reconcile.sh` against GitLab; correct disk cache |
 | 3     | Eligibility       | tick-level prep (clone/pull, ensure_labels), form a serial batch (`max_concurrent_subagents` must be `1`) under launch budget / time budget |
-| 4     | Per-IID Prep      | for each batch member: allocate_attempt → load_ui_accounts → prepare_attempt → build_prompt → label `doing` → init state files (status=in_progress) → render fixed-format prompt |
+| 4     | Per-IID Prep      | for each batch member: allocate_attempt → load_ui_accounts → prepare_attempt → read issue labels → transition entry labels to `doing` → build_prompt → init state files (status=in_progress) → render fixed-format prompt |
 | 5     | Async Spawn       | issue one **anonymous** `sessions_spawn` per IID (NO session name passed — runtime returns `runId`/`childSessionKey`). Persist `(iid, attempt_number, run_id, child_session_key, ui_account_index, spawned_at)` into `campaign_state.json.pending_subagents`. Return a `waiting_for_callbacks` summary and exit. **Does NOT wait for subagent completion.** |
 
 ### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
@@ -48,7 +48,7 @@ This SKILL is intentionally short. Detailed bash and fixed reference data live i
 - `scripts/allocate_attempt.sh` — Phase 4: atomically allocates the next attempt number for an IID.
 - `scripts/load_ui_accounts.sh` — Phase 4: read the deployment-pinned UI test account pool (`<workspace>/config/ui_accounts.env`); used at the top of every batch to allocate one distinct account per IID.
 - `scripts/clone_or_pull.sh` — Phase 3: keep the main repo's refs current. Run once per tick before the batch loop.
-- `scripts/ensure_labels.sh` — Phase 3: make sure the seven workflow labels (`todo doing pr done blocked failed continue`) exist. Run once per tick after auth.
+- `scripts/ensure_labels.sh` — Phase 3: make sure the workflow labels (`todo retry new doing pr done blocked failed continue`) exist. Run once per tick after auth.
 - `scripts/prepare_attempt.sh` — Phase 4: switch the main repo checkout at `${REPO_PATH}` to the per-attempt local branch, return `mode_actual` and `LOCAL_ATTEMPT_BRANCH`. Does NOT symlink hulat or copy `.claude` — both directories are committed in the test team's master+dev branches, so the repo checkout already contains them.
 - `scripts/build_prompt.sh` — Phase 4: build the Claude Code prompt at `${LOG_DIR}/prompt.txt` (UI account injected; continue-mode summaries + reviewer comments included).
 - `scripts/set_issue_label.sh` — Phase 4 (dispatcher: doing transitions) + subagent (Step 6 + 7b: done/pr).
@@ -70,11 +70,11 @@ When in doubt about a path / schema / command, READ the matching reference file.
 Universal rules: [`SOUL.md`](../../SOUL.md) §Shared Operational Policies → No-Fallback. Dispatcher-specific additions:
 
 1. If `flock` cannot acquire the lock, the dispatcher MUST NOT bypass it (no `rm`-the-lockfile, no `--no-lock`, no second-attempt loops). Return a one-line status summary and exit.
-2. If `sessions_spawn` for an issue subagent run fails or times out, the dispatcher MUST NOT run the subagent's logic inline in the dispatcher session, spawn a substitute run, or retry by adding a session name. Mark the IID `blocked` with an accurate `block_reason` and continue per Blocked Skip-and-Retry.
+2. If `sessions_spawn` for an issue subagent run fails or times out, the dispatcher MUST NOT run the subagent's logic inline in the dispatcher session, spawn a substitute run, or retry by adding a session name. Mark the IID `blocked` with an accurate `block_reason`, run best-effort live-label sync (`remove doing`; `add blocked`), and continue per Blocked Skip-and-Retry.
 3. **Anonymous async-callback spawns are the contract** (see Concurrency Policy below). `sessions_spawn` returns a launch acknowledgement (`accepted` + `runId` + `childSessionKey`); the orchestrator records that ack into `pending_subagents` and exits. The terminal compact JSON arrives later inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator MUST NOT pass any session name (`mode="session"` / `name=...`) — that triggers runtime `errorCode=thread_required` on channels that don't support thread-bound named sessions. The orchestrator MUST NOT switch to a "wait inline for the spawn to return compact JSON" mode (no synchronous batch wait). Fire-and-forget WITHOUT a callback is still forbidden — if the runtime cannot deliver `RUN_CHILD_COMPLETION_CALLBACK` for this deployment, that is a tick-level failure (record as deployment incompatibility and abort).
-4. If a per-IID prep step fails (clone_or_pull, prepare_attempt, build_prompt, set_issue_label for `doing`, render), the dispatcher MUST NOT spawn that IID with a partial / improvised setup. Mark the IID `blocked` with the verbatim error as `block_reason` and end this serial batch.
+4. If a per-IID prep step fails (clone_or_pull, prepare_attempt, build_prompt, set_issue_label for `doing`, render), the dispatcher MUST NOT spawn that IID with a partial / improvised setup. Mark the IID `blocked` with the verbatim error as `block_reason`, run best-effort live-label sync (`remove doing`; `add blocked`), and end this serial batch.
 5. If `ensure_labels.sh` fails, the dispatcher MUST treat that as a tick-level failure. Return a one-line summary; do NOT skip the call.
-6. **Phase 6 reply validation failures.** If a subagent's compact reply fails any validation rule in [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply (parse error, IID/attempt mismatch, blocked/failed without block_reason), the dispatcher MUST mark the IID `blocked` with the corresponding `block_reason` and write that to the state files. Do NOT fabricate a "successful" reply on the subagent's behalf.
+6. **Phase 6 reply validation failures.** If a subagent's compact reply fails any validation rule in [`references/state_schema.md`](references/state_schema.md) §Compact Subagent Reply (parse error, IID/attempt mismatch, blocked/failed without block_reason), the dispatcher MUST mark the IID `blocked` with the corresponding `block_reason`, sync the live label to `blocked`, and write that to the state files. Do NOT fabricate a "successful" reply on the subagent's behalf.
 
 On failure:
 
@@ -130,7 +130,7 @@ Universal rules (`glab`-only, forbidden libraries, `--hostname` rule, host pinni
 
 Failure mapping:
 
-- If a per-IID prep call to glab fails (e.g. `build_prompt.sh` cannot read the issue, `set_issue_label.sh` cannot transition), mark that IID `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and end this serial batch.
+- If a per-IID prep call to glab fails (e.g. `build_prompt.sh` cannot read the issue, `set_issue_label.sh` cannot transition), mark that IID `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"`, sync the live label to `blocked` when possible, and end this serial batch.
 - If `glab auth status` fails after `scripts/glab_auth.sh`, or `scripts/glab_auth.sh` itself exits 10/11/12 (deployment-pin missing/malformed) or 13 (trigger mismatch), abort the tick with a one-line summary.
 
 ---
@@ -147,8 +147,8 @@ Concrete rules:
    - `is_closed_on_gitlab` ⇔ live GitLab state is literal `closed`. Closed issues are hard terminal and MUST NEVER be scheduled, even if they have `continue` or lack `done`+`pr`.
    - `has_done_pr` ⇔ live GitLab labels contain both literal `done` and literal `pr`.
    - `is_done_on_gitlab` ⇔ `is_closed_on_gitlab == true` OR `has_done_pr == true`. This backward-compatible terminal-skip field is what the dispatcher uses for "do not schedule".
-   - `needs_continue` ⇔ the issue is opened and live GitLab labels contain literal `continue`. This is set by a human reviewer who has noticed that a previous `done` + `pr` result was incorrect and wants the agent to resume on the existing work branch. `continue` wins if it is present alongside `done` and/or `pr`, but only while the issue is opened.
-   - `user_reopened` ⇔ the issue is opened, does not have the completed pair `done`+`pr`, and none of `failed`, `blocked`, or `continue` are present in live labels.
+   - `needs_continue` ⇔ the issue is opened and live GitLab labels contain literal `continue` (or legacy misspelling `contiune`). This is set by a human reviewer who has noticed that a previous `done` + `pr` result was incorrect and wants the agent to resume on the existing work branch. `continue` wins if it is present alongside `done` and/or `pr`, but only while the issue is opened.
+   - `user_reopened` ⇔ the issue is opened, does not have the completed pair `done`+`pr`, and none of `failed`, `blocked`, `continue`, or `contiune` are present in live labels.
 4. **Disk cache correction is mandatory** when they disagree:
    - If `is_closed_on_gitlab == true`: remove IID from `unfinished_iids`/`blocked_iids`/`failed_iids`/`active_issue_iids`; add to `completed_iids`; update per-issue state file only if needed (`status=done`, `mode="fresh"`); persist.
    - Else if `needs_continue == true`: remove from `completed_iids`/`failed_iids`; add to `unfinished_iids`; per-issue state `status=pending`, `mode="continue"` (leave `attempts_total` untouched); force `campaign_status=running`; persist.
@@ -275,7 +275,7 @@ If `reconcile.sh` fails or no evidence file is produced, abort the tick with `"r
 
 1. **If `pending_subagents` is still non-empty after stuck-eviction**, return `"campaign_status":"waiting_for_callbacks"` immediately. Do NOT form a new batch. Do NOT touch labels. The next scheduled wake-up will re-evaluate.
 2. **Tick-level prep — once per tick, only if pending is empty.**
-   - `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> bash scripts/ensure_labels.sh` — idempotent; creates the seven workflow labels if missing. Failure → tick-level `"ensure_labels_failed"` summary and stop.
+   - `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> bash scripts/ensure_labels.sh` — idempotent; creates the workflow labels if missing. Failure → tick-level `"ensure_labels_failed"` summary and stop.
    - `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> BRANCH=<branch> bash scripts/clone_or_pull.sh` — keeps the main repo's refs current. Failure → tick-level `"clone_or_pull_failed"` summary and stop.
 3. **Early-return only if allowed.** Permitted iff:
    - the evidence file from this tick exists
@@ -307,15 +307,16 @@ This phase runs ONCE per scheduled wake-up (no loop):
       - else `ISSUE_MODE=fresh`
    2. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> ISSUE_MODE=<mode> bash scripts/prepare_attempt.sh`. Capture `mode_actual` (line 1) and `LOCAL_ATTEMPT_BRANCH` (line 2). If `mode_actual=fresh` while `ISSUE_MODE=continue` was requested, record `mode_downgraded_from="continue"` later in the attempt state.
    3. Read the live issue title, URL, and labels via `glab api projects/${PROJECT_URI}/issues/${ISSUE_IID}` so the dispatcher can substitute `{ISSUE_TITLE}` / `{ISSUE_TITLE_QUOTED}` / `{ISSUE_URL}` / `{ISSUE_LABELS}` / `{ISSUE_BODY}` (truncated to ≤ 4 KB) into the executor prompt.
-   4. **Transition to `doing`.** Use `scripts/set_issue_label.sh`:
-      - fresh: remove `todo`, `blocked`, `done`, `pr` (each in its own exec; removes are idempotent), then add `doing`.
-      - continue: remove `continue`, `blocked`, `done`, `pr`, then add `doing`.
-      The dispatcher MUST NOT use `-f labels=...` (full-set overwrite) — it would wipe manually-added labels.
+   4. **Transition to `doing`.** Use `scripts/set_issue_label.sh` with single-label calls only:
+      - Build the entry-label removal set from fixed entry labels plus this tick's trigger labels: `todo`, `retry`, `new`, `continue`, `contiune`, `blocked`, `done`, `pr`, plus every label in `require_labels` that is present on this issue's live label snapshot. Deduplicate the set.
+      - Remove each entry label in its own exec (removes are idempotent), then add `doing` in its own exec.
+      - This applies to fresh and continue mode. `contiune` is a tolerated misspelling for removal/reconciliation only; do not create it in `ensure_labels.sh`.
+      The dispatcher MUST NOT use `-f labels=...` (full-set overwrite) — it would wipe manually-added labels outside the explicit entry-label set.
    5. `PROJECT=<project> GROUP=<group> GITLAB_TOKEN=<token> ISSUE_IID=<iid> ATTEMPT_NUMBER=<N_iid> BRANCH=<branch> DEV_BRANCH=<dev_branch> ISSUE_MODE=<mode_actual> UI_ACCOUNT=<user> UI_PASSWORD=<pass> bash scripts/build_prompt.sh`. Writes `${LOG_DIR}/prompt.txt` with the issue body, working environment, and UI-account override block. Capture stderr (`CONTINUE_MODE_NO_REVIEWER_COMMENTS`, `CONTINUE_MODE_PRIOR_ATTEMPT_COUNT`) for the attempt state.
    6. **Initialize state files.** Write/refresh `${ATTEMPT_STATE_FILE}` with `{iid, attempt_number, attempt_started_at, mode_requested, mode_actual, mode_downgraded_from, no_reviewer_comments, prior_attempt_count, local_branch, log_dir, status:"in_progress"}`. Write/refresh `${ISSUE_STATE_FILE}` with `{iid, session, status:"in_progress", mode:<mode_actual>, attempts_total:<N_iid>, latest_attempt_number:<N_iid>, latest_attempt_dir, retry_count:<from prior>, updated_at}`.
    7. **Render the executor prompt.** Substitute every `{...}` placeholder in `references/executor_prompt.md` with the per-IID values; verify no unsubstituted placeholders remain. If render fails (missing variable, unsubstituted token), mark the IID `blocked` with `block_reason="prompt template render incomplete: <name>"` and skip this IID for the batch.
 
-   If any sub-step fails for the IID, mark it `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"` and skip spawning it. The allocated UI account returns to the pool (no persistence).
+   If any sub-step fails for the IID, mark it `blocked` with `block_reason="dispatcher prep failed: <verbatim error>"`, run best-effort live-label sync (`remove doing`; `add blocked`), and skip spawning it. The allocated UI account returns to the pool (no persistence).
 
 ### Phase 5 — Async Spawn (fire-and-record)
 
@@ -353,14 +354,21 @@ In both contexts:
 
 1. **Validate the compact reply** per `references/state_schema.md` §Compact Subagent Reply → "Dispatcher-side validation". Validation failures (parse error, iid mismatch, attempt mismatch, blocked-without-reason) produce a synthetic blocked classification with the appropriate `block_reason` — do not silently accept malformed replies.
 2. **Match to a `pending_subagents` entry by `iid` + `attempt_number`.** If `pending_subagents[reply.iid]` does not exist, OR `pending_subagents[reply.iid].attempt_number != reply.attempt_number`, treat as stale / late callback: drop with chat summary `"callback_status":"stale_or_already_drained"` and return. Do NOT mutate state files.
-3. **Write the terminal state files** per `references/state_schema.md` §Phase 6 Write Mapping. The dispatcher writes BOTH `${ATTEMPT_STATE_FILE}` and `${ISSUE_STATE_FILE}` from the compact reply. The subagent does not touch them.
-4. **Promote `blocked → failed` if retry budget exhausted.** Increment `retry_count` first if `status in {blocked, failed}`. If `retry_count > blocked_retry_limit`, set `status=failed` in both state files and add to `failed_iids`.
-5. **Classify into `campaign_state.json` lists.**
-   - `done` / `no_changes`: add to `completed_iids`; remove from `unfinished_iids`/`blocked_iids`/`failed_iids`. Increment `quota_completed_this_tick` (counted on the callback path).
-   - `blocked` (not promoted): add to `blocked_iids` with the cooldown-tracking semantics per Blocked Skip-and-Retry; remove from `completed_iids`/`failed_iids`; keep in `unfinished_iids`.
+3. **Compute preliminary terminal status.** Start from the compact reply status. Normalize legacy `no_changes` replies to `blocked` with `block_reason="subagent produced no staged changes"` if the reply did not provide one.
+4. **Synchronize live workflow labels as the final source-of-truth safety net.** Use `scripts/set_issue_label.sh` single-label calls:
+   - final `done`: remove `doing`, `blocked`, `failed`; add `done`; add `pr`. This enforces the user-visible `doing → done → done+pr` end state after the callback is received.
+   - final `blocked`: remove `doing`; add `blocked`. Preserve `done` if it was already added before a later failure, so a failure between `done` and `pr` is visible as `done` + `blocked`.
+   - final `failed`: remove `doing`; remove `blocked`; add `failed`.
+   - legacy `no_changes` after normalization: remove `doing`; add `blocked`.
+   Any required live-label sync failure is itself a blocked result unless the status is already `failed`: append `phase6 label sync failed: <stderr>` to `block_reason`, set final status to `blocked`, and run best-effort blocked sync (`remove doing`; `add blocked`).
+5. **Promote `blocked → failed` if retry budget exhausted.** Increment `retry_count` first if final `status in {blocked, failed}`. If `retry_count > blocked_retry_limit`, promote `status=failed` and run the `failed` label sync (`remove doing`; `remove blocked`; `add failed`).
+6. **Write the terminal state files** per `references/state_schema.md` §Phase 6 Write Mapping, using the final status after label sync / legacy `no_changes` normalization / retry promotion. The dispatcher writes BOTH `${ATTEMPT_STATE_FILE}` and `${ISSUE_STATE_FILE}` from the compact reply plus label-sync errors. The subagent does not touch them.
+7. **Classify into `campaign_state.json` lists.**
+   - `done`: add to `completed_iids`; remove from `unfinished_iids`/`blocked_iids`/`failed_iids`. Increment `quota_completed_this_tick` (counted on the callback path).
+   - `blocked` (including normalized legacy `no_changes`, not promoted): add to `blocked_iids` with the cooldown-tracking semantics per Blocked Skip-and-Retry; remove from `completed_iids`/`failed_iids`; keep in `unfinished_iids`.
    - `failed` (terminal or promoted): add to `failed_iids`; remove from `unfinished_iids`/`blocked_iids`/`completed_iids`.
-6. **Drain the pending entry.** Remove `iid` from `active_issue_iids`, `active_issue_sessions`, and `pending_subagents`. Persist `campaign_state.json`.
-7. **Optional notify.** If a notification channel is configured (reserved trigger field; currently not part of the trigger), post a one-line per-IID summary built from the compact reply: `"#<iid> <status> mr=<merge_request_url> wiki=<wiki_url> mr_action=<mr_action>"`. Skip silently if no channel.
+8. **Drain the pending entry.** Remove `iid` from `active_issue_iids`, `active_issue_sessions`, and `pending_subagents`. Persist `campaign_state.json`.
+9. **Optional notify.** If a notification channel is configured (reserved trigger field; currently not part of the trigger), post a one-line per-IID summary built from the compact reply: `"#<iid> <status> mr=<merge_request_url> wiki=<wiki_url> mr_action=<mr_action>"`. Skip silently if no channel.
 
 After Phase 6 on the callback path, return the compact `callback_handled` chat summary and exit. The next scheduled wake-up forms the next batch (if quota / time budget remain AND `pending_subagents` is empty after eviction).
 
@@ -402,7 +410,7 @@ The callback path **never spawns a new subagent.** Even if the IID just drained 
 
 Successful MR creation plus both workflow labels (`done` and `pr`) being present is the terminal completion condition for a normal attempt. Separately, GitLab `state=closed` is a hard terminal skip condition: the dispatcher MUST NOT schedule a closed issue, even if `continue` is present or `done`/`pr` are absent.
 
-The subagent (per `references/executor_prompt.md` `<instructions>`) changes `doing` to `done` after Wiki evidence is published, then adds `pr` after MR creation / rotation succeeds. The dispatcher's Phase 6 — not the subagent — writes the terminal `status=done` to disk based on the subagent's compact reply.
+The subagent (per `references/executor_prompt.md` `<instructions>`) changes `doing` to `done` after Wiki evidence is published, then adds `pr` after MR creation / rotation succeeds. The dispatcher's Phase 6 — not the subagent — writes the terminal `status=done` to disk based on the subagent's compact reply, and idempotently re-applies the final live-label state (`done` + `pr`) after the callback is received.
 
 For opened issues, the dispatcher MUST NOT schedule that issue again unless reconciliation finds `needs_continue == true` or `user_reopened == true` on GitLab. `continue` wins over cached `done` state and over an existing MR only while the issue is opened.
 
