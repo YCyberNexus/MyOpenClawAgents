@@ -10,9 +10,11 @@ The agent itself runs on the OpenClaw runner with repo clone parents defaulting 
 
 ## Single-skill, async-callback execution model
 
-The agent has **one thick orchestrator session + one anonymous subagent run per IID**. There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
+The agent has **one thick orchestrator session + one anonymous subagent run per IID** (multiple IIDs may be in flight concurrently up to `max_concurrent_subagents`). There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
 
 The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal bookkeeping (Phase 6); the subagent does only the technical work it's asked to do (Step 0–9 in the prompt's `<instructions>` block). The orchestrator owns every state-file write — the subagent does not touch state files. The orchestrator-subagent boundary is **async-callback**: `sessions_spawn` returns a launch ack within seconds; the runtime later wakes the orchestrator with `RUN_CHILD_COMPLETION_CALLBACK` carrying the subagent's terminal compact JSON.
+
+Cross-IID parallelism uses **per-attempt linked git worktrees**. `prepare_attempt.sh` creates `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B` and the subagent runs `acpx claude exec` from inside it. The parent checkout at `${REPO_PATH}` is never mutated by an attempt — only `git fetch` runs against it under `${RESULT_ROOT}/_dispatcher/locks/repo.lock`. N concurrent attempts therefore share one clone of the repo and one fetched object database without colliding on a single working tree.
 
 **Orchestrator (`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/`)** stays alive across scheduler ticks (`agent:acpx_auto_tester:main`). It runs different phases on each of its two trigger commands:
 
@@ -22,9 +24,9 @@ The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal
 | ----- | ---- |
 | 1 Parse        | bootstrap, flock, load + override `campaign_state.json` from trigger; **stuck-pending eviction** (synthesizes Phase 6 blocked replies for any pending entries past `stuck_after_minutes`) |
 | 2 Reconcile    | mandatory `reconcile.sh` against GitLab; correct disk cache from evidence file (no evidence = tick failed) |
-| 3 Eligibility  | if `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (`ensure_labels.sh`, `clone_or_pull.sh`); validate `max_concurrent_subagents=1`; form one serial IID under launch quota |
-| 4 Per-IID Prep | for the single IID: `allocate_attempt.sh` → load UI account from `<workspace>/config/ui_accounts.env` → `prepare_attempt.sh` (switches `${REPO_PATH}` to the per-attempt local branch; the test team's `hulat/`, `.claude/`, `ifp-data/` are already in the branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions entry labels (`todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger labels) to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
-| 5 Async Spawn  | single **anonymous** `sessions_spawn` call (NO session name passed — runtime returns `runId` + `childSessionKey` like `agent:acpx_auto_tester:subagent:<uuid>`). Records the launch ack into `pending_subagents[iid]`. Returns `waiting_for_callbacks` and exits. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures). |
+| 3 Eligibility  | if `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (`ensure_labels.sh`, `clone_or_pull.sh`); validate `1 ≤ max_concurrent_subagents ≤ ui_pool_size`; form a batch of up to that many IIDs under launch quota |
+| 4 Per-IID Prep | for each IID in the batch: `allocate_attempt.sh` → load distinct UI account from `<workspace>/config/ui_accounts.env` (one per IID) → `prepare_attempt.sh` (creates a fresh per-attempt linked worktree at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B`; the test team's `hulat/`, `.claude/`, `ifp-data/` come from the base branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions entry labels (`todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger labels) to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
+| 5 Async Spawn  | one **anonymous** `sessions_spawn` call per surviving IID (NO session name passed — runtime returns `runId` + `childSessionKey` like `agent:acpx_auto_tester:subagent:<uuid>`). Records each launch ack into `pending_subagents[iid]`. Returns `waiting_for_callbacks` and exits. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures). |
 
 ### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
 
@@ -57,11 +59,11 @@ Spawn is **anonymous + async-callback**: `sessions_spawn` is called WITHOUT any 
 
 ## Concurrency and UI-account allocation
 
-`max_concurrent_subagents` (trigger field, default 1) is retained for schema compatibility but must be exactly `1`. All attempts share the main repo checkout, so cross-IID parallelism is disabled; a trigger value greater than 1 is a tick-level configuration error.
+`max_concurrent_subagents` (trigger field, default 1) caps both the per-tick batch size and the maximum number of in-flight subagents. Per-attempt worktrees give each subagent its own working tree, so cross-IID parallelism is enabled. The hard upper bound is the UI account pool size: the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential. A trigger value below 1 aborts with `"invalid_max_concurrent_subagents: must be >= 1"`; a value above the pool aborts with `"ui_account_pool_too_small: pool=<size> requested=<value>"`.
 
-Because the system under test logs out an account when it logs in twice, the dispatcher MUST still allocate a UI account from the pool pinned at `workspace-acpx_auto_tester/config/ui_accounts.env`. Pool-too-small is a tick-level failure. The UI account is injected into the **Claude Code prompt** (`${LOG_DIR}/prompt.txt`) by `build_prompt.sh`; the subagent never sees the credentials directly.
+The dispatcher allocates one distinct UI account per batch IID from `workspace-acpx_auto_tester/config/ui_accounts.env` (in pool-file order). Each pair is injected into THAT IID's **Claude Code prompt** (`${LOG_DIR}/prompt.txt`) by `build_prompt.sh`; the subagent never sees the credentials directly. The pool is consulted fresh at every batch — `pending_subagents` is empty when a new batch forms (single-batch-in-flight invariant), so the next batch's accounts always come from the pool head.
 
-Scheduled wake-up batch shape: pick at most one IID → run per-IID prep → spawn one anonymous run → record the launch acknowledgement → return `waiting_for_callbacks`. Terminal replies arrive later through `RUN_CHILD_COMPLETION_CALLBACK`; the next scheduled wake-up forms another batch only after `pending_subagents` is empty or evicted. No mid-batch top-up.
+Scheduled wake-up batch shape: pick up to `max_concurrent_subagents` IIDs → run per-IID prep sequentially (each gets its own worktree, attempt number, UI account) → spawn one anonymous run per IID → record each launch acknowledgement → return `waiting_for_callbacks`. Terminal replies arrive later through `RUN_CHILD_COMPLETION_CALLBACK`; the next scheduled wake-up forms another batch only after `pending_subagents` is empty or evicted. No mid-batch top-up.
 
 ## Source of truth
 
@@ -74,34 +76,39 @@ Disk cache is corrected to match GitLab — never the other way around.
 ## Disk state layout
 
 ```
-${REPO_PATH}/                                  ← cloned project repo (default /data/${PROJECT}; repo_path=/data/ifp1 gives /data/ifp1/${PROJECT})
+${REPO_PATH}/                                  ← parent checkout (default /data/${PROJECT}; repo_path=/data/ifp1 gives /data/ifp1/${PROJECT})
     .claude/                                   ← in master+dev (test-team maintained)
     hulat/                                     ← in master+dev (was the legacy ${HULAT_DIR})
     ifp-data/                                  ← in master+dev (knowledge base)
-    ifp-result/                                ← agent runtime workspace + issue output root
+    ifp-result/                                ← agent runtime root
         _dispatcher/
             campaign_state.json                ← dispatcher cache (NOT source of truth)
             campaign.lock                      ← flock target
             log/reconcile-<ts>.json            ← reconciliation evidence files
             locks/repo.lock                    ← flock target for clone_or_pull / prepare_attempt
-        issue-<iid>/
+        issue-<iid>/                           ← per-issue subtree (lives OUTSIDE the worktree)
             state.json                         ← cross-attempt per-issue state
             attempt_state.json                 ← current attempt; overwritten each attempt
-            hulat-spec-issue<iid>/             ← Claude Code's spec output (committed; lands in MR)
             log/attempt-NNN/                   ← preserved logs per attempt
             summary.md
+        .worktrees/                            ← per-attempt linked git worktrees
+            issue-<iid>-att-<NNN>/             ← ${WORKTREE_DIR}; acpx cwd; from `git worktree add -B`
+                .claude/ hulat/ ifp-data/      ← from base branch checkout
+                ifp-result/issue-<iid>/hulat-spec-issue<iid>/   ← Claude Code's spec output (force-added; lands in MR)
 ```
 
-`clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed), so per-project runtime-root names are handled by the agent without requiring the test team to maintain a `.gitignore` rule on master + dev. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (`ifp-result/issue-<iid>/hulat-spec-issue<iid>/`), bypassing both `.gitignore` and `info/exclude`. There is no path-based reject in either `stage_and_guard.sh` or `post_push_verify.sh`: any file Claude produced or that ships with the base branch is allowed through to the issue MR.
+`clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed) AND it's repository-wide (covers every linked worktree), so the entire `ifp-result/` subtree — including `.worktrees/` — is invisible to `git status` / `git add -A` in both the parent checkout and inside each per-attempt worktree. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (relative path `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` inside the worktree), bypassing both `.gitignore` and `info/exclude`. There is no path-based reject in either `stage_and_guard.sh` or `post_push_verify.sh`: any file Claude produced or that ships with the base branch is allowed through to the issue MR.
+
+Per-attempt worktrees are NOT auto-cleaned. `prepare_attempt.sh` defensively removes a worktree at the same `(IID, attempt)` path before re-adding (rarely triggered because attempt numbers are monotonic). Operators may run `git worktree remove --force` + `rm -rf` to reclaim disk; logs and per-issue state under `ifp-result/issue-<iid>/` survive worktree teardown.
 
 The clone parent defaults to `/data`; trigger `repo_path` overrides that parent, and the final clone target is `${repo_path}/${PROJECT}`. Non-default deployments must pass `repo_path` on every scheduled trigger and callback. The directory names `ifp-result` and `ifp-data` are defaults. They can be overridden per project by the trigger fields `result_basename` / `data_basename` (carry-forward semantics — once set, persisted in `campaign_state.json` until the trigger replaces them). When overridden, every layer adapts automatically: `env_paths.sh` derives `RESULT_ROOT` / `DATA_DIR` from the basenames, `clone_or_pull.sh` writes the right name into `.git/info/exclude`, and `build_prompt.sh` substitutes the values into the executor prompt. Path examples in this document keep the `ifp-*` defaults for readability; see `references/trigger_command.md` for the override contract.
 
 ## Two-branch model
 
 - `branch` (typically `master`) — **integration / target** branch. MRs are opened against it. Each issue's spec output lives under `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` so MRs into master never collide.
-- `dev_branch` (typically `dev`) — **clean baseline**. Fresh-mode attempts reset the main repo checkout to `origin/${dev_branch}` so Claude Code does not see past issues' spec accumulation. Set `dev_branch=<same-as-branch>` to disable.
-- `WORK_BRANCH=issue/<iid>-auto-fix` — the SINGLE remote branch per issue. Each attempt **force-pushes** to it (Strategy A). Local per-attempt branches `${WORK_BRANCH}-att<NNN>` are kept for audit.
-- Continue mode bases the checkout on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${dev_branch}`. If `origin/${WORK_BRANCH}` is missing, `prepare_attempt.sh` downgrades to fresh mode and records `mode_downgraded_from="continue"` — the only documented exception to the no-fallback policy.
+- `dev_branch` (typically `dev`) — **clean baseline**. Fresh-mode attempts base their per-attempt worktree on `origin/${dev_branch}` so Claude Code does not see past issues' spec accumulation. Set `dev_branch=<same-as-branch>` to disable.
+- `WORK_BRANCH=issue/<iid>-auto-fix` — the SINGLE remote branch per issue. Each attempt **force-pushes** to it (Strategy A) from inside its own worktree. Local per-attempt branches `${WORK_BRANCH}-att<NNN>` are kept in `${REPO_PATH}/.git` for audit.
+- Continue mode bases the per-attempt worktree on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${dev_branch}`. If `origin/${WORK_BRANCH}` is missing, `prepare_attempt.sh` downgrades to fresh mode and records `mode_downgraded_from="continue"` — the only documented exception to the no-fallback policy.
 
 ## Strict no-fallback policy
 

@@ -16,7 +16,7 @@ The next dispatcher tick will pick the issue up and re-run.
 
 In continue mode:
 
-1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to switch the main repo checkout `${WORKTREE_DIR}` (`/data/${PROJECT}`) based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
+1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to create a fresh per-attempt linked git worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}/` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place under `${ISSUE_ROOT}` (outside the worktree). Logs are written under `log/attempt-NNN/` (also outside the worktree) and preserved; prior attempt summaries remain available as GitLab issue notes.
 2. **Dispatcher prep:** Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
 3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`E1b`) and **partitions them in two buckets**:
    - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
@@ -39,10 +39,10 @@ This is a CONTINUE-MODE re-run of GitLab issue #<iid>.
 
 A prior run on this issue produced a merge request and was marked `done` + `pr`,
 but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside the main repo checkout at <repo-root>, branched from
-`origin/<work-branch>` (the work-in-progress branch from the prior run).
-Read what's already there, then continue or correct it according to the
-past-attempt summaries and reviewer guidance below.
+You are running inside a per-attempt git worktree at <worktree-dir>, branched
+from `origin/<work-branch>` (the work-in-progress branch from the prior
+run). Read what's already there, then continue or correct it according
+to the past-attempt summaries and reviewer guidance below.
 
 # Issue
 Title: <issue title>
@@ -63,13 +63,12 @@ Description:
 ...
 
 # Working environment
-- Repository cwd:             <repo-root>
-- Output directory:           <repo-root>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
-- Hulat materials:            <repo-root>/hulat   (committed in <branch>/<dev-branch>, available in checkout)
-- Claude runtime config:      <repo-root>/.claude (committed in <branch>/<dev-branch>, available in checkout)
-- Knowledge base:             <repo-root>/<DATA_BASENAME> (committed in <branch>/<dev-branch>, available in checkout)
-- Agent runtime workspace:    <repo-root>/<RESULT_BASENAME> (touch ONLY the output directory above)
-- Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/<work-branch>
+- Repository cwd:             <worktree-dir> (per-attempt linked git worktree)
+- Output directory:           <worktree-dir>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
+- Hulat materials:            <worktree-dir>/hulat   (committed in <branch>/<dev-branch>, available in this worktree)
+- Claude runtime config:      <worktree-dir>/.claude (committed in <branch>/<dev-branch>, available in this worktree)
+- Knowledge base:             <worktree-dir>/<DATA_BASENAME> (committed in <branch>/<dev-branch>, available in this worktree)
+- Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/<work-branch>
 - Integration branch:         <branch>
 
 `<RESULT_BASENAME>` and `<DATA_BASENAME>` default to `ifp-result` / `ifp-data` and are overridden per-project by the `result_basename` / `data_basename` trigger fields (see `trigger_command.md`); `build_prompt.sh` substitutes the live values when rendering this template.
@@ -77,9 +76,9 @@ Description:
 # Rules
 - Work only on this issue.
 - Place spec / report / artifact output under the output directory only.
-- Modify content under <repo-root> only. Do NOT write outside the repo.
+- Modify content under <worktree-dir> only. Do NOT write outside this worktree.
 - Treat `hulat/`, `.claude/`, and `<DATA_BASENAME>/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- `<RESULT_BASENAME>/_dispatcher/` and other issues' subtrees are dispatcher runtime state — no script blocks edits, but the dispatcher writes them concurrently, so touching them risks corrupting the campaign. Keep changes under your output directory unless a fix genuinely requires more.
+- The dispatcher's runtime state and other issues' subtrees live in the parent checkout's `<RESULT_BASENAME>/` and are NOT visible from inside this worktree — keep changes under your output directory unless a fix genuinely requires modifying the test team's shared content above.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```

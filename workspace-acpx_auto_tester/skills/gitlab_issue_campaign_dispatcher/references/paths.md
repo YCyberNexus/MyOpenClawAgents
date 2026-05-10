@@ -6,18 +6,18 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 
 Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout.
 
-The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. Claude Code runs from the main repo root `${REPO_PATH}`. By default `${REPO_PARENT_PATH}=/data` and `${REPO_PATH}=/data/${PROJECT}`; the optional trigger field `repo_path` can set a different absolute clone parent, with the final repo root derived as `${repo_path}/${PROJECT}`. Runtime state/logs and each issue's committed output directory live under `${REPO_PATH}/ifp-result/`; the dispatcher's `.git/info/exclude` keeps untracked runtime files out of `git add -A`, and `stage_and_guard.sh` force-adds only the current issue's output directory. There is no path-based reject — anything that ends up in the staged/MR diff is allowed through.
+The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. Each per-attempt subagent runs Claude Code from inside its own linked git worktree at `${REPO_PATH}/ifp-result/.worktrees/issue-<iid>-att-<NNN>/` (= `${WORKTREE_DIR}`); the parent checkout at `${REPO_PATH}` is shared by all worktrees as the object DB and `git fetch` target but is never mutated by an attempt. By default `${REPO_PARENT_PATH}=/data` and `${REPO_PATH}=/data/${PROJECT}`; the optional trigger field `repo_path` can set a different absolute clone parent, with the final repo root derived as `${repo_path}/${PROJECT}`. Runtime state/logs and each issue's committed output directory live under `${REPO_PATH}/ifp-result/`; the dispatcher's `.git/info/exclude` keeps untracked runtime files (including the entire `.worktrees/` subtree) out of `git add -A`, and `stage_and_guard.sh` force-adds only the current issue's output directory inside its worktree. There is no path-based reject — anything that ends up in the staged/MR diff is allowed through.
 
 **Repo path override.** `repo_path` is forwarded to dispatcher scripts as `REPO_PARENT_PATH`. When omitted, `env_paths.sh` uses parent `/data` exactly as older deployments did. For example, `project=A` with `repo_path=/data/ifp1` derives final `${REPO_PATH}` as `/data/ifp1/A`. Non-default deployments must pass the same `repo_path` on every scheduled trigger and callback because the campaign state file itself lives under the derived path and cannot be discovered from disk before `env_paths.sh` runs. The value must be an absolute parent directory; `/`, dot segments, whitespace, and shell-unsafe characters outside `[A-Za-z0-9_./-]` are rejected.
 
 **Per-project basename overrides.** The directory names `ifp-result` and `ifp-data` are defaults; they can be replaced per-project via the `result_basename` / `data_basename` trigger fields (carry-forward into `campaign_state.json`; see `trigger_command.md`). When set, `env_paths.sh` exports `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}` and `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`, and every downstream rule below — including `.git/info/exclude`, the executor prompt, and continue-mode template — picks up the override automatically. The path examples in this document use the defaults for readability.
 
 ```
-${REPO_PATH}/                                            ← cloned project repo (default /data/${PROJECT})
+${REPO_PATH}/                                            ← parent checkout (default /data/${PROJECT})
     .claude/                                             (in master+dev, test-team owned)
     hulat/                                               (in master+dev, test-team owned; was the legacy ${HULAT_DIR})
     ifp-data/                                            (in master+dev, test-team owned; knowledge base)
-    ifp-result/                                          ← ${RESULT_ROOT}; agent runtime workspace + issue output root.
+    ifp-result/                                          ← ${RESULT_ROOT}; agent runtime root
         _dispatcher/                                     ← campaign-level state + logs + locks
             campaign_state.json                          ← campaign-level cache (NOT source of truth)
             campaign.lock                                ← flock target for the orchestrator
@@ -25,10 +25,9 @@ ${REPO_PATH}/                                            ← cloned project repo
                 reconcile-<ts>.json                      ← reconciliation evidence files
             locks/
                 repo.lock                                ← flock target for clone_or_pull / prepare_attempt
-        issue-<iid>/                                     ← per-issue subtree
+        issue-<iid>/                                     ← per-issue subtree (lives OUTSIDE worktree)
             state.json                                   (cross-attempt)
             attempt_state.json                           (current attempt; overwritten each attempt)
-            hulat-spec-issue<iid>/                       ← ${OUTPUT_DIR}; Claude Code output for this issue (committed; lands in MR)
             log/
                 attempt-001/                             ← preserved logs per attempt
                     prompt.txt
@@ -42,6 +41,10 @@ ${REPO_PATH}/                                            ← cloned project repo
                 attempt-002/
                     ...
             summary.md                                   (latest summary; mirror of GitLab issue comment)
+        .worktrees/                                      ← ${WORKTREES_ROOT}; per-attempt linked worktrees
+            issue-<iid>-att-<NNN>/                       ← ${WORKTREE_DIR}; acpx cwd; from `git worktree add -B`
+                .claude/ hulat/ ${DATA_BASENAME}/        (from base branch checkout)
+                ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/   ← ${OUTPUT_DIR}; Claude Code output (committed; lands in MR)
 ```
 
 The first-time clone bootstrap order (handled by `scripts/clone_or_pull.sh`):
@@ -73,6 +76,7 @@ Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), an
 | `DISPATCHER_LOG_DIR`    | `${LOG_ROOT}`                                        | `reconcile-<ts>.json` evidence files. Same dir as LOG_ROOT.     |
 | `ISSUES_ROOT`           | `${RESULT_ROOT}`                                     | Parent of `issue-<iid>/` subtrees.                              |
 | `LOCK_FILE`             | `${STATE_DIR}/campaign.lock`                         | flock target.                                                    |
+| `WORKTREES_ROOT`        | `${RESULT_ROOT}/.worktrees`                          | Parent of every per-attempt linked worktree.                    |
 
 To find a specific issue's state file from dispatcher code, use the helper:
 
@@ -86,32 +90,32 @@ ISSUE_STATE="$(issue_state_file_for "${IID}")"
 
 When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additionally exports:
 
-| Variable                  | Value                                                            | Notes                                                          |
-| ------------------------- | ---------------------------------------------------------------- | -------------------------------------------------------------- |
-| `ISSUE_ROOT`              | `${ISSUES_ROOT}/issue-${ISSUE_IID}`                              | this issue's full subtree                                      |
-| `ISSUE_STATE_FILE`        | `${ISSUE_ROOT}/state.json`                                       | cross-attempt per-issue state                                  |
-| `WORK_BRANCH`             | `issue/${ISSUE_IID}-auto-fix`                                    | the SINGLE remote branch (Strategy A)                          |
-| `ATTEMPT_NUMBER_PADDED`   | e.g. "001"                                                       | zero-padded for labels, MR titles, comments, local branches    |
-| `ATTEMPT_DIR`             | `${ISSUE_ROOT}`                                                  | compatibility alias; no per-attempt subdirectory exists        |
-| `WORKTREE_DIR`            | `${REPO_PATH}`                                                   | acpx cwd; the main repo checkout                               |
-| `OUTPUT_DIR`              | `${ISSUE_ROOT}/hulat-spec-issue${ISSUE_IID}`                     | only committable result directory under `ifp-result/`          |
-| `ISSUE_LOG_ROOT`          | `${ATTEMPT_DIR}/log`                                             | parent of per-attempt log directories                          |
-| `LOG_DIR`                 | `${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}`             | current-attempt log files; preserved after the attempt          |
-| `ATTEMPT_STATE_FILE`      | `${ATTEMPT_DIR}/attempt_state.json`                              | current-attempt metadata; overwritten each attempt             |
-| `SUMMARY_FILE`            | `${ATTEMPT_DIR}/summary.md`                                      | latest mirror of GitLab issue summary comment                  |
-| `LOCAL_ATTEMPT_BRANCH`    | `${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}`                     | per-attempt local branch (force-pushed to `${WORK_BRANCH}`)    |
+| Variable                  | Value                                                                                | Notes                                                          |
+| ------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| `ISSUE_ROOT`              | `${ISSUES_ROOT}/issue-${ISSUE_IID}`                                                  | this issue's full subtree (under parent `${RESULT_ROOT}`, NOT inside the worktree) |
+| `ISSUE_STATE_FILE`        | `${ISSUE_ROOT}/state.json`                                                           | cross-attempt per-issue state                                  |
+| `WORK_BRANCH`             | `issue/${ISSUE_IID}-auto-fix`                                                        | the SINGLE remote branch (Strategy A)                          |
+| `ATTEMPT_NUMBER_PADDED`   | e.g. "001"                                                                           | zero-padded for labels, MR titles, comments, local branches    |
+| `ATTEMPT_DIR`             | `${ISSUE_ROOT}`                                                                      | compatibility alias; per-attempt state/logs live directly under ISSUE_ROOT |
+| `WORKTREE_DIR`            | `${WORKTREES_ROOT}/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}`                  | acpx cwd; per-attempt linked git worktree (created by `prepare_attempt.sh`) |
+| `OUTPUT_DIR`              | `${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}` | only committable result directory; lives INSIDE the worktree   |
+| `ISSUE_LOG_ROOT`          | `${ATTEMPT_DIR}/log`                                                                 | parent of per-attempt log directories                          |
+| `LOG_DIR`                 | `${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}`                                 | current-attempt log files; lives outside the worktree, preserved after attempt |
+| `ATTEMPT_STATE_FILE`      | `${ATTEMPT_DIR}/attempt_state.json`                                                  | current-attempt metadata; overwritten each attempt             |
+| `SUMMARY_FILE`            | `${ATTEMPT_DIR}/summary.md`                                                          | latest mirror of GitLab issue summary comment                  |
+| `LOCAL_ATTEMPT_BRANCH`    | `${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}`                                         | per-attempt local branch (force-pushed to `${WORK_BRANCH}`)    |
 
 `ATTEMPT_NUMBER` itself comes from the dispatcher: `scripts/allocate_attempt.sh` increments `attempts_total` in the per-issue state file and prints the new number. The dispatcher passes that number through to all later prep scripts AND embeds it into the rendered subagent prompt — `env_paths.sh` refuses to load if `ATTEMPT_NUMBER` is missing while `ISSUE_IID` is set.
 
 ## Hard rules
 
-1. **`REPO_PATH`'s main working tree is the acpx cwd.** `prepare_attempt.sh` switches the main checkout to `${LOCAL_ATTEMPT_BRANCH}` based on `origin/${DEV_BRANCH}` (fresh) or `origin/${WORK_BRANCH}` (continue). Because a single checkout cannot run multiple branch attempts safely, `max_concurrent_subagents` MUST be `1`.
-2. **Agent runtime files live under `${RESULT_ROOT}` (= `${REPO_PATH}/ifp-result/`).** The dispatcher subtree (`_dispatcher/...`) and non-output per-issue files (`state.json`, `attempt_state.json`, `log/`, `summary.md`) are runtime/audit data. They are kept out of normal `git add -A` by `clone_or_pull.sh`'s entry in `.git/info/exclude`, but no script will refuse to push them if they make it into the diff some other way (e.g. tracked on the base branch). The current issue's `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` so it survives that exclude.
-3. **`hulat/`, `.claude/`, and `ifp-data/` are shared repository content.** They are committed to master + dev by the test team. The repo checkout already contains them — the agent does NOT symlink `hulat/` and does NOT copy `.claude/`. They may be changed when an issue genuinely requires it; avoid unrelated edits.
-4. **Per-issue spec output goes to `${OUTPUT_DIR}` only.** `build_prompt.sh` injects this rule into the Claude Code prompt. Multiple MRs into master never collide because each issue writes into a distinct `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` subdirectory.
-5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/`; historical summaries are preserved as GitLab issue notes.
-6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
-7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}` (`${REPO_PATH}`). Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
+1. **Each attempt runs in its own linked git worktree at `${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}/`.** `prepare_attempt.sh` creates it via `git worktree add -B ${LOCAL_ATTEMPT_BRANCH} ${WORKTREE_DIR} ${BASE_REF}` based on `origin/${DEV_BRANCH}` (fresh) or `origin/${WORK_BRANCH}` (continue). The parent checkout at `${REPO_PATH}` is never mutated by an attempt — only `git fetch` runs against it (under `${RESULT_ROOT}/_dispatcher/locks/repo.lock`). `max_concurrent_subagents` is bounded above by the UI account pool size (see SKILL.md §UI Account Allocation Policy); values below 1 or above the pool abort the tick.
+2. **Agent runtime files live under `${RESULT_ROOT}` (= `${REPO_PATH}/ifp-result/`).** The dispatcher subtree (`_dispatcher/...`), per-issue cross-attempt subtree (`issue-<iid>/state.json`, `issue-<iid>/attempt_state.json`, `issue-<iid>/log/`, `issue-<iid>/summary.md`), and `.worktrees/` are runtime/audit data. They are kept out of normal `git add -A` by `clone_or_pull.sh`'s entry in `.git/info/exclude` (which excludes the entire `${RESULT_BASENAME}/` subtree, including `.worktrees/`), but no script will refuse to push them if they make it into the diff some other way (e.g. tracked on the base branch). The current issue's `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` so it survives that exclude.
+3. **`hulat/`, `.claude/`, and `ifp-data/` are shared repository content.** They are committed to master + dev by the test team. Each per-attempt worktree's checkout already contains them (because they live on the base branch) — the agent does NOT symlink `hulat/` and does NOT copy `.claude/`. They may be changed when an issue genuinely requires it; avoid unrelated edits.
+4. **Per-issue spec output goes to `${OUTPUT_DIR}` only.** `build_prompt.sh` injects this rule into the Claude Code prompt. Multiple MRs into master never collide because each issue writes into a distinct `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` subdirectory (relative path inside the worktree).
+5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/` (outside the worktree, so they survive worktree teardown); historical summaries are preserved as GitLab issue notes.
+6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it from its own worktree. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
+7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}` (the per-attempt worktree, NOT the parent checkout). Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
 8. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode checkouts reset to `origin/${DEV_BRANCH}` so Claude does NOT see past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
 9. **No path-based leak rejection.** `stage_and_guard.sh` and `post_push_verify.sh` no longer reject anything by path. They still serve their bookkeeping roles — staging, NO_CHANGES detection, evidence files, post-push fetch — but every file present in the staged or MR diff goes through. `.git/info/exclude` (set by `clone_or_pull.sh`) keeps untracked `ifp-result/` runtime files out of `git add -A`, and the current issue's `${OUTPUT_DIR}` is force-added so it survives that exclude.
 10. **One-time migration from the old out-of-repo layout.** Some deployments still have a `/data/openclaw_work/${PROJECT}/...` subtree from before the agent moved into `ifp-result/`. Operators should either move it once during deployment:

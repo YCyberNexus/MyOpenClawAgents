@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# prepare_attempt.sh — reset the main repo working tree for this issue
-# attempt and base it on the right starting point.
+# prepare_attempt.sh — create a fresh per-attempt linked git worktree for
+# this issue and base it on the right starting point.
 #
 # Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
-# "${WORK_BRANCH}-att${PADDED}") that is force-pushed to ${WORK_BRANCH}
-# at commit time. Because the main repo working tree is the execution cwd,
-# issue attempts must be serialized by the dispatcher.
+# "${WORK_BRANCH}-att${PADDED}") which is checked out into a per-attempt
+# linked worktree at ${WORKTREE_DIR} (under ${WORKTREES_ROOT}). The local
+# branch is force-pushed to ${WORK_BRANCH} at commit time. Because each
+# attempt has its own worktree, multiple attempts can run concurrently;
+# the parent checkout at ${REPO_PATH} is never mutated by an attempt
+# (only `git fetch` touches it).
 #
 # Modes (env var ISSUE_MODE):
 #   fresh     — base attempt on origin/${DEV_BRANCH} (clean baseline,
@@ -24,18 +27,19 @@
 #   BRANCH — only the source baseline changes.
 #
 # What this script does NOT do:
-#   - It does NOT create a linked git worktree. Claude Code runs in the
-#     main repo working tree at ${REPO_PATH}.
+#   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
+#     `git fetch` runs against it; HEAD stays where clone_or_pull put it.
 #   - It does NOT symlink hulat into the repo. The test team committed
-#     `hulat/` to master+dev, so the checkout already contains it.
-#   - It does NOT copy a `.claude/` runtime config into the repo. The
-#     test team committed `.claude/` to master+dev, so the checkout
+#     `hulat/` to master+dev, so the worktree already contains it after
+#     `git worktree add`.
+#   - It does NOT copy a `.claude/` runtime config into the worktree. The
+#     test team committed `.claude/` to master+dev, so the worktree
 #     already contains that too.
 #   - It does NOT write `.git/info/exclude`. That is `clone_or_pull.sh`'s
 #     responsibility (it appends `/<basename RESULT_ROOT>/` once per clone).
-#     Runtime state/logs therefore stay locally git-ignored; the current
-#     issue's output directory is force-added explicitly by
-#     stage_and_guard.sh, which bypasses the exclude.
+#     Runtime state/logs and `.worktrees/` therefore stay locally
+#     git-ignored; the current issue's output directory is force-added
+#     explicitly by stage_and_guard.sh, which bypasses the exclude.
 #
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
 #   REPO_PATH, BRANCH, DEV_BRANCH, ISSUE_IID, ISSUE_MODE,
@@ -97,39 +101,44 @@ if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
   exit 5
 fi
 
-# Drop tracked/staged residue from an interrupted prior attempt before
-# switching branches. This intentionally leaves gitignored ifp-result/
-# runtime state/logs in place.
-git reset --hard HEAD
-
-# One-time migration cleanup: older deployments placed a linked worktree at
-# ifp-result/issue-<iid>/worktree. Remove it if present so stale worktree
-# metadata cannot hold old local attempt branches open.
+# One-time migration cleanup: older deployments placed a linked worktree
+# at ifp-result/issue-<iid>/worktree. Remove it if present so stale
+# worktree metadata cannot hold old local attempt branches open.
 LEGACY_WORKTREE_DIR="${ISSUE_ROOT}/worktree"
 if [ -e "${LEGACY_WORKTREE_DIR}" ]; then
   git worktree remove --force "${LEGACY_WORKTREE_DIR}" 2>/dev/null || true
   rm -rf "${LEGACY_WORKTREE_DIR}"
 fi
+
+# Defensive: if a previous run left a worktree at the same per-attempt
+# path (e.g. a stuck-pending eviction synthesized a blocked reply, or a
+# manual cleanup removed the directory but not the git registry entry),
+# drop it before re-creating. Attempt numbers are monotonic so this is
+# rarely hit in practice, but `git worktree add` refuses to overwrite an
+# existing path or registry entry.
+if [ -e "${WORKTREE_DIR}" ] || git worktree list --porcelain 2>/dev/null \
+    | awk '$1 == "worktree" { print $2 }' | grep -qxF "${WORKTREE_DIR}"; then
+  git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+  rm -rf "${WORKTREE_DIR}"
+fi
 git worktree prune
 
-# Remove ignored local output before checkout so stale files from an
-# interrupted run cannot block branch switching or leak into the next
-# attempt. Continue mode restores the committed version from BASE_REF.
-rm -rf "${OUTPUT_DIR}"
-
-# The issue directory is reused across attempts, but logs are preserved
-# per attempt under log/attempt-NNN. Recreate only the current attempt's
-# log directory so stale evidence from a same-attempt rerun is not mixed
-# with the current run.
+# Recreate only the current attempt's log dir so stale evidence from a
+# same-attempt rerun is not mixed with the current run. The issue dir is
+# reused across attempts; per-attempt logs live OUTSIDE the per-attempt
+# worktree so they survive worktree teardown by a housekeeper.
 if [ -d "${LOG_DIR}" ]; then
   rm -rf "${LOG_DIR}"
 fi
-mkdir -p "${LOG_DIR}"
+mkdir -p "${LOG_DIR}" "${ATTEMPT_DIR}"
 
-mkdir -p "${ATTEMPT_DIR}"
-git checkout -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}"
-
+# Create the per-attempt linked worktree at ${WORKTREE_DIR} branched
+# from ${BASE_REF}. This is the cwd Claude Code runs in; OUTPUT_DIR is
+# inside it and gets force-added by stage_and_guard.sh after the run.
+mkdir -p "$(dirname "${WORKTREE_DIR}")"
+git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 mkdir -p "${OUTPUT_DIR}"
+
 flock -u 8
 
 echo "${ACTUAL_MODE}"
