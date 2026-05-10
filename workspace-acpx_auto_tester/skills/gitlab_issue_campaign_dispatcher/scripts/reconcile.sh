@@ -31,8 +31,8 @@
 #       "has_done_pr":       bool,   # labels include both "done" and "pr"
 #       "is_closed_on_gitlab": bool,  # state is "closed"
 #       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR done+pr
-#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue label
-#       "needs_continue":    bool,   # opened and labels include literal "continue"
+#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue/contiune label
+#       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
 #
@@ -110,6 +110,7 @@ for iid in "${IIDS[@]}"; do
       ($issue.labels // []) as $labels |
       (($labels | index("done") != null) and ($labels | index("pr") != null)) as $done_with_pr |
       ($issue.state == "closed") as $closed |
+      (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
       {
         iid: $iid,
         state: $issue.state,
@@ -123,9 +124,9 @@ for iid in "${IIDS[@]}"; do
           ($done_with_pr | not) and
           ($labels | index("failed") == null) and
           ($labels | index("blocked") == null) and
-          ($labels | index("continue") == null)
+          ($needs_continue | not)
         ),
-        needs_continue: (($closed | not) and ($labels | index("continue") != null)),
+        needs_continue: (($closed | not) and $needs_continue),
         missing: false
       }')"
   else

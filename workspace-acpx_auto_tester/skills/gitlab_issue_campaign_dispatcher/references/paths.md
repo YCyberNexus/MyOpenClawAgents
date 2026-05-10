@@ -6,14 +6,18 @@ All paths are derived in `scripts/env_paths.sh`. SOURCE that script — do NOT r
 
 Workspace-level overview lives in [`AGENTS.md`](../../../AGENTS.md) §Disk State Layout.
 
-The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. The agent's own state and per-issue worktrees live under `${REPO_PATH}/ifp-result/`, whose contents are gitignored on master + dev so the main worktree's `git status` stays clean.
+The cloned project repo IS the agent's entire workspace. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to the project's master + dev branches, so a fresh `git clone` already contains everything Claude Code needs at runtime. Claude Code runs from the main repo root `${REPO_PATH}`. By default `${REPO_PARENT_PATH}=/data` and `${REPO_PATH}=/data/${PROJECT}`; the optional trigger field `repo_path` can set a different absolute clone parent, with the final repo root derived as `${repo_path}/${PROJECT}`. Runtime state/logs and each issue's committed output directory live under `${REPO_PATH}/ifp-result/`; the dispatcher's `.git/info/exclude` keeps untracked runtime files out of `git add -A`, and `stage_and_guard.sh` force-adds only the current issue's output directory. There is no path-based reject — anything that ends up in the staged/MR diff is allowed through.
+
+**Repo path override.** `repo_path` is forwarded to dispatcher scripts as `REPO_PARENT_PATH`. When omitted, `env_paths.sh` uses parent `/data` exactly as older deployments did. For example, `project=A` with `repo_path=/data/ifp1` derives final `${REPO_PATH}` as `/data/ifp1/A`. Non-default deployments must pass the same `repo_path` on every scheduled trigger and callback because the campaign state file itself lives under the derived path and cannot be discovered from disk before `env_paths.sh` runs. The value must be an absolute parent directory; `/`, dot segments, whitespace, and shell-unsafe characters outside `[A-Za-z0-9_./-]` are rejected.
+
+**Per-project basename overrides.** The directory names `ifp-result` and `ifp-data` are defaults; they can be replaced per-project via the `result_basename` / `data_basename` trigger fields (carry-forward into `campaign_state.json`; see `trigger_command.md`). When set, `env_paths.sh` exports `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}` and `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`, and every downstream rule below — including `.git/info/exclude`, the executor prompt, and continue-mode template — picks up the override automatically. The path examples in this document use the defaults for readability.
 
 ```
-/data/${PROJECT}/                                        ← ${REPO_PATH}; the cloned project repo
+${REPO_PATH}/                                            ← cloned project repo (default /data/${PROJECT})
     .claude/                                             (in master+dev, test-team owned)
     hulat/                                               (in master+dev, test-team owned; was the legacy ${HULAT_DIR})
     ifp-data/                                            (in master+dev, test-team owned; knowledge base)
-    ifp-result/                                          ← ${RESULT_ROOT}; gitignored content. Agent runtime workspace.
+    ifp-result/                                          ← ${RESULT_ROOT}; agent runtime workspace + issue output root.
         _dispatcher/                                     ← campaign-level state + logs + locks
             campaign_state.json                          ← campaign-level cache (NOT source of truth)
             campaign.lock                                ← flock target for the orchestrator
@@ -24,13 +28,7 @@ The cloned project repo IS the agent's entire workspace. The test team commits `
         issue-<iid>/                                     ← per-issue subtree
             state.json                                   (cross-attempt)
             attempt_state.json                           (current attempt; overwritten each attempt)
-            worktree/                                    ← linked git worktree; acpx cwd. Replaced every attempt.
-                .claude/                                 (already in the branch checkout; READ-ONLY)
-                hulat/                                   (already in the branch checkout; READ-ONLY)
-                ifp-data/                                (already in the branch checkout; READ-ONLY)
-                ifp-result/                              (the branch's own placeholder; gitignored content)
-                hulat-spec-issue<iid>/                   ← Claude Code's spec output for this issue (committed; lands in MR)
-                ...other repo files...
+            hulat-spec-issue<iid>/                       ← ${OUTPUT_DIR}; Claude Code output for this issue (committed; lands in MR)
             log/
                 attempt-001/                             ← preserved logs per attempt
                     prompt.txt
@@ -50,9 +48,10 @@ The first-time clone bootstrap order (handled by `scripts/clone_or_pull.sh`):
 
 1. `git clone -b ${BRANCH}` into `${REPO_PATH}` (uses a tmpfs lock at `/tmp/acpx_auto_tester.clone.${PROJECT}.lock` since the in-repo lock dir does not exist yet).
 2. `mkdir -p` the dispatcher subtree (`_dispatcher/`, `_dispatcher/log/`, `_dispatcher/locks/`) and `ifp-result/`.
-3. Acquire the in-repo flock at `${RESULT_ROOT}/_dispatcher/locks/repo.lock` and run `git fetch --prune` + `git worktree prune`.
+3. Acquire the in-repo flock at `${RESULT_ROOT}/_dispatcher/locks/repo.lock` and run `git fetch --prune` + `git worktree prune` (the prune is only for legacy linked-worktree metadata).
+4. Idempotently append `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude`. This is the agent's local-only equivalent of a `.gitignore` rule; `.git/info/exclude` is never committed/pushed, so per-project runtime-root names (`ifp-result/`, `<project>-result/`, …) are handled here without requiring the test team to maintain a tracked `.gitignore` rule on master + dev. The current issue's `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which bypasses `.gitignore` and `info/exclude` alike), so the single committable path stays committable.
 
-Subsequent ticks skip step 1 and go straight to step 3.
+Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), and go straight through step 3.
 
 ## Variables exported by env_paths.sh
 
@@ -60,9 +59,13 @@ Subsequent ticks skip step 1 and go straight to step 3.
 
 | Variable                | Value                                                | Purpose                                                          |
 | ----------------------- | ---------------------------------------------------- | ---------------------------------------------------------------- |
-| `REPO_PATH`             | `/data/${PROJECT}`                                   | The cloned project repo. Hosts linked worktrees.                |
-| `HULAT_DIR`             | `${REPO_PATH}/hulat`                                 | Derived (NOT a trigger input). Test-team-committed; READ-ONLY.  |
-| `RESULT_ROOT`           | `${REPO_PATH}/ifp-result`                            | Agent runtime workspace root. Gitignored on master+dev.         |
+| `REPO_PARENT_PATH`      | `/data` (default) or trigger `repo_path`             | Parent directory under which the project repo is cloned.        |
+| `REPO_PATH`             | `${REPO_PARENT_PATH}/${PROJECT}`                     | The cloned project repo and acpx cwd.                           |
+| `HULAT_DIR`             | `${REPO_PATH}/hulat`                                 | Derived (NOT a trigger input). Test-team-committed.             |
+| `RESULT_BASENAME`       | `ifp-result` (default) or trigger override           | Basename of the agent runtime root. Override via trigger field `result_basename`. |
+| `DATA_BASENAME`         | `ifp-data` (default) or trigger override             | Basename of the test-team knowledge dir. Override via trigger field `data_basename`. |
+| `RESULT_ROOT`           | `${REPO_PATH}/${RESULT_BASENAME}`                    | Agent runtime workspace + issue output root.                    |
+| `DATA_DIR`              | `${REPO_PATH}/${DATA_BASENAME}`                      | Test-team-committed knowledge directory (agent never writes here, but the prompt names this path). |
 | `WORK_ROOT`             | `${RESULT_ROOT}/_dispatcher`                         | Campaign-level agent state.                                     |
 | `STATE_DIR`             | `${WORK_ROOT}`                                       | Campaign state file lives directly here (no further nesting).   |
 | `CAMPAIGN_STATE_FILE`   | `${STATE_DIR}/campaign_state.json`                   | Campaign progress cache.                                         |
@@ -76,6 +79,7 @@ To find a specific issue's state file from dispatcher code, use the helper:
 ```bash
 ISSUE_STATE="$(issue_state_file_for "${IID}")"
 # → /data/${PROJECT}/ifp-result/issue-${IID}/state.json
+# (or ${REPO_PARENT_PATH}/${PROJECT}/ifp-result/issue-${IID}/state.json when repo_path is set)
 ```
 
 ### Per-issue + attempt-level (exported only when `ISSUE_IID` is in env)
@@ -89,7 +93,8 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 | `WORK_BRANCH`             | `issue/${ISSUE_IID}-auto-fix`                                    | the SINGLE remote branch (Strategy A)                          |
 | `ATTEMPT_NUMBER_PADDED`   | e.g. "001"                                                       | zero-padded for labels, MR titles, comments, local branches    |
 | `ATTEMPT_DIR`             | `${ISSUE_ROOT}`                                                  | compatibility alias; no per-attempt subdirectory exists        |
-| `WORKTREE_DIR`            | `${ATTEMPT_DIR}/worktree`                                        | acpx cwd (created by `prepare_attempt.sh`); a linked worktree   |
+| `WORKTREE_DIR`            | `${REPO_PATH}`                                                   | acpx cwd; the main repo checkout                               |
+| `OUTPUT_DIR`              | `${ISSUE_ROOT}/hulat-spec-issue${ISSUE_IID}`                     | only committable result directory under `ifp-result/`          |
 | `ISSUE_LOG_ROOT`          | `${ATTEMPT_DIR}/log`                                             | parent of per-attempt log directories                          |
 | `LOG_DIR`                 | `${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}`             | current-attempt log files; preserved after the attempt          |
 | `ATTEMPT_STATE_FILE`      | `${ATTEMPT_DIR}/attempt_state.json`                              | current-attempt metadata; overwritten each attempt             |
@@ -100,15 +105,15 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 
 ## Hard rules
 
-1. **`REPO_PATH`'s main working tree is never edited by the agent.** The agent uses `git worktree add` to create the issue worktree at `${WORKTREE_DIR}` (a linked worktree inside `${RESULT_ROOT}/issue-<iid>/`), replacing it at the start of each attempt. The main worktree at `${REPO_PATH}` remains on `${BRANCH}` and is touched only for `git fetch` / `git worktree add|remove|prune`.
-2. **Agent runtime files live under `${RESULT_ROOT}` (= `${REPO_PATH}/ifp-result/`).** Both the dispatcher subtree (`_dispatcher/...`) and per-issue subtrees (`issue-<iid>/...`). The project's master + dev branches MUST gitignore the contents of `ifp-result/` so the main worktree's `git status` stays clean and a developer's `git add -A` cannot sweep agent artifacts into a commit. The presence of `ifp-result/` itself in the branch (as an empty placeholder) is fine; only its contents are ignored.
-3. **`hulat/`, `.claude/`, and `ifp-data/` are READ-ONLY.** They are committed to master + dev by the test team. Each issue worktree's checkout already contains them — the agent does NOT symlink `hulat/` and does NOT copy `.claude/`. Treat them as configuration; the agent must not edit them. (Leak guards no longer special-case these directories — they are valid repo content.)
-4. **Per-issue spec output goes to `${WORKTREE_DIR}/hulat-spec-issue<iid>/` only.** `build_prompt.sh` injects this rule into the Claude Code prompt. Multiple MRs into master never collide because each issue writes into a distinct subdirectory.
-5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt replaces `${WORKTREE_DIR}`, recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/`; historical summaries are preserved as GitLab issue notes.
+1. **`REPO_PATH`'s main working tree is the acpx cwd.** `prepare_attempt.sh` switches the main checkout to `${LOCAL_ATTEMPT_BRANCH}` based on `origin/${DEV_BRANCH}` (fresh) or `origin/${WORK_BRANCH}` (continue). Because a single checkout cannot run multiple branch attempts safely, `max_concurrent_subagents` MUST be `1`.
+2. **Agent runtime files live under `${RESULT_ROOT}` (= `${REPO_PATH}/ifp-result/`).** The dispatcher subtree (`_dispatcher/...`) and non-output per-issue files (`state.json`, `attempt_state.json`, `log/`, `summary.md`) are runtime/audit data. They are kept out of normal `git add -A` by `clone_or_pull.sh`'s entry in `.git/info/exclude`, but no script will refuse to push them if they make it into the diff some other way (e.g. tracked on the base branch). The current issue's `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` so it survives that exclude.
+3. **`hulat/`, `.claude/`, and `ifp-data/` are shared repository content.** They are committed to master + dev by the test team. The repo checkout already contains them — the agent does NOT symlink `hulat/` and does NOT copy `.claude/`. They may be changed when an issue genuinely requires it; avoid unrelated edits.
+4. **Per-issue spec output goes to `${OUTPUT_DIR}` only.** `build_prompt.sh` injects this rule into the Claude Code prompt. Multiple MRs into master never collide because each issue writes into a distinct `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` subdirectory.
+5. There is no `${ISSUE_ROOT}/attempts/` directory. Each attempt recreates only its own `${LOG_DIR}` (`log/attempt-NNN/`), overwrites `${ATTEMPT_STATE_FILE}`, and updates `${SUMMARY_FILE}`. Historical logs are preserved under `${ISSUE_LOG_ROOT}/attempt-NNN/`; historical summaries are preserved as GitLab issue notes.
 6. Strategy A: there is exactly ONE remote branch per issue (`${WORK_BRANCH}`). Each attempt force-pushes to it. Local per-attempt branches (`${LOCAL_ATTEMPT_BRANCH}`) are kept in `${REPO_PATH}/.git` for audit.
-7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}`. Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
-8. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode worktrees check out from `origin/${DEV_BRANCH}` so Claude's worktree does NOT contain past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
-9. **Leak surface.** The leak guards (`stage_and_guard.sh`, `post_push_verify.sh`) reject staged paths matching `^ifp-result/_dispatcher/` (always) or `^ifp-result/issue-<N>/` where `<N> != ${ISSUE_IID}` (other-issue subtree). They do NOT reject `hulat/`, `.claude/`, or `ifp-data/` — those are tracked content owned by the test team. They do NOT reject the current issue's own `ifp-result/issue-<iid>/` if Claude somehow `git add -f`'d into it (rare in practice; `ifp-result/` is gitignored on every branch).
+7. Claude Code is invoked one-shot per attempt with `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from inside `${WORKTREE_DIR}` (`${REPO_PATH}`). Persistent / named acpx sessions (`-s`) are forbidden — they do not terminate cleanly under the non-interactive scheduler. Cross-attempt continuity comes from the prompt itself (past attempt summaries + reviewer comments in continue mode), not from any shared Claude session.
+8. Two-branch model. `${BRANCH}` (typically `master`) is the **integration / target** branch — MRs are opened against it; spec output accumulates here. `${DEV_BRANCH}` (typically `dev`) is the **clean baseline** — fresh-mode checkouts reset to `origin/${DEV_BRANCH}` so Claude does NOT see past issues' spec output. Continue mode bases on `origin/${WORK_BRANCH}` (the resumable WIP branch), not `${DEV_BRANCH}`.
+9. **No path-based leak rejection.** `stage_and_guard.sh` and `post_push_verify.sh` no longer reject anything by path. They still serve their bookkeeping roles — staging, NO_CHANGES detection, evidence files, post-push fetch — but every file present in the staged or MR diff goes through. `.git/info/exclude` (set by `clone_or_pull.sh`) keeps untracked `ifp-result/` runtime files out of `git add -A`, and the current issue's `${OUTPUT_DIR}` is force-added so it survives that exclude.
 10. **One-time migration from the old out-of-repo layout.** Some deployments still have a `/data/openclaw_work/${PROJECT}/...` subtree from before the agent moved into `ifp-result/`. Operators should either move it once during deployment:
     - `mv /data/openclaw_work/<project>/openclaw_state/campaign_state.json /data/<project>/ifp-result/_dispatcher/campaign_state.json`
     - `mv /data/openclaw_work/<project>/openclaw_log/dispatcher/* /data/<project>/ifp-result/_dispatcher/log/`
@@ -138,4 +143,4 @@ When a new MR is created (rather than an existing fresh-mode MR being reused), t
 
 These files NEVER go into the work branch — they live under this attempt's `${LOG_DIR}`.
 
-`scripts/upload_attempt_artifacts.sh` publishes the required `prompt.txt` and `claude_result.txt`, plus the first `report.html` found anywhere under `${WORKTREE_DIR}` (excluding the test-team-committed `hulat/`, `.claude/`, `ifp-data/` and the gitignored `ifp-result/`), to project Wiki pages under `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/`. If no `report.html` exists under the worktree, no report Wiki page is published.
+`scripts/upload_attempt_artifacts.sh` publishes the required `prompt.txt` and `claude_result.txt`, plus the first `report.html` found under `${OUTPUT_DIR}`, to project Wiki pages under `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/`. If no `report.html` exists under the output directory, no report Wiki page is published.

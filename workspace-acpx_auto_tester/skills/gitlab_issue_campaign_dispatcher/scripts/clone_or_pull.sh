@@ -1,27 +1,36 @@
 #!/usr/bin/env bash
 # clone_or_pull.sh — ensure ${REPO_PATH} exists as a clone of the project
 # repo, with up-to-date refs, and create the agent's runtime subtree at
-# ${REPO_PATH}/ifp-result/.
+# ${REPO_PATH}/${RESULT_BASENAME}/ (default `ifp-result/`; per-project
+# overridable via the `result_basename` trigger field).
 #
-# The agent's state lives INSIDE the cloned repo at
-# `${REPO_PATH}/ifp-result/`. Before the first clone, that subtree does
-# not exist — the bootstrap order is:
+# The agent's state lives INSIDE the cloned repo at `${RESULT_ROOT}`.
+# Before the first clone, that subtree does not exist — the bootstrap
+# order is:
 #
-#   1. Ensure /data exists.
+#   1. Ensure the parent directory of ${REPO_PATH} exists.
 #   2. If repo is missing, acquire a tmpfs lock and `git clone`. We can't
 #      use the in-repo lock yet because the repo doesn't exist.
 #   3. After clone, create the dispatcher subtree (_dispatcher/log,
-#      _dispatcher/locks) and the issue subtree root (ifp-result/).
+#      _dispatcher/locks) and the issue subtree root.
 #   4. Acquire the in-repo flock and run `git fetch` + `git worktree prune`.
+#   5. Idempotently append `/<basename RESULT_ROOT>/` to
+#      `${REPO_PATH}/.git/info/exclude` so the runtime root is git-ignored
+#      locally. `.git/info/exclude` is NEVER committed/pushed, so this
+#      handles per-project naming (`ifp-result/`, `<project>-result/`, …)
+#      without requiring the test team to maintain a `.gitignore` rule
+#      in master + dev for every project. The current issue's
+#      `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which
+#      bypasses both gitignore and info/exclude), so the single
+#      committable path is unaffected.
 #
-# The MAIN repo's working tree is not used for issue work — each issue
-# gets a separate git worktree at `${REPO_PATH}/ifp-result/issue-<iid>/worktree/`
-# that is replaced for every attempt. The main worktree is only needed
-# because `git worktree add` requires an existing repo to host links
-# from.
+# The MAIN repo's working tree is the only issue execution cwd. The
+# dispatcher serializes issue attempts, and prepare_attempt.sh switches this
+# checkout onto a per-attempt local branch before acpx runs.
 #
 # Required env vars:
-#   REPO_PATH               from env_paths.sh
+#   REPO_PATH               from env_paths.sh (default /data/${PROJECT}; trigger
+#                           repo_path overrides the parent)
 #   BRANCH                  integration / target branch (typically "master")
 #   GROUP                   from trigger
 #   PROJECT                 from trigger
@@ -80,7 +89,7 @@ mkdir -p \
   "${WORK_ROOT}/locks"
 
 # Acquire the in-repo lock for fetch + worktree prune. This is the same
-# lock prepare_attempt.sh uses, so concurrent fetch + worktree-add are
+# lock prepare_attempt.sh uses, so concurrent fetch + branch checkout are
 # serialized.
 LOCK_DIR="${WORK_ROOT}/locks"
 exec 8>"${LOCK_DIR}/repo.lock"
@@ -90,6 +99,19 @@ cd "${REPO_PATH}"
 git remote set-url origin "${AUTHED_REMOTE_URL}"
 git fetch --prune origin
 
-# Prune any stale worktree entries — worktree dirs deleted out-of-band
-# leave records in .git/worktrees that interfere with `worktree add`.
+# Prune stale linked-worktree metadata left by older deployments.
 git worktree prune
+
+# Ensure the agent runtime root is locally ignored. `.git/info/exclude`
+# has identical semantics to `.gitignore` but is never committed/pushed,
+# so per-project runtime-root names (e.g. `ifp-result/`,
+# `<project>-result/`) are handled here without touching the project's
+# tracked `.gitignore`. Idempotent: a fixed-string match prevents
+# duplicate appends across ticks.
+RUNTIME_IGNORE_LINE="/$(basename "${RESULT_ROOT}")/"
+EXCLUDE_FILE="${REPO_PATH}/.git/info/exclude"
+mkdir -p "$(dirname "${EXCLUDE_FILE}")"
+if [ ! -f "${EXCLUDE_FILE}" ] || ! grep -Fxq "${RUNTIME_IGNORE_LINE}" "${EXCLUDE_FILE}"; then
+  printf '\n# acpx_auto_tester runtime root (managed by clone_or_pull.sh)\n%s\n' \
+    "${RUNTIME_IGNORE_LINE}" >> "${EXCLUDE_FILE}"
+fi

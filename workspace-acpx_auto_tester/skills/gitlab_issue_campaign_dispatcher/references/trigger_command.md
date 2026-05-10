@@ -37,11 +37,11 @@ Older triggers may also include `gitlab_address=...` and/or `hulat_dir=...`. Bot
 | `group`                 | GitLab group slug                                                     |
 | `project`               | GitLab project slug                                                   |
 | `branch`                | **Integration / target branch** (typically `master`). MRs are opened against this branch; spec accumulation happens here. |
-| `dev_branch`            | **Clean baseline branch** (typically `dev`). Fresh-mode worktrees are checked out from `origin/${dev_branch}` so Claude Code starts from a clean tree without past spec accumulation. If the project does not maintain a separate clean baseline, set `dev_branch=<same-as-branch>` to fall back to single-branch behavior. |
+| `dev_branch`            | **Clean baseline branch** (typically `dev`). Fresh-mode attempts reset the main repo checkout to `origin/${dev_branch}` so Claude Code starts from a clean tree without past spec accumulation. If the project does not maintain a separate clean baseline, set `dev_branch=<same-as-branch>` to fall back to single-branch behavior. |
 | `gitlab_token`          | Token used by `glab auth login` against the deployment-pinned host    |
 | `issue_min_iid`         | Integer, inclusive                                                    |
 | `issue_max_iid`         | Integer, inclusive                                                    |
-| `hourly_issue_quota`    | Integer. **In async-callback mode this is the per-scheduled-tick LAUNCH count** (how many `sessions_spawn` calls the orchestrator may issue this tick), NOT the completion count. Terminal completions are recorded on callback wake-ups, which do not consume launch budget. Independent of `max_concurrent_subagents` (which caps concurrent in-flight subagents). |
+| `hourly_issue_quota`    | Integer. **In async-callback mode this is the per-scheduled-tick LAUNCH count**, NOT the completion count. This repo-root model still launches at most one IID per tick because `max_concurrent_subagents` must be `1`. |
 | `max_runtime_minutes`   | Integer wall-clock budget for this tick                               |
 | `blocked_retry_limit`   | Integer                                                               |
 | `blocked_cooldown_ticks`| Integer                                                               |
@@ -51,11 +51,14 @@ Older triggers may also include `gitlab_address=...` and/or `hulat_dir=...`. Bot
 | Field                       | Notes                                                                                                                                              |
 | --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `gitlab_address`            | Pure verification value. The host is pinned in `<workspace>/config/gitlab.env`; it is never derived from this field. If supplied, `scripts/glab_auth.sh` checks that it resolves to the same `host:port` and protocol as the pin and aborts on mismatch (exit 13). If omitted, the pin is used unconditionally. New triggers should omit this field. |
-| `max_concurrent_subagents`  | Integer ≥ 1, defaults to `1` if omitted. Upper bound on concurrent issue subagents this orchestrator may have in flight at the same time (i.e., upper bound on `len(pending_subagents)`). **Different IIDs only — two attempts for the same IID never run concurrently regardless of this value.** Independent of `hourly_issue_quota`. When `=1`, exactly one subagent is in flight at any moment. See SOUL.md "Subagent Concurrency Policy" and SKILL.md "Concurrency Policy" for the full contract. |
-| `stuck_after_minutes`       | Integer ≥ 5, defaults to `90`. A pending subagent that has not received a `RUN_CHILD_COMPLETION_CALLBACK` within this many minutes of `spawned_at` is evicted at the top of the next scheduled wake-up (synthesized as a Phase 6 blocked reply with `block_reason="no callback received within stuck_after_minutes"`). Bumping this number is appropriate when subagent runs are routinely close to `runTimeoutSeconds=3600` (60 minutes). Set lower (e.g. 30) only if you are confident the runtime delivers callbacks within seconds of subagent termination. |
+| `repo_path`                 | Optional absolute parent directory for project clones. Forwarded as `REPO_PARENT_PATH=...` to scripts; `env_paths.sh` derives the final repo root as `${repo_path}/${project}` and defaults the parent to `/data` when omitted. Must be absolute and not `/`; values with `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]` are rejected with `"invalid_repo_path"`. Non-default deployments MUST include the same parent on every scheduled trigger and callback because the dispatcher needs it before it can locate `${CAMPAIGN_STATE_FILE}`. |
+| `max_concurrent_subagents`  | Compatibility field. Must be omitted or set to `1`. Any value other than `1` is a tick-level configuration error because all attempts share the main repo checkout at `${REPO_PATH}`. |
+| `stuck_after_minutes`       | Integer ≥ 5, defaults to `210`. A pending subagent that has not received a `RUN_CHILD_COMPLETION_CALLBACK` within this many minutes of `spawned_at` is evicted at the top of the next scheduled wake-up (synthesized as a Phase 6 blocked reply with `block_reason="no callback received within stuck_after_minutes"`). Bumping this number is appropriate when subagent runs are routinely close to `runTimeoutSeconds=10800` (180 minutes). Set lower (e.g. 30) only if you are confident the runtime delivers callbacks within seconds of subagent termination. |
 | `issue_iids`                | Comma-separated integers (e.g. `14,17,20`). Optional whitelist applied **on top of** `[issue_min_iid, issue_max_iid]`. When non-empty, the effective IID universe for this tick = `[issue_min_iid, issue_max_iid] ∩ issue_iids`. IIDs in `issue_iids` that fall outside the range are silently dropped. Whitespace around commas is tolerated. When omitted or empty, no whitelist is applied (the full range is used — current default behavior). **Stuck-pending eviction is NOT subject to this filter** — already in-flight subagents are always evicted by the `stuck_after_minutes` rule regardless of whether their IID is still in the whitelist. |
 | `require_labels`            | Comma-separated GitLab label names (e.g. `acpx-auto,priority::high`). Optional inclusion filter on live GitLab labels (read from the Phase 2 reconcile evidence file). When non-empty, only IIDs whose live labels satisfy the match (combined with `require_labels_match` below) are considered for batching in Phase 3. Match is case-sensitive (GitLab labels are case-sensitive). Whitespace around commas is tolerated; whitespace inside a label name is preserved. When omitted or empty, no label filter is applied — current default behavior. **Does not affect stuck-pending eviction.** |
 | `require_labels_match`      | `or` (default) or `and`. Only meaningful when `require_labels` is non-empty. `or` = IID passes if its live labels include **at least one** of `require_labels`. `and` = IID passes only if its live labels include **all** of `require_labels`. When `require_labels` is empty, this field is ignored. Any other value → tick aborts with `"invalid_require_labels_match"`. |
+| `result_basename`           | Optional. Basename of the agent runtime root **inside the cloned project repo**. The orchestrator forwards this value to every script as `RESULT_BASENAME=...`, and `env_paths.sh` derives `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}`. Use this when the test team renames the runtime directory under a per-project convention (e.g. `pts-result` for the PTS project). When the trigger supplies the field, it overrides the persisted value; when omitted, the dispatcher keeps the persisted value (or `ifp-result` on a fresh deployment) — basenames are deployment-stable per project, so omission is treated as "no change", NOT as "reset to default". |
+| `data_basename`             | Optional. Basename of the test team's knowledge directory inside the repo. Forwarded as `DATA_BASENAME=...`; rendered into the subagent prompt's `<config>` block and Step 0 directory check. Same persistence semantics as `result_basename` (default `ifp-data` on fresh deployment; otherwise carry-forward). |
 
 ## Expected fixed values
 
@@ -74,13 +77,17 @@ Every scalar in "Required inputs" above is authoritative for the current tick. T
 
 This applies in particular to: `issue_min_iid`, `issue_max_iid`, `hourly_issue_quota`, `max_runtime_minutes`, `blocked_retry_limit`, `blocked_cooldown_ticks`.
 
-`max_concurrent_subagents` (when supplied) is also applied as an override using the same rule: write the trigger value into `campaign_state.json.max_concurrent_subagents`. When the trigger omits it, the dispatcher MUST default the field to `1` for the tick AND persist that default so the disk schema stays consistent across versions.
+`max_concurrent_subagents` (when supplied) is also applied as an override using the same rule: write the trigger value into `campaign_state.json.max_concurrent_subagents`. When the trigger omits it, the dispatcher MUST default the field to `1` for the tick AND persist that default so the disk schema stays consistent across versions. If the post-override value is not `1`, abort the tick with `"invalid_max_concurrent_subagents_for_repo_root: expected 1"`.
 
 `gitlab_address` (when supplied) is NOT applied as an override — it is used only for the cross-check above. The pin in `<workspace>/config/gitlab.env` is the single source of truth for host / protocol.
+
+`repo_path` is a bootstrap path input, not a carry-forward value. When the trigger supplies it, validate that it is an absolute parent directory path (reject `/`, dot segments, whitespace, and shell-unsafe characters outside `[A-Za-z0-9_./-]`; abort with `"invalid_repo_path"` on violation) and forward it as `REPO_PARENT_PATH=...` to scripts. `env_paths.sh` derives the final repo root as `${repo_path}/${project}`. When the trigger omits it, the tick uses the legacy default parent `/data`, so the final repo root remains `/data/${project}`. Because `repo_path` determines where `${CAMPAIGN_STATE_FILE}` lives, a non-default deployment must keep passing it on every scheduled trigger and callback.
 
 `stuck_after_minutes` (when supplied) overrides the persisted value the same way `max_concurrent_subagents` does.
 
 `issue_iids`, `require_labels`, and `require_labels_match` (when supplied) override the persisted values the same way the other scalars do — each tick takes whatever the trigger says (or "unset / empty" when the trigger omits the field). The dispatcher persists the post-override values into `campaign_state.json.issue_iids_whitelist` / `.require_labels` / `.require_labels_match` for audit, but does NOT carry a stale whitelist forward when the next trigger drops the field. Stuck-pending eviction is performed BEFORE the new whitelist takes effect, so an in-flight subagent whose IID is removed from the whitelist on this tick still gets its eviction processed (it is NOT silently abandoned).
+
+`result_basename` / `data_basename` use **carry-forward** semantics, NOT the per-tick reset rule used by `max_concurrent_subagents` / `stuck_after_minutes`. When the trigger supplies a value, the dispatcher writes it into `campaign_state.json` and uses it for this tick. When the trigger omits the field, the dispatcher keeps the persisted value; on a fresh deployment with no persisted value, it falls back to the hardcoded defaults (`ifp-result` / `ifp-data`). The reason for the difference: project-local directory names are a deployment property, not a per-tick decision — schedulers should not have to repeat them every tick to keep the project running. Both basenames must be plain directory names — a value containing `/`, `..`, or whitespace aborts the tick with `"invalid_result_basename"` / `"invalid_data_basename"`. Once set for a project, do NOT toggle the values mid-campaign without first migrating the existing on-disk runtime root: the dispatcher will start writing state to a fresh subtree under the new basename.
 
 ---
 
@@ -95,11 +102,12 @@ RUN_CHILD_COMPLETION_CALLBACK
 project=<project>
 group=<group>
 gitlab_token=<token>
+repo_path=<same non-default repo_path, when used by the scheduled trigger>
 iid=<iid>
 attempt_number=<attempt_number>
 run_id=<runId from the launch ack>
 child_session_key=<childSessionKey from the launch ack>
-worker_status=<done|no_changes|blocked|failed>
+worker_status=<done|blocked|failed>   # no_changes is accepted only for legacy callbacks and normalized to blocked
 worker_result_json=<the entire compact JSON line the subagent emitted>
 ```
 
@@ -121,6 +129,7 @@ worker_result_json=<the entire compact JSON line the subagent emitted>
 | `run_id`              | Must equal `pending_subagents[iid].run_id`. Mismatch → log a warning but still process by `iid`+`attempt_number` (the runtime may have allocated multiple runIds during retries — `iid`+`attempt_number` is the canonical identity). |
 | `child_session_key`   | For audit / debugging only. Not load-bearing.                                                  |
 | `worker_status`       | The `status` field from `worker_result_json`, hoisted for routing convenience. The orchestrator MUST still parse `worker_result_json` for the canonical value. |
+| `repo_path`           | Required when the scheduled trigger used a non-default clone parent. Forward as `REPO_PARENT_PATH=...` before sourcing `env_paths.sh`; when omitted, the callback path uses parent `/data` and final repo root `/data/${project}`. |
 
 ### What the orchestrator does NOT need on the callback path
 
@@ -141,4 +150,4 @@ For this workspace's scheduling contract to hold, the runtime MUST:
 3. Carry the subagent's terminal compact JSON in `worker_result_json` verbatim — runtime MUST NOT alter, truncate, or re-serialize the JSON line.
 4. Deliver the callback even if the subagent terminated abnormally (timeout, runtime error, manual cancel). In those cases `worker_status` should be `blocked` or `failed` and `worker_result_json` should be a synthetic minimal compact JSON the runtime constructs (with `iid`, `attempt_number`, `status`, `block_reason`).
 
-If (4) is not feasible on the deployment, the orchestrator's stuck-pending eviction (default 90 min after `spawned_at`) recovers — but at the cost of UI account lockup for that duration.
+If (4) is not feasible on the deployment, the orchestrator's stuck-pending eviction (default 210 min after `spawned_at`) recovers — but at the cost of UI account lockup for that duration.

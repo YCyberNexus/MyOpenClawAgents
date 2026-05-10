@@ -29,9 +29,9 @@ This workspace assumes a single GitLab deployment per runner. If you ever need t
 
 ## `ui_accounts.env`
 
-Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to concurrent subagents.
+Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents.
 
-The system under test logs out an account when the same credentials log in twice. With `max_concurrent_subagents > 1` the dispatcher MUST hand each concurrent subagent a distinct account, otherwise two subagents racing on the same account will continuously kick each other out.
+The system under test logs out an account when the same credentials log in twice. This repo-root execution model is serial (`max_concurrent_subagents=1`), but the dispatcher still allocates one account per spawned IID from this pool.
 
 ### Format
 
@@ -46,18 +46,18 @@ F100004:123456
 
 ### Sizing rule
 
-The pool size MUST be `>= max_concurrent_subagents` for the deployment. The dispatcher checks this every tick: if the next batch's size exceeds the pool size, the tick is aborted (No-Fallback Policy — the dispatcher will never share an account between two in-flight subagents).
+The pool must contain at least one valid account. The dispatcher checks this every tick; if it cannot allocate an account for the serial batch, the tick is aborted.
 
 ### How it flows through the agent
 
 1. Dispatcher sources `<workspace>/config/ui_accounts.env` via `scripts/load_ui_accounts.sh` at the top of every batch.
-2. Dispatcher allocates one account per IID in the batch (first N entries from the pool, in file order).
+2. Dispatcher allocates one account for the serial IID batch (the first entry from the pool, in file order).
 3. For each IID, the dispatcher invokes `scripts/build_prompt.sh` with `UI_ACCOUNT=<user>` `UI_PASSWORD=<pass>` in env. The script appends them to the `# Working environment` section of the Claude Code prompt at `${LOG_DIR}/prompt.txt` with an explicit override note: any account named in the issue body should be replaced by the allocated one. The credentials are NOT injected into the rendered subagent prompt — they live in the Claude Code prompt only, where Claude Code reads them.
-4. After the whole batch returns terminal subagent replies, the accounts implicitly return to the pool — the dispatcher does not persist allocations; the next batch re-allocates from the head of the file. Per-batch synchronous waiting (the existing concurrency contract) is what makes this safe. A push-based `accepted` / `runId` acknowledgement is not a returned batch and must not release accounts.
+4. After the callback drains the pending subagent, the account implicitly returns to the pool — the dispatcher does not persist allocations; the next batch re-allocates from the head of the file. A push-based `accepted` / `runId` acknowledgement is not terminal completion and must not release the pending entry.
 
 ### Setup
 
 1. Create the accounts on the system under test (e.g. `F100001`–`F100004`).
 2. Edit `ui_accounts.env` with the credentials.
-3. Make sure the line count is `>= max_concurrent_subagents` set in your trigger.
+3. Make sure there is at least one valid non-comment account line.
 4. Re-run the scheduled tick.

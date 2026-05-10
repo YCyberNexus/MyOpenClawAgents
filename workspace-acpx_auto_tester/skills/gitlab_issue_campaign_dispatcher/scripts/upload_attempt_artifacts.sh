@@ -11,14 +11,15 @@
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
 #   LOG_DIR                  current-attempt log dir
-#   WORKTREE_DIR             current-attempt worktree
+#   WORKTREE_DIR             repo root cwd
+#   OUTPUT_DIR               current issue's committable result directory
 #
 # Behavior:
 #   - Publishes ${LOG_DIR}/prompt.txt to:
 #       issue<IID>/attempt-NNN/prompt.txt
 #   - Publishes ${LOG_DIR}/claude_result.txt to:
 #       issue<IID>/attempt-NNN/claude_result.txt
-#   - Publishes the first report.html found under ${WORKTREE_DIR}, if any, to:
+#   - Publishes the first report.html found under ${OUTPUT_DIR}, if any, to:
 #       issue<IID>/attempt-NNN/report.html
 #   - Posts a GitLab issue note with links to the Wiki pages.
 #
@@ -35,7 +36,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${GITLAB_API_PROTOCOL:?run scripts/glab_auth.sh first}"
 : "${PROJECT_FULL:?run scripts/env_paths.sh first}"
 : "${PROJECT_URI:?run scripts/env_paths.sh first}"
-: "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" "${LOG_DIR:?}" "${WORKTREE_DIR:?}"
+: "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" "${LOG_DIR:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}"
 
 PROMPT_SOURCE="${LOG_DIR}/prompt.txt"
 CLAUDE_RESULT_SOURCE="${LOG_DIR}/claude_result.txt"
@@ -115,14 +116,11 @@ publish_wiki_page \
   "${WIKI_PREFIX}/claude_result.txt" \
   "${CLAUDE_RESULT_SOURCE}"
 
-find "${WORKTREE_DIR}" \
-  \( -path "${WORKTREE_DIR}/.git" -o \
-     -path "${WORKTREE_DIR}/.claude" -o \
-     -path "${WORKTREE_DIR}/hulat" -o \
-     -path "${WORKTREE_DIR}/ifp-data" -o \
-     -path "${WORKTREE_DIR}/ifp-result" \) -prune \
-  -o -type f -name report.html -print \
-  | sort > "${REPORT_CANDIDATES_FILE}"
+if [ -d "${OUTPUT_DIR}" ]; then
+  find "${OUTPUT_DIR}" -type f -name report.html -print | sort > "${REPORT_CANDIDATES_FILE}"
+else
+  : > "${REPORT_CANDIDATES_FILE}"
+fi
 
 REPORT_SOURCE="$(sed -n '1p' "${REPORT_CANDIDATES_FILE}")"
 if [ -n "${REPORT_SOURCE}" ]; then
@@ -140,7 +138,7 @@ fi
   echo
   cat "${LINKS_FILE}"
   if [ -z "${REPORT_SOURCE}" ]; then
-    echo "- **report.html**: not found under \`${WORKTREE_DIR}\`; no Wiki page published."
+    echo "- **report.html**: not found under \`${OUTPUT_DIR}\`; no Wiki page published."
   fi
   echo
   echo "<!-- /acpx_auto_tester:attempt-wiki-artifacts -->"

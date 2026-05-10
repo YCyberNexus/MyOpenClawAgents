@@ -2,19 +2,28 @@
 # env_paths.sh — single bootstrap for every script in this skill.
 #
 # The cloned project repo IS the agent's entire workspace. The test team
-# maintains `.claude/`, `hulat/`, and `ifp-data/` inside the repo
-# (committed to master + dev). The agent's own state and per-issue
-# subtrees live under `${REPO_PATH}/ifp-result/`, whose contents are
-# gitignored on master+dev so `git status` in the main worktree stays
-# clean.
+# maintains `.claude/`, `hulat/`, and the knowledge-base directory
+# (default `ifp-data/`) inside the repo (committed to master + dev). The
+# agent's own state and per-issue subtrees live under the runtime root
+# (default `${REPO_PATH}/ifp-result/`). Runtime state/log files stay
+# uncommitted there; each issue's committed output is force-added from
+# its own `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/` directory.
 #
-# Disk layout produced by this file:
+# The repo clone parent and the basenames of the runtime root and
+# knowledge-base directory are overridable per project via optional trigger
+# fields `repo_path`, `result_basename`, and `data_basename` (forwarded as
+# REPO_PARENT_PATH / RESULT_BASENAME / DATA_BASENAME env vars). Defaults
+# preserve legacy behavior: repo parent `/data`, final clone target
+# `/data/${PROJECT}`, `ifp-result`, and `ifp-data` for projects that never
+# ship the new fields.
+#
+# Disk layout produced by this file (with default basenames):
 #
 #   ${REPO_PATH}/                        ← /data/${PROJECT}, the cloned repo
 #       .claude/                         (in master+dev, test-team owned)
 #       hulat/                           (in master+dev, test-team owned)
-#       ifp-data/                        (in master+dev, test-team owned)
-#       ifp-result/                      (gitignored content; agent state + worktrees)
+#       ${DATA_BASENAME}/                (in master+dev, test-team owned; default ifp-data)
+#       ${RESULT_BASENAME}/              (agent state/logs + committed per-issue output; default ifp-result)
 #           _dispatcher/                 ← campaign-level state + logs + locks
 #               campaign_state.json
 #               campaign.lock
@@ -23,20 +32,22 @@
 #           issue-<iid>/                 ← per-issue subtree
 #               state.json
 #               attempt_state.json
-#               worktree/                ← linked git worktree (acpx cwd)
+#               hulat-spec-issue<iid>/   ← Claude Code output (committed to MR)
 #               log/attempt-NNN/
 #               summary.md
 #
 # Path derivation is layered:
 #
 #   - dispatcher level (always derived):  PROJECT, GROUP, GITLAB_TOKEN
-#       → REPO_PATH, HULAT_DIR, RESULT_ROOT, WORK_ROOT, STATE_DIR,
-#         CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR, ISSUES_ROOT,
-#         LOCK_FILE
+#                                         (+ optional REPO_PARENT_PATH or REPO_PATH,
+#                                            RESULT_BASENAME, DATA_BASENAME)
+#       → REPO_PATH, HULAT_DIR, DATA_DIR, RESULT_ROOT, WORK_ROOT,
+#         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
+#         ISSUES_ROOT, LOCK_FILE
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
-#         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR,
+#         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
 #         ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
 #         LOCAL_ATTEMPT_BRANCH
 #
@@ -54,6 +65,14 @@
 #   ISSUE_IID        integer issue IID                              (per-issue)
 #   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
 #
+# Optional input env vars (forwarded by the orchestrator from trigger
+# fields; defaults preserve legacy ifp-* layout):
+#   REPO_PARENT_PATH absolute parent for project clones (default: /data)
+#   REPO_PATH        final clone target path. Compatibility input only when
+#                    REPO_PARENT_PATH is unset; normally exported by this file.
+#   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
+#   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
+#
 # Note: HULAT_DIR is NOT a trigger input. It is derived as
 # `${REPO_PATH}/hulat` because the test team committed the hulat
 # materials into the repo. Triggers that still pass `hulat_dir=...` are
@@ -70,10 +89,94 @@ set -euo pipefail
 
 : "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
 
+# Optional trigger field `repo_path` lets the orchestrator place clones under
+# a parent directory other than `/data`. The trigger value is forwarded as
+# REPO_PARENT_PATH; the final repo root remains `${REPO_PARENT_PATH}/${PROJECT}`.
+# REPO_PATH is still accepted as a final repo-root compatibility input for
+# subagent prompts and direct script invocations.
+: "${REPO_PARENT_PATH:=}"
+if [ -n "${REPO_PARENT_PATH}" ]; then
+  # If the trigger supplied a parent with trailing slashes, recompute the final
+  # repo path after parent normalization so `/data/foo/` and `/data/foo` match.
+  while [ "${REPO_PARENT_PATH}" != "/" ] && [ "${REPO_PARENT_PATH%/}" != "${REPO_PARENT_PATH}" ]; do
+    REPO_PARENT_PATH="${REPO_PARENT_PATH%/}"
+  done
+  REPO_PATH="${REPO_PARENT_PATH}/${PROJECT}"
+  while [ "${REPO_PATH}" != "/" ] && [ "${REPO_PATH%/}" != "${REPO_PATH}" ]; do
+    REPO_PATH="${REPO_PATH%/}"
+  done
+else
+  : "${REPO_PATH:=/data/${PROJECT}}"
+  # For the compatibility REPO_PATH input, normalize first and then derive its
+  # parent so `/data/foo/A/` exports parent `/data/foo`.
+  while [ "${REPO_PATH}" != "/" ] && [ "${REPO_PATH%/}" != "${REPO_PATH}" ]; do
+    REPO_PATH="${REPO_PATH%/}"
+  done
+  REPO_PARENT_PATH="${REPO_PATH%/*}"
+  if [ -z "${REPO_PARENT_PATH}" ] || [ "${REPO_PARENT_PATH}" = "${REPO_PATH}" ]; then
+    REPO_PARENT_PATH="/"
+  fi
+  while [ "${REPO_PARENT_PATH}" != "/" ] && [ "${REPO_PARENT_PATH%/}" != "${REPO_PARENT_PATH}" ]; do
+    REPO_PARENT_PATH="${REPO_PARENT_PATH%/}"
+  done
+fi
+
+# Guard against unsafe clone parents and targets. clone_or_pull.sh may remove
+# a non-git directory at REPO_PATH when recovering from an interrupted first
+# clone, so REPO_PATH must be a concrete repo directory derived from a safe
+# parent.
+case "${REPO_PARENT_PATH}" in
+  /*) ;;
+  *)
+    echo "env_paths.sh: invalid_repo_path: repo_path must be absolute" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PARENT_PATH}" in
+  "/")
+    echo "env_paths.sh: invalid_repo_path: repo_path must not be filesystem root" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PARENT_PATH}" in
+  *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+    echo "env_paths.sh: invalid_repo_path: repo_path must not contain dot segments or whitespace" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PARENT_PATH}" in
+  *[!A-Za-z0-9_./-]*)
+    echo "env_paths.sh: invalid_repo_path: repo_path contains unsupported characters" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PATH}" in
+  "/"|"/data"|"/tmp"|"/var"|"/home"|"/Users"|"/private"|"/private/tmp"|"/private/var")
+    echo "env_paths.sh: invalid_repo_path: final REPO_PATH must point at a repo directory, not ${REPO_PATH}" >&2
+    exit 2
+    ;;
+esac
+case "${REPO_PATH}" in
+  *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
+    echo "env_paths.sh: invalid_repo_path: final REPO_PATH is not a safe repo directory" >&2
+    exit 2
+    ;;
+esac
+export REPO_PARENT_PATH REPO_PATH
+
+# Per-project basenames. Optional trigger fields `result_basename` /
+# `data_basename` let the orchestrator override the runtime-root and
+# knowledge-base directory names without code changes (see
+# references/trigger_command.md). Defaults preserve legacy behavior for
+# projects that never ship the new fields.
+: "${RESULT_BASENAME:=ifp-result}"
+: "${DATA_BASENAME:=ifp-data}"
+export RESULT_BASENAME DATA_BASENAME
+
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
-export REPO_PATH="/data/${PROJECT}"
 export HULAT_DIR="${REPO_PATH}/hulat"
-export RESULT_ROOT="${REPO_PATH}/ifp-result"
+export DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
+export RESULT_ROOT="${REPO_PATH}/${RESULT_BASENAME}"
 export WORK_ROOT="${RESULT_ROOT}/_dispatcher"
 export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
@@ -119,9 +222,11 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export ATTEMPT_NUMBER_PADDED
 
   # ATTEMPT_DIR is a compatibility alias for ISSUE_ROOT — there is no
-  # per-attempt subtree. Logs are attempt-scoped under log/attempt-NNN.
+  # per-attempt subtree. Claude runs at the repo root, while this issue's
+  # committed output is force-added from OUTPUT_DIR under ${RESULT_BASENAME}/.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
-  export WORKTREE_DIR="${ATTEMPT_DIR}/worktree"
+  export WORKTREE_DIR="${REPO_PATH}"
+  export OUTPUT_DIR="${ISSUE_ROOT}/hulat-spec-issue${ISSUE_IID}"
   export ISSUE_LOG_ROOT="${ATTEMPT_DIR}/log"
   export LOG_DIR="${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
@@ -129,7 +234,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
   if [ -d "${REPO_PATH}/.git" ]; then
-    mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+    mkdir -p "${ATTEMPT_DIR}" "${OUTPUT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
   fi
 fi
 
