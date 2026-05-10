@@ -32,7 +32,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{WORKTREE_DIR}`         | per-attempt linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}-att-{ATTEMPT_NUMBER_PADDED}/`; this is the acpx cwd |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the worktree) |
 | `{LOG_DIR}`              | `{ISSUE_ROOT}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (outside the worktree, persists)     |
-| `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issue-{ISSUE_IID}` (parent's per-issue subtree)          |
+| `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |

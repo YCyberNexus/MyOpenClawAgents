@@ -86,15 +86,16 @@ ${REPO_PATH}/                                  ← parent checkout (default /dat
             campaign.lock                      ← flock target
             log/reconcile-<ts>.json            ← reconciliation evidence files
             locks/repo.lock                    ← flock target for clone_or_pull / prepare_attempt
-        issue-<iid>/                           ← per-issue subtree (lives OUTSIDE the worktree)
-            state.json                         ← cross-attempt per-issue state
-            attempt_state.json                 ← current attempt; overwritten each attempt
-            log/attempt-NNN/                   ← preserved logs per attempt
-            summary.md
+        issues/                                ← parent of per-issue persistent subtrees
+            issue-<iid>/                       ← per-issue subtree (lives OUTSIDE the worktree)
+                state.json                     ← cross-attempt per-issue state
+                attempt_state.json             ← current attempt; overwritten each attempt
+                log/attempt-NNN/               ← preserved logs per attempt
+                summary.md
         .worktrees/                            ← per-attempt linked git worktrees
             issue-<iid>-att-<NNN>/             ← ${WORKTREE_DIR}; acpx cwd; from `git worktree add -B`
                 .claude/ hulat/ ifp-data/      ← from base branch checkout
-                ifp-result/issue-<iid>/hulat-spec-issue<iid>/   ← Claude Code's spec output (force-added; lands in MR)
+                ifp-result/issue-<iid>/hulat-spec-issue<iid>/   ← Claude Code's spec output (legacy path kept; force-added; lands in MR)
 ```
 
 `clone_or_pull.sh` appends `/<basename RESULT_ROOT>/` (e.g. `/ifp-result/`) to `${REPO_PATH}/.git/info/exclude` once per clone. `.git/info/exclude` is local-only (never committed/pushed) AND it's repository-wide (covers every linked worktree), so the entire `ifp-result/` subtree — including `.worktrees/` — is invisible to `git status` / `git add -A` in both the parent checkout and inside each per-attempt worktree. `stage_and_guard.sh` force-adds only the current issue's `${OUTPUT_DIR}` (relative path `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` inside the worktree), bypassing both `.gitignore` and `info/exclude`. There is no path-based reject in either `stage_and_guard.sh` or `post_push_verify.sh`: any file Claude produced or that ships with the base branch is allowed through to the issue MR.

@@ -30,12 +30,13 @@
 #               campaign.lock
 #               log/reconcile-<ts>.json
 #               locks/repo.lock
-#           issue-<iid>/                 ← per-issue subtree (lives OUTSIDE worktree
+#           issues/                      ← parent of per-issue persistent subtrees
+#               issue-<iid>/             ← per-issue subtree (lives OUTSIDE worktree
 #                                          so logs/state survive worktree teardown)
-#               state.json
-#               attempt_state.json
-#               log/attempt-NNN/         ← per-attempt logs (preserved)
-#               summary.md
+#                   state.json
+#                   attempt_state.json
+#                   log/attempt-NNN/     ← per-attempt logs (preserved)
+#                   summary.md
 #           .worktrees/                  ← per-attempt linked git worktrees
 #               issue-<iid>-att-<NNN>/   ← WORKTREE_DIR; acpx cwd; created by
 #                                          `git worktree add -B` in prepare_attempt.sh
@@ -189,7 +190,7 @@ export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
 export LOG_ROOT="${WORK_ROOT}/log"
 export DISPATCHER_LOG_DIR="${LOG_ROOT}"
-export ISSUES_ROOT="${RESULT_ROOT}"
+export ISSUES_ROOT="${RESULT_ROOT}/issues"
 export LOCK_FILE="${STATE_DIR}/campaign.lock"
 
 # Per-attempt git worktrees live under a single root inside the agent

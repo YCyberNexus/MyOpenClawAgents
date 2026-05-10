@@ -25,26 +25,27 @@ ${REPO_PATH}/                                            ← parent checkout (de
                 reconcile-<ts>.json                      ← reconciliation evidence files
             locks/
                 repo.lock                                ← flock target for clone_or_pull / prepare_attempt
-        issue-<iid>/                                     ← per-issue subtree (lives OUTSIDE worktree)
-            state.json                                   (cross-attempt)
-            attempt_state.json                           (current attempt; overwritten each attempt)
-            log/
-                attempt-001/                             ← preserved logs per attempt
-                    prompt.txt
-                    claude_result.txt
-                    acpx_raw.log
-                    git_status.txt
-                    git_diff.patch
-                    wiki_artifacts.md
-                    wiki_artifact_links.md
-                    wiki_artifact_responses.jsonl
-                attempt-002/
-                    ...
-            summary.md                                   (latest summary; mirror of GitLab issue comment)
+        issues/                                          ← ${ISSUES_ROOT}; parent of per-issue persistent subtrees
+            issue-<iid>/                                 ← per-issue subtree (lives OUTSIDE worktree)
+                state.json                               (cross-attempt)
+                attempt_state.json                       (current attempt; overwritten each attempt)
+                log/
+                    attempt-001/                         ← preserved logs per attempt
+                        prompt.txt
+                        claude_result.txt
+                        acpx_raw.log
+                        git_status.txt
+                        git_diff.patch
+                        wiki_artifacts.md
+                        wiki_artifact_links.md
+                        wiki_artifact_responses.jsonl
+                    attempt-002/
+                        ...
+                summary.md                               (latest summary; mirror of GitLab issue comment)
         .worktrees/                                      ← ${WORKTREES_ROOT}; per-attempt linked worktrees
             issue-<iid>-att-<NNN>/                       ← ${WORKTREE_DIR}; acpx cwd; from `git worktree add -B`
                 .claude/ hulat/ ${DATA_BASENAME}/        (from base branch checkout)
-                ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/   ← ${OUTPUT_DIR}; Claude Code output (committed; lands in MR)
+                ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/   ← ${OUTPUT_DIR}; Claude Code output (committed; lands in MR; legacy path kept so master tree is stable)
 ```
 
 The first-time clone bootstrap order (handled by `scripts/clone_or_pull.sh`):
@@ -74,7 +75,7 @@ Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), an
 | `CAMPAIGN_STATE_FILE`   | `${STATE_DIR}/campaign_state.json`                   | Campaign progress cache.                                         |
 | `LOG_ROOT`              | `${WORK_ROOT}/log`                                   | Dispatcher log subtree root.                                    |
 | `DISPATCHER_LOG_DIR`    | `${LOG_ROOT}`                                        | `reconcile-<ts>.json` evidence files. Same dir as LOG_ROOT.     |
-| `ISSUES_ROOT`           | `${RESULT_ROOT}`                                     | Parent of `issue-<iid>/` subtrees.                              |
+| `ISSUES_ROOT`           | `${RESULT_ROOT}/issues`                              | Parent of `issue-<iid>/` subtrees (groups them under one folder so they don't visually mix with `_dispatcher/` and `.worktrees/`). |
 | `LOCK_FILE`             | `${STATE_DIR}/campaign.lock`                         | flock target.                                                    |
 | `WORKTREES_ROOT`        | `${RESULT_ROOT}/.worktrees`                          | Parent of every per-attempt linked worktree.                    |
 
@@ -82,8 +83,8 @@ To find a specific issue's state file from dispatcher code, use the helper:
 
 ```bash
 ISSUE_STATE="$(issue_state_file_for "${IID}")"
-# → /data/${PROJECT}/ifp-result/issue-${IID}/state.json
-# (or ${REPO_PARENT_PATH}/${PROJECT}/ifp-result/issue-${IID}/state.json when repo_path is set)
+# → /data/${PROJECT}/ifp-result/issues/issue-${IID}/state.json
+# (or ${REPO_PARENT_PATH}/${PROJECT}/ifp-result/issues/issue-${IID}/state.json when repo_path is set)
 ```
 
 ### Per-issue + attempt-level (exported only when `ISSUE_IID` is in env)

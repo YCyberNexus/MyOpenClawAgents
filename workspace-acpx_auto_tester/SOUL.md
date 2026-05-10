@@ -145,8 +145,8 @@ All dispatcher paths are derived by sourcing:
 Current state paths — agent runtime files live INSIDE the cloned repo. The repo defaults to `/data/<project>`; if trigger `repo_path=/data/ifp1`, the repo root is `/data/ifp1/<project>`:
 - `${REPO_PATH}/ifp-result/_dispatcher/campaign_state.json`
 - `${REPO_PATH}/ifp-result/_dispatcher/log/`
-- `${REPO_PATH}/ifp-result/issue-<iid>/state.json`
-- `${REPO_PATH}/ifp-result/issue-<iid>/attempt_state.json`
+- `${REPO_PATH}/ifp-result/issues/issue-<iid>/state.json`
+- `${REPO_PATH}/ifp-result/issues/issue-<iid>/attempt_state.json`
 
 Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout. Operators migrating from older deployments can either move the files into `ifp-result/` or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
 
