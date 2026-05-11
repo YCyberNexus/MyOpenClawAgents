@@ -159,6 +159,22 @@ The runner has these files at `workspace-acpx_auto_tester/config/`:
 
 These are deployment-time pins, edited once on each runner. Not generated from triggers, not modified at runtime.
 
+## Bumping SKILL_VERSION on workspace edits
+
+After any edit to a file under `workspace-acpx_auto_tester/` — including `SOUL.md`, `AGENTS.md`, `USER.md`, `config/`, and anything under `skills/gitlab_issue_campaign_dispatcher/` (the SKILL itself, its `scripts/`, its `references/`) — bump the `[SKILL_VERSION=...]` token at the start of line 3 of [`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md) (inside the `description:` field).
+
+Version format is `YYYY-MM-DD.N`:
+
+- `YYYY-MM-DD` is the current date (the date of the edit).
+- `N` is the per-day sequence number. If the existing version's date is not today, replace the whole token with `<today>.1`. If the existing version's date is already today, increment `N` by 1.
+
+Examples (assume today is 2026-05-11):
+
+- Existing `[SKILL_VERSION=2026-05-08.2]` → new `[SKILL_VERSION=2026-05-11.1]`.
+- Existing `[SKILL_VERSION=2026-05-11.1]` (already bumped earlier today) → new `[SKILL_VERSION=2026-05-11.2]`.
+
+Bump the version in the SAME edit/commit that introduces the workspace change — do not leave it for a follow-up. Edits to files OUTSIDE `workspace-acpx_auto_tester/` (e.g. this `CLAUDE.md`, repo-root files, `.claude/`) do NOT trigger a bump.
+
 ## Sanity-checking shell changes
 
 `bash -n scripts/foo.sh` is the only quick check used in this workspace. Run it after editing any script.
