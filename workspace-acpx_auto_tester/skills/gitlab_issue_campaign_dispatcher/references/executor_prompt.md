@@ -112,10 +112,21 @@ Step 0 — SETUP
   Confirm the per-attempt worktree exists and the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at the worktree root (they came from the base branch checkout). Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent".
 
 Step 1 — EXECUTE acpx (one-shot, long-running)
-  acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \
+  TASK_OUTPUT_DIR={OUTPUT_DIR} \
+    acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \
     1>{LOG_DIR}/claude_result.txt 2>{LOG_DIR}/acpx_raw.log
   CAPTURE: acpx_exit (the exit code).
   If acpx_exit != 0 → FAIL status=blocked block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
+
+  TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
+  ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
+  executor.md) read ${TASK_OUTPUT_DIR} to decide where to write their
+  outputs, and the dispatcher pins it to {OUTPUT_DIR} so those writes
+  land inside the per-attempt worktree's OUTPUT_DIR and get force-added
+  by stage_and_guard.sh. If you ever change which agents are called, keep
+  TASK_OUTPUT_DIR={OUTPUT_DIR} on the acpx invocation — without it the
+  agents fall back to a path outside the worktree and their writes never
+  make it into the commit (NO_CHANGES result).
 
   Tool-exec requirements for Step 1:
   - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
