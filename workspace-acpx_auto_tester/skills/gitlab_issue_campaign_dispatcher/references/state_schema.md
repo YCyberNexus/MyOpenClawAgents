@@ -28,7 +28,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${REP
   "blocked_retry_limit": 3,
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
-  "stuck_after_minutes": 210,
+  "stuck_after_minutes": 330,
   "issue_iids_whitelist": [14, 17, 20],
   "require_labels": ["acpx-auto", "priority::high"],
   "require_labels_match": "and",
@@ -85,7 +85,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 ```text
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
-stuck_after_minutes       = 210
+stuck_after_minutes       = 330
 issue_iids_whitelist      = []
 require_labels            = []
 require_labels_match      = "or"
@@ -121,7 +121,7 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Legacy scalar `active_issue_iid` / `active_issue_session`** — if present and no `active_issue_iids` / `active_issue_sessions` array exists, treat as `[scalar]` (or `[]` if the scalar was `null`). On the next write, persist only the array shape.
 - **Missing `pending_subagents`** — treat as `{}` in memory; persist on next write.
 - **Missing `max_concurrent_subagents`** — default to `1` and persist.
-- **Missing `stuck_after_minutes`** — default to `210` and persist.
+- **Missing `stuck_after_minutes`** — default to `330` and persist.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
 - **Missing `issue_iids_whitelist` / `require_labels` / `require_labels_match`** — default to `[]` / `[]` / `"or"` and persist on next write. These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
