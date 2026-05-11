@@ -215,7 +215,7 @@ Step 7 — CREATE / rotate the MR
 
   Do NOT call `glab mr merge`. Do NOT close the issue. GitLab auto-closes via `Closes #{ISSUE_IID}` in the MR body.
 
-Step 7b — ADD `pr` label
+Step 8 — ADD `pr` label
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
@@ -225,7 +225,7 @@ Step 7b — ADD `pr` label
 
   After this step the live issue should carry both `done` and `pr`. Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr".
 
-Step 8 — SUMMARIZE
+Step 9 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed}> \
@@ -237,13 +237,13 @@ Step 8 — SUMMARIZE
   CAPTURE: summary_posted (true if exit 0; false otherwise).
   Run this on EVERY terminal path — done, no_changes, blocked, failed.
 
-Step 9 — REPLY
+Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
   {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|reused|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
 
   Field rules:
-  - status = done           when Steps 0-7b all succeeded.
+  - status = done           when Steps 0-8 all succeeded.
   - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
   - status = blocked        when any FAIL flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
@@ -273,8 +273,8 @@ When any step instructs "FAIL with status=X, block_reason=Y":
      - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
      - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked` and without `pr`.
   4. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
-  5. Run Step 8 (summarize) with ATTEMPT_STATUS / BLOCK_REASON.
-  6. Output the compact JSON per Step 9 with status=X and block_reason=Y filled in.
+  5. Run Step 9 (summarize) with ATTEMPT_STATUS / BLOCK_REASON.
+  6. Output the compact JSON per Step 10 with status=X and block_reason=Y filled in.
 
 Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.
 </fail_flow>
@@ -288,8 +288,5 @@ Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → f
 - `{ISSUE_BODY}` is for the `<issue>` block only. Truncate to ≤ 4 KB. The full body is already on disk at `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* to acpx.
 - The dispatcher MUST verify all placeholders have been substituted before calling `sessions_spawn`. A literal `{` followed by an uppercase identifier in the rendered string is a missed substitution; abort the IID with `block_reason="prompt template render incomplete: <placeholder>"`.
 - The dispatcher passes the rendered string as the entire spawn payload. There are no additional env-var injections at the OpenClaw layer — the subagent reads everything from this prompt.
-- `timeoutSeconds` for the launch-ack wait: 30. Without this, the harness/gateway defaults to ~10s and has been observed to return only a `childSessionKey` placeholder with no `runId` (no real subagent behind it). 30 gives the runtime enough headroom to return a complete launch ack on a normal day.
-- `runTimeoutSeconds` for the subagent runtime cap: 18000. `cleanup`: `keep`. If the trigger supplies `--model` (reserved; not currently a trigger field), forward it.
-- **Spawn anonymously, do NOT pass any session name (HARD).** The orchestrator's `sessions_spawn` call MUST NOT include `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter. Earlier deployments hit `errorCode=thread_required` on channels that don't support thread bindings; passing no name avoids that entirely. The runtime returns `runId` + `childSessionKey` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`) — the orchestrator records both into `campaign_state.json.pending_subagents[iid]` for audit + stuck-pending detection. The runtime session-key label is NOT used to match replies — that's done by the `iid` field of the compact JSON (Phase 6 validation rule 2 in `references/state_schema.md` §Compact Subagent Reply). The rendered prompt's `iid` field MUST be correct.
-- **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via the runtime's `RUN_CHILD_COMPLETION_CALLBACK` trigger, NOT via the synchronous return value of `sessions_spawn`. The subagent itself does not need to know about the callback mechanism — it just emits the compact JSON line on its last turn and stops, exactly as the `<instructions>` Step 9 says. The runtime captures that final line and forwards it inside `worker_result_json` of the callback payload.
-- The subagent's compact JSON reply is canonical; the dispatcher uses it for Phase 6 follow-up bookkeeping (state file writes, campaign_state updates, summary aggregation, optional notify). The subagent does NOT write the terminal `issue/state.json` or `issue/attempt_state.json` itself — see `references/state_schema.md` §Compact Subagent Reply and §Phase 6 Write Mapping.
+- **`sessions_spawn` shape (anonymous + `label=` cosmetic + `timeoutSeconds=30` + `runTimeoutSeconds=18000` + `cleanup="keep"` + serial-only) is the contract in [`SKILL.md`](../SKILL.md) §Concurrency Policy.** Do NOT pass `name=` / `session_name=` / `mode="session"` (triggers `thread_required` on some channels). DO pass `label="#<iid>-att-<NNN>"` for the UI LABEL column — it is a separate cosmetic field. Validate the launch ack carries both `runId` and `childSessionKey` before recording into `pending_subagents[iid]`; matched callbacks identify the IID by the `iid` field of the compact JSON, NOT by the runtime session-key label. The rendered prompt's `iid` field MUST therefore be correct.
+- **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via `RUN_CHILD_COMPLETION_CALLBACK`, not the synchronous return of `sessions_spawn`. The subagent just emits the compact JSON line on its last turn (Step 10) and stops; the runtime forwards it inside `worker_result_json`. Phase 6 reads that reply and owns all terminal state-file writes per [`state_schema.md`](state_schema.md) §Compact Subagent Reply + §Phase 6 Write Mapping.

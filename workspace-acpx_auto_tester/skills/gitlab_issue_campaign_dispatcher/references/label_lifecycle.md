@@ -52,7 +52,7 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 | From       | To         | Performer  | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
 | `todo` / `retry` / `new` / `blocked` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove `todo`, `retry`, `new`, `continue`, `contiune`, `blocked`, `done`, `pr`, and every matched trigger `require_labels` label; add `doing` |
-| `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `continue`, `contiune`, `retry`, `new`, `blocked`, `done`, `pr`, and every matched trigger `require_labels` label; add `doing` |
+| `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `todo`, `continue`, `contiune`, `retry`, `new`, `blocked`, `done`, `pr`, and every matched trigger `require_labels` label; add `doing` |
 | `doing`    | `done`     | subagent   | branch pushed, post-push verification passed, attempt artifacts published to the project Wiki and linked from the issue | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
 | `done`     | `done+pr`  | subagent   | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr`                                           |
 | `doing`    | `blocked`  | subagent   | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |

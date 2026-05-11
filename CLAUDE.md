@@ -10,11 +10,9 @@ The agent itself runs on the OpenClaw runner with repo clone parents defaulting 
 
 ## Single-skill, async-callback execution model
 
-The agent has **one thick orchestrator session + one anonymous subagent run per IID** (multiple IIDs may be in flight concurrently up to `max_concurrent_subagents`). There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
+The agent has **one thick orchestrator session + one anonymous subagent run per IID** (multiple IIDs may be in flight concurrently up to `max_concurrent_subagents`). There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload, runs Steps 0–10, and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator owns every state-file write; the subagent never touches state files. Full algorithm + spawn shape: workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md §Dispatcher Algorithm + §Concurrency Policy.
 
-The split: the orchestrator does ALL preparation (Phases 1–4) and ALL terminal bookkeeping (Phase 6); the subagent does only the technical work it's asked to do (Step 0–9 in the prompt's `<instructions>` block). The orchestrator owns every state-file write — the subagent does not touch state files. The orchestrator-subagent boundary is **async-callback**: `sessions_spawn` returns a launch ack within seconds; the runtime later wakes the orchestrator with `RUN_CHILD_COMPLETION_CALLBACK` carrying the subagent's terminal compact JSON.
-
-Cross-IID parallelism uses **per-attempt linked git worktrees**. `prepare_attempt.sh` creates `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B` and the subagent runs `acpx claude exec` from inside it. The parent checkout at `${REPO_PATH}` is never mutated by an attempt — only `git fetch` runs against it under `${RESULT_ROOT}/_dispatcher/locks/repo.lock`. N concurrent attempts therefore share one clone of the repo and one fetched object database without colliding on a single working tree.
+Cross-IID parallelism uses **per-attempt linked git worktrees**: `prepare_attempt.sh` creates `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B`. The parent checkout at `${REPO_PATH}` is never mutated by an attempt — only `git fetch` runs against it under `${RESULT_ROOT}/_dispatcher/locks/repo.lock`. N concurrent attempts share one clone of the repo and one fetched object database without colliding on a single working tree.
 
 **Orchestrator (`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/`)** stays alive across scheduler ticks (`agent:acpx_auto_tester:main`). It runs different phases on each of its two trigger commands:
 
@@ -38,7 +36,7 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 | 2 Reconcile | narrow reconcile against GitLab (single-IID range when feasible) |
 | 6 Follow-up | parse + validate the callback's compact JSON → match to `pending_subagents[reply.iid]` (Phase 6 validation rule 2; reply.attempt_number must equal pending entry's) → synchronize live labels (`done` + `pr`, `blocked`, or `failed`) → write **terminal** `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` → drain pending entry → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if `retry_count > blocked_retry_limit`) → optional notify_channel → return |
 
-**Subagent (anonymous runtime session; the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–9 from the prompt's `<instructions>` block:
+**Subagent (anonymous runtime session; the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–10 from the prompt's `<instructions>` block:
 
 1. SETUP: `cd ${WORKTREE_DIR}` and one-shot `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt`.
 2. `stage_and_guard.sh` (stage repo-root changes; force-add the issue's `${OUTPUT_DIR}`; emit STAGED_OK / NO_CHANGES — no path-based reject).
@@ -47,9 +45,9 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 5. `upload_attempt_artifacts.sh` (publish prompt/result/optional report.html to project Wiki, link from issue).
 6. `set_issue_label.sh` `doing → done`.
 7. `create_mr.sh` (mode-dependent: fresh = reuse single MR; continue = close prior open MRs and create a fresh one).
-7b. `set_issue_label.sh add pr` after MR creation succeeds.
-8. `summarize_attempt.sh` posts a per-attempt summary as a GitLab issue note.
-9. **Emit ONE compact JSON line** on the LAST line of its turn, carrying every fact the orchestrator's Phase 6 needs (`iid`, `attempt_number`, `status`, `mode_actual`, `work_branch`, `local_branch`, `commit_sha`, `merge_request_url`, `mr_action`, `wiki_url`, `labels_added`, `labels_removed`, `summary_posted`, `block_reason`, `log_dir`).
+8. `set_issue_label.sh add pr` after MR creation succeeds.
+9. `summarize_attempt.sh` posts a per-attempt summary as a GitLab issue note.
+10. **Emit ONE compact JSON line** on the LAST line of its turn, carrying every fact the orchestrator's Phase 6 needs (`iid`, `attempt_number`, `status`, `mode_actual`, `work_branch`, `local_branch`, `commit_sha`, `merge_request_url`, `mr_action`, `wiki_url`, `labels_added`, `labels_removed`, `summary_posted`, `block_reason`, `log_dir`).
 
 On any subagent FAIL path, remove `doing` and add `blocked` before summarizing and returning the compact JSON. Phase 6 re-applies the final label state idempotently when the callback arrives.
 

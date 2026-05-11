@@ -10,7 +10,7 @@ Notes:
 
 - `branch` is the **integration / target** branch (typically `master`); `dev_branch` is the **clean baseline** (typically `dev`) used to reset fresh-mode repo checkouts so Claude Code does not see past issues' spec accumulation. If your project has no separate baseline, set `dev_branch=<same-as-branch>`.
 - `max_concurrent_subagents` defaults to `1`; raise it to fan out across multiple in-flight IIDs, but only up to the size of the UI account pool at `<workspace>/config/ui_accounts.env` (each in-flight subagent must hold a distinct account). The dispatcher gives each attempt its own per-attempt linked git worktree so cross-IID parallelism is safe at the working-tree level.
-- `gitlab_address` is no longer required (the host is pinned at `<workspace>/config/gitlab.env`). If supplied, it is treated as a verification value — see [`SOUL.md`](SOUL.md) §GitLab Host Pinning.
+- `gitlab_address` is no longer required (the host is pinned at `<workspace>/config/gitlab.env`). If supplied, it is treated as a verification value — see [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md) §Optional inputs.
 
 ## Expected Behavior
 

@@ -17,16 +17,16 @@ The next dispatcher tick will pick the issue up and re-run.
 In continue mode:
 
 1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to create a fresh per-attempt linked git worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}/` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place under `${ISSUE_ROOT}` (outside the worktree). Logs are written under `log/attempt-NNN/` (also outside the worktree) and preserved; prior attempt summaries remain available as GitLab issue notes.
-2. **Dispatcher prep:** Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
-3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`E1b`) and **partitions them in two buckets**:
+2. **Dispatcher prep:** Reads the issue (`G1` in `glab_commands.md`) for title, description, current labels.
+3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`G1b`) and **partitions them in two buckets**:
    - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
    - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- acpx_auto_tester:attempt-wiki-artifacts ... -->`) and legacy pre-rename Wiki artifact notes. This is where humans write supplemental instructions.
 4. **Dispatcher prep:** `build_prompt.sh` writes the Claude Code prompt at `${LOG_DIR}/prompt.txt` with both buckets, in chronological order, in distinct sections (see template below).
 5. **Subagent:** Runs Claude Code via the same one-shot invocation used in fresh mode: `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from `${WORKTREE_DIR}`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the prompt's "Past attempt summaries" section, not from a persistent Claude session.
 6. **Subagent:** After the attempt finishes (terminal status, any of done / blocked / failed; legacy no_changes is normalized to blocked), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
 7. **Subagent — MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
-   - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
-   - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
+   - looks up all open MRs currently pointing at `${WORK_BRANCH}` (G6)
+   - closes them without merging (G10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
    - creates a fresh MR for the new attempt with description that begins `Closes #<iid>` and includes `Supersedes !<old_mr_iid>` references so reviewers can trace the chain
    This means each continue cycle produces a distinct MR in GitLab. Reviewers see one MR per attempt. Only the latest MR is open; older ones are closed but still visible.
 
@@ -87,7 +87,7 @@ In fresh mode the prompt looks similar but omits the "Past attempt summaries" an
 
 ## What if there are no reviewer comments?
 
-If continue mode is requested but `E1b` returns zero non-system notes that are not auto-summaries, the reviewer flipped the label without leaving guidance. In that case the dispatcher's `build_prompt.sh`:
+If continue mode is requested but `G1b` returns zero non-system notes that are not auto-summaries, the reviewer flipped the label without leaving guidance. In that case the dispatcher's `build_prompt.sh`:
 
 - Builds the prompt with the reviewer-comments section saying `(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)`.
 - Continues normally; the dispatcher records `no_reviewer_comments=true` in the current-attempt state for operator awareness.

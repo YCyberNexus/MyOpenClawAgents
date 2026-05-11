@@ -2,7 +2,7 @@
 
 This workspace implements a quota-carryover GitLab issue campaign with blocked skip-and-retry, executed as **one thick orchestrator session + one anonymous subagent run per IID**, in an **async-callback model** (see [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm). There is exactly ONE skill in this workspace (the orchestrator); the subagent never loads a skill — it receives a fully-rendered self-contained fixed-format prompt as its `sessions_spawn` payload and emits one compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
 
-The repo follows a **two-branch model**: a clean baseline branch (typically `dev`, passed as `dev_branch=`) from which fresh attempts are checked out, and an integration branch (typically `master`, passed as `branch=`) that accumulates spec output via merge requests. The parent checkout lives at `${REPO_PATH}` (default `/data/${PROJECT}`; trigger `repo_path` overrides the parent, so `repo_path=/data/ifp1` gives `/data/ifp1/${PROJECT}`); each subagent runs Claude Code from inside its own per-attempt linked git worktree at `${REPO_PATH}/ifp-result/.worktrees/issue-<iid>-att-<NNN>/` rather than the parent itself, so multiple attempts can run concurrently without colliding on a single working tree. Each issue's spec output is required to live under the worktree-relative path `ifp-result/issue-<iid>/hulat-spec-issue<iid>/`, so MRs into `master` never collide on file paths.
+The repo follows a **two-branch model**: a clean baseline branch (typically `dev`, passed as `dev_branch=`) from which fresh attempts are checked out, and an integration branch (typically `master`, passed as `branch=`) that accumulates spec output via merge requests. The parent checkout lives at `${REPO_PATH}` (default `/data/${PROJECT}`; trigger `repo_path` overrides the parent, so `repo_path=/data/ifp1` gives `/data/ifp1/${PROJECT}`); each subagent runs Claude Code from inside its own per-attempt linked git worktree at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` rather than the parent itself, so multiple attempts can run concurrently without colliding on a single working tree. Each issue's spec output is required to live under the worktree-relative path `${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/`, so MRs into `master` never collide on file paths.
 
 ## Agent Identity
 
@@ -13,46 +13,14 @@ The repo follows a **two-branch model**: a clean baseline branch (typically `dev
 
 This workspace has exactly one skill: `skills/gitlab_issue_campaign_dispatcher/`.
 
-The orchestrator handles two trigger commands and runs different phases on each:
+The orchestrator handles two trigger commands:
 
-### Path A: scheduled wake-up (`RUN_SCHEDULED_ISSUE_CAMPAIGN`)
+- `RUN_SCHEDULED_ISSUE_CAMPAIGN` (scheduled wake-up) — Phases 1–5: parse + reconcile + per-IID prep + serial anonymous `sessions_spawn`, then returns `waiting_for_callbacks`.
+- `RUN_CHILD_COMPLETION_CALLBACK` (callback wake-up) — Phase 6 for ONE IID: validate the subagent's compact JSON reply (in `worker_result_json`), sync live labels, write terminal `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}`, drain `pending_subagents[iid]`, classify into `completed/blocked/failed_iids`. The callback path NEVER spawns a replacement subagent.
 
-| Phase | What |
-| ----- | ---- |
-| 1 Parse        | bootstrap, flock, load + override `campaign_state.json`. Stuck-pending eviction (synthesizes Phase 6 blocked replies for any pending entries past `stuck_after_minutes`). |
-| 2 Reconcile    | mandatory `reconcile.sh` against GitLab; correct disk cache from evidence file. |
-| 3 Eligibility  | If `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (clone/pull, ensure_labels), validate `1 ≤ max_concurrent_subagents ≤ ui_pool_size`, and form a batch of up to that many IIDs under launch quota. |
-| 4 Per-IID Prep | for each IID in the batch: allocate_attempt → load distinct UI account → prepare_attempt (creates per-attempt linked git worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B`) → read issue labels → transition entry labels (`todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger labels) to `doing` → build_prompt → init `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` (in_progress) → write `pending_subagents[iid]` placeholder → render fixed-format prompt. |
-| 5 Async Spawn  | one **anonymous** `sessions_spawn` per surviving IID (NO session name passed); record each launch ack's `runId` + `childSessionKey` into `pending_subagents[iid]`; persist; return `waiting_for_callbacks`. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures). |
+Full Phase-by-Phase step list with env-var contract per script: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm.
 
-### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
-
-The runtime delivers ONE callback per subagent termination. Each callback wakes the same orchestrator session with the subagent's terminal compact JSON in `worker_result_json`.
-
-| Phase | What |
-| ----- | ---- |
-| 1 Parse     | bootstrap, flock, load `campaign_state.json` (no trigger override on callback path). |
-| 2 Reconcile | narrow reconcile against GitLab (single-IID range when feasible). |
-| 6 Follow-up | parse + validate the callback's compact JSON → match to `pending_subagents[reply.iid]` (Phase 6 validation rule 2; reply.attempt_number must equal pending entry's) → synchronize live labels (`done` + `pr`, `blocked`, or `failed`) → write **terminal** `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` → drain pending entry → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if retry exhausted) → optional notify_channel → return. The callback path does NOT spawn a replacement subagent — the next scheduled wake-up forms the next batch. |
-
-### Subagent
-
-The subagent (one anonymous run per IID per spawn) receives the rendered fixed-format prompt and runs only the technical workflow (Steps 0–9 in the prompt's `<instructions>` block):
-
-- Step 1: one-shot `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt` from inside `${WORKTREE_DIR}`
-- Step 2: `stage_and_guard.sh` (stage repo-root changes, force-add the issue's `${OUTPUT_DIR}`, emit STAGED_OK / NO_CHANGES — no path-based reject)
-- Step 3: `commit_and_push.sh` (Strategy A — force-push the per-attempt local branch to the single fixed `${WORK_BRANCH}`)
-- Step 4: `post_push_verify.sh` (post-push fetch sanity — no path-based reject)
-- Step 5: `upload_attempt_artifacts.sh` (publish prompt/result/optional report.html to project Wiki and link from issue)
-- Step 6: `set_issue_label.sh` to transition `doing → done`
-- Step 7: `create_mr.sh` (mode-dependent rotation: fresh = reuse single MR; continue = close prior open MRs and create a fresh one referencing them)
-- Step 7b: `set_issue_label.sh add pr` after MR creation succeeds
-- Step 8: `summarize_attempt.sh` posts a per-attempt summary back to the issue
-- Step 9: emit ONE compact JSON line per [`references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply, then stop
-
-On any subagent FAIL path, the subagent removes `doing` and adds `blocked` before posting the summary and compact JSON. Phase 6 re-applies the final label state idempotently after the callback is received.
-
-The subagent invokes scripts at `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts/<name>.sh` by absolute path (the orchestrator renders `{SCRIPTS_DIR}` into the prompt). **The subagent NEVER loads this SKILL, NEVER reads SOUL.md / AGENTS.md, NEVER calls sessions_spawn / sessions_history, NEVER writes any state file.** All terminal state-file writes are owned by the orchestrator's Phase 6, fed by the compact JSON reply.
+The subagent (one anonymous run per IID per spawn) reads ONLY the rendered fixed-format prompt and runs Steps 0–10 in `<instructions>` (acpx → stage → commit/push → post-push verify → wiki → doing→done → MR → add pr → summarize → emit compact JSON). It NEVER loads this SKILL, reads SOUL.md/AGENTS.md, calls `sessions_spawn` / `sessions_history`, or writes any state file. The compact JSON line on its last turn is the orchestrator's only signal. Workflow + per-step env-var contract: [`references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) `<instructions>`. Compact JSON schema: [`references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply.
 
 ## Required Capabilities and Concurrency Limit
 
@@ -81,6 +49,8 @@ Operators are expected to confirm with the OpenClaw maintainer that (1) and (2) 
 
 Logical issue subagent name: `issue-<project>-<iid>` (e.g. `issue-px_ifp_hulat-1`). Used for `active_issue_sessions` bookkeeping and human-readable logging only. **The runtime session name is always anonymous** — the orchestrator does not pass any name to `sessions_spawn`. The runtime returns its own auto-generated key (e.g. `agent:acpx_auto_tester:subagent:<uuid>`) which the orchestrator records into `pending_subagents[iid].child_session_key` for audit and stuck-pending detection. Callbacks are matched back to dispatched IIDs by the `iid` field of the compact JSON, not by the runtime session-key label. Detailed session policy lives in [`SOUL.md`](SOUL.md) §Session Policy.
 
+Separately from session naming, the dispatcher MUST pass `label="#<iid>-att-<NNN>"` on every `sessions_spawn` so the OpenClaw Sessions UI LABEL column shows the IID and attempt number. `label=` is a cosmetic UI field, not a session-name field — it does NOT trigger `thread_required`. Full parameter-name resolution policy lives in [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Concurrency Policy "Session label for runtime UI".
+
 ## Deployment Pin: GitLab Host
 
 The agent's GitLab host is pinned at `<workspace>/config/gitlab.env`. Required fields:
@@ -94,14 +64,9 @@ Behavioral rules (verification against trigger, token rotation, abort-on-mismatc
 
 Full tree, variable table, and hard rules live in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md). Workspace-level invariants:
 
-- `${REPO_PATH}/` — the cloned project repo and Claude Code cwd. Defaults to `/data/${PROJECT}`; trigger `repo_path` can set another absolute clone parent and the final repo root becomes `${repo_path}/${PROJECT}`. The test team commits `.claude/`, `hulat/`, and `ifp-data/` to master+dev so a fresh clone already contains everything Claude Code needs at runtime.
-- `${REPO_PATH}/ifp-result/` — agent runtime root, INSIDE the cloned repo. Holds:
-  - `_dispatcher/` — campaign-level state (`campaign_state.json`, `campaign.lock`), dispatcher logs (`log/reconcile-<ts>.json`), and locks (`locks/repo.lock`).
-  - `issues/issue-<iid>/` — per-issue persistent subtree, OUTSIDE every worktree (`state.json`, `attempt_state.json`, `log/attempt-NNN/`, `summary.md`). Every retry writes a new `log/attempt-NNN/`; historical attempt logs are preserved through worktree teardowns.
-  - `.worktrees/issue-<iid>-att-<NNN>/` — per-attempt linked git worktree (acpx cwd). Each attempt's committed spec output lives inside its own worktree at the worktree-relative path `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` (this legacy path is intentionally preserved so master commit paths are stable).
-- `hulat/`, `.claude/`, `ifp-data/` are shared repository content at the repo root (committed by the test team). The agent does NOT symlink `hulat/` and does NOT copy `.claude/` any more — both are simply present in the branch checkout. They may be changed when an issue genuinely requires it; avoid unrelated edits.
-- `ifp-result` and `ifp-data` are default basenames. Per-project overrides come from the trigger fields `result_basename` / `data_basename` (carry-forward, persisted in `campaign_state.json`); when set, `env_paths.sh` exports them as `RESULT_BASENAME` / `DATA_BASENAME` and derives `RESULT_ROOT` / `DATA_DIR` from there. Path examples in this document use the defaults. See `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`.
-- Non-default `repo_path` parent must be present on every scheduled trigger and callback because it is needed before the dispatcher can find `campaign_state.json`.
-- The `hulat_dir` trigger field is no longer used. The dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`. Old triggers that still pass `hulat_dir=...` are silently accepted (the override never reaches a script).
+- The cloned project repo IS the agent's workspace. The test team commits `.claude/`, `hulat/`, and `${DATA_BASENAME}/` to master+dev, so a fresh clone already contains everything Claude Code needs.
+- Agent runtime files live under `${REPO_PATH}/${RESULT_BASENAME}/` (default `ifp-result`): `_dispatcher/` (campaign state + logs + locks), `issues/issue-<iid>/` (per-issue persistent subtree, outside every worktree), `.worktrees/issue-<iid>-att-<NNN>/` (per-attempt linked git worktree, acpx cwd).
+- Each issue's committed spec output is at the worktree-relative path `${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/` so MRs into master never collide on file paths.
+- `${REPO_PATH}` defaults to `/data/${PROJECT}`; trigger `repo_path` can override the parent. `${RESULT_BASENAME}` / `${DATA_BASENAME}` default to `ifp-result` / `ifp-data`; trigger `result_basename` / `data_basename` override per project (carry-forward). Non-default `repo_path` MUST be passed on every scheduled trigger and callback because the dispatcher needs it to locate `campaign_state.json` before sourcing `env_paths.sh`. The `hulat_dir` trigger field is no longer used (the dispatcher derives `HULAT_DIR=${REPO_PATH}/hulat`); old triggers that still pass it are silently accepted — see [`references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
 
-Claude Code invocation contract and Wiki-evidence publication contract live in [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) and in the SKILL's §Dispatcher Algorithm.
+Claude Code invocation contract and Wiki-evidence publication contract live in [`references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) and in the SKILL's §Dispatcher Algorithm.
