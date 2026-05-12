@@ -1,7 +1,7 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-12.1] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with async-callback subagent execution. Orchestrator runs Phases 1-5 (Parse, Reconcile, Eligibility, Per-IID Prep, Async Spawn) on every scheduled wake-up. Phase 5 issues anonymous sessions_spawn calls (NO session name passed — runtime returns runId/childSessionKey), records the (iid, runId, child_session_key) mapping into pending_subagents, and IMMEDIATELY returns waiting_for_callbacks. The runtime later pushes RUN_CHILD_COMPLETION_CALLBACK with each subagent's terminal compact JSON; the orchestrator wakes on each callback and runs Phase 6 (Follow-up) for the matched IID — validate compact reply by iid field, write terminal state files, drain pending entry, classify into campaign_state lists, optional notify. Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. The active_issue_iids bookkeeping (persisted before spawn) is the structural same-IID-no-parallel guarantee; replies are matched to dispatched IIDs by the iid field of the compact JSON, NOT by runtime session name. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool held until callback drains, persistent disk state, stuck-pending detection, optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
-allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn
+description: "[SKILL_VERSION=2026-05-12.3] Run a recurring scheduled GitLab issue campaign as a single thick orchestrator with async-callback subagent execution. Orchestrator runs Phases 1-5 (Parse, Reconcile, Eligibility, Per-IID Prep, Async Spawn) on every scheduled wake-up. Phase 5 issues anonymous sessions_spawn calls (NO session name passed — runtime returns runId/childSessionKey), records the (iid, runId, child_session_key) mapping into pending_subagents, and IMMEDIATELY returns waiting_for_callbacks. The runtime later pushes RUN_CHILD_COMPLETION_CALLBACK with each subagent's terminal compact JSON; the orchestrator wakes on each callback and runs Phase 6 (Follow-up) for the matched IID — validate compact reply by iid field, write terminal state files, drain pending entry, classify into campaign_state lists, best-effort cleanup of the child runtime session via `subagents kill --target <childSessionKey>` when the final status is `done` (gated by `kill_subagent_on_done`, default true) so the runtime store does not bloat with completed sessions, optional notify. Subagents receive a fully-rendered self-contained fixed-format prompt and run only the technical workflow (acpx → commit/push/wiki/MR/labels/summarize) — they do NOT load this SKILL and do NOT write state files. The active_issue_iids bookkeeping (persisted before spawn) is the structural same-IID-no-parallel guarantee; replies are matched to dispatched IIDs by the iid field of the compact JSON, NOT by runtime session name. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, per-batch UI-account allocation from a deployment-pinned pool held until callback drains, persistent disk state, stuck-pending detection, optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+allowed-tools: Bash, Read, Write, Edit, sessions_history, sessions_spawn, subagents
 ---
 
 # GitLab Issue Campaign Dispatcher Skill
@@ -200,6 +200,31 @@ Each issue uses its own subagent. The **runtime** session name is **always anony
 
 ---
 
+## Subagent Runtime Cleanup Policy
+
+After every `RUN_CHILD_COMPLETION_CALLBACK` the orchestrator's Phase 6 (step 9) MAY call the runtime-side `subagents` tool to release the completed subagent's runtime session and transcript-store entry. This is a **best-effort cleanup pass**, not part of the correctness contract — its only purpose is to stop the runtime session store from growing unbounded as completed subagents accumulate. The corresponding bulk-prune CLI (`openclaw sessions cleanup --enforce`) is operator-side maintenance scheduled independently, NOT invoked from inside this orchestrator.
+
+1. **Tool + invocation shape.** Use the `subagents` tool with `action="kill"` and `target=<child_session_key>`, where `child_session_key` is the value captured into `pending_subagents[iid].child_session_key` at Phase 5 launch ack. The `subagents` tool exposes `list` / `kill` / `steer` actions; only `kill` is used by this SKILL.
+2. **Gate — `done` only, opt-out via trigger.** Cleanup MUST fire only when ALL THREE conditions hold:
+   - `final_status == "done"` after Phase 6 step 5's retry-promotion (i.e. the IID truly completed with `done` + `pr` labels).
+   - `kill_subagent_on_done` is true on the post-override `campaign_state.json` (trigger-controlled, defaults to `true` when omitted — see [`references/trigger_command.md`](references/trigger_command.md)).
+   - The captured `child_session_key` is a non-empty string (orphan-pending entries with `null` `child_session_key` are skipped because there is no target to kill).
+   `blocked` and `failed` IIDs MUST be left alive in the runtime store so operators can replay them via `sessions_history` for postmortem. Stuck-pending eviction also does NOT trigger cleanup — by definition no terminal compact JSON was received, so there is no `done` to gate on.
+3. **Best-effort error handling.** Cleanup failure (tool not registered on this runtime, target session not found, RPC timeout) MUST NOT mutate state files, MUST NOT re-classify the IID into `blocked_iids` / `failed_iids`, MUST NOT retry within this callback wake-up. Record the verbatim error in the chat summary's `cleanup_status` field and proceed. The next scheduled wake-up does NOT replay the cleanup — leaving the orphan runtime session in place is the documented degradation mode; operators reclaim those entries later via `openclaw sessions cleanup --enforce`.
+4. **Ordering inside Phase 6.** Cleanup runs AFTER step 8 (drain pending entry + persist) so the state-file invariants are committed first. Capture `child_session_key` from the `pending_subagents` entry BEFORE step 8 drains it — once drained, the value is gone from disk.
+
+The compact chat summary on the callback path carries one `cleanup_status` value:
+
+| Value                                          | Meaning                                                                                    |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `"killed"`                                     | `subagents kill` succeeded; the runtime session is gone.                                   |
+| `"failed: <verbatim error>"`                   | `subagents kill` returned an error. State files are unaffected.                            |
+| `"skipped: not_done"`                          | Gate failed: final status is `blocked` / `failed` (intentional preservation for debug).    |
+| `"skipped: kill_subagent_on_done=false"`       | Gate failed: trigger has disabled cleanup campaign-wide (operator opt-out).                |
+| `"skipped: no_child_session_key"`              | Gate failed: drained pending entry had `null` / empty `child_session_key` (orphan-pending).|
+
+---
+
 ## Per-Exec Env Contract (Dispatcher Minimum Vars)
 
 Universal frame: [`SOUL.md`](../../SOUL.md) §Per-Exec Env Contract. Each Bash exec runs in a fresh shell; export the minimum on the same line.
@@ -367,7 +392,7 @@ Phase 6 runs in two contexts:
 
 **(a) On the callback path (`RUN_CHILD_COMPLETION_CALLBACK`)** — process exactly one IID per wake-up. The callback payload contains the subagent's terminal compact JSON. See §Callback Wake-up Algorithm below for the full step list.
 
-**(b) Inline on the scheduled wake-up** — for synthesized blocked replies (launch ack missing `runId`/`childSessionKey`, or stuck-pending eviction at the top of the tick). Same step list as (a), processed on the spot before Phase 5.
+**(b) Inline on the scheduled wake-up** — for synthesized blocked replies (Phase 5 launch retry exhaustion, including ack missing `runId`/`childSessionKey`, or stuck-pending eviction at the top of the tick). Same step list as (a), processed on the spot before Phase 5, except that launch-side synthesized replies skip `retry_count` increment as described in step 5.
 
 In both contexts:
 
@@ -380,14 +405,15 @@ In both contexts:
    - final `failed`: remove `doing`; remove `blocked`; add `failed`.
    - legacy `no_changes` after normalization: remove `doing`; add `blocked`.
    Any required live-label sync failure is itself a blocked result unless the status is already `failed`: append `phase6 label sync failed: <stderr>` to `block_reason`, set final status to `blocked`, and run best-effort blocked sync (`remove doing`; `add blocked`).
-5. **Promote `blocked → failed` if retry budget exhausted.** Increment `retry_count` first if final `status in {blocked, failed}`. If `retry_count > blocked_retry_limit`, promote `status=failed` and run the `failed` label sync (`remove doing`; `remove blocked`; `add failed`).
+5. **Promote `blocked → failed` if retry budget exhausted.** Increment `retry_count` first if final `status in {blocked, failed}`, except for launch-side synthesized blocked replies from Phase 5 `sessions_spawn` retry exhaustion; those preserve the prior `retry_count` and are not promoted to `failed` on this tick. For all other blocked/failed outcomes, if `retry_count > blocked_retry_limit`, promote `status=failed` and run the `failed` label sync (`remove doing`; `remove blocked`; `add failed`).
 6. **Write the terminal state files** per `references/state_schema.md` §Phase 6 Write Mapping, using the final status after label sync / legacy `no_changes` normalization / retry promotion. The dispatcher writes BOTH `${ATTEMPT_STATE_FILE}` and `${ISSUE_STATE_FILE}` from the compact reply plus label-sync errors. The subagent does not touch them.
 7. **Classify into `campaign_state.json` lists.**
    - `done`: add to `completed_iids`; remove from `unfinished_iids`/`blocked_iids`/`failed_iids`. Increment `quota_completed_this_tick` (counted on the callback path).
    - `blocked` (including normalized legacy `no_changes`, not promoted): add to `blocked_iids` with the cooldown-tracking semantics per Blocked Skip-and-Retry; remove from `completed_iids`/`failed_iids`; keep in `unfinished_iids`.
    - `failed` (terminal or promoted): add to `failed_iids`; remove from `unfinished_iids`/`blocked_iids`/`completed_iids`.
-8. **Drain the pending entry.** Remove `iid` from `active_issue_iids`, `active_issue_sessions`, and `pending_subagents`. Persist `campaign_state.json`.
-9. **Optional notify.** If a notification channel is configured (reserved trigger field; currently not part of the trigger), post a one-line per-IID summary built from the compact reply: `"#<iid> <status> mr=<merge_request_url> wiki=<wiki_url> mr_action=<mr_action>"`. Skip silently if no channel.
+8. **Drain the pending entry.** Remove `iid` from `active_issue_iids`, `active_issue_sessions`, and `pending_subagents`. Persist `campaign_state.json`. **Capture `child_session_key` from the drained entry BEFORE removing it** so step 9 can target the right runtime session.
+9. **Best-effort subagent runtime cleanup (done-only).** If `kill_subagent_on_done == true` (default; campaign-state value, set by trigger override) AND `final_status == "done"` AND the captured `child_session_key` is a non-empty string, call the `subagents` tool with `action="kill"` and `target=<child_session_key>` to release the completed subagent's runtime session and transcript-store entry. The runtime call is **best-effort and OUT OF BAND of the main correctness path**: any error (tool not registered, target not found, RPC timeout) is recorded as `"cleanup_status":"failed: <verbatim error>"` in the chat summary but MUST NOT mutate state files, MUST NOT re-classify the IID into blocked/failed, MUST NOT retry within this callback wake-up. On success, record `"cleanup_status":"killed"`. When the gate condition is not met, record one of `"cleanup_status":"skipped: not_done"` / `"skipped: kill_subagent_on_done=false"` / `"skipped: no_child_session_key"` and proceed. `blocked` / `failed` IIDs MUST be left alive in the runtime store so operators can replay them via `sessions_history` for postmortem.
+10. **Optional notify.** If a notification channel is configured (reserved trigger field; currently not part of the trigger), post a one-line per-IID summary built from the compact reply: `"#<iid> <status> mr=<merge_request_url> wiki=<wiki_url> mr_action=<mr_action>"`. Skip silently if no channel.
 
 After Phase 6 on the callback path, return the compact `callback_handled` chat summary and exit. The next scheduled wake-up forms the next batch (if quota / time budget remain AND `pending_subagents` is empty after eviction).
 
@@ -420,7 +446,7 @@ The callback path **never spawns a new subagent.** Even if the IID just drained 
 
 1. Blocked issues record `block_reason` in their per-issue state file.
 2. A blocked issue is retryable only after `blocked_cooldown_ticks` ticks have elapsed since the last attempt.
-3. If `retry_count > blocked_retry_limit` (after Phase 6 increment), the issue is promoted to `failed`.
+3. If `retry_count > blocked_retry_limit` (after Phase 6 increment), the issue is promoted to `failed`. Launch-side `sessions_spawn` failures after the 3-attempt in-tick retry loop still enter `blocked_iids` for cooldown/reschedule, but do NOT increment `retry_count` or promote to `failed` solely through this counter.
 4. A blocked issue must not block later non-blocked issues from using quota. Even after cooldown, blocked retries are selected only after all currently eligible non-blocked backlog and fresh candidates have been launched or ruled out.
 
 ---
@@ -501,12 +527,15 @@ Return a single compact JSON summary. The shape depends on the wake-up path.
   "attempt_number": 3,
   "terminal_status": "done",
   "merge_request_url": "https://gitlab.example.com/.../merge_requests/123",
+  "cleanup_status": "killed",
   "remaining_pending_iids": [],
   "campaign_status": "running"
 }
 ```
 
-**Stale / late callback:** `"callback_status": "stale_or_already_drained"` plus `"iid"`, `"attempt_number"`. No state file mutation.
+`cleanup_status` reflects the Phase 6 step 9 subagent runtime cleanup outcome. See §Subagent Runtime Cleanup Policy for the full value table. Always emitted on the callback path (handled variant); omitted from the stale/late variant.
+
+**Stale / late callback:** `"callback_status": "stale_or_already_drained"` plus `"iid"`, `"attempt_number"`. No state file mutation. No `cleanup_status` either (no entry was drained, so no `child_session_key` to act on).
 
 **Other variants:**
 

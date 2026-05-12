@@ -58,7 +58,7 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 | `doing`    | `blocked`  | subagent   | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
 | `done`     | `done+blocked` | subagent | retryable failure after Wiki evidence and `done`, before `pr` can be added | `set_issue_label.sh add blocked`; do NOT add `pr`                     |
 | `blocked`  | `doing`    | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
-| `blocked`  | `failed`   | dispatcher | `retry_count > blocked_retry_limit` during Phase 6   | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
+| `blocked`  | `failed`   | dispatcher | `retry_count > blocked_retry_limit` during Phase 6; launch-side `sessions_spawn` failures do not increment `retry_count` | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
 | `done+pr`  | `continue` | **human reviewer** | reviewer notices the prior run was incomplete and wants the agent to re-run on the existing branch | manual on the GitLab UI; the agent does NOT make this transition itself |
 
 ## Important rules

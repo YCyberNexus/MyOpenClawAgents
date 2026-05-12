@@ -29,6 +29,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${REP
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
   "stuck_after_minutes": 330,
+  "kill_subagent_on_done": true,
   "issue_iids_whitelist": [14, 17, 20],
   "require_labels": ["acpx-auto", "priority::high"],
   "require_labels_match": "and",
@@ -86,6 +87,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 stuck_after_minutes       = 330
+kill_subagent_on_done     = true
 issue_iids_whitelist      = []
 require_labels            = []
 require_labels_match      = "or"
@@ -122,6 +124,7 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `pending_subagents`** — treat as `{}` in memory; persist on next write.
 - **Missing `max_concurrent_subagents`** — default to `1` and persist.
 - **Missing `stuck_after_minutes`** — default to `330` and persist.
+- **Missing `kill_subagent_on_done`** — default to `true` and persist. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after a `done` callback; legacy files predate the field and inherit the safe-by-default "clean up after success" behavior. Re-disable per-tick via the trigger field of the same name when running in debug mode.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
 - **Missing `issue_iids_whitelist` / `require_labels` / `require_labels_match`** — default to `[]` / `[]` / `"or"` and persist on next write. These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
@@ -142,7 +145,7 @@ The dispatcher MUST NOT keep both the scalar and the array fields in the persist
 
 Path: `${ISSUE_STATE_FILE}` = `${ISSUE_ROOT}/state.json`
 
-Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before each spawn). The dispatcher's Phase 4 prep refreshes `status="in_progress"` / `mode` / `attempts_total` / `latest_attempt_*` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `commit_sha` / `merge_request_url` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
+Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before each spawn). The dispatcher's Phase 4 prep refreshes `status="in_progress"` / `mode` / `attempts_total` / `latest_attempt_*` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `commit_sha` / `merge_request_url` / `block_reason` from the subagent's compact JSON reply or from an inline-synthesized blocked reply. Launch-side `sessions_spawn` failures preserve `retry_count`; other blocked/failed outcomes consume that budget. The subagent does NOT write this file.
 
 ```json
 {
@@ -170,7 +173,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | `attempts_total`        | int             | Number of attempts ever launched for this IID.                         |
 | `latest_attempt_number` | int             | Same number as `${ATTEMPT_NUMBER}` of the most recent attempt.         |
 | `latest_attempt_dir`    | string          | Convenience absolute path; matches `${ATTEMPT_DIR}`. In the current layout this is `${ISSUE_ROOT}`. |
-| `retry_count`           | int             | How many times this issue has entered `blocked` (across attempts).     |
+| `retry_count`           | int             | How many blocked/failed outcomes have consumed the cross-tick retry budget. Launch-side `sessions_spawn` failures after in-tick retry exhaustion do not increment it. |
 | `block_reason`          | string \| null  | Required when `status=blocked` or `failed`.                            |
 | `commit_sha`            | string \| null  | Latest pushed commit SHA when applicable.                              |
 | `merge_request_url`     | string \| null  | Strategy A: single MR per issue in fresh mode; rotated in continue mode. |
@@ -292,7 +295,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 The compact reply arrives in two ways:
 
 - **Callback path** — the runtime delivers `RUN_CHILD_COMPLETION_CALLBACK` carrying the full compact JSON in `worker_result_json`. One callback per subagent.
-- **Inline-synthesized path** — Phase 5 launch failure / stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot.
+- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot. Phase 5 launch failures are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
 
 The validation pipeline is the same in both paths:
 
@@ -304,7 +307,7 @@ The validation pipeline is the same in both paths:
 3. Normalize legacy `reply.status="no_changes"` to `status="blocked"` and set `block_reason="subagent produced no staged changes"` when the reply did not provide a reason.
 4. If `reply.status in {blocked, failed}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
 5. Synchronize live GitLab workflow labels from the final status with `scripts/set_issue_label.sh`: `done` ends as `done` + `pr`, `blocked` ends as no `doing` + `blocked`, and `failed` ends as no `doing` / `blocked` + `failed`. Any required live-label sync failure converts a non-failed result to `blocked` with `block_reason` appended.
-6. If `status=blocked` AND `retry_count > blocked_retry_limit` (after incrementing), promote to `status=failed`, add to `failed_iids`, and run failed-label sync.
+6. If `status=blocked` AND `retry_count > blocked_retry_limit` (after incrementing), promote to `status=failed`, add to `failed_iids`, and run failed-label sync. For Phase 5 launch-side synthesized blocked replies only, do not increment `retry_count` and do not promote to `failed` on this tick.
 7. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
 8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
 
@@ -330,7 +333,7 @@ The dispatcher takes the validated compact reply and writes:
 - `latest_attempt_dir` ← `${ISSUE_ROOT}` (canonical)
 - `commit_sha` ← reply.commit_sha (empty → null)
 - `merge_request_url` ← reply.merge_request_url (empty → null)
-- `retry_count` ← prior + 1 if final status in {blocked, failed}; else prior unchanged
+- `retry_count` ← prior + 1 if final status in {blocked, failed} and the reply is NOT a Phase 5 launch-side synthesized blocked reply; else prior unchanged
 - `block_reason` ← final block_reason after validation / label-sync errors (empty → null)
 - `updated_at` ← ISO-8601 UTC now
 - preserve `iid`, `session`, `attempts_total` (already monotonically tracked in Phase 4)
