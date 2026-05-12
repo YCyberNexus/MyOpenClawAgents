@@ -201,17 +201,26 @@ Step 6 — TRANSITION doing → done
 Step 7 — CREATE / rotate the MR
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
+    REPO_PATH={REPO_PATH} WORKTREE_DIR={WORKTREE_DIR} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
     bash {SCRIPTS_DIR}/create_mr.sh
-  CAPTURE: merge_request_url (printed), mr_action (printed; one of: created, reused, rotated).
+  CAPTURE: merge_request_url = first stdout line, mr_action = second stdout line (one of: created, rotated).
   Non-zero exit → FAIL status=blocked block_reason="MR creation failed: <last stderr line>".
 
-  Mode-specific behavior (already in the script):
-  - ISSUE_MODE=fresh:    reuse the existing open MR for {WORK_BRANCH}, otherwise create.
-  - ISSUE_MODE=continue: close every open MR for {WORK_BRANCH} (without merging) and create a fresh one referencing them.
+  Rotation policy (both ISSUE_MODE values follow the same path; the
+  script `cd`s into {WORKTREE_DIR} first because glab `mr create` shells
+  out to `git` internally even with `--repo`):
+  - If one or more open MRs already point at {WORK_BRANCH}, close them
+    without merging (the integration branch is untouched; closed MR
+    objects remain as historical record) and then create a fresh MR
+    whose description references them as `Supersedes !<old_iid>`.
+    mr_action = "rotated".
+  - If no open MR exists, just create a new one. mr_action = "created".
+  - mr_action = "reused" no longer occurs — every new attempt produces
+    a fresh MR object so reviewers see attempts as separate MRs rather
+    than a force-pushed branch silently updating an old MR.
 
   Do NOT call `glab mr merge`. Do NOT close the issue. GitLab auto-closes via `Closes #{ISSUE_IID}` in the MR body.
 
@@ -227,20 +236,24 @@ Step 8 — ADD `pr` label
 
 Step 9 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
+    SUMMARY_POST_TO_ISSUE=<true|false> \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed}> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
-  CAPTURE: summary_posted (true if exit 0; false otherwise).
+  CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
   Run this on EVERY terminal path — done, no_changes, blocked, failed.
+  Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, and no_changes.
+  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note.
 
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|reused|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
+  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
 
   Field rules:
   - status = done           when Steps 0-8 all succeeded.
@@ -249,6 +262,7 @@ Step 10 — REPLY
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
   - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr".
   - mr_action = none when no MR step ran (no_changes / blocked before Step 7).
+  - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries, use false.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
   This single JSON line is the ONLY artifact the dispatcher reads from your reply. Do NOT additionally write the terminal issue state or attempt state files yourself; the dispatcher (Phase 6) writes those files from this JSON.
@@ -273,7 +287,7 @@ When any step instructs "FAIL with status=X, block_reason=Y":
      - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
      - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked` and without `pr`.
   4. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
-  5. Run Step 9 (summarize) with ATTEMPT_STATUS / BLOCK_REASON.
+  5. Run Step 9 (summarize) with ATTEMPT_STATUS / BLOCK_REASON and SUMMARY_POST_TO_ISSUE=false.
   6. Output the compact JSON per Step 10 with status=X and block_reason=Y filled in.
 
 Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.

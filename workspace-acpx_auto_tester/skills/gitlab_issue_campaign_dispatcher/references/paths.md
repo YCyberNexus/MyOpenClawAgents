@@ -103,7 +103,7 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 | `ISSUE_LOG_ROOT`          | `${ATTEMPT_DIR}/log`                                                                 | parent of per-attempt log directories                          |
 | `LOG_DIR`                 | `${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}`                                 | current-attempt log files; lives outside the worktree, preserved after attempt |
 | `ATTEMPT_STATE_FILE`      | `${ATTEMPT_DIR}/attempt_state.json`                                                  | current-attempt metadata; overwritten each attempt             |
-| `SUMMARY_FILE`            | `${ATTEMPT_DIR}/summary.md`                                                          | latest mirror of GitLab issue summary comment                  |
+| `SUMMARY_FILE`            | `${ATTEMPT_DIR}/summary.md`                                                          | latest local attempt summary; successful done attempts also post it as a GitLab issue comment |
 | `LOCAL_ATTEMPT_BRANCH`    | `${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}`                                         | per-attempt local branch (force-pushed to `${WORK_BRANCH}`)    |
 
 `ATTEMPT_NUMBER` itself comes from the dispatcher: `scripts/allocate_attempt.sh` increments `attempts_total` in the per-issue state file and prints the new number. The dispatcher passes that number through to all later prep scripts AND embeds it into the rendered subagent prompt — `env_paths.sh` refuses to load if `ATTEMPT_NUMBER` is missing while `ISSUE_IID` is set.
@@ -142,9 +142,9 @@ After post-push verification succeeds and before MR creation, these are auto-cre
 - `wiki_artifact_links.md` — generated list of Wiki links used in the issue note
 - `wiki_artifact_responses.jsonl` — raw `projects/:id/wikis` create/update responses
 
-When a new MR is created (rather than an existing fresh-mode MR being reused), this is also auto-created:
+Every attempt that reaches Step 7 also auto-creates:
 
-- `mr_description.md` — body of the merge request
+- `mr_description.md` — body of the merge request (rebuilt fresh on every attempt; both fresh and continue modes now close any prior open MR for `${WORK_BRANCH}` and create a new one, so `mr_description.md` is always regenerated)
 
 These files NEVER go into the work branch — they live under this attempt's `${LOG_DIR}`.
 

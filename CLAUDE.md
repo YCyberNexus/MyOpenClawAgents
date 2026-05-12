@@ -34,7 +34,7 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 | ----- | ---- |
 | 1 Parse     | bootstrap, flock, load `campaign_state.json` (no trigger override on callback path) |
 | 2 Reconcile | narrow reconcile against GitLab (single-IID range when feasible) |
-| 6 Follow-up | parse + validate the callback's compact JSON → match to `pending_subagents[reply.iid]` (Phase 6 validation rule 2; reply.attempt_number must equal pending entry's) → synchronize live labels (`done` + `pr`, `blocked`, or `failed`) → write **terminal** `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` → drain pending entry → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if `retry_count > blocked_retry_limit`) → best-effort `subagents kill --target <child_session_key>` on `done` IIDs when `kill_subagent_on_done=true` (default; blocked/failed are preserved for postmortem) → optional notify_channel → return |
+| 6 Follow-up | parse + validate the callback's compact JSON → match to `pending_subagents[reply.iid]` (Phase 6 validation rule 2; reply.attempt_number must equal pending entry's) → synchronize live labels (`done` + `pr`, `blocked`, or `failed`) → write **terminal** `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` → drain pending entry → classify into `completed_iids` / `blocked_iids` / `failed_iids` (promote `blocked → failed` if `retry_count > blocked_retry_limit`) → best-effort `subagents kill --target <child_session_key>` for terminal `done` / `blocked` / `failed` when `kill_subagent_on_terminal=true` (default; blocked/failed cleanup first requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`) → optional notify_channel → return |
 
 **Subagent (anonymous runtime session; the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–10 from the prompt's `<instructions>` block:
 
@@ -44,9 +44,9 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 4. `post_push_verify.sh` (post-push fetch sanity — no path-based reject).
 5. `upload_attempt_artifacts.sh` (publish prompt/result/optional report.html to project Wiki, link from issue).
 6. `set_issue_label.sh` `doing → done`.
-7. `create_mr.sh` (mode-dependent: fresh = reuse single MR; continue = close prior open MRs and create a fresh one).
+7. `create_mr.sh` (both modes rotate: close every prior open MR for `${WORK_BRANCH}` then create a fresh one — `mr_action="rotated"` when a prior MR was closed, `"created"` otherwise; the legacy fresh-mode reuse path is retired).
 8. `set_issue_label.sh add pr` after MR creation succeeds.
-9. `summarize_attempt.sh` posts a per-attempt summary as a GitLab issue note.
+9. `summarize_attempt.sh` writes a local per-attempt summary; successful `done` attempts also post it as a GitLab issue note, while failure summaries stay local.
 10. **Emit ONE compact JSON line** on the LAST line of its turn, carrying every fact the orchestrator's Phase 6 needs (`iid`, `attempt_number`, `status`, `mode_actual`, `work_branch`, `local_branch`, `commit_sha`, `merge_request_url`, `mr_action`, `wiki_url`, `labels_added`, `labels_removed`, `summary_posted`, `block_reason`, `log_dir`).
 
 On any subagent FAIL path, remove `doing` and add `blocked` before summarizing and returning the compact JSON. Phase 6 re-applies the final label state idempotently when the callback arrives.

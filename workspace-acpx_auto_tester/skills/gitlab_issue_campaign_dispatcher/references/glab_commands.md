@@ -124,7 +124,7 @@ glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.w
 
 ### G9 — Post a note (comment) on the issue (subagent)
 
-Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before `done` labeling and MR creation.
+Used by `scripts/summarize_attempt.sh` to post successful `done` attempt summaries back to the issue so the next continue-mode run can read them. Failure summaries are written locally only when `SUMMARY_POST_TO_ISSUE=false`. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before `done` labeling and MR creation.
 
 ```bash
 glab api --method POST \

@@ -29,6 +29,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${REP
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
   "stuck_after_minutes": 330,
+  "kill_subagent_on_terminal": true,
   "kill_subagent_on_done": true,
   "issue_iids_whitelist": [14, 17, 20],
   "require_labels": ["acpx-auto", "priority::high"],
@@ -87,6 +88,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 stuck_after_minutes       = 330
+kill_subagent_on_terminal = true
 kill_subagent_on_done     = true
 issue_iids_whitelist      = []
 require_labels            = []
@@ -112,6 +114,8 @@ quota_launched_this_tick  = 0
 | `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
+| `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
+| `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
 | `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target and acpx cwd. Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
 | `result_basename`       | string          | Post-override snapshot of the trigger's `result_basename`. Defaults to `"ifp-result"`. Used by `env_paths.sh` to derive `RESULT_ROOT=${REPO_PATH}/${result_basename}` and forwarded to every script as `RESULT_BASENAME=...`. Tick aborts with `"invalid_result_basename"` when the value contains `/`, `..`, or whitespace. |
 | `data_basename`         | string          | Post-override snapshot of the trigger's `data_basename`. Defaults to `"ifp-data"`. Forwarded as `DATA_BASENAME=...` and rendered into the subagent prompt. Same validation as `result_basename`. |
@@ -124,7 +128,8 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `pending_subagents`** — treat as `{}` in memory; persist on next write.
 - **Missing `max_concurrent_subagents`** — default to `1` and persist.
 - **Missing `stuck_after_minutes`** — default to `330` and persist.
-- **Missing `kill_subagent_on_done`** — default to `true` and persist. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after a `done` callback; legacy files predate the field and inherit the safe-by-default "clean up after success" behavior. Re-disable per-tick via the trigger field of the same name when running in debug mode.
+- **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` outcomes; blocked/failed cleanup is additionally gated on local evidence existence.
+- **Missing `kill_subagent_on_done`** — default to the same value as `kill_subagent_on_terminal` and persist only for backward-readable audit. New logic should not use it except for the compatibility rule above.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
 - **Missing `issue_iids_whitelist` / `require_labels` / `require_labels_match`** — default to `[]` / `[]` / `"or"` and persist on next write. These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
@@ -194,7 +199,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 
 Path: `${ATTEMPT_STATE_FILE}` = `${ATTEMPT_DIR}/attempt_state.json`
 
-Each attempt overwrites this file with the current attempt's details. Older local attempt-state files are not preserved on disk; durable history is kept in GitLab attempt-summary notes and in the monotonically increasing attempt counters.
+Each attempt overwrites this file with the current attempt's details. Older local attempt-state files are not preserved on disk; durable history is kept in the monotonically increasing attempt counters, local attempt logs, and GitLab attempt-summary notes for successful `done` attempts.
 
 ```json
 {
@@ -276,11 +281,11 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` — per-attempt local branch kept for audit.   |
 | `commit_sha`         | string          | Empty `""` if Step 3 did not run (no_changes / blocked-before-commit). |
 | `merge_request_url`  | string          | Empty `""` if Step 7 did not run.                                      |
-| `mr_action`          | string (enum)   | `created` / `reused` / `rotated` / `none`. `none` when Step 7 did not run. |
+| `mr_action`          | string (enum)   | `created` / `rotated` / `none`. `rotated` when one or more prior open MRs were closed before creating the new one, `created` when no prior open MR existed, `none` when Step 7 did not run. The legacy `reused` value is retired — both fresh and continue modes now always close + create. |
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |
 | `labels_added`       | array of string | The labels the subagent ADDED in Steps 6 / 7b or fail-flow label sync (e.g. `["done","pr"]` for done, `["blocked"]` for a blocked failure before done). |
 | `labels_removed`     | array of string | The labels the subagent REMOVED in Step 6 or fail-flow label sync (e.g. `["doing"]`). |
-| `summary_posted`     | bool            | `true` iff `summarize_attempt.sh` exit 0.                              |
+| `summary_posted`     | bool            | `true` iff `summarize_attempt.sh` posted a GitLab issue note. Failure paths set `SUMMARY_POST_TO_ISSUE=false`, so this is normally `false` even when `${SUMMARY_FILE}` was written locally. |
 | `block_reason`       | string          | Required non-empty when `status` is `blocked` or `failed`; empty `""` otherwise. |
 | `log_dir`            | string          | Absolute path; mirrors `${LOG_DIR}`. Helps the dispatcher locate logs without re-deriving paths. |
 
@@ -310,6 +315,7 @@ The validation pipeline is the same in both paths:
 6. If `status=blocked` AND `retry_count > blocked_retry_limit` (after incrementing), promote to `status=failed`, add to `failed_iids`, and run failed-label sync. For Phase 5 launch-side synthesized blocked replies only, do not increment `retry_count` and do not promote to `failed` on this tick.
 7. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
 8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
+9. **Best-effort terminal cleanup.** If `kill_subagent_on_terminal=true` and a `child_session_key` was captured before drain, Phase 6 may call `subagents kill` for terminal `done` / `blocked` / `failed`. For `blocked` / `failed`, cleanup first verifies local evidence exists under `${LOG_DIR}` / `${ISSUE_ROOT}`; missing evidence yields `cleanup_status="skipped: local_evidence_missing"` and preserves the runtime transcript.
 
 ### Phase 6 Write Mapping
 
@@ -321,7 +327,7 @@ The dispatcher takes the validated compact reply and writes:
 - `commit_sha` ← reply.commit_sha (empty → null)
 - `wiki_artifacts_file` ← `${LOG_DIR}/wiki_artifacts.md` if reply.wiki_url is non-empty, else null
 - `attempt_artifacts_posted_to_wiki` ← reply.wiki_url is non-empty
-- `summary_file` ← `${SUMMARY_FILE}` if reply.summary_posted, else null
+- `summary_file` ← `${SUMMARY_FILE}` if the file exists locally, else null
 - `summary_posted_to_issue` ← reply.summary_posted
 - `block_reason` ← final block_reason after validation / label-sync errors (empty → null)
 - preserve everything Phase 4 already wrote (`attempt_number`, `mode_*`, `local_branch`, `log_dir`, `attempt_started_at`, `no_reviewer_comments`, `prior_attempt_count`)
