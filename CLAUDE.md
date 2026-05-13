@@ -178,6 +178,17 @@ Bump the version in the SAME edit/commit that introduces the workspace change â€
 
 `bash -n scripts/foo.sh` is the only quick check used in this workspace. Run it after editing any script.
 
+## Code review workflow
+
+Every non-trivial code change MUST go through the review loop before the task is considered complete:
+
+1. **Edit**: Main agent (or editor subagent) makes the code changes.
+2. **Review**: Spawn `Agent(subagent_type="code-review")` to review the diff. The reviewer checks for correctness, security, performance, and adherence to project conventions.
+3. **Address**: Main agent applies the reviewer's feedback. If the reviewer found no issues, the loop is done.
+4. **Repeat**: Go back to step 2 until the reviewer returns zero findings.
+
+This applies to all edits under `workspace-acpx_auto_tester/` (scripts, references, SKILL.md, SOUL.md, AGENTS.md, USER.md). Trivial changes (typos, version bumps, single-line fixes) can skip the loop at the main agent's discretion.
+
 ## Where to look for full details
 
 - Workspace contracts: `workspace-acpx_auto_tester/SOUL.md` (subagent concurrency policy, no-fallback, GitLab access, host pinning, per-exec env contract, working directory, source of truth).
