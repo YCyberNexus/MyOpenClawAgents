@@ -105,7 +105,7 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
 </env_contract>
 
 <instructions>
-Follow steps 0-9 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
+Follow steps 0-10 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
 
 Step 0 — SETUP
   cd {WORKTREE_DIR}

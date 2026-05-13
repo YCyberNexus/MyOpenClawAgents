@@ -226,6 +226,16 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
   export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
+  # One-time migration: older deployments placed per-issue subtrees directly
+  # under ${RESULT_ROOT} (e.g. ifp-result/issue-14/) before the issues/
+  # nesting was introduced. Move any legacy per-issue directory into the new
+  # ${ISSUES_ROOT} parent so existing state files are not lost.
+  LEGACY_ISSUE_ROOT="${RESULT_ROOT}/issue-${ISSUE_IID}"
+  if [ ! -d "${ISSUE_ROOT}" ] && [ -d "${LEGACY_ISSUE_ROOT}" ]; then
+    mkdir -p "${ISSUES_ROOT}"
+    mv "${LEGACY_ISSUE_ROOT}" "${ISSUE_ROOT}"
+  fi
+
   # Same guard as above: only create the per-issue subtree once the repo
   # exists. Phase 4 always runs after Phase 3's clone_or_pull, so the repo
   # is guaranteed present by the time any per-issue script sources this.

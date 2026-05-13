@@ -96,7 +96,10 @@ if [ "${EXISTING_COUNT}" -gt 0 ]; then
   SUPERSEDES_REFS="$(echo "${EXISTING_JSON}" | jq -r 'map("!" + (.iid|tostring)) | join(", ")')"
   echo "${EXISTING_JSON}" | jq -r '.[].iid' | while IFS= read -r existing_iid; do
     glab mr close "${existing_iid}" \
-      --repo "${PROJECT_FULL}" >/dev/null
+      --repo "${PROJECT_FULL}" >/dev/null || {
+      echo "create_mr: failed to close MR !${existing_iid}" >&2
+      exit 4
+    }
   done
   SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by acpx_auto_tester attempt ${ATTEMPT_NUMBER_PADDED} re-run; mode=${ISSUE_MODE})."
   MR_ACTION="rotated"

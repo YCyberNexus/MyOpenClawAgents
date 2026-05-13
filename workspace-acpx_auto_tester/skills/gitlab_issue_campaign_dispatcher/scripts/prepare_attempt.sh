@@ -102,9 +102,10 @@ if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
 fi
 
 # One-time migration cleanup: older deployments placed a linked worktree
-# at ifp-result/issue-<iid>/worktree. Remove it if present so stale
-# worktree metadata cannot hold old local attempt branches open.
-LEGACY_WORKTREE_DIR="${ISSUE_ROOT}/worktree"
+# at ifp-result/issue-<iid>/worktree (BEFORE the issues/ nesting — the
+# old path was ${RESULT_ROOT}/issue-<iid>/worktree). Remove it if present
+# so stale worktree metadata cannot hold old local attempt branches open.
+LEGACY_WORKTREE_DIR="${RESULT_ROOT}/issue-${ISSUE_IID}/worktree"
 if [ -e "${LEGACY_WORKTREE_DIR}" ]; then
   git worktree remove --force "${LEGACY_WORKTREE_DIR}" 2>/dev/null || true
   rm -rf "${LEGACY_WORKTREE_DIR}"
