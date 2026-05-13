@@ -121,7 +121,8 @@
       "WebFetch(*)",
       "Read(*)",
       "Edit(*)",
-      "Write(*)"
+      "Write(*)",
+      "Bash(codex review *)"
     ]
   }
 }
