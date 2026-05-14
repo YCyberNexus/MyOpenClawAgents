@@ -180,24 +180,14 @@ Bump the version in the SAME edit/commit that introduces the workspace change â€
 
 ## Code review workflow
 
-Every non-trivial code change MUST go through the review loop before the task is considered complete. The reviewer is **Codex** (`codex review` via Bash), whose stdout is visible to the user â€” not a black-box subagent.
+Every non-trivial code change MUST go through the review loop before the task is considered complete. The reviewer is a Claude Code `code-reviewer` subagent (`Agent(subagent_type="code-reviewer")`).
 
 1. **Edit**: Main agent makes the code changes.
-2. **Review**: Run `codex review --uncommitted` via Bash (timeout 600s). Codex checks for correctness, security, performance, and best practices. The review output is shown directly to the user. For targeted review of a single file, pipe the full diff: `git diff HEAD -- <file> | codex review -`. This only works for tracked files; for new (untracked) files, use `codex review --uncommitted` instead.
-3. **Address**: Main agent applies Codex's review feedback. If Codex found no issues, the loop is done.
-4. **Repeat**: Go back to step 2. **Maximum 3 review rounds total.** If after the 3rd review Codex still finds issues, stop the loop and present the review report to the user for manual decision. Do not continue modifying without user approval.
+2. **Review**: Spawn `Agent(subagent_type="code-reviewer")` to review the changes. Always pass the diff scope in the agent prompt (e.g. "review the uncommitted changes in CLAUDE.md"). The subagent checks for correctness, security, performance, and best practices. The review output is returned inline in the session, visible to both the main agent and the user.
+3. **Address**: Main agent applies the reviewer's feedback. If the reviewer found no actionable findings (no code changes recommended), the loop is done. Otherwise, proceed to step 4.
+4. **Repeat**: Go back to step 2. **Maximum 3 review rounds total.** If after the 3rd review the reviewer still finds issues, stop the loop and present the review report to the user for manual decision. Do not continue modifying without user approval.
 
-Common invocations (all with `timeout=600000`):
-
-| Scenario | Command |
-|----------|---------|
-| Review uncommitted changes (default) | `codex review --uncommitted` |
-| Review vs base branch | `codex review --base master` |
-| Review a specific commit | `codex review --commit <SHA>` |
-| Review single file (fast) | `git diff HEAD -- <file> \| codex review -` |
-| With custom focus | `codex review --uncommitted "focus on error handling and edge cases"` |
-
-This applies to all edits under `workspace-acpx_auto_tester/` (scripts, references, SKILL.md, SOUL.md, AGENTS.md, USER.md). Trivial changes (typos, version bumps, single-line fixes) can skip the loop at the main agent's discretion.
+This applies to all edits under `workspace-acpx_auto_tester/` (scripts, references, SKILL.md, SOUL.md, AGENTS.md, USER.md, config/). Trivial changes (typos, version bumps, single-line fixes) can skip the loop at the main agent's discretion.
 
 ## Where to look for full details
 
