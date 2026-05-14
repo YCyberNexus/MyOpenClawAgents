@@ -189,6 +189,8 @@ Every non-trivial code change MUST go through the review loop before the task is
 
 This applies to all edits under `workspace-acpx_auto_tester/` (scripts, references, SKILL.md, SOUL.md, AGENTS.md, USER.md, config/). Trivial changes (typos, version bumps, single-line fixes) can skip the loop at the main agent's discretion.
 
+A project-local Stop hook ([`.claude/hooks/require-workspace-review.sh`](.claude/hooks/require-workspace-review.sh), registered in [`.claude/settings.json`](.claude/settings.json)) enforces this: when the turn tries to end with uncommitted changes under `workspace-acpx_auto_tester/`, it returns `decision:"block"` and feeds back the review instruction. After the loop completes (or the change is genuinely trivial), clear the block by writing the current diff fingerprint to `.claude/.review-done-sha` — the exact `printf %s '<hash>' > .claude/.review-done-sha` line is included in the hook's reason text.
+
 ## Where to look for full details
 
 - Workspace contracts: `workspace-acpx_auto_tester/SOUL.md` (subagent concurrency policy, no-fallback, GitLab access, host pinning, per-exec env contract, working directory, source of truth).
