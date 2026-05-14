@@ -86,7 +86,7 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence (on runner)**: \`${LOG_DIR}\`"
+  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the per-attempt worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive in the MR diff)"
   if [ -f "${LOG_DIR}/wiki_artifacts.md" ]; then
     echo "- **Wiki evidence**: published and linked from this issue before MR creation"
   fi

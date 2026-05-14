@@ -32,10 +32,9 @@
 #               locks/repo.lock
 #           issues/                      ← parent of per-issue persistent subtrees
 #               issue-<iid>/             ← per-issue subtree (lives OUTSIDE worktree
-#                                          so logs/state survive worktree teardown)
+#                                          so state/summary survive worktree teardown)
 #                   state.json
 #                   attempt_state.json
-#                   log/attempt-NNN/     ← per-attempt logs (preserved)
 #                   summary.md
 #           .worktrees/                  ← per-attempt linked git worktrees
 #               issue-<iid>-att-<NNN>/   ← WORKTREE_DIR; acpx cwd; created by
@@ -43,6 +42,12 @@
 #                   .claude/ hulat/ ${DATA_BASENAME}/    (from base branch checkout)
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
 #                                                        ← OUTPUT_DIR (force-added)
+#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
+#                                                        ← LOG_DIR (inside worktree;
+#                                                          prompt.txt + claude_result.txt
+#                                                          force-added by stage_and_guard.sh,
+#                                                          other files stay locally ignored
+#                                                          via .git/info/exclude)
 #
 # Path derivation is layered:
 #
@@ -56,7 +61,7 @@
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
 #         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
-#         ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
+#         LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
 #         LOCAL_ATTEMPT_BRANCH
 #
 # Why a single layered file: a single env_paths.sh keeps the dispatcher's
@@ -251,24 +256,29 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # database / `git fetch` target and is NEVER mutated by an attempt, so
   # multiple attempts can run concurrently without colliding on a single
   # working tree. ATTEMPT_DIR remains a compatibility alias for
-  # ISSUE_ROOT (no per-attempt sibling subtree exists outside the
-  # worktree); per-attempt state and logs live in ISSUE_ROOT so they
-  # survive worktree teardown by a housekeeper.
+  # ISSUE_ROOT (the per-issue persistent subtree). Cross-attempt state
+  # (state.json, attempt_state.json, summary.md) lives in ISSUE_ROOT so
+  # it survives worktree teardown by a housekeeper. LOG_DIR now lives
+  # INSIDE the worktree (under ${RESULT_BASENAME}/issue-<iid>/log/) so
+  # `prompt.txt` and `claude_result.txt` can be force-added into the MR;
+  # the rest of the log files stay locally ignored via the repository
+  # `.git/info/exclude` entry for `/${RESULT_BASENAME}/` and disappear
+  # when the worktree is removed.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}"
   export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
-  export ISSUE_LOG_ROOT="${ATTEMPT_DIR}/log"
-  export LOG_DIR="${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}"
+  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
-  # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR are
-  # created inside prepare_attempt.sh after `git worktree add` succeeds —
-  # creating WORKTREE_DIR ahead of time would make `git worktree add`
-  # refuse the path.
+  # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR
+  # are created inside prepare_attempt.sh after `git worktree add`
+  # succeeds — creating WORKTREE_DIR ahead of time would make
+  # `git worktree add` refuse the path, and LOG_DIR is nested inside the
+  # worktree.
   if [ -d "${REPO_PATH}/.git" ]; then
-    mkdir -p "${ATTEMPT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+    mkdir -p "${ATTEMPT_DIR}"
   fi
 fi
 

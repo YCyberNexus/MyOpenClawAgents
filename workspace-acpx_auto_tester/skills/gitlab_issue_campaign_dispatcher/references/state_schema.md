@@ -211,9 +211,9 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "no_reviewer_comments": false,
   "prior_attempt_count": 1,
   "local_branch": "issue/14-auto-fix-att002",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/issues/issue-14/log/attempt-002",
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14-att-002/<RESULT_BASENAME>/issue-14/log/attempt-002",
   "commit_sha": "abc1234...",
-  "wiki_artifacts_file": "/data/<project>/<RESULT_BASENAME>/issues/issue-14/log/attempt-002/wiki_artifacts.md",
+  "wiki_artifacts_file": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14-att-002/<RESULT_BASENAME>/issue-14/log/attempt-002/wiki_artifacts.md",
   "attempt_artifacts_posted_to_wiki": true,
   "status": "done",
   "block_reason": null,
@@ -263,7 +263,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "labels_removed": ["doing"],
   "summary_posted": true,
   "block_reason": "",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/issues/issue-14/log/attempt-003"
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14-att-003/<RESULT_BASENAME>/issue-14/log/attempt-003"
 }
 ```
 

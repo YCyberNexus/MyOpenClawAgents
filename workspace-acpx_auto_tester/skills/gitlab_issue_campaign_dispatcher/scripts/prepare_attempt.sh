@@ -124,21 +124,34 @@ if [ -e "${WORKTREE_DIR}" ] || git worktree list --porcelain 2>/dev/null \
 fi
 git worktree prune
 
-# Recreate only the current attempt's log dir so stale evidence from a
-# same-attempt rerun is not mixed with the current run. The issue dir is
-# reused across attempts; per-attempt logs live OUTSIDE the per-attempt
-# worktree so they survive worktree teardown by a housekeeper.
-if [ -d "${LOG_DIR}" ]; then
-  rm -rf "${LOG_DIR}"
-fi
-mkdir -p "${LOG_DIR}" "${ATTEMPT_DIR}"
+# Ensure the cross-attempt ISSUE_ROOT exists for state.json /
+# attempt_state.json / summary.md. The log dir itself now lives inside
+# the worktree (see below) so it is recreated AFTER `git worktree add`.
+mkdir -p "${ATTEMPT_DIR}"
 
 # Create the per-attempt linked worktree at ${WORKTREE_DIR} branched
-# from ${BASE_REF}. This is the cwd Claude Code runs in; OUTPUT_DIR is
-# inside it and gets force-added by stage_and_guard.sh after the run.
+# from ${BASE_REF}. This is the cwd Claude Code runs in; OUTPUT_DIR and
+# LOG_DIR are inside it. OUTPUT_DIR is force-added by stage_and_guard.sh
+# after the run; LOG_DIR's prompt.txt + claude_result.txt are
+# force-added by the same script, the remaining log files stay locally
+# ignored via the repository `.git/info/exclude` entry.
 mkdir -p "$(dirname "${WORKTREE_DIR}")"
 git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 mkdir -p "${OUTPUT_DIR}"
+
+# Recreate only the current attempt's log dir so stale evidence from a
+# same-(IID, attempt) rerun is not mixed with the current run. The
+# worktree was just checked out from BASE_REF; in continue mode that
+# ref may already contain prior attempts' tracked `log/attempt-<earlier>/`
+# directories, but those use a different attempt number and so do not
+# collide with the current LOG_DIR. The rm is defensive against an exact
+# same-(IID, attempt) rerun (rare — attempt numbers are monotonic).
+# Done AFTER `git worktree add` so the directory is created inside the
+# freshly-checked-out worktree.
+if [ -d "${LOG_DIR}" ]; then
+  rm -rf "${LOG_DIR}"
+fi
+mkdir -p "${LOG_DIR}"
 
 flock -u 8
 
