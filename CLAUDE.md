@@ -185,7 +185,7 @@ Every non-trivial code change MUST go through the review loop before the task is
 1. **Edit**: Main agent makes the code changes.
 2. **Review**: Run `codex review --uncommitted` via Bash (timeout 600s). Codex checks for correctness, security, performance, and best practices. The review output is shown directly to the user. For targeted review of a single file, pipe the full diff: `git diff HEAD -- <file> | codex review -`. This only works for tracked files; for new (untracked) files, use `codex review --uncommitted` instead.
 3. **Address**: Main agent applies Codex's review feedback. If Codex found no issues, the loop is done.
-4. **Repeat**: Go back to step 2 until `codex review` returns zero findings.
+4. **Repeat**: Go back to step 2. **Maximum 3 review rounds total.** If after the 3rd review Codex still finds issues, stop the loop and present the review report to the user for manual decision. Do not continue modifying without user approval.
 
 Common invocations (all with `timeout=600000`):
 
