@@ -38,6 +38,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
 | `{RESULT_BASENAME}`      | optional trigger field `result_basename`; defaults to `ifp-result` (basename of agent runtime root) |
 | `{DATA_BASENAME}`        | optional trigger field `data_basename`; defaults to `ifp-data` (basename of test-team knowledge dir) |
+| `{SESSION_NAME}`         | `issue-{ISSUE_IID}` — named acpx session for cross-attempt resume; persists the Claude Code conversation so a retry after interruption can continue from where it left off |
 
 `{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
 
@@ -81,6 +82,7 @@ ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
 RESULT_BASENAME={RESULT_BASENAME}           # basename of agent runtime root in the repo (default: ifp-result)
 DATA_BASENAME={DATA_BASENAME}               # basename of test-team knowledge dir in the repo (default: ifp-data)
+SESSION_NAME={SESSION_NAME}                 # acpx session name for cross-attempt resume (persists Claude Code conversation)
 </config>
 
 <issue>
@@ -111,12 +113,13 @@ Step 0 — SETUP
   cd {WORKTREE_DIR}
   Confirm the per-attempt worktree exists and the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at the worktree root (they came from the base branch checkout). Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent".
 
-Step 1 — EXECUTE acpx (one-shot, long-running)
+Step 1 — EXECUTE acpx (session-persisted, long-running)
   TASK_OUTPUT_DIR={OUTPUT_DIR} \
-    acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt \
+    acpx --auth-policy skip claude exec -s {SESSION_NAME} -f {LOG_DIR}/prompt.txt \
     1>{LOG_DIR}/claude_result.txt 2>{LOG_DIR}/acpx_raw.log
   CAPTURE: acpx_exit (the exit code).
   If acpx_exit != 0 → FAIL status=blocked block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
+  <!-- RESUME_MARKER: "acpx run failed" — do not change this substring; the dispatcher Step 1.5 resume detection depends on it. -->
 
   TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
@@ -133,9 +136,10 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 18000 seconds.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
+  <!-- RESUME_MARKER: "acpx exec timed out" — do not change this substring; the dispatcher Step 1.5 resume detection depends on it. -->
+  - The `-s {SESSION_NAME}` flag persists the Claude Code conversation to disk. On a retry after interruption, the session is resumed and the prompt tells Claude Code to continue from where it left off — this is the cross-attempt continuity mechanism.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
-  - no `-s` (persistent / named acpx session)
   - no `--no-wait`, no streaming acpx mode, no `acpx claude command`
   - do not drop `--auth-policy skip`
   - do not call `claude` directly without acpx

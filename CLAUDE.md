@@ -38,7 +38,7 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 
 **Subagent (anonymous runtime session; the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–10 from the prompt's `<instructions>` block:
 
-1. SETUP: `cd ${WORKTREE_DIR}` and one-shot `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt`.
+1. SETUP: `cd ${WORKTREE_DIR}` and `acpx --auth-policy skip claude exec -s issue-<iid> -f ${LOG_DIR}/prompt.txt` (session-persisted; on retry after interruption, the session resumes).
 2. `stage_and_guard.sh` (stage repo-root changes; force-add the issue's `${OUTPUT_DIR}`; emit STAGED_OK / NO_CHANGES — no path-based reject).
 3. `commit_and_push.sh` (Strategy A force-push to single fixed `${WORK_BRANCH}`).
 4. `post_push_verify.sh` (post-push fetch sanity — no path-based reject).
@@ -115,7 +115,7 @@ Both halves MUST follow the prescribed method exactly. When it fails, fail the a
 
 - If a script in `scripts/` exits non-zero, **read stdout/stderr, classify, persist state, stop**. Do not rewrite its logic inline, do not "do it manually", do not substitute a "simpler" command.
 - All GitLab access is via `glab` CLI through the commands listed in the SKILL's `references/glab_commands.md` (G1–G13). **No `curl` / `wget` / `requests` / `python-gitlab` / `@gitbeaker` / any HTTP library.** Not even as a "just this once" fallback.
-- The Claude Code invocation contract is exactly `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from `cwd=${WORKTREE_DIR}`, one-shot. Start it with PTY on the first attempt, use a timeout that covers the expected run, and poll the same process if the exec tool yields a session. Do not re-run `acpx` after a tool timeout. No `-s` (persistent session), no `--no-wait`, no streaming mode, no calling `claude` directly without acpx, no other LLM as substitute.
+- The Claude Code invocation contract is `acpx --auth-policy skip claude exec -s issue-<iid> -f "${LOG_DIR}/prompt.txt"` from `cwd=${WORKTREE_DIR}`, session-persisted. Start it with PTY on the first attempt, use a timeout that covers the expected run, and poll the same process if the exec tool yields a session. Do not re-run `acpx` after a tool timeout. The `-s issue-<iid>` persists the conversation across attempts — if interrupted, the next attempt resumes the session with a short continue prompt. No `--no-wait`, no streaming mode, no calling `claude` directly without acpx, no other LLM as substitute.
 - If `git push` is rejected, mark `blocked` — do **not** add extra `git push --force` outside `commit_and_push.sh`, do not rebase and re-push.
 - `glab mr merge` is forbidden — MRs stay open until a human merges them. The subagent never closes the issue itself either; GitLab auto-closes via `Closes #<iid>` in the MR body.
 - If a per-IID dispatcher prep step fails (clone_or_pull, prepare_attempt, build_prompt, label transitions), mark that IID `blocked` and end the serial batch. Do NOT spawn an IID with partial setup. Do NOT retry the failed prep inline.

@@ -124,6 +124,31 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
 fi
 
 # 3. Build the prompt file.
+if [ "${ACPX_RESUME:-false}" = "true" ]; then
+  # Resume mode: the previous acpx run was interrupted. The Claude Code
+  # session persists via `-s {SESSION_NAME}`, so we write a short "continue
+  # from where you left off" prompt. The full task description and past
+  # conversation are already in the session history.
+  {
+    cat <<EOF
+The previous run was interrupted before completion.
+Please continue from where you left off.
+
+Issue: #${ISSUE_IID} — ${ISSUE_TITLE}
+Working directory: ${WORKTREE_DIR}
+Output directory: ${OUTPUT_DIR}
+
+You have access to the full conversation history from the previous run.
+Continue working on this task — do not re-run steps that were already completed.
+When you finish, summarize briefly what you did (including any changes from the prior run).
+EOF
+  } > "${PROMPT_FILE}"
+  echo "CONTINUE_MODE_NO_REVIEWER_COMMENTS=true" >&2
+  echo "CONTINUE_MODE_PRIOR_ATTEMPT_COUNT=0" >&2
+  echo "${PROMPT_FILE}"
+  exit 0
+fi
+
 {
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
