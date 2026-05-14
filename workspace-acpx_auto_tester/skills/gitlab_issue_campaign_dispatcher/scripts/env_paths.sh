@@ -37,7 +37,7 @@
 #                   attempt_state.json
 #                   summary.md
 #           .worktrees/                  ← per-attempt linked git worktrees
-#               issue-<iid>-att-<NNN>/   ← WORKTREE_DIR; acpx cwd; created by
+#               issue-<iid>-att-<NNN>/   ← WORKTREE_DIR; Claude Code working directory;
 #                                          `git worktree add -B` in prepare_attempt.sh
 #                   .claude/ hulat/ ${DATA_BASENAME}/    (from base branch checkout)
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/

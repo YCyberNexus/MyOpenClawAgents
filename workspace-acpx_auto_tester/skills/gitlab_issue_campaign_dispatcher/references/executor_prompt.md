@@ -29,7 +29,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
-| `{WORKTREE_DIR}`         | per-attempt linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}-att-{ATTEMPT_NUMBER_PADDED}/`; this is the acpx cwd |
+| `{WORKTREE_DIR}`         | per-attempt linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}-att-{ATTEMPT_NUMBER_PADDED}/`; Claude Code's working directory (where it writes spec output). acpx is invoked from `{REPO_PATH}` so the session `-s {SESSION_NAME}` is stored under the parent checkout's stable project identity — all attempts share the same session store. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the worktree) |
 | `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the worktree; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
@@ -75,7 +75,7 @@ DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
-WORKTREE_DIR={WORKTREE_DIR}                 # per-attempt linked git worktree; acpx cwd; .claude/, hulat/, {DATA_BASENAME}/ are present from the base branch checkout
+WORKTREE_DIR={WORKTREE_DIR}                 # per-attempt linked git worktree; Claude Code's working directory; .claude/, hulat/, {DATA_BASENAME}/ are present from the base branch checkout. acpx is invoked from REPO_PATH (parent checkout) so session -s {SESSION_NAME} is stored under the stable project identity.
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
@@ -100,7 +100,7 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
 
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
   ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-  REPO_PATH={WORKTREE_DIR} \
+  REPO_PATH={REPO_PATH} \
   RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME}
 
 `REPO_PATH` carries the parent checkout — the shared object database all per-attempt worktrees branch from (default `/data/{PROJECT}`; with trigger `repo_path=/data/ifp1`, `/data/ifp1/{PROJECT}`). It is NOT the same as `WORKTREE_DIR` (which is your per-attempt linked worktree). Pass `REPO_PATH={REPO_PATH}` so `env_paths.sh` can re-derive `WORKTREE_DIR={WORKTREE_DIR}` from `ISSUE_IID` + `ATTEMPT_NUMBER`. `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
@@ -114,6 +114,7 @@ Step 0 — SETUP
   Confirm the per-attempt worktree exists and the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at the worktree root (they came from the base branch checkout). Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent".
 
 Step 1 — EXECUTE acpx (session-persisted, long-running)
+  cd {REPO_PATH}
   TASK_OUTPUT_DIR={OUTPUT_DIR} \
     acpx --auth-policy skip claude exec -s {SESSION_NAME} -f {LOG_DIR}/prompt.txt \
     1>{LOG_DIR}/claude_result.txt 2>{LOG_DIR}/acpx_raw.log
@@ -135,7 +136,7 @@ Step 1 — EXECUTE acpx (session-persisted, long-running)
   - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 18000 seconds.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
-  - The `-s {SESSION_NAME}` flag persists the Claude Code conversation to disk. On a retry after interruption, the session is resumed and the prompt tells Claude Code to continue from where it left off — this is the cross-attempt continuity mechanism.
+  - The `-s {SESSION_NAME}` flag persists the Claude Code conversation to disk. **acpx MUST be invoked from `{REPO_PATH}`** (the parent checkout) so the session is stored under the stable project identity — all attempts share the same session store regardless of their per-attempt worktree path. On a retry after interruption, the session is resumed and the prompt tells Claude Code to continue from where it left off — this is the cross-attempt continuity mechanism.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
   - no `--no-wait`, no streaming acpx mode, no `acpx claude command`

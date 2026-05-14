@@ -119,7 +119,7 @@ cd "${SKILL_DIR}"
 
 Do NOT invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` / `ls`. The single allowed convention: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
 
-The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. The subagent's cwd policy is: at acpx time, `cd ${WORKTREE_DIR}`; at all other steps, any cwd works because every script is invoked by absolute path.
+The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. The subagent's cwd policy is: at acpx time, `cd ${REPO_PATH}` (the parent checkout, for stable session storage — all attempts share the same project identity); at all other steps, any cwd works because every script is invoked by absolute path.
 
 ## Source of Truth
 
