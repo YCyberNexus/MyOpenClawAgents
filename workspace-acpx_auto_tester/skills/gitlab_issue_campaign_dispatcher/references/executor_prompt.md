@@ -119,7 +119,6 @@ Step 1 — EXECUTE acpx (session-persisted, long-running)
     1>{LOG_DIR}/claude_result.txt 2>{LOG_DIR}/acpx_raw.log
   CAPTURE: acpx_exit (the exit code).
   If acpx_exit != 0 → FAIL status=blocked block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
-  <!-- RESUME_MARKER: "acpx run failed" — do not change this substring; the dispatcher Step 1.5 resume detection depends on it. -->
 
   TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
@@ -136,7 +135,6 @@ Step 1 — EXECUTE acpx (session-persisted, long-running)
   - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 18000 seconds.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
-  <!-- RESUME_MARKER: "acpx exec timed out" — do not change this substring; the dispatcher Step 1.5 resume detection depends on it. -->
   - The `-s {SESSION_NAME}` flag persists the Claude Code conversation to disk. On a retry after interruption, the session is resumed and the prompt tells Claude Code to continue from where it left off — this is the cross-attempt continuity mechanism.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):

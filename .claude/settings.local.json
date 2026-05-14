@@ -123,7 +123,8 @@
       "Edit(*)",
       "Write(*)",
       "Bash(codex review *)",
-      "Skill(update-config)"
+      "Skill(update-config)",
+      "Read(//Users/yuanchenxiang/.claude/**)"
     ]
   }
 }

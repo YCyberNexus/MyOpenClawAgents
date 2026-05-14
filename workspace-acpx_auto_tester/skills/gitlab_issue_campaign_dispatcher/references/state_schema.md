@@ -29,6 +29,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
   "stuck_after_minutes": 330,
+  "acpx_resume": false,
   "kill_subagent_on_terminal": true,
   "kill_subagent_on_done": true,
   "issue_iids_whitelist": [14, 17, 20],
@@ -86,6 +87,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 stuck_after_minutes       = 330
+acpx_resume               = false
 kill_subagent_on_terminal = true
 kill_subagent_on_done     = true
 issue_iids_whitelist      = []
@@ -112,6 +114,7 @@ quota_launched_this_tick  = 0
 | `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
+| `acpx_resume` | bool | Post-override snapshot of the trigger's `acpx_resume` field. Defaults to `false`. When `true`, Phase 4 Step 1.5 sets `ACPX_RESUME=true` if `attempts_total > 0`, causing `build_prompt.sh` to write a short resume prompt instead of the full task prompt. Does NOT force `ISSUE_MODE=continue`. |
 | `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
 | `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target and acpx cwd. Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |

@@ -33,3 +33,4 @@ node_modules/
 
 # Claude Code hook sentinels (state, not config)
 .claude/.review-done-sha
+.claude/.review-baseline
