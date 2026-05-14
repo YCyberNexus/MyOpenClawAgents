@@ -122,7 +122,8 @@
       "Read(*)",
       "Edit(*)",
       "Write(*)",
-      "Bash(codex review *)"
+      "Bash(codex review *)",
+      "Skill(update-config)"
     ]
   }
 }
