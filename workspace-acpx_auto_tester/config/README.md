@@ -29,35 +29,29 @@ This workspace assumes a single GitLab deployment per runner. If you ever need t
 
 ## `ui_accounts.env`
 
-Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents.
-
-The system under test logs out an account when the same credentials log in twice. Each subagent receives `accounts_per_issue` distinct accounts (one per robot test file, default 10). The pool size therefore acts as the hard upper bound on `max_concurrent_subagents * accounts_per_issue`: a tick whose requested product exceeds the pool aborts with `"ui_account_pool_too_small"`.
+Pins the UI test account all subagents share to log into the system under test. The test team has confirmed the system under test does NOT log out the older session on duplicate login, so a single account is sufficient regardless of `max_concurrent_subagents`.
 
 ### Format
 
-One account per line, `username:password`. Lines starting with `#` and blank lines are ignored. Example (40-account pool for 4 concurrent subagents × 10 robot files each):
+Only the first valid entry is used. One account per line, `username:password`. Lines starting with `#` and blank lines are ignored. Example:
 
 ```
 F100001:123456
-F100002:123456
-...
-F100040:123456
 ```
 
 ### Sizing rule
 
-The pool must contain at least `max_concurrent_subagents * accounts_per_issue` valid accounts. The dispatcher checks this every tick via `scripts/load_ui_accounts.sh`; if `BATCH_SIZE * ACCOUNTS_PER_ISSUE` exceeds the pool size, the script exits 13 and the dispatcher aborts the tick with `"ui_account_pool_too_small: pool=<size> needed=<product>"`. Pool size is therefore the practical upper bound on per-tick concurrency.
+A single account is sufficient. `scripts/load_ui_accounts.sh` reads the first valid entry and ignores the rest.
 
 ### How it flows through the agent
 
-1. Dispatcher reads `<workspace>/config/ui_accounts.env` via `scripts/load_ui_accounts.sh` at the top of every batch, passing both `BATCH_SIZE` and `ACCOUNTS_PER_ISSUE`.
-2. Dispatcher allocates `batch_size * accounts_per_issue` distinct accounts (blocks of `accounts_per_issue` per IID, in file order; `accounts[k*N .. k*N+N-1]` → IID `k`).
-3. For each IID, the dispatcher invokes `scripts/build_prompt.sh` with that IID's `UI_ACCOUNTS='[{"u":"<user>","p":"<pass>"},...]'` — a JSON array of all accounts allocated to this IID. The script renders them as a numbered list in the `# Working environment` section of the Claude Code prompt at `${LOG_DIR}/prompt.txt` with an explicit override note. The credentials are NOT injected into the rendered subagent prompt — they live in the Claude Code prompt only, where Claude Code reads them.
-4. After each callback drains the corresponding pending subagent, that subagent's account block implicitly returns to the pool — the dispatcher does not persist allocations across batches; the next batch re-allocates from the head of the file (the single-batch-in-flight invariant guarantees `pending_subagents` is empty before the next batch forms).
+1. Dispatcher reads `<workspace>/config/ui_accounts.env` via `scripts/load_ui_accounts.sh` (no `BATCH_SIZE` or `ACCOUNTS_PER_ISSUE` needed).
+2. The same account (`UI_ACCOUNT` / `UI_PASSWORD`) is passed to every IID's `scripts/build_prompt.sh` invocation.
+3. `build_prompt.sh` appends the credentials to the `# Working environment` section of the Claude Code prompt at `${LOG_DIR}/prompt.txt`. The credentials are NOT injected into the rendered subagent prompt — they live in the Claude Code prompt only, where Claude Code reads them.
 
 ### Setup
 
-1. Create the accounts on the system under test (e.g. `F100001`–`F100040` for 4 concurrent subagents × 10 robot files).
+1. Create the account on the system under test (e.g. `F100001`).
 2. Edit `ui_accounts.env` with the credentials.
-3. Make sure there are at least `max_concurrent_subagents * accounts_per_issue` valid non-comment account lines.
+3. Make sure there is at least one valid non-comment account line.
 4. Re-run the scheduled tick.

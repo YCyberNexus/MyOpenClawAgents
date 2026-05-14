@@ -44,7 +44,6 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
       "attempt_number": 3,
       "run_id": "9710b359-2f32-407b-8c54-5c995ba266dc",
       "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-bcc8-4418-b401-c5f5f752609a",
-      "ui_account_index_start": 0,
       "spawned_at": "2026-05-06T10:00:12Z"
     }
   },
@@ -68,7 +67,6 @@ Map keyed by stringified IID. Each entry tracks one in-flight subagent from spaw
 | `attempt_number`     | int    | The attempt number allocated for this subagent. Phase 6 validates `callback.attempt_number == this` to reject stale callbacks. |
 | `run_id`             | string \| null | The `runId` returned by `sessions_spawn`. `null` only between Phase 4 step 5 (placeholder write) and Phase 5 step 2 (post-launch update); the orchestrator MUST NOT leave a `null` run_id once Phase 5 has finished. |
 | `child_session_key`  | string \| null | The anonymous `childSessionKey` returned by `sessions_spawn` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`). For runtime-side audit only; not used for matching callbacks. Same nullability rule as `run_id`. |
-| `ui_account_index_start` | int | The 0-based index of the FIRST account in `<workspace>/config/ui_accounts.env` allocated to this subagent. The subagent owns `accounts_per_issue` consecutive accounts starting at this index. With `max_concurrent_subagents=1` and `accounts_per_issue=10` this is `0`; with `N>1` the orchestrator binds the block `accounts[k*K .. k*K+K-1]` → the `k`-th IID of the batch (k = 0..batch_size-1, K = accounts_per_issue). |
 | `spawned_at`         | ISO-8601 UTC \| null | The orchestrator's wall-clock timestamp when `sessions_spawn` returned its launch ack. Used for stuck-pending eviction (`now - spawned_at >= stuck_after_minutes`). `null` between placeholder write and launch ack receipt; an entry with `null` `spawned_at` past `Phase 5 → end-of-tick` is itself a stuck case and gets evicted on the next scheduled wake-up. |
 
 A `pending_subagents` entry with `placeholder: true` is a transient state during Phase 4 step 5 / Phase 5; it MUST NOT survive the end of the scheduled wake-up. If a crash leaves a placeholder behind, the next scheduled wake-up's stuck-pending eviction (which inspects `spawned_at`) treats it as stuck and synthesizes a blocked Phase 6 reply (`block_reason="placeholder pending entry survived: spawn was never observed to land"`).
