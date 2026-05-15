@@ -114,33 +114,38 @@ Step 0 — SETUP
   Confirm the per-attempt worktree exists and the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at the worktree root (they came from the base branch checkout). Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent".
 
 Step 1 — EXECUTE acpx (session-persisted, long-running)
-  cd {REPO_PATH}
-  TASK_OUTPUT_DIR={OUTPUT_DIR} \
-    acpx --auth-policy skip claude exec -s {SESSION_NAME} -f {LOG_DIR}/prompt.txt \
-    1>{LOG_DIR}/claude_result.txt 2>{LOG_DIR}/acpx_raw.log
-  CAPTURE: acpx_exit (the exit code).
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/run_acpx_attempt.sh
+  CAPTURE: acpx_exit (the script's exit code; stdout also prints `ACPX_EXIT=<n>`).
   If acpx_exit != 0 → FAIL status=blocked block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
+  Do NOT inspect or tail acpx logs after this failure; preserve the logs and enter the FAIL flow immediately.
 
   TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
   executor.md) read ${TASK_OUTPUT_DIR} to decide where to write their
   outputs, and the dispatcher pins it to {OUTPUT_DIR} so those writes
   land inside the per-attempt worktree's OUTPUT_DIR and get force-added
-  by stage_and_guard.sh. If you ever change which agents are called, keep
-  TASK_OUTPUT_DIR={OUTPUT_DIR} on the acpx invocation — without it the
-  agents fall back to a path outside the worktree and their writes never
-  make it into the commit (NO_CHANGES result).
+  by stage_and_guard.sh. {SCRIPTS_DIR}/run_acpx_attempt.sh owns that env
+  var and the acpx argv — do not construct an acpx command yourself. If
+  you ever change which agents are called, keep TASK_OUTPUT_DIR={OUTPUT_DIR}
+  inside run_acpx_attempt.sh — without it the agents fall back to a path
+  outside the worktree and their writes never make it into the commit
+  (NO_CHANGES result).
 
   Tool-exec requirements for Step 1:
   - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
   - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 18000 seconds.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
-  - The `-s {SESSION_NAME}` flag persists the Claude Code conversation to disk. **acpx MUST be invoked from `{REPO_PATH}`** (the parent checkout) so the session is stored under the stable project identity — all attempts share the same session store regardless of their per-attempt worktree path. On a retry after interruption, the session is resumed and the prompt tells Claude Code to continue from where it left off — this is the cross-attempt continuity mechanism.
+  - {SCRIPTS_DIR}/run_acpx_attempt.sh invokes acpx from `{REPO_PATH}` with `-s {SESSION_NAME}`. The `-s {SESSION_NAME}` flag persists the Claude Code conversation to disk, and running from the parent checkout stores the session under the stable project identity — all attempts share the same session store regardless of their per-attempt worktree path. On a retry after interruption, the session is resumed and the prompt tells Claude Code to continue from where it left off — this is the cross-attempt continuity mechanism.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
+  - do not call `acpx` directly; only call {SCRIPTS_DIR}/run_acpx_attempt.sh
   - no `--no-wait`, no streaming acpx mode, no `acpx claude command`
-  - do not drop `--auth-policy skip`
+  - do not add, remove, or rewrite acpx flags; run_acpx_attempt.sh owns the fixed `--auth-policy skip` invocation
   - do not call `claude` directly without acpx
   - do not substitute another LLM CLI (`openai` / `gemini` / `ollama` / etc.)
   - if acpx fails, preserve all of {LOG_DIR}; do NOT delete partial logs
@@ -273,6 +278,7 @@ Step 10 — REPLY
 
 <constraints>
 - No-fallback. If any {SCRIPTS_DIR}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead.
+- acpx is script-owned. The only allowed acpx execution path is {SCRIPTS_DIR}/run_acpx_attempt.sh; do not type an acpx command in any tool call.
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
 - Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
