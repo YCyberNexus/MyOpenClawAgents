@@ -3,7 +3,7 @@
 #
 # Keep acpx argument construction in this script instead of the rendered
 # subagent prompt. That prevents model/tool-call drift from inventing flags or
-# changing redirection while preserving the same session-persisted contract.
+# changing redirection while preserving the same one-shot execution contract.
 
 set -euo pipefail
 
@@ -34,7 +34,6 @@ mkdir -p "${LOG_DIR}"
 prompt_file="${LOG_DIR}/prompt.txt"
 stdout_log="${LOG_DIR}/claude_result.txt"
 stderr_log="${LOG_DIR}/acpx_raw.log"
-session_name="issue-${ISSUE_IID}"
 
 if [ ! -f "${prompt_file}" ]; then
   echo "run_acpx_attempt.sh: prompt file missing: ${prompt_file}" >&2
@@ -44,14 +43,14 @@ fi
 {
   printf 'cwd=%s\n' "${REPO_PATH}"
   printf 'TASK_OUTPUT_DIR=%s\n' "${OUTPUT_DIR}"
-  printf 'command=acpx --auth-policy skip claude exec -s %s -f %s\n' "${session_name}" "${prompt_file}"
+  printf 'command=acpx --auth-policy skip claude exec -f %s\n' "${prompt_file}"
 } > "${LOG_DIR}/acpx_command.txt"
 
 cd "${REPO_PATH}"
 
 set +e
 TASK_OUTPUT_DIR="${OUTPUT_DIR}" \
-  acpx --auth-policy skip claude exec -s "${session_name}" -f "${prompt_file}" \
+  acpx --auth-policy skip claude exec -f "${prompt_file}" \
   1>"${stdout_log}" 2>"${stderr_log}"
 acpx_exit=$?
 set -e
