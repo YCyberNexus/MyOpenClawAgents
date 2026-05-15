@@ -126,21 +126,74 @@ fi
 # 3. Build the prompt file.
 if [ "${ACPX_RESUME:-false}" = "true" ]; then
   # Resume mode: the previous acpx run was interrupted. The Claude Code
-  # session persists via `-s {SESSION_NAME}`, so we write a short "continue
-  # from where you left off" prompt. The full task description and past
-  # conversation are already in the session history.
+  # session persists via `-s {SESSION_NAME}`, so the full task description
+  # and past conversation are already in the session history. The prompt
+  # written here is a step-aware resume hint: it lists the three hulat
+  # sub-agents and instructs Claude Code to inspect OUTPUT_DIR on startup
+  # and selectively invoke only the agents whose output is missing.
   {
     cat <<EOF
 The previous run was interrupted before completion.
-Please continue from where you left off.
 
-Issue: #${ISSUE_IID} — ${ISSUE_TITLE}
-Working directory: ${WORKTREE_DIR}
-Output directory: ${OUTPUT_DIR}
+Issue:           #${ISSUE_IID} — ${ISSUE_TITLE}
+Working dir:     ${WORKTREE_DIR}
+Output dir:      ${OUTPUT_DIR}
 
 You have access to the full conversation history from the previous run.
-Continue working on this task — do not re-run steps that were already completed.
-When you finish, summarize briefly what you did (including any changes from the prior run).
+
+# Step-by-step layout (hulat agents under ${WORKTREE_DIR}/hulat/agents/)
+
+This task runs three sub-agents in order, each writing under ${OUTPUT_DIR}:
+
+  step1-scanner   -> detector.md            (analyzes the issue/site, produces scanner output)
+  step2-generator -> testcase-generator.md  (produces test cases from scanner output)
+  step3-executor  -> executor.md            (executes the test cases, produces the test report)
+
+These agents do NOT have built-in skip logic. You are responsible for
+choosing which agents to invoke based on what is already on disk.
+
+# Resume decision (run this BEFORE anything else)
+
+Before classifying, also check for partial / corrupt output from the
+interrupted run: a file that exists but is zero-byte, has malformed
+JSON, has an obviously truncated tail, or whose surrounding log
+indicates an error at write time is NOT "complete" — treat the step
+that produced it as incomplete (or earlier, if the corruption suggests
+the input was already bad).
+
+  1. \`ls -la ${OUTPUT_DIR}/\` and inspect what is already there from the
+     previous run. Compare against what each step is expected to produce.
+  2. If step2 (testcase-generator) has already produced a COMPLETE and
+     uncorrupted set of test cases — i.e. detector output is present
+     and consistent AND test cases are present and parseable — invoke
+     ONLY step3 (executor.md) against the existing output. DO NOT
+     invoke detector.md. DO NOT invoke testcase-generator.md — UNLESS
+     you find concrete evidence the existing output is corrupted (e.g.
+     zero-byte testcase files, malformed JSON, parse errors on first
+     read). In that case, treat the corrupted step as incomplete and
+     re-run from it.
+  3. If step1 (detector) output is complete AND consistent but step2
+     is missing/incomplete, invoke step2 (testcase-generator.md) and
+     then step3 (executor.md). DO NOT invoke detector.md (same
+     corruption-escape applies as in branch 2).
+  4. If OUTPUT_DIR is empty, only has unrelated scraps, or step1
+     output is itself partial/truncated/corrupted, run all three
+     agents in order from step1.
+
+When you are unsure whether step2's output is "complete", look at the
+detector output (if step1 emits a structured manifest / scan list of
+items to generate cases for, compare 1:1 against the testcase
+artifacts present in OUTPUT_DIR; if detector's output is free-form,
+fall back to file sizes and timestamps to judge completeness). If
+every scanned item has a corresponding test case, step2 is complete.
+Otherwise treat step2 as incomplete and re-run it for the missing
+items.
+
+# Reporting
+
+When you finish, summarize briefly:
+  - Which agents you invoked (and which you skipped, with the reason).
+  - Any new outputs produced vs. carried over from the prior run.
 EOF
   } > "${PROMPT_FILE}"
   echo "CONTINUE_MODE_NO_REVIEWER_COMMENTS=true" >&2
