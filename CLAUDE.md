@@ -57,9 +57,9 @@ Spawn is **anonymous + async-callback**: `sessions_spawn` is called WITHOUT any 
 
 ## Concurrency and UI-account allocation
 
-`max_concurrent_subagents` (trigger field, default 1) caps both the per-tick batch size and the maximum number of in-flight subagents. Per-attempt worktrees give each subagent its own working tree, so cross-IID parallelism is enabled. The hard upper bound is the UI account pool size: the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential. A trigger value below 1 aborts with `"invalid_max_concurrent_subagents: must be >= 1"`; a value above the pool aborts with `"ui_account_pool_too_small: pool=<size> requested=<value>"`.
+`max_concurrent_subagents` (trigger field, default 1) caps both the per-tick batch size and the maximum number of in-flight subagents. Per-attempt worktrees give each subagent its own working tree, so cross-IID parallelism is enabled. The hard upper bound is the UI account pool size: the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential. A trigger value below 1 aborts with `"invalid_max_concurrent_subagents: must be >= 1"`; a value above the pool aborts with `"ui_account_pool_too_small: pool=<size> max_concurrent_subagents=<value>"`.
 
-The dispatcher allocates one distinct UI account per batch IID from `workspace-acpx_auto_tester/config/ui_accounts.env` (in pool-file order). Each pair is injected into THAT IID's **Claude Code prompt** (`${LOG_DIR}/prompt.txt`) by `build_prompt.sh`; the subagent never sees the credentials directly. The pool is consulted fresh at every batch — `pending_subagents` is empty when a new batch forms (single-batch-in-flight invariant), so the next batch's accounts always come from the pool head.
+The dispatcher divides the pool into exactly `max_concurrent_subagents` slots — slot size = `floor(pool_size / max_concurrent_subagents)` with the integer remainder front-loaded onto the first slots (e.g. `pool=50, max=4 → 13,13,12,12`; `pool=3, max=2 → 2,1`). There is **no `accounts_per_issue` trigger field**; per-IID account counts are derived automatically. The dispatcher binds the `k`-th slot to the `k`-th IID of the batch and injects that slot's credentials into THAT IID's **Claude Code prompt** (`${LOG_DIR}/prompt.txt`) via `build_prompt.sh`; the subagent never sees the credentials directly. The pool is consulted fresh at every batch — `pending_subagents` is empty when a new batch forms (single-batch-in-flight invariant), so the next batch's accounts always come from the pool head.
 
 Scheduled wake-up batch shape: pick up to `max_concurrent_subagents` IIDs → run per-IID prep sequentially (each gets its own worktree, attempt number, UI account) → spawn one anonymous run per IID with per-IID 3-attempt launch retry → record each valid launch acknowledgement → return `waiting_for_callbacks`. Terminal replies arrive later through `RUN_CHILD_COMPLETION_CALLBACK`; the next scheduled wake-up forms another batch only after `pending_subagents` is empty or evicted. No mid-batch top-up.
 
@@ -129,8 +129,8 @@ OpenClaw runs each Bash tool call in a **fresh shell**. Exports do NOT survive t
 
 `env_paths.sh` is **layered**: it always derives dispatcher-level paths, and additionally derives per-issue + attempt-level paths when `ISSUE_IID` is set (then `ATTEMPT_NUMBER` is also required).
 
-- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when trigger `repo_path` is non-default). Some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`.
-- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER`. Some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`. `HULAT_DIR` is derived inside `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
+- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when trigger `repo_path` is non-default). Some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `MAX_CONCURRENT_SUBAGENTS`.
+- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER`. Some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNTS`. `HULAT_DIR` is derived inside `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 Always prefix Bash invocations with the minimum vars on the same line — never rely on prior exports. The recommended pattern:
 
