@@ -126,7 +126,9 @@
       "Skill(update-config)",
       "Read(//Users/yuanchenxiang/.claude/**)",
       "Bash(find /Users/yuanchenxiang/IdeaProjects/MyOpenClawAgents -maxdepth 2 -type f -name \"AGENTS.md\" 2>/dev/null; find /Users/yuanchenxiang -maxdepth 4 -type d -name \"*acpx*\" 2>/dev/null | head -20)",
-      "Read(//Users/yuanchenxiang/**)"
+      "Read(//Users/yuanchenxiang/**)",
+      "Skill(git-commit-chinese)",
+      "Skill(git-commit-chinese:*)"
     ]
   }
 }

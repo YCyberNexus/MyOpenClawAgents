@@ -16,7 +16,7 @@
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
 #   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH,
-#   DEV_BRANCH, UI_ACCOUNT, UI_PASSWORD
+#   DEV_BRANCH, UI_ACCOUNTS
 #
 # `HULAT_DIR` is NOT a trigger input. The test team commits `hulat/` to
 # master+dev, so the repo checkout already contains it at
@@ -25,13 +25,16 @@
 # does not surface the path in the prompt (the agent reads from `hulat/`
 # relative to the repo root).
 #
-# UI_ACCOUNT / UI_PASSWORD are the test credentials for the subagent,
-# read from the first entry of <workspace>/config/ui_accounts.env.
-# All concurrent subagents share the same account (the test team has
-# confirmed the system under test does not log out on duplicate login).
-# They are injected into the prompt's "# Working environment" section
-# with an override note: any account named in the issue body MUST be
-# replaced by these values when Claude Code logs in.
+# UI_ACCOUNTS is a JSON array of {"u":"<username>","p":"<password>"} objects,
+# allocated by the dispatcher from the deployment-pinned pool. Each subagent
+# receives accounts_per_issue accounts (one per robot test file). They are
+# injected into the prompt's "# Working environment" section with an explicit
+# override note: any account named in the issue body MUST be replaced by one
+# of these values when Claude Code logs in. Different concurrent subagents
+# always receive different accounts (see dispatcher's UI Account Allocation
+# Policy), and different robot executions within a subagent MUST use different
+# accounts — sharing an account would cause one robot to kick another out of
+# the system under test.
 #
 # Output:
 #   Writes ${LOG_DIR}/prompt.txt and prints its absolute path on stdout.
@@ -51,19 +54,22 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
-# UI account is read from the first entry of the pool pinned at
-# <workspace>/config/ui_accounts.env. All concurrent subagents share the
-# same account (test team confirmed no duplicate-login issue).
-# If either env var is missing, this script exits non-zero and the
-# dispatcher marks the IID `blocked`.
-if [ -z "${UI_ACCOUNT:-}" ]; then
-  echo "build_prompt: UI_ACCOUNT is required" >&2
+# UI accounts are allocated by the dispatcher per-batch from the pool pinned
+# at <workspace>/config/ui_accounts.env. Each subagent receives
+# accounts_per_issue accounts (one per robot test file). The dispatcher
+# ensures distinct accounts across concurrent batch members AND across
+# concurrent robot executions within a subagent — see SKILL.md
+# §UI Account Allocation Policy. If UI_ACCOUNTS is missing or invalid,
+# this script exits non-zero and the dispatcher marks the IID `blocked`.
+if [ -z "${UI_ACCOUNTS:-}" ]; then
+  echo "build_prompt: UI_ACCOUNTS is required (dispatcher must pass a JSON array of {\"u\":\"<user>\",\"p\":\"<pass>\"} objects)" >&2
   exit 3
 fi
-if [ -z "${UI_PASSWORD:-}" ]; then
-  echo "build_prompt: UI_PASSWORD is required" >&2
+if ! echo "${UI_ACCOUNTS}" | jq -e '. | type == "array" and length > 0' >/dev/null 2>&1; then
+  echo "build_prompt: UI_ACCOUNTS must be a non-empty JSON array" >&2
   exit 4
 fi
+ACCOUNT_COUNT="$(echo "${UI_ACCOUNTS}" | jq 'length')"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -259,13 +265,18 @@ EOF
 - Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
-# UI test account
-The following test account is used for THIS run. When the issue description
-names a UI account (for example "use F100001 to log in"), you MUST IGNORE that
-name and use the credentials below instead.
+# UI test accounts (dispatcher-allocated — overrides any account in the issue body)
+The orchestrator has allocated the following ${ACCOUNT_COUNT} test accounts for THIS run.
+When the issue description names a UI account (for example "use F100001 to log in"),
+you MUST IGNORE that name and use one of the credentials below instead. Other concurrent
+runs are using DIFFERENT accounts; reusing the issue body's account would cause
+both runs to log each other out of the system under test.
 
-- Username: ${UI_ACCOUNT}
-- Password: ${UI_PASSWORD}
+This run has ${ACCOUNT_COUNT} accounts available — one per robot test file. Assign
+distinct accounts to concurrent robot executions; never share an account between two
+concurrently-running robots.
+
+$(echo "${UI_ACCOUNTS}" | jq -r 'to_entries | .[] | "- Account \(.key + 1): username=\(.value.u), password=\(.value.p)"')
 
 # Rules
 - Work only on this issue.

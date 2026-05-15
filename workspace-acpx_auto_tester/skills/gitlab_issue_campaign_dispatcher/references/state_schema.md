@@ -28,6 +28,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "blocked_retry_limit": 3,
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
+  "accounts_per_issue": 10,
   "stuck_after_minutes": 330,
   "acpx_resume": false,
   "kill_subagent_on_terminal": true,
@@ -45,6 +46,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
       "attempt_number": 3,
       "run_id": "9710b359-2f32-407b-8c54-5c995ba266dc",
       "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-bcc8-4418-b401-c5f5f752609a",
+      "ui_account_index_start": 0,
       "spawned_at": "2026-05-06T10:00:12Z"
     }
   },
@@ -68,6 +70,7 @@ Map keyed by stringified IID. Each entry tracks one in-flight subagent from spaw
 | `attempt_number`     | int    | The attempt number allocated for this subagent. Phase 6 validates `callback.attempt_number == this` to reject stale callbacks. |
 | `run_id`             | string \| null | The `runId` returned by `sessions_spawn`. `null` only between Phase 4 step 5 (placeholder write) and Phase 5 step 2 (post-launch update); the orchestrator MUST NOT leave a `null` run_id once Phase 5 has finished. |
 | `child_session_key`  | string \| null | The anonymous `childSessionKey` returned by `sessions_spawn` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`). For runtime-side audit only; not used for matching callbacks. Same nullability rule as `run_id`. |
+| `ui_account_index_start` | int | The 0-based index of the FIRST account in `<workspace>/config/ui_accounts.env` allocated to this subagent. The subagent owns `accounts_per_issue` consecutive accounts starting at this index. With `max_concurrent_subagents=1` and `accounts_per_issue=10` this is `0`; with `N>1` the orchestrator binds the block `accounts[k*K .. k*K+K-1]` → the `k`-th IID of the batch (k = 0..batch_size-1, K = accounts_per_issue). Unlike `run_id` / `child_session_key` / `spawned_at`, this field is non-null even for placeholder entries — Phase 4 step 5 writes it together with the placeholder because the dispatcher already allocated the block in step 4. If the placeholder is reaped (Phase 5 launch retries exhaust) without ever reaching Phase 5 step 2, the value records the unused allocation for audit; the next batch's allocation comes from the pool head as usual. |
 | `spawned_at`         | ISO-8601 UTC \| null | The orchestrator's wall-clock timestamp when `sessions_spawn` returned its launch ack. Used for stuck-pending eviction (`now - spawned_at >= stuck_after_minutes`). `null` between placeholder write and launch ack receipt; an entry with `null` `spawned_at` past `Phase 5 → end-of-tick` is itself a stuck case and gets evicted on the next scheduled wake-up. |
 
 A `pending_subagents` entry with `placeholder: true` is a transient state during Phase 4 step 5 / Phase 5; it MUST NOT survive the end of the scheduled wake-up. If a crash leaves a placeholder behind, the next scheduled wake-up's stuck-pending eviction (which inspects `spawned_at`) treats it as stuck and synthesizes a blocked Phase 6 reply (`block_reason="placeholder pending entry survived: spawn was never observed to land"`).
@@ -86,6 +89,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 ```text
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
+accounts_per_issue        = 10
 stuck_after_minutes       = 330
 acpx_resume               = false
 kill_subagent_on_terminal = true
@@ -115,6 +119,7 @@ quota_launched_this_tick  = 0
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
 | `acpx_resume` | bool | Post-override snapshot of the trigger's `acpx_resume` field. Defaults to `false`. When `true`, Phase 4 Step 1.5 sets `ACPX_RESUME=true` if `attempts_total > 0`, causing `build_prompt.sh` to write a short resume prompt instead of the full task prompt. Does NOT force `ISSUE_MODE=continue`. |
+| `accounts_per_issue`    | int             | Post-override snapshot of the trigger's `accounts_per_issue` field. Defaults to `10`. Number of UI accounts allocated per IID subagent (one per robot test file). Must satisfy `1 ≤ accounts_per_issue` and `max_concurrent_subagents * accounts_per_issue ≤ ui_account_pool_size`; violations abort the tick with `"invalid_accounts_per_issue: must be >= 1"` / `"ui_account_pool_too_small: pool=<size> needed=<product>"`. See SKILL.md §UI Account Allocation Policy. |
 | `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
 | `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target and acpx cwd. Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
@@ -128,6 +133,7 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Legacy scalar `active_issue_iid` / `active_issue_session`** — if present and no `active_issue_iids` / `active_issue_sessions` array exists, treat as `[scalar]` (or `[]` if the scalar was `null`). On the next write, persist only the array shape.
 - **Missing `pending_subagents`** — treat as `{}` in memory; persist on next write.
 - **Missing `max_concurrent_subagents`** — default to `1` and persist.
+- **Missing `accounts_per_issue`** — default to `10` and persist.
 - **Missing `stuck_after_minutes`** — default to `330` and persist.
 - **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` outcomes; blocked/failed cleanup is additionally gated on local evidence existence.
 - **Missing `kill_subagent_on_done`** — default to the same value as `kill_subagent_on_terminal` and persist only for backward-readable audit. New logic should not use it except for the compatibility rule above.

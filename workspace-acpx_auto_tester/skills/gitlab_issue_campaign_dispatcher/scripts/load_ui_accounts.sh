@@ -1,24 +1,39 @@
 #!/usr/bin/env bash
-# load_ui_accounts.sh — read the deployment-pinned UI test account from
-# (<workspace>/config/ui_accounts.env) and print it to stdout.
+# load_ui_accounts.sh — read the deployment-pinned UI test account pool
+# (<workspace>/config/ui_accounts.env) and print accounts to stdout, one
+# per line in "user:pass" form, in file order.
 #
-# All concurrent subagents share the same account. The test team has
-# confirmed the system under test does NOT log out the older session on
-# duplicate login, so a single account is sufficient.
-#
-# Only the first valid entry in the pool file is used.
+# The dispatcher uses this to allocate distinct test accounts per IID in
+# a concurrent batch. Each subagent receives ACCOUNTS_PER_ISSUE accounts
+# (one per robot test file). The system under test logs out an account when
+# the same credentials log in twice, so two concurrent subagents — and two
+# concurrent robot executions within a subagent — MUST NOT share an account.
 #
 # Optional env vars:
-#   (none — BATCH_SIZE, ACCOUNTS_PER_ISSUE are no longer used)
+#   BATCH_SIZE           integer >= 1. Number of IIDs in this batch.
+#   ACCOUNTS_PER_ISSUE   integer >= 1, defaults to 1 (backward compat).
+#                         Number of accounts allocated per IID.
+#
+#   When both are set: TOTAL_NEEDED = BATCH_SIZE * ACCOUNTS_PER_ISSUE.
+#   The script asserts pool_size >= TOTAL_NEEDED (else exits 13) and
+#   prints the first TOTAL_NEEDED entries.
 #
 # Output (stdout):
-#   <user>:<pass>
+#   <user1>:<pass1>
+#   <user2>:<pass2>
+#   ...
 #
 # Exit codes:
 #   0   success
 #   10  pin file missing (deployment incomplete)
 #   11  pool is empty (no valid lines)
 #   12  pool contains a malformed line (no ':' separator)
+#   13  pool size < BATCH_SIZE * ACCOUNTS_PER_ISSUE
+#   14  ACCOUNTS_PER_ISSUE is set but not a positive integer
+#   15  BATCH_SIZE is set but not a positive integer
+#
+# On failure: the dispatcher MUST abort the tick (No-Fallback Policy —
+# never improvise an account; never share an account between subagents).
 
 set -euo pipefail
 
@@ -33,8 +48,10 @@ if [ ! -f "${POOL_FILE}" ]; then
   exit 10
 fi
 
-# Parse the first valid entry: strip blank lines, comment lines, and
-# surrounding whitespace. Use only the first valid entry.
+# Parse: strip blank lines, comment lines, and surrounding whitespace.
+# Validate each remaining line contains exactly one ':' separator with
+# non-empty user and pass.
+ACCOUNTS=()
 LINE_NO=0
 while IFS= read -r RAW || [ -n "${RAW}" ]; do
   LINE_NO=$((LINE_NO + 1))
@@ -48,10 +65,41 @@ while IFS= read -r RAW || [ -n "${RAW}" ]; do
     echo "load_ui_accounts: ${POOL_FILE}:${LINE_NO}: malformed entry '${TRIMMED}' (expected 'user:pass')" >&2
     exit 12
   fi
-  printf '%s\n' "${USER_PART}:${PASS_PART}"
-  exit 0
+  ACCOUNTS+=("${USER_PART}:${PASS_PART}")
 done < "${POOL_FILE}"
 
-# No valid entry found
-echo "load_ui_accounts: ${POOL_FILE} contains no valid entries" >&2
-exit 11
+POOL_SIZE="${#ACCOUNTS[@]}"
+if [ "${POOL_SIZE}" -eq 0 ]; then
+  echo "load_ui_accounts: ${POOL_FILE} contains no valid entries" >&2
+  exit 11
+fi
+
+if [ -n "${BATCH_SIZE:-}" ]; then
+  if ! [[ "${BATCH_SIZE}" =~ ^[0-9]+$ ]] || [ "${BATCH_SIZE}" -lt 1 ]; then
+    echo "load_ui_accounts: BATCH_SIZE must be a positive integer, got '${BATCH_SIZE}'" >&2
+    exit 15
+  fi
+
+  # ACCOUNTS_PER_ISSUE defaults to 1 for backward compatibility
+  if [ -n "${ACCOUNTS_PER_ISSUE:-}" ]; then
+    if ! [[ "${ACCOUNTS_PER_ISSUE}" =~ ^[0-9]+$ ]] || [ "${ACCOUNTS_PER_ISSUE}" -lt 1 ]; then
+      echo "load_ui_accounts: ACCOUNTS_PER_ISSUE must be a positive integer, got '${ACCOUNTS_PER_ISSUE}'" >&2
+      exit 14
+    fi
+  else
+    ACCOUNTS_PER_ISSUE=1
+  fi
+
+  TOTAL_NEEDED=$((BATCH_SIZE * ACCOUNTS_PER_ISSUE))
+  if [ "${POOL_SIZE}" -lt "${TOTAL_NEEDED}" ]; then
+    echo "load_ui_accounts: pool size ${POOL_SIZE} < BATCH_SIZE ${BATCH_SIZE} * ACCOUNTS_PER_ISSUE ${ACCOUNTS_PER_ISSUE} = ${TOTAL_NEEDED}; cannot satisfy concurrent batch without sharing accounts" >&2
+    exit 13
+  fi
+  for ((i = 0; i < TOTAL_NEEDED; i++)); do
+    printf '%s\n' "${ACCOUNTS[$i]}"
+  done
+else
+  for entry in "${ACCOUNTS[@]}"; do
+    printf '%s\n' "${entry}"
+  done
+fi

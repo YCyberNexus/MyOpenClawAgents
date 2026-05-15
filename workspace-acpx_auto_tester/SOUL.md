@@ -30,15 +30,15 @@ Step-by-step workflow with env-var contract per step: [`references/executor_prom
 
 ## Subagent Concurrency Policy (READ FIRST — HARD RULE)
 
-The agent runs each per-attempt subagent in its own linked git worktree, so cross-IID parallelism is enabled. All concurrent subagents share the same UI test account — the test team has confirmed the system under test does not log out on duplicate login.
+The agent runs each per-attempt subagent in its own linked git worktree, so cross-IID parallelism is enabled. The hard upper bound on concurrency is the deployment-pinned UI account pool size — the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential.
 
-`max_concurrent_subagents` is a trigger input (see SKILL `references/trigger_command.md`). It defaults to 1 when the trigger omits it. The post-override value MUST satisfy `1 ≤ max_concurrent_subagents`; values below 1 abort the tick with `"invalid_max_concurrent_subagents: must be >= 1"`. There is no pool-size upper bound.
+`max_concurrent_subagents` is a trigger input (see SKILL `references/trigger_command.md`). It defaults to 1 when the trigger omits it. The post-override value MUST satisfy `1 ≤ max_concurrent_subagents` and `max_concurrent_subagents * accounts_per_issue ≤ ui_account_pool_size`; values below 1 abort the tick with `"invalid_max_concurrent_subagents: must be >= 1"`, values whose product with `accounts_per_issue` exceeds the pool abort with `"ui_account_pool_too_small: pool=<size> needed=<product>"`.
 
 Hard invariants:
 
-1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions.
+1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions, AND every active session MUST hold a distinct UI account index.
 2. **No same-IID parallelism.** Two subagents MUST NEVER work concurrently on the same `${ISSUE_IID}`. The structural guarantee is the orchestrator's `active_issue_iids` + `pending_subagents` bookkeeping: persist each IID into both BEFORE issuing `sessions_spawn` (Phase 4 step 5 placeholder write + Phase 5 ack-write); MUST NOT spawn for an IID already present in those structures.
-3. **Single-batch-in-flight invariant.** The orchestrator MUST NOT form a new batch on a scheduled wake-up while `pending_subagents` is non-empty (after stuck-pending eviction).
+3. **Single-batch-in-flight invariant.** The orchestrator MUST NOT form a new batch on a scheduled wake-up while `pending_subagents` is non-empty (after stuck-pending eviction). UI account safety depends on this: accounts allocated to in-flight subagents stay in `pending_subagents[*].ui_account_index_start` until each callback drains them, and the next batch's accounts are drawn fresh from the pool head only after pending is empty.
 4. **Async-callback spawn.** Phase 5 issues one anonymous `sessions_spawn` per surviving IID, retrying the identical launch payload up to 3 total attempts with 2-second fixed backoff on launch failure. A valid launch ack is recorded into `pending_subagents`, and the orchestrator returns `waiting_for_callbacks` immediately. The orchestrator does NOT block waiting for compact JSON. The runtime later wakes the orchestrator with one `RUN_CHILD_COMPLETION_CALLBACK` per subagent termination; each callback delivers that subagent's terminal compact JSON. The orchestrator runs Phase 6 on each callback wake-up. Subsequent batches are formed by subsequent scheduled wake-ups, not callback wake-ups.
 5. **Anonymous spawns only — do NOT pass session name (HARD).** The orchestrator MUST NOT pass `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter to `sessions_spawn`. Earlier deployments hit `errorCode=thread_required` on channels (e.g. webchat) that don't support thread bindings. The runtime returns `runId` + `childSessionKey`; both go into `pending_subagents[iid]`. Replies are matched back to dispatched IIDs by the `iid` field of the compact JSON (Phase 6 validation), NOT by runtime session-key label.
 
@@ -100,7 +100,7 @@ OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports do NOT survive
 The exact minimum env list is layered (see SKILL "Per-Exec Env Contract"):
 
 - Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when the trigger uses non-default `repo_path`; some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`).
-- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
+- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNTS`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 The universal rule: every Bash exec MUST export the minimum vars at the front of the command line. Never rely on exports from a previous Bash tool call. The rendered subagent prompt repeats these env vars at every step so the subagent gets it right by following the prompt verbatim.
 
