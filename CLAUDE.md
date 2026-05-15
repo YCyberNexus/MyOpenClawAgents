@@ -4,17 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repository is
 
-This is **not** an application repo — it is the **deployment artifact for an OpenClaw agent** named `acpx_auto_tester`. It contains the agent's prompt contracts (`SOUL.md`, `AGENTS.md`, `USER.md`), one SKILL (`gitlab_issue_campaign_dispatcher`), and the bash scripts that SKILL invokes. There is no build, no test runner, no package manifest. Changes here are deployed by syncing this workspace to the runner.
+This is **not** an application repo — it is the **deployment artifact for an OpenClaw agent** named `acpx_auto_tester_pts`. It contains the agent's prompt contracts (`SOUL.md`, `AGENTS.md`, `USER.md`), one SKILL (`gitlab_issue_campaign_dispatcher`), and the bash scripts that SKILL invokes. There is no build, no test runner, no package manifest. Changes here are deployed by syncing this workspace to the runner.
 
 The agent itself runs on the OpenClaw runner with repo clone parents defaulting to `/data` unless trigger `repo_path` overrides that parent; nothing in this repo executes locally during development. **Do NOT attempt to run this agent or `acpx claude` locally on this machine** — the agent and acpx toolchain only work on the server. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
 
 ## Single-skill, async-callback execution model
 
-The agent has **one thick orchestrator session + one anonymous subagent run per IID** (multiple IIDs may be in flight concurrently up to `max_concurrent_subagents`). There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload, runs Steps 0–10, and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator owns every state-file write; the subagent never touches state files. Full algorithm + spawn shape: workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md §Dispatcher Algorithm + §Concurrency Policy.
+The agent has **one thick orchestrator session + one anonymous subagent run per IID** (multiple IIDs may be in flight concurrently up to `max_concurrent_subagents`). There is exactly **one SKILL** in this workspace (the orchestrator). The subagent NEVER loads a SKILL — it receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload, runs Steps 0–10, and emits ONE compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`. The orchestrator owns every state-file write; the subagent never touches state files. Full algorithm + spawn shape: workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/SKILL.md §Dispatcher Algorithm + §Concurrency Policy.
 
 Cross-IID parallelism uses **per-attempt linked git worktrees**: `prepare_attempt.sh` creates `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B`. The parent checkout at `${REPO_PATH}` is never mutated by an attempt — only `git fetch` runs against it under `${RESULT_ROOT}/_dispatcher/locks/repo.lock`. N concurrent attempts share one clone of the repo and one fetched object database without colliding on a single working tree.
 
-**Orchestrator (`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/`)** stays alive across scheduler ticks (`agent:acpx_auto_tester:main`). It runs different phases on each of its two trigger commands:
+**Orchestrator (`workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/`)** stays alive across scheduler ticks (`agent:acpx_auto_tester_pts:main`). It runs different phases on each of its two trigger commands:
 
 ### Path A: scheduled wake-up (`RUN_SCHEDULED_ISSUE_CAMPAIGN`)
 
@@ -23,8 +23,8 @@ Cross-IID parallelism uses **per-attempt linked git worktrees**: `prepare_attemp
 | 1 Parse        | bootstrap, flock, load + override `campaign_state.json` from trigger; **stuck-pending eviction** (synthesizes Phase 6 blocked replies for any pending entries past `stuck_after_minutes`) |
 | 2 Reconcile    | mandatory `reconcile.sh` against GitLab; correct disk cache from evidence file (no evidence = tick failed) |
 | 3 Eligibility  | if `pending_subagents` is still non-empty after eviction → return `waiting_for_callbacks` and exit. Otherwise: tick-level prep (`ensure_labels.sh`, `clone_or_pull.sh`); validate `1 ≤ max_concurrent_subagents ≤ ui_pool_size`; form a batch of up to that many IIDs under launch quota |
-| 4 Per-IID Prep | for each IID in the batch: `allocate_attempt.sh` → load distinct UI account from `<workspace>/config/ui_accounts.env` (one per IID) → `prepare_attempt.sh` (creates a fresh per-attempt linked worktree at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B`; the test team's `hulat/`, `.claude/`, `ifp-data/` come from the base branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions entry labels (`todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger labels) to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
-| 5 Async Spawn  | one **anonymous** `sessions_spawn` call per surviving IID (NO session name passed — runtime returns `runId` + `childSessionKey` like `agent:acpx_auto_tester:subagent:<uuid>`). Launch failures retry the identical payload up to 3 total attempts with 2-second fixed backoff; only a valid ack is recorded into `pending_subagents[iid]`. Returns `waiting_for_callbacks` and exits. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures, which do not increment `retry_count`). |
+| 4 Per-IID Prep | for each IID in the batch: `allocate_attempt.sh` → load distinct UI account from `<workspace>/config/ui_accounts.env` (one per IID) → `prepare_attempt.sh` (creates a fresh per-attempt linked worktree at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>-att-<NNN>/` via `git worktree add -B`; the test team's `hulat/`, `.claude/`, `ifp-data/` come from the base branch checkout) → reads issue title/url/labels/body via `glab` → `set_issue_label.sh` transitions entry labels (`todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger labels) to `doing` → `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt` with UI account injected) → initializes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (status=in_progress) → writes `pending_subagents[iid]` placeholder → renders [`references/executor_prompt.md`](workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) with per-IID values |
+| 5 Async Spawn  | one **anonymous** `sessions_spawn` call per surviving IID (NO session name passed — runtime returns `runId` + `childSessionKey` like `agent:acpx_auto_tester_pts:subagent:<uuid>`). Launch failures retry the identical payload up to 3 total attempts with 2-second fixed backoff; only a valid ack is recorded into `pending_subagents[iid]`. Returns `waiting_for_callbacks` and exits. **Phase 6 does NOT run on this path** (except inline-synthesized blocked for launch failures, which do not increment `retry_count`). |
 
 ### Path B: callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)
 
@@ -38,7 +38,7 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 
 **Subagent (anonymous runtime session; the orchestrator matches replies back by the `iid` field of the compact JSON)** receives the rendered fixed-format prompt and runs Steps 0–10 from the prompt's `<instructions>` block:
 
-1. SETUP: call `bash ${SCRIPTS_DIR}/run_acpx_attempt.sh` with the standard per-issue env. The script owns the fixed `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt` invocation from `${REPO_PATH}` (the parent checkout). Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so there is no Claude-Code-level memory between attempts; cross-attempt continuity must come from the self-contained rendered prompt, prior attempt summaries (auto-posted GitLab notes), reviewer comments, and the `origin/${WORK_BRANCH}` contents (including the force-added `log/attempt-NNN/prompt.txt` + `claude_result.txt`). See `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md` and `references/continue_mode.md` for the externalized continuity contract.
+1. SETUP: call `bash ${SCRIPTS_DIR}/run_acpx_attempt.sh` with the standard per-issue env. The script owns the fixed `acpx --auth-policy skip claude exec -f ${LOG_DIR}/prompt.txt` invocation from `${REPO_PATH}` (the parent checkout). Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so there is no Claude-Code-level memory between attempts; cross-attempt continuity must come from the self-contained rendered prompt, prior attempt summaries (auto-posted GitLab notes), reviewer comments, and the `origin/${WORK_BRANCH}` contents (including the force-added `log/attempt-NNN/prompt.txt` + `claude_result.txt`). See `workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md` and `references/continue_mode.md` for the externalized continuity contract.
 2. `stage_and_guard.sh` (stage repo-root changes; force-add the issue's `${OUTPUT_DIR}`; emit STAGED_OK / NO_CHANGES — no path-based reject).
 3. `commit_and_push.sh` (Strategy A force-push to single fixed `${WORK_BRANCH}`).
 4. `post_push_verify.sh` (post-push fetch sanity — no path-based reject).
@@ -151,7 +151,7 @@ Every script path in the SKILL is relative to that skill's own directory. Before
 
 ## Deployment-pinned config
 
-The runner has these files at `workspace-acpx_auto_tester/config/`:
+The runner has these files at `workspace-acpx_auto_tester_pts/config/`:
 
 - `gitlab.env` — `GITLAB_HOST` and `GITLAB_API_PROTOCOL`. The host is **never** derived from the trigger's `gitlab_address`; that field is verification-only. Token rotation works because `gitlab_token` from the trigger is forwarded to `glab auth login` against the pinned host.
 - `ui_accounts.env` — pool of UI test accounts, one `username:password` per line. Pool size MUST be at least 1.
@@ -160,7 +160,7 @@ These are deployment-time pins, edited once on each runner. Not generated from t
 
 ## Bumping SKILL_VERSION on workspace edits
 
-After any edit to a file under `workspace-acpx_auto_tester/` — including `SOUL.md`, `AGENTS.md`, `USER.md`, `config/`, and anything under `skills/gitlab_issue_campaign_dispatcher/` (the SKILL itself, its `scripts/`, its `references/`) — bump the `[SKILL_VERSION=...]` token at the start of line 3 of [`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md) (inside the `description:` field).
+After any edit to a file under `workspace-acpx_auto_tester_pts/` — including `SOUL.md`, `AGENTS.md`, `USER.md`, `config/`, and anything under `skills/gitlab_issue_campaign_dispatcher/` (the SKILL itself, its `scripts/`, its `references/`) — bump the `[SKILL_VERSION=...]` token at the start of line 3 of [`workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/SKILL.md`](workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/SKILL.md) (inside the `description:` field).
 
 Version format is `YYYY-MM-DD.N`:
 
@@ -172,7 +172,7 @@ Examples (assume today is 2026-05-11):
 - Existing `[SKILL_VERSION=2026-05-08.2]` → new `[SKILL_VERSION=2026-05-11.1]`.
 - Existing `[SKILL_VERSION=2026-05-11.1]` (already bumped earlier today) → new `[SKILL_VERSION=2026-05-11.2]`.
 
-Bump the version in the SAME edit/commit that introduces the workspace change — do not leave it for a follow-up. Edits to files OUTSIDE `workspace-acpx_auto_tester/` (e.g. this `CLAUDE.md`, repo-root files, `.claude/`) do NOT trigger a bump.
+Bump the version in the SAME edit/commit that introduces the workspace change — do not leave it for a follow-up. Edits to files OUTSIDE `workspace-acpx_auto_tester_pts/` (e.g. this `CLAUDE.md`, repo-root files, `.claude/`) do NOT trigger a bump.
 
 ## Sanity-checking shell changes
 
@@ -187,15 +187,15 @@ Every non-trivial code change MUST go through the review loop before the task is
 3. **Address**: Main agent applies the reviewer's feedback. If the reviewer found no actionable findings (no code changes recommended), the loop is done. Otherwise, proceed to step 4.
 4. **Repeat**: Go back to step 2. **Maximum 3 review rounds total.** If after the 3rd review the reviewer still finds issues, stop the loop and present the review report to the user for manual decision. Do not continue modifying without user approval.
 
-This applies to all edits under `workspace-acpx_auto_tester/` (scripts, references, SKILL.md, SOUL.md, AGENTS.md, USER.md, config/). Trivial changes (typos, version bumps, single-line fixes) can skip the loop at the main agent's discretion.
+This applies to all edits under `workspace-acpx_auto_tester_pts/` (scripts, references, SKILL.md, SOUL.md, AGENTS.md, USER.md, config/). Trivial changes (typos, version bumps, single-line fixes) can skip the loop at the main agent's discretion.
 
-A project-local Stop hook ([`.claude/hooks/require-workspace-review.sh`](.claude/hooks/require-workspace-review.sh), registered in [`.claude/settings.json`](.claude/settings.json)) enforces this: when the turn tries to end with uncommitted changes under `workspace-acpx_auto_tester/`, it returns `decision:"block"` and feeds back the review instruction. After the loop completes (or the change is genuinely trivial), clear the block by writing the current diff fingerprint to `.claude/.review-done-sha` — the exact `printf %s '<hash>' > .claude/.review-done-sha` line is included in the hook's reason text.
+A project-local Stop hook ([`.claude/hooks/require-workspace-review.sh`](.claude/hooks/require-workspace-review.sh), registered in [`.claude/settings.json`](.claude/settings.json)) enforces this: when the turn tries to end with uncommitted changes under `workspace-acpx_auto_tester_pts/`, it returns `decision:"block"` and feeds back the review instruction. After the loop completes (or the change is genuinely trivial), clear the block by writing the current diff fingerprint to `.claude/.review-done-sha` — the exact `printf %s '<hash>' > .claude/.review-done-sha` line is included in the hook's reason text.
 
 ## Where to look for full details
 
-- Workspace contracts: `workspace-acpx_auto_tester/SOUL.md` (subagent concurrency policy, no-fallback, GitLab access, host pinning, per-exec env contract, working directory, source of truth).
-- Dispatcher algorithm + spawn payload: `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md` (§Dispatcher Algorithm, §UI Account Allocation Policy, §Source-of-Truth Policy, §Concurrency Policy).
-- The subagent's prompt template: `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md` — the dispatcher renders this and ships it as the spawn payload.
+- Workspace contracts: `workspace-acpx_auto_tester_pts/SOUL.md` (subagent concurrency policy, no-fallback, GitLab access, host pinning, per-exec env contract, working directory, source of truth).
+- Dispatcher algorithm + spawn payload: `workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/SKILL.md` (§Dispatcher Algorithm, §UI Account Allocation Policy, §Source-of-Truth Policy, §Concurrency Policy).
+- The subagent's prompt template: `workspace-acpx_auto_tester_pts/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md` — the dispatcher renders this and ships it as the spawn payload.
 - Trigger schema, state schemas, allowed glab commands (G1–G13), label lifecycle, continue-mode template: that skill's `references/`.
 
 When in doubt about a path / schema / command / transition, READ the matching reference file. Do NOT reconstruct content from memory — these contracts are deliberately exhaustive and the agent's correctness depends on following them literally.

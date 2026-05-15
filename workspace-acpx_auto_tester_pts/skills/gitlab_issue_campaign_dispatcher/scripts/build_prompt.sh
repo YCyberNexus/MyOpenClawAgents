@@ -4,8 +4,8 @@
 #
 # The prompt has up to three input sections (continue mode):
 #   - Issue title + description
-#   - Past attempt summaries  (notes posted by acpx_auto_tester itself, marked
-#                              with <!-- acpx_auto_tester:attempt-summary ... -->;
+#   - Past attempt summaries  (notes posted by acpx_auto_tester_pts itself, marked
+#                              with <!-- acpx_auto_tester_pts:attempt-summary ... -->;
 #                              legacy pre-rename markers are also recognized)
 #   - Reviewer comments       (all OTHER non-system notes, excluding
 #                              agent-posted Wiki artifact notes)
@@ -98,7 +98,7 @@ PAST_ATTEMPTS_BLOCK=""
 REVIEWER_BLOCK=""
 NO_REVIEWER_COMMENTS=true
 PRIOR_ATTEMPT_COUNT=0
-CURRENT_AGENT_MARKER_PREFIX="acpx_auto_tester"
+CURRENT_AGENT_MARKER_PREFIX="acpx_auto_tester_pts"
 LEGACY_AGENT_MARKER_PREFIX="uiauto""tester"
 SUMMARY_MARKER_RE="<!-- (${CURRENT_AGENT_MARKER_PREFIX}|${LEGACY_AGENT_MARKER_PREFIX}):attempt-summary v[0-9]+ "
 AUTO_MARKER_RE="<!-- (${CURRENT_AGENT_MARKER_PREFIX}|${LEGACY_AGENT_MARKER_PREFIX}):attempt-(summary|attachments|wiki-artifacts) v[0-9]+ "
@@ -183,7 +183,7 @@ EOF
 
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
-# Past attempt summaries (auto-posted by acpx_auto_tester)
+# Past attempt summaries (auto-posted by acpx_auto_tester_pts)
 ${PAST_ATTEMPTS_BLOCK:-(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)}
 
 # Reviewer comments (everything else, chronological)

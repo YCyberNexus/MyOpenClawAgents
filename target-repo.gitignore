@@ -1,4 +1,4 @@
-# ─── acpx_auto_tester agent runtime ─────────────────────────────
+# ─── acpx_auto_tester_pts agent runtime ─────────────────────────────
 # All agent runtime files (campaign state, locks, dispatcher logs,
 # per-issue state.json / attempt_state.json / log/ / summary.md) live
 # under the agent runtime root and must NEVER be committed. The default

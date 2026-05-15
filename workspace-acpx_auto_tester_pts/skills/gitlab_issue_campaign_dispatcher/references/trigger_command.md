@@ -153,7 +153,7 @@ The callback payload does NOT need to carry: `branch`, `dev_branch`, `issue_min_
 
 For this workspace's scheduling contract to hold, the runtime MUST:
 
-1. Deliver `RUN_CHILD_COMPLETION_CALLBACK` to the SAME orchestrator session that issued the original `sessions_spawn` (typically `agent:acpx_auto_tester:main`).
+1. Deliver `RUN_CHILD_COMPLETION_CALLBACK` to the SAME orchestrator session that issued the original `sessions_spawn` (typically `agent:acpx_auto_tester_pts:main`).
 2. Deliver the callback exactly once per subagent termination (idempotent retry by `run_id` + `iid` + `attempt_number` is acceptable; the orchestrator drops duplicates as `stale_or_already_drained`).
 3. Carry the subagent's terminal compact JSON in `worker_result_json` verbatim — runtime MUST NOT alter, truncate, or re-serialize the JSON line.
 4. Deliver the callback even if the subagent terminated abnormally (timeout, runtime error, manual cancel). In those cases `worker_status` should be `blocked` or `failed` and `worker_result_json` should be a synthetic minimal compact JSON the runtime constructs (with `iid`, `attempt_number`, `status`, `block_reason`).

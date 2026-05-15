@@ -101,7 +101,7 @@ if [ "${EXISTING_COUNT}" -gt 0 ]; then
       exit 4
     }
   done
-  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by acpx_auto_tester attempt ${ATTEMPT_NUMBER_PADDED} re-run; mode=${ISSUE_MODE})."
+  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by acpx_auto_tester_pts attempt ${ATTEMPT_NUMBER_PADDED} re-run; mode=${ISSUE_MODE})."
   MR_ACTION="rotated"
 fi
 
