@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/require-workspace-review.sh"
+            "command": "test -f .claude/hooks/require-workspace-review.sh && bash .claude/hooks/require-workspace-review.sh"
           }
         ]
       }
