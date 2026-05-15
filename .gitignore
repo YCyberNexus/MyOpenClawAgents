@@ -30,4 +30,7 @@ node_modules/
 
 # Logs
 *.log
-/.claude/
+
+# Claude Code hook sentinels (state, not config)
+.claude/.review-done-sha
+.claude/.review-baseline
