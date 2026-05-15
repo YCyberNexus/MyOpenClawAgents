@@ -31,7 +31,7 @@ This workspace assumes a single GitLab deployment per runner. If you ever need t
 
 Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents.
 
-Per the test team's confirmed behavior, the system under test logs out an account when the same credentials log in twice. Each subagent therefore receives `accounts_per_issue` distinct accounts (one per robot test file, default 10) — sharing an account between concurrent subagents (or between concurrent robot files within a subagent) would let them kick each other out. The pool size acts as the hard upper bound on `max_concurrent_subagents * accounts_per_issue`: a tick whose requested product exceeds the pool aborts with `"ui_account_pool_too_small"`.
+Per the test team's confirmed behavior, the system under test logs out an account when the same credentials log in twice. Each subagent therefore receives `accounts_per_issue` distinct accounts (one per robot test file, default 14) — sharing an account between concurrent subagents (or between concurrent robot files within a subagent) would let them kick each other out. The pool size acts as the hard upper bound on `max_concurrent_subagents * accounts_per_issue`: a tick whose requested product exceeds the pool aborts with `"ui_account_pool_too_small"`.
 
 ### Format
 
