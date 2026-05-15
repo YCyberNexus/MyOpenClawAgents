@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is **not** an application repo — it is the **deployment artifact for an OpenClaw agent** named `acpx_auto_tester`. It contains the agent's prompt contracts (`SOUL.md`, `AGENTS.md`, `USER.md`), one SKILL (`gitlab_issue_campaign_dispatcher`), and the bash scripts that SKILL invokes. There is no build, no test runner, no package manifest. Changes here are deployed by syncing this workspace to the runner.
 
-The agent itself runs on the OpenClaw runner with repo clone parents defaulting to `/data` unless trigger `repo_path` overrides that parent; nothing in this repo executes locally during development. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
+The agent itself runs on the OpenClaw runner with repo clone parents defaulting to `/data` unless trigger `repo_path` overrides that parent; nothing in this repo executes locally during development. **Do NOT attempt to run this agent or `acpx claude` locally on this machine** — the agent and acpx toolchain only work on the server. When editing scripts, sanity-check with `bash -n scripts/foo.sh` (it appears in the allowed permissions and is the only "test" command in use).
 
 ## Single-skill, async-callback execution model
 
