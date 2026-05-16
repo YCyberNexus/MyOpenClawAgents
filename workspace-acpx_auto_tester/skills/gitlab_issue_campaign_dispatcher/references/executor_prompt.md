@@ -4,6 +4,8 @@ The dispatcher extracts the fenced "Rendered Prompt" block below, renders it int
 
 The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
 
+> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–10, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent execute `hulat/agents/*` directly and skip `run_acpx_attempt.sh`, breaking the whole stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
+
 ---
 
 ## Template Variables
@@ -50,7 +52,10 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 
 Everything between the fenced lines below is what the dispatcher writes into `sessions_spawn`. Render placeholders, do not include the surrounding documentation.
 
+The very first line is a **payload sentinel** the dispatcher's Phase 5 step 0 checks via fixed-string grep before each `sessions_spawn` call (see SKILL.md). Keep it verbatim — do not edit, translate, or move it. If the sentinel is missing from the rendered string the orchestrator hands to `sessions_spawn`, that is a strong signal the orchestrator is about to ship the wrong prompt (e.g. `${LOG_DIR}/prompt.txt`), and the spawn MUST be aborted.
+
 ```
+# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1
 You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
 The dispatcher has already prepared everything. Your job: run acpx → commit/push/wiki/MR/labels/summarize → return ONE compact JSON line.
 
