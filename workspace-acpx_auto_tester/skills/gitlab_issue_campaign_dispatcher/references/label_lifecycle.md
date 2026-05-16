@@ -47,7 +47,7 @@ When the scheduled trigger supplies `require_labels`, those labels are also trea
 
 ## Concrete transitions and how to perform them
 
-All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so that unrelated labels on the issue are preserved.
+All transitions use targeted add/remove calls through `scripts/set_issue_label.sh` so that unrelated non-workflow labels on the issue are preserved. The script also enforces workflow-label exclusivity when adding a workflow label: it removes conflicting workflow labels in the same GitLab issue update, leaving only the target label except for the allowed `done` + `pr` and `done` + `blocked` pairs.
 
 | From       | To         | Performer  | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
@@ -67,9 +67,10 @@ All transitions use single-label add/remove (`scripts/set_issue_label.sh`) so th
 2. **Attempt evidence comes first.** Before `create_mr.sh` runs and before the issue can be labeled `done`, `scripts/upload_attempt_artifacts.sh` MUST publish attempt-scoped Wiki pages for `prompt.txt`, `claude_result.txt`, and optional `report.html`, then link them from the issue.
 3. **Dispatcher completion requires `done+pr`.** Because `done` is applied before MR creation, the dispatcher must not treat `done` alone as terminal completion. Reconciliation only considers an issue complete when both labels are present, unless `continue` is also present.
 4. **Never call `glab mr merge`.** The merge request stays open for human review.
-5. **No full-set label overwrite.** Always use add+remove of single labels (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, etc.) the user may have added.
-6. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
-7. **Dispatcher final synchronization.** Phase 6 re-applies the terminal workflow labels from the compact reply as an idempotent safety net: `done` replies must end with `done` + `pr`, `blocked` replies must end with `blocked` and no `doing`, and promoted `failed` replies must end with `failed` and no `blocked` / `doing`.
+5. **No full-set label overwrite.** Always use targeted add/remove operations through `set_issue_label.sh` (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, etc.) the user may have added.
+6. **Workflow-label exclusivity.** Aside from `done` + `pr` and `done` + `blocked`, an issue should carry at most one workflow label at a time. `set_issue_label.sh add <workflow-label>` removes conflicting workflow labels automatically, so a missed explicit `remove blocked` cannot leave `doing` + `blocked` behind.
+7. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
+8. **Dispatcher final synchronization.** Phase 6 re-applies the terminal workflow labels from the compact reply as an idempotent safety net: `done` replies must end with `done` + `pr`, `blocked` replies must end with `blocked` and no `doing`, and promoted `failed` replies must end with `failed` and no `blocked` / `doing`.
 
 ## Issue closure vs `done` label
 
