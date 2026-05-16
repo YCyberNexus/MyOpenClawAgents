@@ -29,7 +29,6 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
   "stuck_after_minutes": 330,
-  "acpx_resume": false,
   "kill_subagent_on_terminal": true,
   "kill_subagent_on_done": true,
   "issue_iids_whitelist": [14, 17, 20],
@@ -91,7 +90,6 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 stuck_after_minutes       = 330
-acpx_resume               = false
 kill_subagent_on_terminal = true
 kill_subagent_on_done     = true
 issue_iids_whitelist      = []
@@ -118,10 +116,9 @@ quota_launched_this_tick  = 0
 | `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
-| `acpx_resume` | bool | Deprecated compatibility flag. Defaults to `false`. Current acpx exposes `claude exec` as one-shot and has no saved-session flag, so `build_prompt.sh` always writes the full self-contained prompt; when this field causes `ACPX_RESUME=true`, the script emits `ACPX_RESUME_IGNORED=true` on stderr. Does NOT force `ISSUE_MODE=continue`. |
 | `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
-| `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target and acpx cwd. Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
+| `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target (the parent checkout; the per-attempt linked worktree at `${WORKTREE_DIR}` is acpx's cwd). Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
 | `result_basename`       | string          | Post-override snapshot of the trigger's `result_basename`. Defaults to `"ifp-result"`. Used by `env_paths.sh` to derive `RESULT_ROOT=${REPO_PATH}/${result_basename}` and forwarded to every script as `RESULT_BASENAME=...`. Tick aborts with `"invalid_result_basename"` when the value contains `/`, `..`, or whitespace. |
 | `data_basename`         | string          | Post-override snapshot of the trigger's `data_basename`. Defaults to `"ifp-data"`. Forwarded as `DATA_BASENAME=...` and rendered into the subagent prompt. Same validation as `result_basename`. |
 
@@ -216,7 +213,6 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "mode_requested": "continue",
   "mode_actual": "continue",
   "mode_downgraded_from": null,
-  "acpx_resume_ignored": false,
   "no_reviewer_comments": false,
   "prior_attempt_count": 1,
   "local_branch": "issue/14-auto-fix-att002",
@@ -237,7 +233,6 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `mode_requested`          | what reconciliation / per-issue state asked for (`fresh` or `continue`)                   |
 | `mode_actual`             | what `prepare_attempt.sh` ended up running (continue can downgrade to fresh)              |
 | `mode_downgraded_from`    | non-null only when `mode_actual=fresh` but `mode_requested=continue` and the remote branch was missing |
-| `acpx_resume_ignored`     | true if `build_prompt.sh` reported `ACPX_RESUME_IGNORED=true`; current acpx has no saved-session flag, so the prompt stayed full and self-contained |
 | `no_reviewer_comments`    | continue mode only — true if `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
 | `prior_attempt_count`     | continue mode only — number of past `acpx_auto_tester:attempt-summary` notes (plus legacy pre-rename attempt-summary notes) the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |
@@ -247,7 +242,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `summary_file`            | `${SUMMARY_FILE}` once `summarize_attempt.sh` has run                                     |
 | `summary_posted_to_issue` | true after the summary was successfully posted as a GitLab issue note                     |
 
-The dispatcher's Phase 4 prep initializes `attempt_started_at`, `mode_*`, `acpx_resume_ignored`, `no_reviewer_comments`, `prior_attempt_count`, `local_branch`, `log_dir`, `status="in_progress"` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `attempt_finished_at` / `commit_sha` / `wiki_artifacts_file` / `attempt_artifacts_posted_to_wiki` / `summary_posted_to_issue` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
+The dispatcher's Phase 4 prep initializes `attempt_started_at`, `mode_*`, `no_reviewer_comments`, `prior_attempt_count`, `local_branch`, `log_dir`, `status="in_progress"` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `attempt_finished_at` / `commit_sha` / `wiki_artifacts_file` / `attempt_artifacts_posted_to_wiki` / `summary_posted_to_issue` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
 
 ---
 
@@ -338,7 +333,7 @@ The dispatcher takes the validated compact reply and writes:
 - `summary_file` ← `${SUMMARY_FILE}` if the file exists locally, else null
 - `summary_posted_to_issue` ← reply.summary_posted
 - `block_reason` ← final block_reason after validation / label-sync errors (empty → null)
-- preserve everything Phase 4 already wrote (`attempt_number`, `mode_*`, `local_branch`, `log_dir`, `attempt_started_at`, `acpx_resume_ignored`, `no_reviewer_comments`, `prior_attempt_count`)
+- preserve everything Phase 4 already wrote (`attempt_number`, `mode_*`, `local_branch`, `log_dir`, `attempt_started_at`, `no_reviewer_comments`, `prior_attempt_count`)
 
 **`${ISSUE_STATE_FILE}`** (overwrite):
 - `status` ← final status after validation / live-label sync / legacy `no_changes` normalization / blocked→failed promotion

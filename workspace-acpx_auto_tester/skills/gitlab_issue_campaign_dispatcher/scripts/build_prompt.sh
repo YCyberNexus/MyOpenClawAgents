@@ -42,7 +42,6 @@
 # Output:
 #   Writes ${LOG_DIR}/prompt.txt and prints its absolute path on stdout.
 #   Reports auditing flags on stderr:
-#     ACPX_RESUME_IGNORED=true|false
 #     CONTINUE_MODE_NO_REVIEWER_COMMENTS=true|false
 #     CONTINUE_MODE_PRIOR_ATTEMPT_COUNT=<int>
 
@@ -135,17 +134,6 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
 fi
 
 # 3. Build the prompt file.
-if [ "${ACPX_RESUME:-false}" = "true" ]; then
-  # Current acpx releases expose `claude exec` as a one-shot command with no
-  # saved-session flag. A short "resume the previous conversation" prompt would
-  # therefore be under-specified, so keep generating the full self-contained
-  # prompt and preserve continuity through issue text, prior summaries, reviewer
-  # notes, and the work branch contents.
-  echo "ACPX_RESUME_IGNORED=true" >&2
-else
-  echo "ACPX_RESUME_IGNORED=false" >&2
-fi
-
 {
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF

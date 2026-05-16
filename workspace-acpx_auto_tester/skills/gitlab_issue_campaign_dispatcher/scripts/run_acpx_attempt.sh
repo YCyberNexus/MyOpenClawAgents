@@ -41,12 +41,12 @@ if [ ! -f "${prompt_file}" ]; then
 fi
 
 {
-  printf 'cwd=%s\n' "${REPO_PATH}"
+  printf 'cwd=%s\n' "${WORKTREE_DIR}"
   printf 'TASK_OUTPUT_DIR=%s\n' "${OUTPUT_DIR}"
   printf 'command=acpx --auth-policy skip claude exec -f %s\n' "${prompt_file}"
 } > "${LOG_DIR}/acpx_command.txt"
 
-cd "${REPO_PATH}"
+cd "${WORKTREE_DIR}"
 
 set +e
 TASK_OUTPUT_DIR="${OUTPUT_DIR}" \

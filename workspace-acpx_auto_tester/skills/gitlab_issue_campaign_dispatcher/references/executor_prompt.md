@@ -31,7 +31,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
-| `{WORKTREE_DIR}`         | per-attempt linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}-att-{ATTEMPT_NUMBER_PADDED}/`; Claude Code's working directory (where it writes spec output). acpx is invoked from `{REPO_PATH}` with the one-shot `-f {LOG_DIR}/prompt.txt` interface, and the prompt tells Claude Code to work in this worktree. |
+| `{WORKTREE_DIR}`         | per-attempt linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}-att-{ATTEMPT_NUMBER_PADDED}/`; this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes spec output here. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the worktree) |
 | `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the worktree; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
@@ -78,7 +78,7 @@ DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
-WORKTREE_DIR={WORKTREE_DIR}                 # per-attempt linked git worktree; Claude Code's working directory; .claude/, hulat/, {DATA_BASENAME}/ are present from the base branch checkout. acpx is invoked from REPO_PATH with the script-owned one-shot -f prompt interface.
+WORKTREE_DIR={WORKTREE_DIR}                 # per-attempt linked git worktree; acpx cwd; .claude/, hulat/, {DATA_BASENAME}/ are present from the base branch checkout. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
@@ -142,7 +142,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 18000 seconds.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
-  - {SCRIPTS_DIR}/run_acpx_attempt.sh invokes acpx from `{REPO_PATH}` with `--auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so cross-attempt continuity must come from the self-contained prompt, prior attempt summaries, reviewer comments, and the work branch contents.
+  - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID run independently — cross-attempt continuity must come from the self-contained prompt, prior attempt summaries, reviewer comments, and the work branch contents.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
   - do not call `acpx` directly; only call {SCRIPTS_DIR}/run_acpx_attempt.sh
