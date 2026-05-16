@@ -8,26 +8,33 @@
 # same credentials log in twice, so two concurrent subagents — and two
 # concurrent robot executions within a subagent — MUST NOT share an
 # account. The pool is therefore divided into per-subagent slots whose
-# size is computed automatically from the pool size and
+# size is computed automatically from the pool size,
 # MAX_CONCURRENT_SUBAGENTS (the configured concurrency cap, NOT the
 # actual batch size — slot sizes stay stable across batches that may
-# pick fewer IIDs than the cap).
+# pick fewer IIDs than the cap), and MAX_ACCOUNTS_PER_ISSUE (the
+# per-IID account cap, default 14).
 #
 # Optional env vars:
 #   MAX_CONCURRENT_SUBAGENTS   integer ≥ 1, ≤ pool_size. Required for
 #                              batch allocation (info-only mode runs
 #                              when omitted: just dumps the pool).
+#   MAX_ACCOUNTS_PER_ISSUE     integer ≥ 1. Defaults to 14. Caps each
+#                              per-IID slot after pool/concurrency
+#                              division.
 #
 # When MAX_CONCURRENT_SUBAGENTS is set:
 #   - The script validates 1 ≤ MAX_CONCURRENT_SUBAGENTS ≤ pool_size.
-#   - It computes per-slot sizes by dividing pool_size by
+#   - It computes raw per-slot sizes by dividing pool_size by
 #     MAX_CONCURRENT_SUBAGENTS. The integer remainder is front-loaded
-#     onto the first slots so every account is reachable. Examples:
+#     onto the first slots. It then caps each slot at
+#     MAX_ACCOUNTS_PER_ISSUE. Examples:
 #       pool=3,  max=2 → SLOT_SIZES=2,1
-#       pool=50, max=4 → SLOT_SIZES=13,13,12,12
-#       pool=14, max=1 → SLOT_SIZES=14
-#   - It prints `POOL_SIZE=<n>` and `SLOT_SIZES=<csv>` to stderr; the
-#     orchestrator captures these to slice stdout into per-IID blocks.
+#       pool=50, max=4, cap=14 → SLOT_SIZES=13,13,12,12
+#       pool=40, max=1, cap=14 → SLOT_SIZES=14
+#       pool=40, max=1, cap=10 → SLOT_SIZES=10
+#   - It prints `POOL_SIZE=<n>` and capped `SLOT_SIZES=<csv>` to
+#     stderr; the orchestrator captures these to slice stdout into
+#     per-IID blocks.
 #   - The csv length equals MAX_CONCURRENT_SUBAGENTS. The k-th IID of
 #     the batch (0-indexed) takes SLOT_SIZES[k] accounts starting at
 #     offset SUM(SLOT_SIZES[0..k-1]) in the stdout pool listing.
@@ -50,6 +57,7 @@
 #   13  MAX_CONCURRENT_SUBAGENTS > pool_size (each in-flight subagent
 #       MUST hold at least one distinct UI account; cannot satisfy)
 #   14  MAX_CONCURRENT_SUBAGENTS is set but not a positive integer
+#   15  MAX_ACCOUNTS_PER_ISSUE is set but not a positive integer
 #
 # On failure: the dispatcher MUST abort the tick (No-Fallback Policy —
 # never improvise an account; never share an account between subagents).
@@ -98,6 +106,11 @@ if [ -n "${MAX_CONCURRENT_SUBAGENTS:-}" ]; then
     echo "load_ui_accounts: MAX_CONCURRENT_SUBAGENTS must be a positive integer, got '${MAX_CONCURRENT_SUBAGENTS}'" >&2
     exit 14
   fi
+  EFFECTIVE_MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS_PER_ISSUE:-14}"
+  if ! [[ "${EFFECTIVE_MAX_ACCOUNTS_PER_ISSUE}" =~ ^[0-9]+$ ]] || [ "${EFFECTIVE_MAX_ACCOUNTS_PER_ISSUE}" -lt 1 ]; then
+    echo "load_ui_accounts: MAX_ACCOUNTS_PER_ISSUE must be a positive integer, got '${EFFECTIVE_MAX_ACCOUNTS_PER_ISSUE}'" >&2
+    exit 15
+  fi
   if [ "${MAX_CONCURRENT_SUBAGENTS}" -gt "${POOL_SIZE}" ]; then
     echo "load_ui_accounts: MAX_CONCURRENT_SUBAGENTS ${MAX_CONCURRENT_SUBAGENTS} > pool size ${POOL_SIZE}; cannot give every concurrent subagent at least one distinct account" >&2
     exit 13
@@ -111,6 +124,9 @@ if [ -n "${MAX_CONCURRENT_SUBAGENTS:-}" ]; then
       SIZE=$((BASE + 1))
     else
       SIZE="${BASE}"
+    fi
+    if [ "${SIZE}" -gt "${EFFECTIVE_MAX_ACCOUNTS_PER_ISSUE}" ]; then
+      SIZE="${EFFECTIVE_MAX_ACCOUNTS_PER_ISSUE}"
     fi
     if [ -z "${SLOT_SIZES}" ]; then
       SLOT_SIZES="${SIZE}"

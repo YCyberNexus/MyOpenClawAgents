@@ -32,7 +32,7 @@ Step-by-step workflow with env-var contract per step: [`references/executor_prom
 
 The agent runs each per-attempt subagent in its own linked git worktree, so cross-IID parallelism is enabled. The hard upper bound on concurrency is the deployment-pinned UI account pool size — the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential.
 
-`max_concurrent_subagents` is a trigger input (see SKILL `references/trigger_command.md`). It defaults to 1 when the trigger omits it. The post-override value MUST satisfy `1 ≤ max_concurrent_subagents ≤ ui_account_pool_size`; values below 1 abort the tick with `"invalid_max_concurrent_subagents: must be >= 1"`, values exceeding the pool abort with `"ui_account_pool_too_small: pool=<size> max_concurrent_subagents=<value>"`. Per-IID account counts are derived automatically from `pool_size / max_concurrent_subagents` with the integer remainder front-loaded onto the first slots — the trigger does NOT carry an `accounts_per_issue` field. See SKILL.md §UI Account Allocation Policy for the exact slot-sizing formula.
+`max_concurrent_subagents` is a trigger input (see SKILL `references/trigger_command.md`). It defaults to 1 when the trigger omits it. The post-override value MUST satisfy `1 ≤ max_concurrent_subagents ≤ ui_account_pool_size`; values below 1 abort the tick with `"invalid_max_concurrent_subagents: must be >= 1"`, values exceeding the pool abort with `"ui_account_pool_too_small: pool=<size> max_concurrent_subagents=<value>"`. `max_accounts_per_issue` is a trigger input that caps the number of UI accounts assigned to one IID/subagent after the pool is divided by concurrency; it defaults to 14 when omitted and must be a positive integer. Per-IID account counts are derived automatically from `pool_size / max_concurrent_subagents` with the integer remainder front-loaded onto the first slots, then capped by `max_accounts_per_issue` — the trigger does NOT carry an `accounts_per_issue` field. See SKILL.md §UI Account Allocation Policy for the exact slot-sizing formula.
 
 Hard invariants:
 
@@ -99,7 +99,7 @@ OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports do NOT survive
 
 The exact minimum env list is layered (see SKILL "Per-Exec Env Contract"):
 
-- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when the trigger uses non-default `repo_path`; some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `MAX_CONCURRENT_SUBAGENTS`).
+- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when the trigger uses non-default `repo_path`; some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `MAX_CONCURRENT_SUBAGENTS` / `MAX_ACCOUNTS_PER_ISSUE`).
 - Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNTS`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 The universal rule: every Bash exec MUST export the minimum vars at the front of the command line. Never rely on exports from a previous Bash tool call. The rendered subagent prompt repeats these env vars at every step so the subagent gets it right by following the prompt verbatim.

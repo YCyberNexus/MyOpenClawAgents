@@ -29,8 +29,9 @@
 # allocated by the dispatcher from the deployment-pinned pool. Each subagent
 # receives the slot it was assigned by load_ui_accounts.sh — slot size
 # = floor(pool_size / max_concurrent_subagents) with the integer remainder
-# front-loaded onto the first slots, so the count varies across IIDs in the
-# same batch when the pool does not divide evenly. They are
+# front-loaded onto the first slots, then capped by max_accounts_per_issue
+# (default 14), so the count varies across IIDs in the same batch when the
+# pool does not divide evenly or the cap binds. They are
 # injected into the prompt's "# Working environment" section with an explicit
 # override note: any account named in the issue body MUST be replaced by one
 # of these values when Claude Code logs in. Different concurrent subagents
@@ -60,7 +61,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 # UI accounts are allocated by the dispatcher per-batch from the pool pinned
 # at <workspace>/config/ui_accounts.env. Each subagent receives its assigned
 # slot (count derived automatically from pool_size / max_concurrent_subagents
-# with the integer remainder front-loaded). The dispatcher
+# with the integer remainder front-loaded, then capped by
+# max_accounts_per_issue). The dispatcher
 # ensures distinct accounts across concurrent batch members AND across
 # concurrent robot executions within a subagent — see SKILL.md
 # §UI Account Allocation Policy. If UI_ACCOUNTS is missing or invalid,
