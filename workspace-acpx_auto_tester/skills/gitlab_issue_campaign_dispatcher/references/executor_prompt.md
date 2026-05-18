@@ -40,6 +40,8 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
 | `{RESULT_BASENAME}`      | optional trigger field `result_basename`; defaults to `ifp-result` (basename of agent runtime root) |
 | `{DATA_BASENAME}`        | optional trigger field `data_basename`; defaults to `ifp-data` (basename of test-team knowledge dir) |
+| `{ACPX_TIMEOUT_SECONDS}` | optional trigger field `acpx_timeout_seconds`; defaults to `18000`. Subagent Step 1 bash command timeout for `run_acpx_attempt.sh`. |
+| `{ACPX_TIMEOUT_MINUTES}` | `floor({ACPX_TIMEOUT_SECONDS} / 60)`; used in the constraints block's hard wall-clock soft cap. Always derived from `{ACPX_TIMEOUT_SECONDS}` so the two stay in lockstep. |
 `{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
 
 `{GITLAB_TOKEN}` is sensitive. The rendered prompt is the only place it appears in subagent context; do not log or echo it.
@@ -85,6 +87,7 @@ ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
 RESULT_BASENAME={RESULT_BASENAME}           # basename of agent runtime root in the repo (default: ifp-result)
 DATA_BASENAME={DATA_BASENAME}               # basename of test-team knowledge dir in the repo (default: ifp-data)
+ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} # bash command timeout for Step 1 run_acpx_attempt.sh (also drives the {ACPX_TIMEOUT_MINUTES} soft cap)
 </config>
 
 <issue>
@@ -139,7 +142,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
 
   Tool-exec requirements for Step 1:
   - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
-  - Use a command timeout that covers the whole expected Claude Code run; the deployment default is 18000 seconds.
+  - Use a command timeout that covers the whole expected Claude Code run; the deployment value is {ACPX_TIMEOUT_SECONDS} seconds (configurable via the `acpx_timeout_seconds` trigger field — see [`trigger_command.md`](./trigger_command.md)). Pass exactly this value as the Bash tool's command timeout when invoking `run_acpx_attempt.sh`.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
   - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID run independently — cross-attempt continuity must come from the self-contained prompt, prior attempt summaries, reviewer comments, and the work branch contents.
@@ -284,7 +287,7 @@ Step 10 — REPLY
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
 - Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
-- Hard timeout: 300 minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded 300-minute soft cap".
+- Hard timeout: {ACPX_TIMEOUT_MINUTES} minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded {ACPX_TIMEOUT_MINUTES}-minute soft cap".
 - Never paste full diffs, full claude_result.txt, or long issue bodies into chat.
 </constraints>
 
@@ -313,5 +316,5 @@ Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → f
 - `{ISSUE_BODY}` is for the `<issue>` block only. Truncate to ≤ 4 KB. The full body is already on disk at `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* to acpx.
 - The dispatcher MUST verify all placeholders have been substituted before calling `sessions_spawn`. A literal `{` followed by an uppercase identifier in the rendered string is a missed substitution; abort the IID with `block_reason="prompt template render incomplete: <placeholder>"`.
 - The dispatcher passes the rendered string as the entire spawn payload. There are no additional env-var injections at the OpenClaw layer — the subagent reads everything from this prompt.
-- **`sessions_spawn` shape (anonymous + `label=` cosmetic + `timeoutSeconds=30` + `runTimeoutSeconds=18000` + `cleanup="keep"` + serial-only + 3-attempt launch retry) is the contract in [`SKILL.md`](../SKILL.md) §Concurrency Policy.** Do NOT pass `name=` / `session_name=` / `mode="session"` (triggers `thread_required` on some channels). DO pass `label="#<iid>-att-<NNN>"` for the UI LABEL column — it is a separate cosmetic field. Validate the launch ack carries both `runId` and `childSessionKey` before recording into `pending_subagents[iid]`; if launch validation fails, retry the identical spawn payload up to 3 total attempts with 2-second fixed backoff before synthesizing a blocked reply. Matched callbacks identify the IID by the `iid` field of the compact JSON, NOT by the runtime session-key label. The rendered prompt's `iid` field MUST therefore be correct.
+- **`sessions_spawn` shape (anonymous + `label=` cosmetic + `timeoutSeconds=30` + `runTimeoutSeconds=<run_timeout_seconds>` default 18000 + `cleanup="keep"` + serial-only + 3-attempt launch retry) is the contract in [`SKILL.md`](../SKILL.md) §Concurrency Policy.** Do NOT pass `name=` / `session_name=` / `mode="session"` (triggers `thread_required` on some channels). DO pass `label="#<iid>-att-<NNN>"` for the UI LABEL column — it is a separate cosmetic field. Validate the launch ack carries both `runId` and `childSessionKey` before recording into `pending_subagents[iid]`; if launch validation fails, retry the identical spawn payload up to 3 total attempts with 2-second fixed backoff before synthesizing a blocked reply. Matched callbacks identify the IID by the `iid` field of the compact JSON, NOT by the runtime session-key label. The rendered prompt's `iid` field MUST therefore be correct.
 - **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via `RUN_CHILD_COMPLETION_CALLBACK`, not the synchronous return of `sessions_spawn`. The subagent just emits the compact JSON line on its last turn (Step 10) and stops; the runtime forwards it inside `worker_result_json`. Phase 6 reads that reply and owns all terminal state-file writes per [`state_schema.md`](state_schema.md) §Compact Subagent Reply + §Phase 6 Write Mapping.

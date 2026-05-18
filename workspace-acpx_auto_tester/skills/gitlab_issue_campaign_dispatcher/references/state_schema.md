@@ -30,6 +30,8 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "max_concurrent_subagents": 1,
   "max_accounts_per_issue": 14,
   "stuck_after_minutes": 330,
+  "run_timeout_seconds": 18000,
+  "acpx_timeout_seconds": 18000,
   "kill_subagent_on_terminal": true,
   "kill_subagent_on_done": true,
   "issue_iids_whitelist": [14, 17, 20],
@@ -92,6 +94,8 @@ next_new_issue_iid        = issue_min_iid
 max_concurrent_subagents  = 1
 max_accounts_per_issue    = 14
 stuck_after_minutes       = 330
+run_timeout_seconds       = 18000
+acpx_timeout_seconds      = 18000
 kill_subagent_on_terminal = true
 kill_subagent_on_done     = true
 issue_iids_whitelist      = []
@@ -120,6 +124,8 @@ quota_launched_this_tick  = 0
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
 | `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
+| `run_timeout_seconds`   | int             | Post-override snapshot of the trigger's `run_timeout_seconds`. Defaults to `18000` (5 hours). Must be integer ≥ 60 and `≥ acpx_timeout_seconds`. Read by Phase 5 when constructing `sessions_spawn(..., runTimeoutSeconds=<value>, ...)`. Callback path does not re-read the trigger override; the persisted value from the most recent scheduled wake-up is authoritative for any callback-path readers (post-mortem inspection, future tooling). Not directly compared against `spawned_at` at eviction time — that comparison uses `stuck_after_minutes`, which the operator is responsible for keeping consistent with this value (see `trigger_command.md` §`stuck_after_minutes` rule of thumb). |
+| `acpx_timeout_seconds`  | int             | Post-override snapshot of the trigger's `acpx_timeout_seconds`. Defaults to `18000`. Must be integer ≥ 60 and `≤ run_timeout_seconds`. Rendered into the executor prompt in Phase 4 step 7 as `{ACPX_TIMEOUT_SECONDS}` and `{ACPX_TIMEOUT_MINUTES} = floor(value / 60)`. Persisted for audit; callback path reads it for diagnostic purposes only. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
 | `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target (the parent checkout; the per-attempt linked worktree at `${WORKTREE_DIR}` is acpx's cwd). Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
 | `result_basename`       | string          | Post-override snapshot of the trigger's `result_basename`. Defaults to `"ifp-result"`. Used by `env_paths.sh` to derive `RESULT_ROOT=${REPO_PATH}/${result_basename}` and forwarded to every script as `RESULT_BASENAME=...`. Tick aborts with `"invalid_result_basename"` when the value contains `/`, `..`, or whitespace. |
@@ -135,6 +141,8 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `max_accounts_per_issue`** — default to `14` and persist.
 - **Stale `accounts_per_issue` field** — silently dropped on the next persist. The field is no longer part of the schema; per-IID account counts are derived automatically from the pool size, `max_concurrent_subagents`, and `max_accounts_per_issue` (see SKILL.md §UI Account Allocation Policy).
 - **Missing `stuck_after_minutes`** — default to `330` and persist.
+- **Missing `run_timeout_seconds`** — default to `18000` and persist. Older deployments did not carry this field; loading it from a legacy file is harmless because Phase 5 reads the post-override value, not the trigger directly.
+- **Missing `acpx_timeout_seconds`** — default to `18000` and persist. Same legacy-tolerance rule as `run_timeout_seconds`. If the persisted `acpx_timeout_seconds` somehow exceeds the persisted `run_timeout_seconds` (only possible across a hand-edited file), the loader does NOT auto-correct; Phase 1's post-override validation aborts the tick with `"run_timeout_seconds_below_acpx_timeout_seconds"` so the operator notices.
 - **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` outcomes; blocked/failed cleanup is additionally gated on local evidence existence.
 - **Missing `kill_subagent_on_done`** — default to the same value as `kill_subagent_on_terminal` and persist only for backward-readable audit. New logic should not use it except for the compatibility rule above.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
