@@ -50,6 +50,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "result_basename": "ifp-result",
   "data_basename": "ifp-data",
   "next_new_issue_iid": 4,
+  "tick_seq": 27,
   "active_issue_iids": [14],
   "active_issue_sessions": ["issue-px_ifp_hulat-14"],
   "pending_subagents": {
@@ -62,6 +63,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
       "spawned_at": "2026-05-06T10:00:12Z"
     }
   },
+  "blocked_at_tick_by_iid": {},
   "unfinished_iids": [9, 10, 14, 15],
   "completed_iids": [1, 2, 3],
   "blocked_iids": [],
@@ -101,6 +103,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 
 ```text
 next_new_issue_iid        = issue_min_iid
+tick_seq                  = 0
 max_concurrent_subagents  = 1
 max_accounts_per_issue    = 14
 stuck_after_minutes       = 330
@@ -117,6 +120,7 @@ repo_path                 = "/data"
 active_issue_iids         = []
 active_issue_sessions     = []
 pending_subagents         = {}
+blocked_at_tick_by_iid    = {}
 unfinished_iids           = []
 completed_iids            = []
 blocked_iids              = []
@@ -130,6 +134,8 @@ quota_launched_this_tick  = 0
 | Field                   | Type            | Notes                                                                 |
 | ----------------------- | --------------- | --------------------------------------------------------------------- |
 | `max_accounts_per_issue` | int             | Post-override snapshot of the trigger's per-IID UI account cap. Defaults to `14`. Must be a positive integer. Used only when forming the next scheduled batch; callback processing reads the persisted value for audit but does not recalculate allocations. |
+| `tick_seq`               | int             | Monotonic scheduled-wake counter. `dispatch_prepare_tick.sh` increments it once after acquiring the dispatcher lock and uses it with `blocked_at_tick_by_iid` to enforce `blocked_cooldown_ticks`. Callback wake-ups do not increment it. |
+| `blocked_at_tick_by_iid` | object          | Map from stringified IID to the `tick_seq` at which the IID most recently entered `blocked`. Removed when the IID becomes `done` or `failed`. Missing legacy entries are treated as immediately retryable so old state is not stranded. |
 | `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
@@ -149,13 +155,15 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `pending_subagents`** — treat as `{}` in memory; persist on next write.
 - **Missing `max_concurrent_subagents`** — default to `1` and persist.
 - **Missing `max_accounts_per_issue`** — default to `14` and persist.
-- **Stale `accounts_per_issue` field** — silently dropped on the next persist. The field is no longer part of the schema; per-IID account counts are derived automatically from the pool size, `max_concurrent_subagents`, and `max_accounts_per_issue` (see SKILL.md §UI Account Allocation Policy).
+- **Stale `accounts_per_issue` field** — silently dropped on the next persist. The field is no longer part of the schema; per-IID account counts are derived automatically from the pool size, `max_concurrent_subagents`, and `max_accounts_per_issue`.
 - **Missing `stuck_after_minutes`** — default to `330` and persist.
 - **Missing `run_timeout_seconds`** — default to `18000` and persist. Older deployments did not carry this field; loading it from a legacy file is harmless because Phase 5 reads the post-override value, not the trigger directly.
 - **Missing `acpx_timeout_seconds`** — default to `18000` and persist. Same legacy-tolerance rule as `run_timeout_seconds`. If the persisted `acpx_timeout_seconds` somehow exceeds the persisted `run_timeout_seconds` (only possible across a hand-edited file), the loader does NOT auto-correct; Phase 1's post-override validation aborts the tick with `"run_timeout_seconds_below_acpx_timeout_seconds"` so the operator notices.
 - **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` outcomes; blocked/failed cleanup is additionally gated on local evidence existence.
 - **Missing `kill_subagent_on_done`** — default to the same value as `kill_subagent_on_terminal` and persist only for backward-readable audit. New logic should not use it except for the compatibility rule above.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
+- **Missing `tick_seq`** — default to `0`; the next scheduled wake-up increments and persists it.
+- **Missing `blocked_at_tick_by_iid`** — default to `{}`. A blocked IID with no map entry is considered cooldown-eligible on the next batch decision.
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
 - **Missing `issue_iids_whitelist` / `require_labels` / `require_labels_match`** — default to `[]` / `[]` / `"or"` and persist on next write. These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
 - **Missing `repo_path`** — default to `"/data"` in memory and persist on next write. This is a bootstrap path snapshot only; if the operator configured a non-default clone parent, the trigger/callback still has to provide it so the dispatcher can locate this state file before loading it.
@@ -340,7 +348,7 @@ The validation pipeline is the same in both paths:
 6. If `status=blocked` AND `retry_count > blocked_retry_limit` (after incrementing), promote to `status=failed`, add to `failed_iids`, and run failed-label sync. For Phase 5 launch-side synthesized blocked replies only, do not increment `retry_count` and do not promote to `failed` on this tick.
 7. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
 8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
-9. **Best-effort terminal cleanup.** If `kill_subagent_on_terminal=true` and a `child_session_key` was captured before drain, Phase 6 may call `subagents kill` for terminal `done` / `blocked` / `failed`. For `blocked` / `failed`, cleanup first verifies local evidence exists under `${LOG_DIR}` / `${ISSUE_ROOT}`; missing evidence yields `cleanup_status="skipped: local_evidence_missing"` and preserves the runtime transcript.
+9. **Best-effort terminal cleanup.** If `kill_subagent_on_terminal=true` and a `child_session_key` was captured before drain, Phase 6 may request `subagents kill` for terminal `done` / `blocked` / `failed` by returning `cleanup.action="kill"`. For `blocked` / `failed`, cleanup first verifies local evidence exists under `${LOG_DIR}` / `${ISSUE_ROOT}`; missing evidence yields `cleanup.action="skip", cleanup.reason="local_evidence_missing"` and preserves the runtime transcript.
 
 ### Phase 6 Write Mapping
 

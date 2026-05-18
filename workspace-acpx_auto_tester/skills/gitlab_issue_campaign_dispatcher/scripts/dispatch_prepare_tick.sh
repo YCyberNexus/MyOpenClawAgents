@@ -177,6 +177,32 @@ source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_dispatch_lib.sh"
 
+# If the trigger omitted basenames and the persisted state lives under a
+# non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
+# Discover the existing runtime root under REPO_PATH before falling back to
+# a fresh default tree.
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
+   && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
+  shopt -s nullglob
+  for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
+    CANDIDATE_PROJECT="$(jq -r '.project // empty' "${candidate_state}" 2>/dev/null || true)"
+    [ "${CANDIDATE_PROJECT}" = "${PROJECT}" ] || continue
+    candidate_result_root="$(dirname "$(dirname "${candidate_state}")")"
+    candidate_result_basename="$(basename "${candidate_result_root}")"
+    if [ -z "${T[result_basename]:-}" ]; then
+      PERSISTED_RB="$(jq -r --arg fallback "${candidate_result_basename}" '.result_basename // $fallback' "${candidate_state}")"
+      [ -n "${PERSISTED_RB}" ] && export RESULT_BASENAME="${PERSISTED_RB}"
+    fi
+    if [ -z "${T[data_basename]:-}" ]; then
+      PERSISTED_DB="$(jq -r '.data_basename // empty' "${candidate_state}")"
+      [ -n "${PERSISTED_DB}" ] && export DATA_BASENAME="${PERSISTED_DB}"
+    fi
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/env_paths.sh"
+    break
+  done
+fi
+
 # Carry-forward for basenames: if trigger omitted them but a persisted
 # campaign_state.json exists with non-default values, re-source env_paths
 # with those values so all derived paths match the persisted layout.
@@ -205,6 +231,7 @@ if ! flock -n 9; then
 fi
 
 wrapper_log prepare_tick "tick started project=${PROJECT}"
+TICK_START_TS="$(date -u +%s)"
 
 # ─── 6. Load state + apply trigger override ──────────────────────
 STATE_JSON="$(load_state)"
@@ -236,6 +263,8 @@ case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurre
 [ "${MAX_CONCURRENT}" -ge 1 ] || emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1"
 case "${MAX_ACCOUNTS}" in *[!0-9]*|"") emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;; esac
 [ "${MAX_ACCOUNTS}" -ge 1 ] || emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1"
+case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
+[ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
 case "${RUN_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_run_timeout_seconds: must be >= 60" ;; esac
 [ "${RUN_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_run_timeout_seconds: must be >= 60"
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
@@ -330,6 +359,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     issue_iids_whitelist: $issue_iids_whitelist,
     require_labels: $require_labels,
     require_labels_match: $require_labels_match,
+    tick_seq: ((.tick_seq // 0) + 1),
+    blocked_at_tick_by_iid: (.blocked_at_tick_by_iid // {}),
     quota_launched_this_tick: 0,
     quota_completed_this_tick: 0
   }
@@ -347,6 +378,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
   | del(.active_issue_session)
   | if has("pending_subagents") | not then .pending_subagents = {} else . end
   | if .pending_subagents == null then .pending_subagents = {} else . end
+  | if has("blocked_at_tick_by_iid") | not then .blocked_at_tick_by_iid = {} else . end
+  | if .blocked_at_tick_by_iid == null then .blocked_at_tick_by_iid = {} else . end
   ')"
 
 # Drop active_issue_iids entries with no matching pending entry (legacy stale).
@@ -574,6 +607,13 @@ if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]
 fi
 
 # ─── 15. Batch formation ──────────────────────────────────────────
+ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
+if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
+  jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
+    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+  exit 0
+fi
+
 # Batch picking jq filter — keeps the priority order from SKILL.md:
 #   1. lowest-IID non-blocked unfinished backlog
 #   2. lowest-IID fresh from next_new_issue_iid upward
@@ -586,7 +626,6 @@ QUOTA_LEFT=$(( HOURLY_QUOTA - QUOTA_LAUNCHED ))
 BATCH_CAP="${MAX_CONCURRENT}"
 [ "${QUOTA_LEFT}" -lt "${BATCH_CAP}" ] && BATCH_CAP="${QUOTA_LEFT}"
 
-BLOCKED_RETRY_LIMIT="$(printf '%s' "${STATE_JSON}" | jq -r '.blocked_retry_limit')"
 NEXT_NEW="$(printf '%s' "${STATE_JSON}" | jq -r '.next_new_issue_iid // .issue_min_iid')"
 
 # eligibility candidates per category
@@ -594,8 +633,7 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson ev "${EVIDENCE_JSON}" \
   --argjson universe "${EFF_UNIVERSE_JSON}" \
   --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
-  --argjson next_new "${NEXT_NEW}" \
-  --argjson rate_limit "${BLOCKED_RETRY_LIMIT}" '
+  --argjson next_new "${NEXT_NEW}" '
   . as $s
   | ($ev | map({iid:.iid, e:.})) as $evmap
   | ($evmap | map({(.iid|tostring): .e}) | add // {}) as $byiid
@@ -606,8 +644,18 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
         and ($e.is_closed_on_gitlab // false) != true
         and (($e.has_done_pr // false) != true or ($e.needs_continue // false) == true)
       ))) as $eligible
-  | ($eligible | map(select(($s.blocked_iids // []) | index(.) | not)) | sort) as $non_blocked
-  | ($eligible | map(select(($s.blocked_iids // []) | index(.))) | sort) as $blocked_retryable_raw
+  | ($eligible | map(select(. as $i |
+      (($s.blocked_iids // []) | index($i) | not)
+      and (($s.unfinished_iids // []) | index($i))
+    )) | sort) as $backlog
+  | ($eligible | map(select(. as $i |
+      (($s.blocked_iids // []) | index($i) | not)
+      and (($s.unfinished_iids // []) | index($i) | not)
+      and (($s.completed_iids // []) | index($i) | not)
+      and (($s.failed_iids // []) | index($i) | not)
+      and ($i >= $next_new)
+    )) | sort) as $fresh
+  | ($eligible | map(select(. as $i | ($s.blocked_iids // []) | index($i))) | sort) as $blocked_retryable_raw
   | # blocked_iids invariant: only retryable entries are in this list.
     # Phase 6 promotes blocked → failed (and moves the IID into failed_iids)
     # whenever retry_count > blocked_retry_limit. Launch-side synthesized
@@ -616,21 +664,28 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     # increment retry_count, but they also do not violate the invariant —
     # they just defer one extra tick before another launch attempt. Per-
     # issue retry_count lives in issues/issue-<iid>/state.json and is
-    # consulted only inside phase6_process; here we trust the invariant
-    # rather than re-loading per-issue state for every batch decision.
-    $blocked_retryable_raw as $blocked_retryable
-  | ($non_blocked | sort) as $backlog
-  | {backlog: $backlog, blocked_retryable: $blocked_retryable}')"
+    # consulted only inside phase6_process; blocked_cooldown_ticks is tracked
+    # at campaign level with tick_seq so blocked entries can sit out N
+    # scheduled wake-ups before retrying.
+    ($blocked_retryable_raw | map(select(. as $i |
+      (($s.blocked_cooldown_ticks // 0) <= 0)
+      or (($s.blocked_at_tick_by_iid[($i|tostring)] // null) == null)
+      or ((($s.tick_seq // 0) - ($s.blocked_at_tick_by_iid[($i|tostring)] | tonumber)) >= ($s.blocked_cooldown_ticks // 0))
+    ))) as $blocked_retryable
+  | {backlog: $backlog, fresh: $fresh, blocked_retryable: $blocked_retryable}')"
 
 BACKLOG_JSON="$(printf '%s' "${BATCH_CANDIDATES_JSON}" | jq -c '.backlog')"
+FRESH_JSON="$(printf '%s' "${BATCH_CANDIDATES_JSON}" | jq -c '.fresh')"
 BLOCKED_JSON="$(printf '%s' "${BATCH_CANDIDATES_JSON}" | jq -c '.blocked_retryable')"
 
-# Pick batch: backlog first, then blocked, up to BATCH_CAP.
+# Pick batch: unfinished backlog first, then fresh, then cooled-down blocked,
+# up to BATCH_CAP.
 BATCH_JSON="$(jq -nc \
   --argjson backlog "${BACKLOG_JSON}" \
+  --argjson fresh "${FRESH_JSON}" \
   --argjson blocked "${BLOCKED_JSON}" \
   --argjson cap "${BATCH_CAP}" '
-  ($backlog + $blocked) | unique_by(.) | .[0:$cap]')"
+  ($backlog + $fresh + $blocked) | unique_by(.) | .[0:$cap]')"
 
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
@@ -638,6 +693,16 @@ if [ "${BATCH_SIZE}" = "0" ]; then
     '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
+
+# Move the fresh-issue cursor past any fresh IID selected for this batch. The
+# backlog/blocked paths do not affect it.
+STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+  --argjson batch "${BATCH_JSON}" \
+  --argjson fresh "${FRESH_JSON}" '
+  ($batch - ($batch - $fresh)) as $fresh_batch
+  | if ($fresh_batch | length) > 0 then
+      .next_new_issue_iid = ([.next_new_issue_iid // .issue_min_iid, (($fresh_batch | max) + 1)] | max)
+    else . end')"
 
 # ─── 16. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
@@ -924,6 +989,9 @@ for iid in "${BATCH_IIDS[@]}"; do
   ACPX_MIN=$(( ACPX_TIMEOUT / 60 ))
   WORK_BRANCH_X="issue/${iid}-auto-fix"
 
+  RENDER_ERR="$(mktemp)"
+  CLEANUP_FILES+=("${RENDER_ERR}")
+  set +e
   rendered="$(TPL_PROJECT="${PROJECT}" \
               TPL_GROUP="${GROUP}" \
               TPL_GITLAB_HOST="${GITLAB_HOST}" \
@@ -952,14 +1020,14 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_DATA_BASENAME="${DATA_BASENAME}" \
               TPL_ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT}" \
               TPL_ACPX_TIMEOUT_MINUTES="${ACPX_MIN}" \
-              python3 - "${template}" <<'PYEOF'
+              python3 - "${template}" 2>"${RENDER_ERR}" <<'PYEOF'
 import os, re, sys
 text = sys.argv[1]
 for k, v in os.environ.items():
     if k.startswith("TPL_"):
         placeholder = "{" + k[4:] + "}"
-        text = text.replace(placeholder, v)
-m = re.search(r'\{[A-Z_][A-Z0-9_]*\}', text)
+        text = re.sub(r'(?<!\$)' + re.escape(placeholder), lambda _m: v, text)
+m = re.search(r'(?<!\$)\{[A-Z_][A-Z0-9_]*\}', text)
 if m:
     sys.stderr.write("UNSUBSTITUTED_PLACEHOLDER=" + m.group(0) + "\n")
     sys.exit(1)
@@ -967,8 +1035,9 @@ sys.stdout.write(text)
 PYEOF
 )"
   RENDER_RC=$?
+  set -e
   if [ "${RENDER_RC}" -ne 0 ] || [ -z "${rendered}" ]; then
-    miss="$(printf '%s' "${rendered}" | grep -oE '\{[A-Z_][A-Z0-9_]*\}' | head -n 1 || true)"
+    miss="$(sed -n 's/^UNSUBSTITUTED_PLACEHOLDER=//p' "${RENDER_ERR}" | head -n 1)"
     prep_blocked "prompt template render incomplete: ${miss:-unknown}"
     continue
   fi

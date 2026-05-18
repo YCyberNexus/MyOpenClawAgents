@@ -14,7 +14,9 @@ wake-up, then performs only the genuinely LLM-only actions
 
 All three:
 
-- Source `env_paths.sh` + `_dispatch_lib.sh` at the top.
+- Source `env_paths.sh` + `_dispatch_lib.sh` at the top. `dispatch_prepare_tick.sh`
+  may re-source `env_paths.sh` after discovering persisted non-default
+  `result_basename` / `data_basename` roots.
 - Acquire the dispatcher flock (`${LOCK_FILE}`) non-blocking. On miss
   they emit a single-line JSON envelope and exit 0 — the runtime is
   expected to retry the trigger.
@@ -90,9 +92,10 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     `status:"tick_failed"`.
 15. Apply `require_labels` / `require_labels_match` filter on the
     evidence file. Compute `label_filtered_in` / `label_filtered_out`.
-16. **Batch formation.** Priority order per SKILL.md §Phase 4 step 2:
-    non-blocked backlog (lowest IID first) then blocked retryable
-    (lowest IID first, only after backlog exhausted). Cap by
+16. **Batch formation.** Priority order:
+    non-blocked unfinished backlog (lowest IID first), then fresh IIDs
+    at or above `next_new_issue_iid`, then blocked IIDs whose
+    `blocked_cooldown_ticks` has elapsed. Cap by
     `min(max_concurrent_subagents, hourly_issue_quota - quota_launched_this_tick)`.
 17. For each IID in the batch (sequential):
     1. `allocate_attempt.sh` → attempt number.
@@ -124,6 +127,9 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
        `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1`. Mismatch → `prep_blocked`
        with the verbatim `block_reason` from SKILL.md §Phase 5 step 0.
     10. Write the rendered payload to `${LOG_DIR}/spawn_payload.txt`.
+        The renderer replaces only dispatcher placeholders like
+        `{WORKTREE_DIR}` and intentionally leaves shell literals like
+        `${WORKTREE_DIR}` / `${TASK_OUTPUT_DIR}` untouched.
         Add an entry to `dispatch_entries[]`.
 21. Emit the final envelope.
 
@@ -175,13 +181,15 @@ Called: once per IID per scheduled wake-up, immediately after each
 - `STATUS=spawned`: replaces the pre-spawn placeholder with the launch
   ack values (`run_id`, `child_session_key`, `spawned_at` = now), drops
   `placeholder:true`, bumps `quota_launched_this_tick`, sets
-  `campaign_status = "waiting_for_callbacks"`, persists.
+  `campaign_status = "waiting_for_callbacks"`, persists, then truncates
+  `${LOG_DIR}/spawn_payload.txt` to scrub the GitLab token.
 - `STATUS=launch_failed`: synthesizes a blocked Phase 6 reply with
   `block_reason="sessions_spawn failed after ${LAUNCH_ATTEMPTS} attempts (2s backoff): ${LAUNCH_ERROR}"`,
   runs `phase6_process` with `is_launch_synth=true` (so retry_count is
   NOT incremented — launch-side failures get their cross-tick
   reschedule for free via `blocked_iids`), drains the pending entry,
-  classifies, persists. Returns the cleanup decision (almost always
+  classifies, persists, and also truncates `${LOG_DIR}/spawn_payload.txt`
+  because no runtime owns the prompt after launch exhaustion. Returns the cleanup decision (almost always
   `skip: no_child_session_key` because the failed launch never produced
   one).
 

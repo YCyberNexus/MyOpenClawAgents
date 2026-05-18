@@ -77,6 +77,17 @@ if [ "${PENDING_ATTEMPT}" != "${ATTEMPT_NUMBER}" ]; then
   exit 2
 fi
 
+scrub_spawn_payload() {
+  local attempt_padded payload_file
+  attempt_padded="$(printf '%03d' "${ATTEMPT_NUMBER}")"
+  payload_file="${WORKTREES_ROOT}/issue-${IID}-att-${attempt_padded}/${RESULT_BASENAME}/issue-${IID}/log/attempt-${attempt_padded}/spawn_payload.txt"
+  if [ -f "${payload_file}" ]; then
+    : >"${payload_file}" 2>/dev/null \
+      && wrapper_log record_spawn "scrubbed spawn payload iid=${IID}" \
+      || wrapper_log record_spawn "warn: could not scrub spawn payload at ${payload_file}"
+  fi
+}
+
 case "${STATUS}" in
   spawned)
     : "${RUN_ID:?dispatch_record_spawn.sh: RUN_ID required for STATUS=spawned}"
@@ -98,16 +109,9 @@ case "${STATUS}" in
     persist_state "${NEW_STATE}"
     REMAINING="$(printf '%s' "${NEW_STATE}" | jq -r '.pending_subagents | keys | length')"
 
-    # Scrub the rendered spawn payload now that the runtime has it in
-    # memory. The file holds the GitLab token in cleartext until then.
-    # Best-effort: failure is logged but does not fail the writeback.
-    ATTEMPT_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
-    PAYLOAD_FILE="${WORKTREES_ROOT}/issue-${IID}-att-${ATTEMPT_PADDED}/${RESULT_BASENAME}/issue-${IID}/log/attempt-${ATTEMPT_PADDED}/spawn_payload.txt"
-    if [ -f "${PAYLOAD_FILE}" ]; then
-      : >"${PAYLOAD_FILE}" 2>/dev/null \
-        && wrapper_log record_spawn "scrubbed spawn payload iid=${IID} (subagent runtime has it)" \
-        || wrapper_log record_spawn "warn: could not scrub spawn payload at ${PAYLOAD_FILE}"
-    fi
+    # The file holds the GitLab token in cleartext until the launch outcome is
+    # recorded. Best-effort: failure is logged but does not fail writeback.
+    scrub_spawn_payload
 
     wrapper_log record_spawn "spawned iid=${IID} attempt=${ATTEMPT_NUMBER} run_id=${RUN_ID}"
     jq -nc \
@@ -123,6 +127,7 @@ case "${STATUS}" in
     : "${LAUNCH_ATTEMPTS:=3}"
     BLOCK_REASON="sessions_spawn failed after ${LAUNCH_ATTEMPTS} attempts (2s backoff): ${LAUNCH_ERROR}"
     REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${ATTEMPT_NUMBER}" "${BLOCK_REASON}")"
+    scrub_spawn_payload
 
     # Run Phase 6 with is_launch_synth=true so retry_count is NOT incremented.
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"

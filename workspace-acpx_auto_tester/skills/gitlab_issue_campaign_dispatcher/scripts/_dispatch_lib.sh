@@ -95,9 +95,11 @@ fresh_init_state() {
       result_basename: $result_basename,
       data_basename: $data_basename,
       next_new_issue_iid: null,
+      tick_seq: 0,
       active_issue_iids: [],
       active_issue_sessions: [],
       pending_subagents: {},
+      blocked_at_tick_by_iid: {},
       unfinished_iids: [],
       completed_iids: [],
       blocked_iids: [],
@@ -379,17 +381,20 @@ phase6_apply_state_classify() {
     | .active_issue_sessions    = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))
     | (if $final_status == "done" then
          .completed_iids    = (((.completed_iids // []) + [$iid]) | unique)
+         | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
          | .blocked_iids    = ((.blocked_iids    // []) | map(select(. != $iid)))
          | .failed_iids     = ((.failed_iids     // []) | map(select(. != $iid)))
          | .quota_completed_this_tick = (((.quota_completed_this_tick // 0)) + 1)
        elif $final_status == "blocked" then
          .blocked_iids      = (((.blocked_iids   // []) + [$iid]) | unique)
+         | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) + {($iid|tostring): (.tick_seq // 0)})
          | .unfinished_iids = (((.unfinished_iids // []) + [$iid]) | unique)
          | .completed_iids  = ((.completed_iids // []) | map(select(. != $iid)))
          | .failed_iids     = ((.failed_iids    // []) | map(select(. != $iid)))
        else
          .failed_iids       = (((.failed_iids    // []) + [$iid]) | unique)
+         | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
          | .blocked_iids    = ((.blocked_iids    // []) | map(select(. != $iid)))
          | .completed_iids  = ((.completed_iids  // []) | map(select(. != $iid)))

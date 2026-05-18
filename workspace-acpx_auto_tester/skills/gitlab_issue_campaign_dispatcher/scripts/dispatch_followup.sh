@@ -87,10 +87,21 @@ else
   REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_ATTEMPT}")"
 fi
 
+# IID cross-check. phase6_normalize_reply preserves a parseable reply's iid, so
+# reject a callback whose envelope IID and compact-reply IID disagree before any
+# state mutation can drain or write the wrong issue.
+REPLY_IID="$(printf '%s' "${REPLY_JSON}" | jq -r '.iid')"
+if [ "${REPLY_IID}" != "${IID}" ]; then
+  jq -nc --argjson iid "${IID}" --arg reply_iid "${REPLY_IID}" \
+    '{callback_status:"stale_or_already_drained", iid:$iid, reply_iid:$reply_iid,
+      chat_summary:("stale callback: reply iid=" + $reply_iid + " does not match callback iid #" + ($iid|tostring))}'
+  exit 0
+fi
+
 # Attempt-number cross-check (Phase 6 validation rule 2).
 REPLY_ATTEMPT="$(printf '%s' "${REPLY_JSON}" | jq -r '.attempt_number')"
 if [ "${REPLY_ATTEMPT}" != "${PENDING_ATTEMPT}" ]; then
-  jq -nc --argjson iid "${IID}" --argjson att "${REPLY_ATTEMPT}" \
+  jq -nc --argjson iid "${IID}" --arg att "${REPLY_ATTEMPT}" \
     '{callback_status:"stale_or_already_drained", iid:$iid, attempt_number:$att,
       chat_summary:("stale callback: reply attempt=" + ($att|tostring) + " does not match pending attempt for #" + ($iid|tostring))}'
   exit 0

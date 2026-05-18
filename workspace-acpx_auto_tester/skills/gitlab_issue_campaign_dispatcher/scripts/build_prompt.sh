@@ -64,8 +64,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 # with the integer remainder front-loaded, then capped by
 # max_accounts_per_issue). The dispatcher
 # ensures distinct accounts across concurrent batch members AND across
-# concurrent robot executions within a subagent — see SKILL.md
-# §UI Account Allocation Policy. If UI_ACCOUNTS is missing or invalid,
+# concurrent robot executions within a subagent. If UI_ACCOUNTS is missing or invalid,
 # this script exits non-zero and the dispatcher marks the IID `blocked`.
 if [ -z "${UI_ACCOUNTS:-}" ]; then
   echo "build_prompt: UI_ACCOUNTS is required (dispatcher must pass a JSON array of {\"u\":\"<user>\",\"p\":\"<pass>\"} objects)" >&2
