@@ -21,7 +21,7 @@ glab auth status --hostname "${GITLAB_HOST}"
 
 ## Flag compatibility
 
-Every flag used in G1–G13 has been verified to exist on the runner's installed `glab`. Before adding a new flag — here, in `scripts/*.sh`, or in `references/executor_prompt.md` — run `glab <subcommand> --help` on the runner and confirm the flag is listed. The runner may lag mainstream releases: e.g. `--description-file` on `glab mr create` is documented upstream but missing on some runner installs, so G7 uses `--description "$(cat <file>)"` instead. Workspace-wide policy lives in [`SOUL.md`](../../../SOUL.md) §GitLab Access.
+Every flag used in G1–G13 (plus G1b) has been verified to exist on the runner's installed `glab`. Before adding a new flag — here, in `scripts/*.sh`, or in `references/executor_prompt.md` — run `glab <subcommand> --help` on the runner and confirm the flag is listed. The runner may lag mainstream releases: e.g. `--description-file` on `glab mr create` is documented upstream but missing on some runner installs, so G7 uses `--description "$(cat <file>)"` instead. Workspace-wide policy lives in [`SOUL.md`](../../../SOUL.md) §GitLab Access.
 
 ## Commands
 
@@ -67,9 +67,11 @@ glab api --method POST \
   -f "name=${LABEL_NAME}" -f "color=#808080"
 ```
 
-### G4 — Add a single label (dispatcher prep + subagent)
+### G4 — Add a target label (dispatcher prep + subagent)
 
 Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing` and to re-apply final callback labels (`done` + `pr`, `blocked`, or `failed`). The subagent also uses it for immediate `done` / `pr` / `blocked` updates during the post-acpx flow.
+
+For workflow labels, the wrapper also passes `remove_labels=<conflicting workflow labels>` in the same issue update, preserving unrelated non-workflow labels while enforcing the allowed workflow states (`done` + `pr`, `done` + `blocked`, or one workflow label).
 
 ```bash
 glab api --method PUT \
@@ -124,7 +126,7 @@ glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.w
 
 ### G9 — Post a note (comment) on the issue (subagent)
 
-Used by `scripts/summarize_attempt.sh` to post the per-attempt summary back to the issue so the next continue-mode run can read it. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before `done` labeling and MR creation.
+Used by `scripts/summarize_attempt.sh` to post successful `done` attempt summaries back to the issue so the next continue-mode run can read them. Failure summaries are written locally only when `SUMMARY_POST_TO_ISSUE=false`. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before `done` labeling and MR creation.
 
 ```bash
 glab api --method POST \

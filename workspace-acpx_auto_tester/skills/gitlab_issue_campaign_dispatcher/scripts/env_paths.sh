@@ -19,22 +19,35 @@
 #
 # Disk layout produced by this file (with default basenames):
 #
-#   ${REPO_PATH}/                        ← /data/${PROJECT}, the cloned repo
+#   ${REPO_PATH}/                        ← /data/${PROJECT}, parent checkout (shared
+#                                          object DB; only `git fetch` mutates it)
 #       .claude/                         (in master+dev, test-team owned)
 #       hulat/                           (in master+dev, test-team owned)
 #       ${DATA_BASENAME}/                (in master+dev, test-team owned; default ifp-data)
-#       ${RESULT_BASENAME}/              (agent state/logs + committed per-issue output; default ifp-result)
+#       ${RESULT_BASENAME}/              (agent state/logs + per-issue subtrees; default ifp-result)
 #           _dispatcher/                 ← campaign-level state + logs + locks
 #               campaign_state.json
 #               campaign.lock
 #               log/reconcile-<ts>.json
 #               locks/repo.lock
-#           issue-<iid>/                 ← per-issue subtree
-#               state.json
-#               attempt_state.json
-#               hulat-spec-issue<iid>/   ← Claude Code output (committed to MR)
-#               log/attempt-NNN/
-#               summary.md
+#           issues/                      ← parent of per-issue persistent subtrees
+#               issue-<iid>/             ← per-issue subtree (lives OUTSIDE worktree
+#                                          so state/summary survive worktree teardown)
+#                   state.json
+#                   attempt_state.json
+#                   summary.md
+#           .worktrees/                  ← per-attempt linked git worktrees
+#               issue-<iid>-att-<NNN>/   ← WORKTREE_DIR; acpx cwd; created by
+#                                          `git worktree add -B` in prepare_attempt.sh
+#                   .claude/ hulat/ ${DATA_BASENAME}/    (from base branch checkout)
+#                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
+#                                                        ← OUTPUT_DIR (force-added)
+#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
+#                                                        ← LOG_DIR (inside worktree;
+#                                                          prompt.txt + claude_result.txt
+#                                                          force-added by stage_and_guard.sh,
+#                                                          other files stay locally ignored
+#                                                          via .git/info/exclude)
 #
 # Path derivation is layered:
 #
@@ -43,12 +56,12 @@
 #                                            RESULT_BASENAME, DATA_BASENAME)
 #       → REPO_PATH, HULAT_DIR, DATA_DIR, RESULT_ROOT, WORK_ROOT,
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
-#         ISSUES_ROOT, LOCK_FILE
+#         ISSUES_ROOT, LOCK_FILE, WORKTREES_ROOT
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
 #         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
-#         ISSUE_LOG_ROOT, LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
+#         LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
 #         LOCAL_ATTEMPT_BRANCH
 #
 # Why a single layered file: a single env_paths.sh keeps the dispatcher's
@@ -182,8 +195,14 @@ export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
 export LOG_ROOT="${WORK_ROOT}/log"
 export DISPATCHER_LOG_DIR="${LOG_ROOT}"
-export ISSUES_ROOT="${RESULT_ROOT}"
+export ISSUES_ROOT="${RESULT_ROOT}/issues"
 export LOCK_FILE="${STATE_DIR}/campaign.lock"
+
+# Per-attempt git worktrees live under a single root inside the agent
+# runtime tree (already covered by `.git/info/exclude`). Always exported
+# so housekeeper / cleanup scripts can find them even when ISSUE_IID is
+# unset.
+export WORKTREES_ROOT="${RESULT_ROOT}/.worktrees"
 
 # Only mkdir inside the repo if the repo has actually been cloned. Before
 # the first clone `${REPO_PATH}` does not exist; clone_or_pull.sh creates
@@ -194,7 +213,8 @@ if [ -d "${REPO_PATH}/.git" ]; then
     "${STATE_DIR}" \
     "${LOG_ROOT}" \
     "${DISPATCHER_LOG_DIR}" \
-    "${ISSUES_ROOT}"
+    "${ISSUES_ROOT}" \
+    "${WORKTREES_ROOT}"
 fi
 
 issue_state_file_for() {
@@ -211,6 +231,16 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
   export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
+  # One-time migration: older deployments placed per-issue subtrees directly
+  # under ${RESULT_ROOT} (e.g. ifp-result/issue-14/) before the issues/
+  # nesting was introduced. Move any legacy per-issue directory into the new
+  # ${ISSUES_ROOT} parent so existing state files are not lost.
+  LEGACY_ISSUE_ROOT="${RESULT_ROOT}/issue-${ISSUE_IID}"
+  if [ ! -d "${ISSUE_ROOT}" ] && [ -d "${LEGACY_ISSUE_ROOT}" ]; then
+    mkdir -p "${ISSUES_ROOT}"
+    mv "${LEGACY_ISSUE_ROOT}" "${ISSUE_ROOT}"
+  fi
+
   # Same guard as above: only create the per-issue subtree once the repo
   # exists. Phase 4 always runs after Phase 3's clone_or_pull, so the repo
   # is guaranteed present by the time any per-issue script sources this.
@@ -221,20 +251,34 @@ if [ -n "${ISSUE_IID:-}" ]; then
   ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
   export ATTEMPT_NUMBER_PADDED
 
-  # ATTEMPT_DIR is a compatibility alias for ISSUE_ROOT — there is no
-  # per-attempt subtree. Claude runs at the repo root, while this issue's
-  # committed output is force-added from OUTPUT_DIR under ${RESULT_BASENAME}/.
+  # Each attempt runs inside its own linked git worktree at WORKTREE_DIR.
+  # The parent checkout at ${REPO_PATH} is only used as the shared object
+  # database / `git fetch` target and is NEVER mutated by an attempt, so
+  # multiple attempts can run concurrently without colliding on a single
+  # working tree. ATTEMPT_DIR remains a compatibility alias for
+  # ISSUE_ROOT (the per-issue persistent subtree). Cross-attempt state
+  # (state.json, attempt_state.json, summary.md) lives in ISSUE_ROOT so
+  # it survives worktree teardown by a housekeeper. LOG_DIR now lives
+  # INSIDE the worktree (under ${RESULT_BASENAME}/issue-<iid>/log/) so
+  # `prompt.txt` and `claude_result.txt` can be force-added into the MR;
+  # the rest of the log files stay locally ignored via the repository
+  # `.git/info/exclude` entry for `/${RESULT_BASENAME}/` and disappear
+  # when the worktree is removed.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
-  export WORKTREE_DIR="${REPO_PATH}"
-  export OUTPUT_DIR="${ISSUE_ROOT}/hulat-spec-issue${ISSUE_IID}"
-  export ISSUE_LOG_ROOT="${ATTEMPT_DIR}/log"
-  export LOG_DIR="${ISSUE_LOG_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}"
+  export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}"
+  export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
+  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
+  # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR
+  # are created inside prepare_attempt.sh after `git worktree add`
+  # succeeds — creating WORKTREE_DIR ahead of time would make
+  # `git worktree add` refuse the path, and LOG_DIR is nested inside the
+  # worktree.
   if [ -d "${REPO_PATH}/.git" ]; then
-    mkdir -p "${ATTEMPT_DIR}" "${OUTPUT_DIR}" "${ISSUE_LOG_ROOT}" "${LOG_DIR}"
+    mkdir -p "${ATTEMPT_DIR}"
   fi
 fi
 

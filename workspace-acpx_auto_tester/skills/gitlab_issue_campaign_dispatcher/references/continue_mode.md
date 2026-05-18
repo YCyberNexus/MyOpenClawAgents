@@ -6,7 +6,7 @@ This page documents how human reviewers and the agent cooperate when an issue's 
 
 When you find an issue whose MR was created but the work is incomplete or wrong, the agent will not detect this on its own. Do these three things, in this order:
 
-1. **Read the latest auto-posted attempt summary on the issue.** The agent posts a short comment after every attempt with the marker `<!-- acpx_auto_tester:attempt-summary v2 ... -->`. This tells you the attempt status, commit SHA when available, MR URL when available, changed-file count / preview, and the runner evidence path for full logs and diffs. For successful push-ready attempts, the agent also posts `<!-- acpx_auto_tester:attempt-wiki-artifacts v1 ... -->` before MR creation with links to the Wiki pages for prompt/result logs and optional report. Continue mode also recognizes legacy pre-rename markers from earlier runs.
+1. **Read the latest auto-posted attempt summary on the issue.** The agent posts a short marked comment for successful `done` attempts with `<!-- acpx_auto_tester:attempt-summary v2 ... -->`; failure summaries stay local under `${ISSUE_ROOT}/summary.md`. Posted summaries tell you the attempt status, commit SHA when available, MR URL when available, changed-file count / preview, and the runner evidence path for full logs and diffs. For successful push-ready attempts, the agent also posts `<!-- acpx_auto_tester:attempt-wiki-artifacts v1 ... -->` before MR creation with links to the Wiki pages for prompt/result logs and optional report. Continue mode also recognizes legacy pre-rename markers from earlier runs.
 2. **Leave a comment on the issue describing what to do on the next run.** The comment is freeform — write whatever the next Claude Code run needs. Include file paths, env requirements, acceptance criteria, or "do not do X" cautions.
 3. **Flip the issue's label from `done` / `pr` to `continue`.** The agent triggers continue mode on the `continue` label. It also tolerates the legacy misspelling `contiune`, but new human action should use `continue`.
 
@@ -16,19 +16,19 @@ The next dispatcher tick will pick the issue up and re-run.
 
 In continue mode:
 
-1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to switch the main repo checkout `${WORKTREE_DIR}` (`/data/${PROJECT}`) based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place. Logs are written under `log/attempt-NNN/` and preserved; prior attempt summaries remain available as GitLab issue notes.
-2. **Dispatcher prep:** Reads the issue (`E1` in `glab_commands.md`) for title, description, current labels.
-3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`E1b`) and **partitions them in two buckets**:
-   - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These were posted by the agent itself after previous attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path.
+1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to create a fresh per-attempt linked git worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}/` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place under `${ISSUE_ROOT}` (outside the worktree, so they survive worktree teardown). Per-attempt logs are written at `${WORKTREE_DIR}/${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/` INSIDE the worktree; `prompt.txt` and `claude_result.txt` are force-added by `stage_and_guard.sh` and therefore preserved on `${WORK_BRANCH}`, so a later continue-mode attempt sees prior attempts' `log/attempt-001/`, `log/attempt-002/`, ... in its fresh worktree. The remaining log files (`acpx_raw.log`, `git_status.txt`, `git_diff.patch`, `wiki_*`, `mr_description.md`) stay locally ignored and disappear when housekeeping removes the worktree. Prior attempt summaries also remain available as GitLab issue notes.
+2. **Dispatcher prep:** Reads the issue (`G1` in `glab_commands.md`) for title, description, current labels.
+3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`G1b`) and **partitions them in two buckets**:
+   - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These are posted by the agent for successful prior attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path. Failure summaries are local-only and are not injected into continue-mode prompts unless a human copies relevant guidance into a reviewer comment.
    - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- acpx_auto_tester:attempt-wiki-artifacts ... -->`) and legacy pre-rename Wiki artifact notes. This is where humans write supplemental instructions.
 4. **Dispatcher prep:** `build_prompt.sh` writes the Claude Code prompt at `${LOG_DIR}/prompt.txt` with both buckets, in chronological order, in distinct sections (see template below).
-5. **Subagent:** Runs Claude Code via the same one-shot invocation used in fresh mode: `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` from `${WORKTREE_DIR}`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the prompt's "Past attempt summaries" section, not from a persistent Claude session.
-6. **Subagent:** After the attempt finishes (terminal status, any of done / blocked / failed; legacy no_changes is normalized to blocked), `scripts/summarize_attempt.sh` posts a new summary comment to the issue, marked with `<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`. This becomes input for the next continue-mode run, if any.
-7. **Subagent — MR rotation.** Continue mode does NOT reuse the previous attempt's merge request. Instead, `scripts/create_mr.sh`:
-   - looks up all open MRs currently pointing at `${WORK_BRANCH}` (E6)
-   - closes them without merging (E10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
+5. **Subagent:** Runs Claude Code via the same script-owned one-shot invocation used in all modes: `scripts/run_acpx_attempt.sh` `cd`s into `${WORKTREE_DIR}` (the per-attempt worktree) and runs `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the checked-out `origin/${WORK_BRANCH}` contents plus the prompt's "Past attempt summaries" and "Reviewer comments" sections.
+6. **Subagent:** After the attempt finishes (terminal status, any of done / blocked / failed; legacy no_changes is normalized to blocked), `scripts/summarize_attempt.sh` always writes `${SUMMARY_FILE}` locally. Successful `done` attempts also post that summary as a marked GitLab issue comment (`<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`) for future continue-mode context. Failure paths keep evidence local only and do not publish Wiki evidence.
+7. **Subagent — MR rotation.** Continue mode does NOT reuse the previous attempt's merge request — and neither does fresh mode any more. Both modes now share the same rotation policy in `scripts/create_mr.sh`:
+   - looks up all open MRs currently pointing at `${WORK_BRANCH}` (G6)
+   - closes them without merging (G10) — the integration branch is untouched, the closed MRs remain in GitLab as historical record
    - creates a fresh MR for the new attempt with description that begins `Closes #<iid>` and includes `Supersedes !<old_mr_iid>` references so reviewers can trace the chain
-   This means each continue cycle produces a distinct MR in GitLab. Reviewers see one MR per attempt. Only the latest MR is open; older ones are closed but still visible.
+   Every attempt — fresh or continue — therefore produces a distinct MR in GitLab. Reviewers see one MR per attempt. Only the latest MR is open; older ones are closed but still visible.
 
 ## Prompt template (continue mode)
 
@@ -39,10 +39,10 @@ This is a CONTINUE-MODE re-run of GitLab issue #<iid>.
 
 A prior run on this issue produced a merge request and was marked `done` + `pr`,
 but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside the main repo checkout at <repo-root>, branched from
-`origin/<work-branch>` (the work-in-progress branch from the prior run).
-Read what's already there, then continue or correct it according to the
-past-attempt summaries and reviewer guidance below.
+You are running inside a per-attempt git worktree at <worktree-dir>, branched
+from `origin/<work-branch>` (the work-in-progress branch from the prior
+run). Read what's already there, then continue or correct it according
+to the past-attempt summaries and reviewer guidance below.
 
 # Issue
 Title: <issue title>
@@ -63,13 +63,12 @@ Description:
 ...
 
 # Working environment
-- Repository cwd:             <repo-root>
-- Output directory:           <repo-root>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
-- Hulat materials:            <repo-root>/hulat   (committed in <branch>/<dev-branch>, available in checkout)
-- Claude runtime config:      <repo-root>/.claude (committed in <branch>/<dev-branch>, available in checkout)
-- Knowledge base:             <repo-root>/<DATA_BASENAME> (committed in <branch>/<dev-branch>, available in checkout)
-- Agent runtime workspace:    <repo-root>/<RESULT_BASENAME> (touch ONLY the output directory above)
-- Working branch (local):     attempt-local branch in this repo, will be force-pushed to origin/<work-branch>
+- Repository cwd:             <worktree-dir> (per-attempt linked git worktree)
+- Output directory:           <worktree-dir>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
+- Hulat materials:            <worktree-dir>/hulat   (committed in <branch>/<dev-branch>, available in this worktree)
+- Claude runtime config:      <worktree-dir>/.claude (committed in <branch>/<dev-branch>, available in this worktree)
+- Knowledge base:             <worktree-dir>/<DATA_BASENAME> (committed in <branch>/<dev-branch>, available in this worktree)
+- Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/<work-branch>
 - Integration branch:         <branch>
 
 `<RESULT_BASENAME>` and `<DATA_BASENAME>` default to `ifp-result` / `ifp-data` and are overridden per-project by the `result_basename` / `data_basename` trigger fields (see `trigger_command.md`); `build_prompt.sh` substitutes the live values when rendering this template.
@@ -77,9 +76,9 @@ Description:
 # Rules
 - Work only on this issue.
 - Place spec / report / artifact output under the output directory only.
-- Modify content under <repo-root> only. Do NOT write outside the repo.
+- Modify content under <worktree-dir> only. Do NOT write outside this worktree.
 - Treat `hulat/`, `.claude/`, and `<DATA_BASENAME>/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- `<RESULT_BASENAME>/_dispatcher/` and other issues' subtrees are dispatcher runtime state — no script blocks edits, but the dispatcher writes them concurrently, so touching them risks corrupting the campaign. Keep changes under your output directory unless a fix genuinely requires more.
+- The dispatcher's runtime state and other issues' subtrees live in the parent checkout's `<RESULT_BASENAME>/` and are NOT visible from inside this worktree — keep changes under your output directory unless a fix genuinely requires modifying the test team's shared content above.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```
@@ -88,7 +87,7 @@ In fresh mode the prompt looks similar but omits the "Past attempt summaries" an
 
 ## What if there are no reviewer comments?
 
-If continue mode is requested but `E1b` returns zero non-system notes that are not auto-summaries, the reviewer flipped the label without leaving guidance. In that case the dispatcher's `build_prompt.sh`:
+If continue mode is requested but `G1b` returns zero non-system notes that are not auto-summaries, the reviewer flipped the label without leaving guidance. In that case the dispatcher's `build_prompt.sh`:
 
 - Builds the prompt with the reviewer-comments section saying `(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)`.
 - Continues normally; the dispatcher records `no_reviewer_comments=true` in the current-attempt state for operator awareness.

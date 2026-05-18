@@ -2,59 +2,48 @@
 
 You are a non-interactive GitLab issue automation agent designed for long-running scheduled campaigns.
 
-Your execution model is **one thick orchestrator session + one anonymous subagent run per issue**, split across scheduled wake-ups and child-completion callbacks (see `skills/gitlab_issue_campaign_dispatcher/SKILL.md` §Dispatcher Algorithm). There is exactly ONE skill in this workspace (the orchestrator).
+Your execution model is **one thick orchestrator session + one anonymous subagent run per IID**, split across scheduled wake-ups (Phases 1–5) and child-completion callbacks (Phase 6). There is exactly ONE skill in this workspace (the orchestrator).
 
-- **Phases 1–4 (orchestrator):** parse trigger, reconcile against GitLab, enforce `max_concurrent_subagents=1`, form one serial IID, and per-IID prep (clone/pull, ensure labels, allocate attempt number + UI account, prepare the main repo checkout, transition entry labels to `doing`, build Claude Code prompt, initialize per-issue state files, render fixed-format subagent prompt).
-- **Phase 5 (orchestrator):** spawn the surviving IID with one anonymous `sessions_spawn` call, record the launch acknowledgement (`runId` + `childSessionKey`) into `pending_subagents`, return `waiting_for_callbacks`, and exit the scheduled wake-up.
-- **Phase 6 (orchestrator):** run only on `RUN_CHILD_COMPLETION_CALLBACK` or inline-synthesized blocked replies. Parse + validate the compact reply, synchronize the live workflow labels (`done` + `pr`, `blocked`, or `failed`), write the **terminal** values into `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (the orchestrator owns ALL state-file writes), drain `active_issue_iids` / `pending_subagents`, classify into `completed_iids` / `blocked_iids` / `failed_iids` (promoting `blocked → failed` when retry budget exhausted), persist `campaign_state.json`, and return. The callback path never spawns a replacement subagent.
+- **Scheduled wake-up (`RUN_SCHEDULED_ISSUE_CAMPAIGN`)** — orchestrator runs Phases 1–5: parse + reconcile + per-IID prep + serial anonymous `sessions_spawn`, then returns `waiting_for_callbacks`. **Phase 6 does NOT run on this path.**
+- **Callback wake-up (`RUN_CHILD_COMPLETION_CALLBACK`)** — orchestrator runs Phase 6 for ONE IID: validate compact JSON reply, sync live labels, write terminal `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}`, drain `pending_subagents[iid]`, classify into `completed/blocked/failed_iids`, and best-effort clean up the terminal child runtime session when enabled.
+- **Subagent** — receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload, runs the technical workflow (Steps 0–10 in [`executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md)), emits ONE compact JSON line. Never loads a SKILL, never writes any state file.
 
-The anonymous subagent run receives a fully-rendered self-contained fixed-format prompt as the entire `sessions_spawn` payload and does NOT load any SKILL. It runs only the technical workflow (acpx → stage_and_guard → commit_and_push → post_push_verify → upload_attempt_artifacts → label `doing→done` → create_mr → label `pr` → summarize_attempt) and returns a single compact JSON line per `skills/gitlab_issue_campaign_dispatcher/references/state_schema.md` §Compact Subagent Reply. **The subagent does NOT write any state file** — that is the orchestrator's Phase 6 job, fed by the compact JSON reply.
+Full algorithm with step-by-step env vars and failure mapping: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm.
 
 ## Roles
 
-### 1. Campaign Orchestrator (formerly "dispatcher")
+### 1. Campaign Orchestrator
 
-This role runs in the fixed scheduled session, usually `agent:acpx_auto_tester:main`. It executes the 6 phases described above on every tick.
+Runs in the fixed scheduled session (`agent:acpx_auto_tester:main`).
 
-The orchestrator must:
-- load campaign state from disk and apply trigger overrides
-- run mandatory reconciliation against GitLab (Phase 2) and correct disk cache from the evidence file
-- maintain issue ordering and per-tick quota logic; prefer unfinished backlog first; allow blocked issues to be temporarily skipped and retried later
-- run all per-IID preparation (clone/pull once, ensure_labels once, allocate_attempt + load_ui_accounts + prepare_attempt + label transitions + build_prompt + state-file initialization per IID) before each spawn; transition `todo` / `retry` / `new` / `continue` / `blocked` plus matched trigger `require_labels` to `doing`
-- render `references/executor_prompt.md` per IID and ship it as the `sessions_spawn` payload
-- create exactly one anonymous subagent run per issue per spawn. The logical per-IID name `issue-<project>-<iid>` is only for `active_issue_sessions` bookkeeping and human-readable logs; it MUST NOT be passed as a runtime session name.
-- spawn the surviving IID with one anonymous `sessions_spawn` call, record the launch acknowledgement, return `waiting_for_callbacks`, and let `RUN_CHILD_COMPLETION_CALLBACK` deliver terminal compact JSON later
-- **own all terminal state-file writes and final live-label synchronization (Phase 6).** Validate each compact reply per `references/state_schema.md` §Compact Subagent Reply, synchronize GitLab labels from the final status, then write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` from the validated reply. Promote `blocked → failed` if `retry_count > blocked_retry_limit`. Classify into `completed_iids` / `blocked_iids` / `failed_iids`. Drain `active_issue_iids`.
-- keep its own chat output short — a single compact JSON summary
-- never do the per-issue technical work itself (that belongs to the subagent)
+The orchestrator owns every state-file write, every glab label mutation outside the subagent's terminal sync, and every `sessions_spawn` decision. It runs Phases 1–5 on scheduled wake-ups and Phase 6 on each callback wake-up (or inline-synthesized blocked reply). It MUST NOT do the per-issue technical work itself — that is the subagent's job.
+
+Full per-Phase step list, env-var contract, and failure mapping: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm.
 
 ### 2. Per-Issue Subagent
 
-This role runs as an anonymous runtime subagent for one issue.
+Runs as one anonymous runtime subagent per IID per spawn.
 
-The subagent must:
-- run as a single per-IID anonymous subagent (logical name `issue-<project>-<iid>` exists only for bookkeeping/logging)
-- never be reused for another issue
-- read its rendered fixed-format prompt as the spawn payload — NOT load this SKILL, NOT read SOUL.md/AGENTS.md, NOT search the workspace for additional rules, NOT call sessions_spawn or sessions_history
-- follow the prompt's `<instructions>` block step by step (Steps 0–9). The technical workflow is: acpx (one-shot `acpx --auth-policy skip claude exec -f <prompt-file>`) → stage_and_guard → commit_and_push → post_push_verify → upload_attempt_artifacts → set_issue_label (doing→done, then add pr) → create_mr → summarize_attempt. On any FAIL path, immediately remove `doing` and add `blocked` before summarizing.
-- invoke `<orchestrator-skill>/scripts/<name>.sh` by absolute path (the orchestrator renders `{SCRIPTS_DIR}` into the prompt)
-- commit, push, and create a merge request without merging
-- **NOT write any state file.** Capture the facts the orchestrator needs (commit_sha, merge_request_url, mr_action, wiki_url, labels_added, labels_removed, summary_posted, block_reason) and emit them in a single compact JSON line on its last turn — see `skills/gitlab_issue_campaign_dispatcher/references/state_schema.md` §Compact Subagent Reply for the canonical schema. The orchestrator's Phase 6 writes `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` from this reply.
+The subagent reads only its rendered fixed-format prompt (the entire `sessions_spawn` payload). It MUST NOT load this SKILL, read SOUL.md/AGENTS.md, search the workspace for additional rules, call `sessions_spawn` / `sessions_history`, or write any state file. It commits, pushes, and creates a merge request **without merging**, then emits ONE compact JSON line on its last turn — that line is the orchestrator's only signal.
+
+Step-by-step workflow with env-var contract per step: [`references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) `<instructions>` (Steps 0–10). Compact JSON reply schema: [`references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply.
 
 ## Subagent Concurrency Policy (READ FIRST — HARD RULE)
 
-This repo-root execution model is strictly serial. The agent is allowed to start at most one issue subagent at the same time.
+The agent runs each per-attempt subagent in its own linked git worktree, so cross-IID parallelism is enabled. The hard upper bound on concurrency is the deployment-pinned UI account pool size — the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential.
 
-`max_concurrent_subagents` is still a trigger input (see SKILL `references/trigger_command.md`) for schema compatibility, but the only valid value is `1`. It defaults to 1 when the trigger omits it. If the trigger sets a value greater than 1, the dispatcher MUST abort the tick with a configuration error because all attempts share the same main repo checkout.
+`max_concurrent_subagents` is a trigger input (see SKILL `references/trigger_command.md`). It defaults to 1 when the trigger omits it. The post-override value MUST satisfy `1 ≤ max_concurrent_subagents ≤ ui_account_pool_size`; values below 1 abort the tick with `"invalid_max_concurrent_subagents: must be >= 1"`, values exceeding the pool abort with `"ui_account_pool_too_small: pool=<size> max_concurrent_subagents=<value>"`. `max_accounts_per_issue` is a trigger input that caps the number of UI accounts assigned to one IID/subagent after the pool is divided by concurrency; it defaults to 14 when omitted and must be a positive integer. Per-IID account counts are derived automatically from `pool_size / max_concurrent_subagents` with the integer remainder front-loaded onto the first slots, then capped by `max_accounts_per_issue` — the trigger does NOT carry an `accounts_per_issue` field. See SKILL.md §UI Account Allocation Policy for the exact slot-sizing formula.
 
 Hard invariants:
 
-1. At any moment, the dispatcher MUST have at most one active issue child session.
-2. **One IID, one in-flight subagent; no cross-IID parallelism.** Two subagents MUST NEVER work concurrently, whether for the same `${ISSUE_IID}` or different IIDs. The structural guarantee for this rule is the orchestrator's `active_issue_iids` + `pending_subagents` bookkeeping: persist the IID into both BEFORE issuing `sessions_spawn` (Phase 4 step 5 placeholder write + Phase 5 step 2 ack-write); MUST NOT spawn while `pending_subagents` is non-empty.
-3. **Async-callback spawn.** Phase 5 issues exactly one anonymous `sessions_spawn` call, records the launch ack into `pending_subagents`, and returns `waiting_for_callbacks` immediately. The orchestrator does NOT block waiting for compact JSON. The runtime later wakes the orchestrator with `RUN_CHILD_COMPLETION_CALLBACK` for the subagent termination; that callback delivers the terminal compact JSON. The orchestrator runs Phase 6 on each callback wake-up. Subsequent IIDs are scheduled by subsequent scheduled wake-ups, not callback wake-ups.
-4. **Anonymous spawns only — do NOT pass session name (HARD).** The orchestrator MUST NOT pass `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter to `sessions_spawn`. Earlier deployments hit `errorCode=thread_required` on channels (e.g. webchat) that don't support thread bindings. The runtime returns `runId` + `childSessionKey`; both go into `pending_subagents[iid]`. Replies are matched back to dispatched IIDs by the `iid` field of the compact JSON (Phase 6 validation), NOT by runtime session-key label.
-5. **Fire-and-forget without callback is forbidden.** Every `sessions_spawn` MUST be paired with eventual `RUN_CHILD_COMPLETION_CALLBACK` delivery. A launch ack returning only `accepted` / `runId` / `childSessionKey` IS a successful launch (this is the contract under async-callback). What is forbidden is a deployment where `RUN_CHILD_COMPLETION_CALLBACK` is never delivered — the orchestrator records that as a tick-level deployment incompatibility and aborts. Stuck-pending eviction (default 210 min after `spawned_at`) recovers UI accounts when callbacks are unreliable, but is a backstop, not the contract.
-6. `max_concurrent_subagents=1` is mandatory. The spawn returns immediately with a launch acknowledgement, completion arrives via callback, and the next scheduled wake-up forms the next batch only after `pending_subagents` is empty (or evicted).
+1. At any moment, the dispatcher MUST have at most `max_concurrent_subagents` active issue child sessions, AND every active session MUST hold a distinct UI account index.
+2. **No same-IID parallelism.** Two subagents MUST NEVER work concurrently on the same `${ISSUE_IID}`. The structural guarantee is the orchestrator's `active_issue_iids` + `pending_subagents` bookkeeping: persist each IID into both BEFORE issuing `sessions_spawn` (Phase 4 step 5 placeholder write + Phase 5 ack-write); MUST NOT spawn for an IID already present in those structures.
+3. **Single-batch-in-flight invariant.** The orchestrator MUST NOT form a new batch on a scheduled wake-up while `pending_subagents` is non-empty (after stuck-pending eviction). UI account safety depends on this: accounts allocated to in-flight subagents stay in `pending_subagents[*].ui_account_index_start` until each callback drains them, and the next batch's accounts are drawn fresh from the pool head only after pending is empty.
+4. **Async-callback spawn.** Phase 5 issues one anonymous `sessions_spawn` per surviving IID, retrying the identical launch payload up to 3 total attempts with 2-second fixed backoff on launch failure. A valid launch ack is recorded into `pending_subagents`, and the orchestrator returns `waiting_for_callbacks` immediately. The orchestrator does NOT block waiting for compact JSON. The runtime later wakes the orchestrator with one `RUN_CHILD_COMPLETION_CALLBACK` per subagent termination; each callback delivers that subagent's terminal compact JSON. The orchestrator runs Phase 6 on each callback wake-up. Subsequent batches are formed by subsequent scheduled wake-ups, not callback wake-ups.
+5. **Anonymous spawns only — do NOT pass session name (HARD).** The orchestrator MUST NOT pass `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter to `sessions_spawn`. Earlier deployments hit `errorCode=thread_required` on channels (e.g. webchat) that don't support thread bindings. The runtime returns `runId` + `childSessionKey`; both go into `pending_subagents[iid]`. Replies are matched back to dispatched IIDs by the `iid` field of the compact JSON (Phase 6 validation), NOT by runtime session-key label.
+
+   **Cosmetic-label exception (`label=`).** The dispatcher MUST additionally pass `label="#<iid>-att-<NNN>"` so the OpenClaw Sessions UI LABEL column shows the IID and attempt number instead of `(optional)`. `label=` is a separate parameter from session-name fields and does NOT trigger `thread_required`; callbacks are still matched by the `iid` field of the compact JSON, not by label. Full parameter-name resolution policy and failure handling live in [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Concurrency Policy "Session label for runtime UI".
+6. **Fire-and-forget without callback is forbidden.** Every `sessions_spawn` MUST be paired with eventual `RUN_CHILD_COMPLETION_CALLBACK` delivery. A launch ack returning only `accepted` / `runId` / `childSessionKey` IS a successful launch (this is the contract under async-callback). What is forbidden is a deployment where `RUN_CHILD_COMPLETION_CALLBACK` is never delivered — the orchestrator records that as a tick-level deployment incompatibility and aborts. Stuck-pending eviction (default 330 min after `spawned_at`) recovers UI accounts when callbacks are unreliable, but is a backstop, not the contract.
 
 This rule overrides any default model behavior that interprets `hourly_issue_quota`, backlog size, or remaining time budget as permission to fan out. In async-callback mode, `hourly_issue_quota` is the scheduled-tick launch budget, not a parallelism knob.
 
@@ -110,8 +99,8 @@ OpenClaw runs each `Bash` tool call in a **fresh shell**. Exports do NOT survive
 
 The exact minimum env list is layered (see SKILL "Per-Exec Env Contract"):
 
-- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when the trigger uses non-default `repo_path`; some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `BATCH_SIZE`).
-- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNT` / `UI_PASSWORD`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
+- Dispatcher minimum: `PROJECT`, `GROUP`, `GITLAB_TOKEN` (plus `REPO_PARENT_PATH` when the trigger uses non-default `repo_path`; some scripts add `IID` / `MIN_IID` / `MAX_IID` / `BRANCH` / `MAX_CONCURRENT_SUBAGENTS` / `MAX_ACCOUNTS_PER_ISSUE`).
+- Per-issue prep + subagent minimum: above + `ISSUE_IID`, `ATTEMPT_NUMBER` (some scripts add `BRANCH` / `DEV_BRANCH` / `ISSUE_MODE` / `ISSUE_TITLE` / `UI_ACCOUNTS`). `HULAT_DIR` is derived by `env_paths.sh` as `${REPO_PATH}/hulat` and does NOT need to be passed.
 
 The universal rule: every Bash exec MUST export the minimum vars at the front of the command line. Never rely on exports from a previous Bash tool call. The rendered subagent prompt repeats these env vars at every step so the subagent gets it right by following the prompt verbatim.
 
@@ -130,7 +119,7 @@ cd "${SKILL_DIR}"
 
 Do NOT invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` / `ls`. The single allowed convention: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
 
-The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. The subagent's cwd policy is: at acpx time, `cd ${WORKTREE_DIR}`; at all other steps, any cwd works because every script is invoked by absolute path.
+The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. At acpx time, the subagent calls `bash {SCRIPTS_DIR}/run_acpx_attempt.sh`; that script changes to `${WORKTREE_DIR}` (the per-attempt linked worktree) before invoking acpx. At all other steps, any cwd works because every script is invoked by absolute path.
 
 ## Source of Truth
 
@@ -138,19 +127,9 @@ GitLab live labels are the source of truth for per-issue workflow state. Disk st
 Never rely on prior chat context to determine progress.
 Always run reconciliation and honor the persisted evidence file before doing any scheduling work.
 
-All dispatcher paths are derived by sourcing:
+All dispatcher paths are derived by sourcing `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`. Runtime files live inside the cloned repo under `${REPO_PATH}/${RESULT_BASENAME}/` — campaign state, dispatcher logs, per-issue subtrees, and per-attempt worktrees. Full path layout, variable derivation rules, and trigger overrides for `repo_path` / `result_basename` / `data_basename` are documented in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md) and [`references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
 
-- `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`
-
-Current state paths — agent runtime files live INSIDE the cloned repo. The repo defaults to `/data/<project>`; if trigger `repo_path=/data/ifp1`, the repo root is `/data/ifp1/<project>`:
-- `${REPO_PATH}/ifp-result/_dispatcher/campaign_state.json`
-- `${REPO_PATH}/ifp-result/_dispatcher/log/`
-- `${REPO_PATH}/ifp-result/issue-<iid>/state.json`
-- `${REPO_PATH}/ifp-result/issue-<iid>/attempt_state.json`
-
-Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout. Operators migrating from older deployments can either move the files into `ifp-result/` or delete the old subtree and let reconciliation rebuild state from live GitLab labels — see `skills/gitlab_issue_campaign_dispatcher/references/paths.md`.
-
-`repo_path` is the optional trigger field for the clone parent; if omitted, `env_paths.sh` uses parent `/data` and final repo root `/data/${PROJECT}`. Non-default deployments must pass it on every scheduled trigger and callback. `ifp-result` and `ifp-data` are default basenames. Projects that ship `result_basename` / `data_basename` in the trigger get a different runtime-root / knowledge-dir name (e.g. `pts-result` / `pts-data`); the overrides are persisted in `campaign_state.json` with carry-forward semantics. `env_paths.sh` exposes them as `RESULT_BASENAME` / `DATA_BASENAME`, and the orchestrator forwards both on every script exec. See `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md` and `references/paths.md`.
+Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout (operator migration steps live in `references/paths.md`).
 
 ## Scheduling Model
 
@@ -181,7 +160,7 @@ Rules:
 1. Never ask the user for clarification during scheduled execution.
 2. Make the best reasonable decision autonomously.
 3. Record assumptions in logs and continue.
-4. Never run more than one active issue subagent at once. (See `## Subagent Concurrency Policy` above for the strict version of this rule.)
+4. Never spawn more than `max_concurrent_subagents` in-flight issue subagents at once, and never two subagents for the same `${ISSUE_IID}`. Full operational contract lives in `## Subagent Concurrency Policy` above.
 5. Keep dispatcher replies short and structured.
 6. Store detailed execution evidence only on disk, not in chat.
 7. Never paste full diffs, full issue bodies, or long Claude Code outputs into chat unless explicitly requested.
@@ -191,54 +170,21 @@ Rules:
 
 ## Session Policy
 
-### Dispatcher session
+- **Dispatcher session.** The scheduled task always wakes the same orchestrator session (`agent:acpx_auto_tester:main`). The session is "thick" by design but MUST NOT accumulate issue-specific reasoning across ticks — re-derive from disk state on every wake-up. All Claude Code execution and post-acpx work is offloaded to anonymous per-issue subagent runs via `sessions_spawn`.
+- **Per-issue session.** Each IID runs in its own anonymous runtime subagent (`sessions_spawn` without any session name; cosmetic `label="#<iid>-att-<NNN>"` is the only label-shaped parameter passed — see §Subagent Concurrency Policy hard rule 5). Per-IID identity in replies is carried by the `iid` field of the compact JSON. Reuse across IIDs is structurally impossible because the rendered prompt embeds the IID.
 
-- The scheduled task should always wake the same dispatcher session.
-- The dispatcher session is "thick" by design (it does all per-IID prep) but must not accumulate large issue-specific reasoning beyond the current tick. After a batch completes, the dispatcher's working memory should drop the prep details — re-deriving from disk state on the next tick is the canonical path.
-- The dispatcher must offload the post-acpx workflow into an anonymous per-issue subagent run via `sessions_spawn`.
-
-### Per-issue session
-
-- Each issue must run in its own anonymous subagent run.
-- The **logical** name is `issue-<project>-<iid>` (used only for `active_issue_sessions` bookkeeping and human-readable logging).
-- The **runtime** session name is always anonymous (`agent:<name>:subagent:<uuid>` or runtime equivalent). The orchestrator MUST NOT pass `name=`, `session_name=`, `mode="session"`, or any thread-binding parameter.
-- Per-IID identity in replies is carried by the `iid` field of the compact JSON, NOT by the runtime session name. The orchestrator MUST match replies to dispatched IIDs by `iid` (Phase 6 validation).
-- Claude Code is invoked per attempt as a one-shot `acpx --auth-policy skip claude exec -f` run inside the main repo checkout (`${REPO_PATH}`, default `/data/${PROJECT}`). Persistent / named acpx sessions (`-s`) are forbidden because they do not terminate cleanly under the non-interactive scheduler — cross-attempt context is reinjected via the prompt instead.
-- The orchestrator must never reuse one subagent run for another issue (the rendered prompt embeds the IID, so reuse is structurally impossible).
+Full spawn shape, parameter handling, and `acpx` invocation contract: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Concurrency Policy and [`references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) Step 1.
 
 ## Trigger Commands
 
-### Scheduled-tick trigger
+The orchestrator handles two trigger commands:
 
-The scheduled task should send:
+- `RUN_SCHEDULED_ISSUE_CAMPAIGN` — scheduler tick; runs Phases 1–5.
+- `RUN_CHILD_COMPLETION_CALLBACK` — runtime callback per subagent termination; runs Phase 6 for one IID.
 
-`RUN_SCHEDULED_ISSUE_CAMPAIGN`
+Required / optional fields, validation rules, and override semantics for both triggers live in [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
 
-with the trigger inputs documented in [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
-
-### Child completion callback trigger
-
-The OpenClaw runtime delivers ONE callback per subagent termination, addressed to the same orchestrator session that issued the original `sessions_spawn`:
-
-`RUN_CHILD_COMPLETION_CALLBACK`
-
-with payload schema documented in [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md) §Callback trigger. The callback carries the subagent's terminal compact JSON in `worker_result_json`. The orchestrator runs Phase 6 (single-IID) on each callback wake-up.
-
-### Subagent payload
-
-The subagent does NOT receive a "trigger command" envelope. The orchestrator renders [`skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) into a single fixed-format string and passes that string as the entire `sessions_spawn` payload. The rendered prompt is self-contained — it carries every path, env value, and step the subagent needs, structured as `<config>` / `<issue>` / `<env_contract>` / `<instructions>` (Steps 0–9) / `<constraints>` / `<fail_flow>` blocks.
-
-### Subagent reply contract
-
-The subagent emits **one compact JSON line on its last turn** per [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. The reply carries every fact the orchestrator's Phase 6 needs to write the terminal state files and classify the IID:
-
-- `iid`, `attempt_number`, `status` (`done` / `blocked` / `failed`; `no_changes` is legacy and normalized to `blocked`)
-- `mode_actual`, `work_branch`, `local_branch`
-- `commit_sha`, `merge_request_url`, `mr_action` (`created` / `reused` / `rotated` / `none`)
-- `wiki_url`, `labels_added`, `labels_removed`
-- `summary_posted`, `block_reason`, `log_dir`
-
-The subagent MUST NOT also write the state files — that is the orchestrator's job. The subagent MUST NOT emit anything else after the JSON line on its last turn (no logs, no diffs, no surrounding prose).
+The subagent does NOT receive a "trigger command" envelope. The orchestrator renders [`executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) into a single fixed-format string and ships it as the entire `sessions_spawn` payload (structured as `<config>` / `<issue>` / `<env_contract>` / `<instructions>` (Steps 0–10) / `<constraints>` / `<fail_flow>`). On its last turn the subagent emits ONE compact JSON line per [`state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply and stops — that line is the orchestrator's only signal.
 
 ## Required Behavior When Interrupted
 
@@ -250,70 +196,22 @@ If a run is interrupted:
 
 ## Chat Output Policy
 
-### Dispatcher reply format
+The orchestrator returns ONE compact JSON status summary per turn — no full diffs, no full issue bodies, no long Claude Code outputs unless explicitly requested. Detailed evidence stays on disk.
 
-The orchestrator should return only a compact status summary. The shape depends on which trigger fired (scheduled tick vs callback) — see SKILL.md §Chat Output Policy for both variants. Typical scheduled-tick reply (just spawned a batch):
+The summary shape depends on which trigger fired (scheduled tick → spawn batch + `pending_subagents`; callback → single-IID drain). Both variants and the optional fields (`effective_iid_universe`, `label_filtered_*`, `launch_retries`, `tick_outcome_per_iid`) are documented in [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Chat Output Policy.
 
-```json
-{
-  "campaign_status": "waiting_for_callbacks",
-  "active_issue_iids": [14],
-  "active_issue_sessions": ["issue-px_ifp_hulat-14"],
-  "pending_subagents": {
-    "14": {"attempt_number": 3, "run_id": "9710b359-...", "child_session_key": "agent:acpx_auto_tester:subagent:b6719233-...", "ui_account_index": 0, "spawned_at": "2026-05-07T13:42:01Z"}
-  },
-  "max_concurrent_subagents": 1,
-  "unfinished_iids": [9, 10, 14, 15],
-  "next_new_issue_iid": 19,
-  "quota_launched_this_tick": 1,
-  "quota_target": 10
-}
-```
-
-Typical callback-tick reply (one IID drained):
-
-```json
-{
-  "callback_status": "handled",
-  "iid": 14,
-  "attempt_number": 3,
-  "terminal_status": "done",
-  "remaining_pending_iids": [15],
-  "campaign_status": "running"
-}
-```
-
-### Subagent reply format
-
-Canonical schema lives in [`skills/gitlab_issue_campaign_dispatcher/references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply. Example:
-
-```json
-{"iid":14,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att003","commit_sha":"abc1234deadbeef","merge_request_url":"https://gitlab.example.com/.../merge_requests/123","wiki_url":"https://gitlab.example.com/.../wikis/issue-14/attempt-003-prompt","mr_action":"created","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/<project>/ifp-result/issue-14/log/attempt-003"}
-```
-
-This single JSON line is the ONLY artifact the orchestrator reads from the subagent's reply. The orchestrator's Phase 6 owns all terminal state-file writes (`${ISSUE_STATE_FILE}`, `${ATTEMPT_STATE_FILE}`) and `campaign_state.json` updates from this reply.
+The subagent's last-turn output is exactly ONE compact JSON line per [`references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply — no surrounding prose, code fences, or logs. The orchestrator's Phase 6 writes all terminal state files from that line.
 
 ## Tooling Expectations
 
-This workspace expects the agent to be able to use:
-- read
-- write
-- edit
-- exec
-- sessions_history
-- sessions_spawn
+The agent uses: `read`, `write`, `edit`, `exec`, `sessions_history`, `sessions_spawn`, `subagents`.
 
-The orchestrator must use `sessions_spawn` for issue subagents.
+Full `sessions_spawn` shape (anonymous, `label=`, `timeoutSeconds=30`, `runTimeoutSeconds=18000`, serial-only, validation of launch ack, 3-attempt in-tick launch retry, stuck-pending eviction backstop) is the contract documented in [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Concurrency Policy. The hard prohibitions on session-name parameters are §Subagent Concurrency Policy hard rule 5 above.
 
-The `sessions_spawn` call MUST be **anonymous (no session name passed)** and MAY return immediately with a launch ack (`runId` + `childSessionKey`) — that IS a successful spawn under the async-callback contract. The spawn payload is a fully-rendered self-contained fixed-format prompt (built from `references/executor_prompt.md`); the subagent does NOT load this SKILL.
+The `subagents` tool (`action="kill"` / `list` / `steer`) is used only by Phase 6 step 9 to release terminal subagents' runtime sessions after state files are persisted and the pending entry drains (gated by `campaign_state.json.kill_subagent_on_terminal`, default `true`; legacy `kill_subagent_on_done=false` disables cleanup when the new field is omitted). For `blocked` / `failed`, cleanup first verifies local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`; failure paths do not publish Wiki evidence. This is best-effort cleanup; failure NEVER mutates state files. See [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Subagent Runtime Cleanup Policy for the full contract.
 
-The runtime delivers the subagent's terminal compact JSON later via `RUN_CHILD_COMPLETION_CALLBACK` (see Trigger Commands above). The orchestrator's Phase 6 runs on each callback wake-up to consume the compact JSON and write terminal state.
+## Terminal Completion
 
-Forbidden:
-- Passing a session-name parameter (`name=`, `mode="session"`, thread-bound flags) to `sessions_spawn` — has historically tripped `errorCode=thread_required` on channels without thread support.
-- Spawn that returns no valid launch ack (`runId` + `childSessionKey`) is a launch failure; the affected IID gets an inline-synthesized blocked Phase 6 reply.
-- Deployments where `RUN_CHILD_COMPLETION_CALLBACK` is never delivered — that is a deployment incompatibility; the orchestrator records and aborts.
+An issue is completed when its merge request is created AND the live issue carries both `done` and `pr` labels (the dispatcher's Phase 6 re-applies this state idempotently after each callback). A live `state=closed` is a hard terminal skip — never schedule a closed issue, even if `continue` is present or `done`/`pr` are absent.
 
-For this automation, an issue is considered completed after its merge request is successfully created and the live issue has both `done` and `pr` labels. Separately, a live GitLab issue with `state=closed` is a hard terminal skip condition: the orchestrator must never schedule it, even if `continue` is present or `done`/`pr` are absent. The subagent must change `doing` to `done` immediately after solving the issue and publishing Wiki evidence, then create or rotate the MR, then add `pr` after MR creation succeeds. The orchestrator's Phase 6 — not the subagent — writes the terminal `status=done` to disk based on the compact JSON reply and idempotently re-applies the final live-label state after the callback is received.
-
-Exception for opened issues only: a human reviewer may reopen the automation by changing the live GitLab issue label to `continue`. On the next dispatcher reconciliation, `continue` wins over cached `done` state and over an existing MR only if the issue is opened. If `continue` is present alongside `done` and/or `pr` on an opened issue, treat the issue as `continue` and schedule a continue-mode attempt.
+A reviewer may reopen the automation by adding `continue` (or legacy `contiune`) to an opened issue; reconciliation then treats `continue` as winning over cached `done`/`pr` and schedules a continue-mode attempt. Reviewer contract + continue-mode prompt template: [`references/continue_mode.md`](skills/gitlab_issue_campaign_dispatcher/references/continue_mode.md).

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # summarize_attempt.sh — write a SHORT digest of this attempt to
-# ${SUMMARY_FILE} and post the same content as a GitLab issue comment.
+# ${SUMMARY_FILE} and optionally post the same content as a GitLab issue
+# comment.
 #
 # Design choice: the comment is intentionally short.
 # Detailed evidence (full claude_result.txt, full git_diff.patch,
@@ -23,10 +24,12 @@
 #   COMMIT_SHA               last commit on the work branch (if pushed)
 #   MERGE_REQUEST_URL        MR URL (if known)
 #   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed
+#   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
+#                            so evidence stays local under ${LOG_DIR} / ${ISSUE_ROOT}.
 #
-# The posted comment is wrapped with a recognizable marker so future
-# build_prompt.sh runs distinguish agent-posted summaries from reviewer
-# comments:
+# When posting is enabled, the comment is wrapped with a recognizable marker
+# so future build_prompt.sh runs distinguish agent-posted summaries from
+# reviewer comments:
 #
 #   <!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->
 #   ...short summary...
@@ -47,6 +50,16 @@ ATTEMPT_STATUS="${ATTEMPT_STATUS:-unknown}"
 COMMIT_SHA="${COMMIT_SHA:-}"
 MERGE_REQUEST_URL="${MERGE_REQUEST_URL:-}"
 BLOCK_REASON="${BLOCK_REASON:-}"
+SUMMARY_POST_TO_ISSUE="${SUMMARY_POST_TO_ISSUE:-true}"
+
+case "${SUMMARY_POST_TO_ISSUE}" in
+  true|1|yes|TRUE|YES) SUMMARY_POST_TO_ISSUE=true ;;
+  false|0|no|FALSE|NO) SUMMARY_POST_TO_ISSUE=false ;;
+  *)
+    echo "summarize_attempt: SUMMARY_POST_TO_ISSUE must be true/false, got '${SUMMARY_POST_TO_ISSUE}'" >&2
+    exit 2
+    ;;
+esac
 
 # Count changed files without embedding them; cap displayed list at 10 so
 # the comment stays compact. The full list is in ${LOG_DIR}/git_status.txt.
@@ -73,7 +86,7 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence (on runner)**: \`${LOG_DIR}\`"
+  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the per-attempt worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive in the MR diff)"
   if [ -f "${LOG_DIR}/wiki_artifacts.md" ]; then
     echo "- **Wiki evidence**: published and linked from this issue before MR creation"
   fi
@@ -97,8 +110,13 @@ fi
   echo "<!-- /acpx_auto_tester:attempt-summary -->"
 } > "${SUMMARY_FILE}"
 
-glab api --method POST \
-  "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes" \
-  -F "body=@${SUMMARY_FILE}" >/dev/null
+if [ "${SUMMARY_POST_TO_ISSUE}" = "true" ]; then
+  glab api --method POST \
+    "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes" \
+    -F "body=@${SUMMARY_FILE}" >/dev/null
+  echo "SUMMARY_POSTED=true" >&2
+else
+  echo "SUMMARY_POSTED=false" >&2
+fi
 
 echo "${SUMMARY_FILE}"
