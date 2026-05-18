@@ -12,6 +12,16 @@ There are three state files in this workspace:
 
 **State-file write ownership:** the **dispatcher writes all state files**, including the terminal updates. The dispatcher's Phase 4 (per-IID prep) initializes the in-progress values in `issue-<iid>/state.json` and `issue-<iid>/attempt_state.json`. The subagent's compact JSON reply (see §Compact Subagent Reply below) carries every fact the dispatcher needs; the dispatcher's Phase 6 follow-up writes the terminal values from that reply. The subagent does NOT touch any state file.
 
+**Wrapper-side writes (post-refactor).** As of `SKILL_VERSION=2026-05-18.x`, every dispatcher-side state write is performed by one of three shell wrappers under `scripts/` (see [`dispatcher_wrappers.md`](dispatcher_wrappers.md)), NOT by the orchestrator LLM directly:
+
+| Wrapper | Writes |
+| ------- | ------ |
+| `dispatch_prepare_tick.sh` | `campaign_state.json` (trigger overrides, stuck-eviction Phase 6 results, post-reconcile cache correction, batch placeholders); per-IID `state.json` + `attempt_state.json` initial `status=in_progress` blocks; `${LOG_DIR}/spawn_payload.txt` (the rendered executor prompt). |
+| `dispatch_record_spawn.sh` | `campaign_state.json` (post-launch ack writeback of `run_id` / `child_session_key` / `spawned_at`, or — on launch failure — Phase 6 blocked synth + drain). |
+| `dispatch_followup.sh` | `campaign_state.json` (drain + classify + `campaign_status` flip back to `running` when pending hits empty); per-IID `state.json` + `attempt_state.json` terminal blocks per §Phase 6 Write Mapping below. |
+
+All three wrappers hold the dispatcher flock (`${LOCK_FILE}`) for their entire critical section and persist `campaign_state.json` atomically (`mktemp` + `mv`). The LLM never touches state files directly under the new contract.
+
 ## campaign_state.json
 
 Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RESULT_ROOT}/_dispatcher/campaign_state.json`; default `/data/${PROJECT}/${RESULT_BASENAME}/_dispatcher/campaign_state.json`)
