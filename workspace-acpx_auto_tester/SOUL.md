@@ -30,7 +30,7 @@ Step-by-step workflow with env-var contract per step: [`references/executor_prom
 
 ## Subagent Concurrency Policy (READ FIRST — HARD RULE)
 
-The agent runs each per-attempt subagent in its own linked git worktree, so cross-IID parallelism is enabled. The hard upper bound on concurrency is the deployment-pinned UI account pool size — the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential.
+The agent runs each per-IID subagent (one subagent per attempt of a given IID; multiple IIDs may be in flight) in a SHARED per-issue linked git worktree at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/` — the worktree is created on attempt 1 and reused on every subsequent attempt of that same IID (untracked scratch survives across attempts). Cross-IID parallelism is enabled because different IIDs use different worktree paths; same-IID attempts never run concurrently (single-batch invariant). The hard upper bound on concurrency is the deployment-pinned UI account pool size — the system under test logs out an account when it logs in twice, so each in-flight subagent must hold a distinct credential.
 
 `max_concurrent_subagents` is a trigger input (see SKILL `references/trigger_command.md`). It defaults to 1 when the trigger omits it. The post-override value MUST satisfy `1 ≤ max_concurrent_subagents ≤ ui_account_pool_size`; values below 1 abort the tick with `"invalid_max_concurrent_subagents: must be >= 1"`, values exceeding the pool abort with `"ui_account_pool_too_small: pool=<size> max_concurrent_subagents=<value>"`. `max_accounts_per_issue` is a trigger input that caps the number of UI accounts assigned to one IID/subagent after the pool is divided by concurrency; it defaults to 14 when omitted and must be a positive integer. Per-IID account counts are derived automatically from `pool_size / max_concurrent_subagents` with the integer remainder front-loaded onto the first slots, then capped by `max_accounts_per_issue`.
 
@@ -119,7 +119,7 @@ cd "${SKILL_DIR}"
 
 Do NOT invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` / `ls`. The single allowed convention: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
 
-The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. At acpx time, the subagent calls `bash {SCRIPTS_DIR}/run_acpx_attempt.sh`; that script changes to `${WORKTREE_DIR}` (the per-attempt linked worktree) before invoking acpx. At all other steps, any cwd works because every script is invoked by absolute path.
+The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. At acpx time, the subagent calls `bash {SCRIPTS_DIR}/run_acpx_attempt.sh`; that script changes to `${WORKTREE_DIR}` (the shared per-issue linked worktree for this IID, reused across attempts so untracked scratch from the previous attempt is available) before invoking acpx. At all other steps, any cwd works because every script is invoked by absolute path.
 
 ## Source of Truth
 
@@ -127,7 +127,7 @@ GitLab live labels are the source of truth for per-issue workflow state. Disk st
 Never rely on prior chat context to determine progress.
 Always run reconciliation and honor the persisted evidence file before doing any scheduling work.
 
-All dispatcher paths are derived by sourcing `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`. Runtime files live inside the cloned repo under `${REPO_PATH}/${RESULT_BASENAME}/` — campaign state, dispatcher logs, per-issue subtrees, and per-attempt worktrees. Full path layout, variable derivation rules, and trigger overrides for `repo_path` / `result_basename` / `data_basename` are documented in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md) and [`references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
+All dispatcher paths are derived by sourcing `skills/gitlab_issue_campaign_dispatcher/scripts/env_paths.sh`. Runtime files live inside the cloned repo under `${REPO_PATH}/${RESULT_BASENAME}/` — campaign state, dispatcher logs, per-issue subtrees, and the shared per-issue worktrees (one per IID at `.worktrees/issue-<iid>/`, reused across every attempt of that IID). Full path layout, variable derivation rules, and trigger overrides for `repo_path` / `result_basename` / `data_basename` are documented in [`skills/gitlab_issue_campaign_dispatcher/references/paths.md`](skills/gitlab_issue_campaign_dispatcher/references/paths.md) and [`references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
 
 Never hand-write `/data/openclaw_work/<project>/...` paths — those belonged to an earlier out-of-repo layout (operator migration steps live in `references/paths.md`).
 

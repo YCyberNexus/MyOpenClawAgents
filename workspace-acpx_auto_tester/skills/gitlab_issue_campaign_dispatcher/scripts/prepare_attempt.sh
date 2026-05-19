@@ -1,20 +1,33 @@
 #!/usr/bin/env bash
-# prepare_attempt.sh — create a fresh per-attempt linked git worktree for
-# this issue and base it on the right starting point.
+# prepare_attempt.sh — ensure a per-issue linked git worktree exists for
+# this IID and put it on the right starting point for the current attempt.
 #
 # Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
-# "${WORK_BRANCH}-att${PADDED}") which is checked out into a per-attempt
-# linked worktree at ${WORKTREE_DIR} (under ${WORKTREES_ROOT}). The local
-# branch is force-pushed to ${WORK_BRANCH} at commit time. Because each
-# attempt has its own worktree, multiple attempts can run concurrently;
-# the parent checkout at ${REPO_PATH} is never mutated by an attempt
-# (only `git fetch` touches it).
+# "${WORK_BRANCH}-att${PADDED}") checked out into a SHARED per-issue
+# linked worktree at ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}
+# (note: NO -att-<NNN> suffix). On attempt 1 this script creates the
+# worktree via `git worktree add -B`. On attempt N>1 it force-switches
+# the already-existing worktree's checked-out branch to BASE_REF; this
+# leaves untracked files in the worktree alone, so any scratch state
+# `acpx claude exec` wrote during attempt N (intermediate notes, Claude
+# Code's local caches, etc.) is still on disk for attempt N+1. The local
+# attempt branch is force-pushed to ${WORK_BRANCH} at commit time.
+# Cross-IID parallelism stays safe because different IIDs use different
+# worktree paths; same-IID attempts never run concurrently (single-batch
+# invariant enforced by the dispatcher's `pending_subagents` bookkeeping),
+# so it is safe to reuse one worktree across attempts. The parent checkout
+# at ${REPO_PATH} is never mutated by an attempt (only `git fetch` touches
+# it under ${WORK_ROOT}/locks/repo.lock).
 #
 # Modes (env var ISSUE_MODE):
 #   fresh     — base attempt on origin/${DEV_BRANCH} (clean baseline,
-#               no past spec accumulation visible to Claude). The
-#               previous attempts' work is intentionally discarded.
+#               no past spec accumulation visible to Claude on TRACKED
+#               files). Prior attempts' COMMITTED work on ${WORK_BRANCH}
+#               is intentionally not used; however, untracked scratch
+#               files left in the shared per-issue worktree by an earlier
+#               attempt survive the in-place branch switch, which is
+#               required so `acpx claude exec` can resume on retries.
 #   continue  — base attempt on origin/${WORK_BRANCH} if it exists, else
 #               downgrade to fresh (and use origin/${DEV_BRANCH})
 #
@@ -111,43 +124,94 @@ if [ -e "${LEGACY_WORKTREE_DIR}" ]; then
   rm -rf "${LEGACY_WORKTREE_DIR}"
 fi
 
-# Defensive: if a previous run left a worktree at the same per-attempt
-# path (e.g. a stuck-pending eviction synthesized a blocked reply, or a
-# manual cleanup removed the directory but not the git registry entry),
-# drop it before re-creating. Attempt numbers are monotonic so this is
-# rarely hit in practice, but `git worktree add` refuses to overwrite an
-# existing path or registry entry.
-if [ -e "${WORKTREE_DIR}" ] || git worktree list --porcelain 2>/dev/null \
-    | awk '$1 == "worktree" { print $2 }' | grep -qxF "${WORKTREE_DIR}"; then
-  git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
-  rm -rf "${WORKTREE_DIR}"
+# Migration cleanup: an earlier scheme used per-attempt worktree paths
+# at ${WORKTREES_ROOT}/issue-<iid>-att-<NNN>/. We now reuse ONE shared
+# worktree at ${WORKTREES_ROOT}/issue-<iid>/ across every attempt of an
+# IID, so drop any leftover per-attempt directories (with their git
+# registry entries) before we touch the shared path. A literal-`*` shell
+# loop with a no-match guard avoids spurious removal of the new path.
+for legacy_per_attempt_dir in "${WORKTREES_ROOT}/issue-${ISSUE_IID}"-att-*; do
+  [ -e "${legacy_per_attempt_dir}" ] || continue
+  git worktree remove --force "${legacy_per_attempt_dir}" 2>/dev/null || true
+  rm -rf "${legacy_per_attempt_dir}"
+done
+
+# Look up whether ${WORKTREE_DIR} is currently a registered linked
+# worktree (the registry lives in ${REPO_PATH}/.git/worktrees/...).
+worktree_registered() {
+  git worktree list --porcelain 2>/dev/null \
+    | awk '$1 == "worktree" { print $2 }' \
+    | grep -qxF "${WORKTREE_DIR}"
+}
+
+# Reuse the existing per-issue worktree if it looks healthy
+# (`.git` is a file pointing at the registry AND the registry knows the
+# path). Otherwise fall through to a clean recreate.
+WORKTREE_REUSE=false
+if [ -f "${WORKTREE_DIR}/.git" ] && worktree_registered; then
+  WORKTREE_REUSE=true
+fi
+
+if [ "${WORKTREE_REUSE}" = false ]; then
+  # Recreate path. This is normal on attempt 1 of an IID, but on later
+  # attempts it implies prior scratch state was lost (operator removed the
+  # directory, the registry was pruned, etc.). Log to stderr so the caller
+  # captures it in wrapper.log for post-mortems — otherwise "Claude lost
+  # its memory across attempts" symptoms are hard to attribute.
+  if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
+    dir_present=false; [ -e "${WORKTREE_DIR}" ] && dir_present=true
+    reg_present=false; worktree_registered && reg_present=true
+    echo "prepare_attempt: recreating worktree at ${WORKTREE_DIR} for attempt ${ATTEMPT_NUMBER_PADDED} (dir_present=${dir_present} registered=${reg_present}); any untracked scratch from prior attempts will be lost" >&2
+  fi
+  # Defensive cleanup for half-broken state — either an orphan directory
+  # without a registry entry, or a registry entry pointing at a missing
+  # directory. Then prune before recreating.
+  if [ -e "${WORKTREE_DIR}" ] || worktree_registered; then
+    git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+    rm -rf "${WORKTREE_DIR}"
+  fi
 fi
 git worktree prune
 
 # Ensure the cross-attempt ISSUE_ROOT exists for state.json /
-# attempt_state.json / summary.md. The log dir itself now lives inside
-# the worktree (see below) so it is recreated AFTER `git worktree add`.
+# attempt_state.json / summary.md. The log dir itself lives inside the
+# worktree (see below) so it is recreated AFTER the worktree is on the
+# correct base ref.
 mkdir -p "${ATTEMPT_DIR}"
 
-# Create the per-attempt linked worktree at ${WORKTREE_DIR} branched
-# from ${BASE_REF}. This is the cwd Claude Code runs in; OUTPUT_DIR and
-# LOG_DIR are inside it. OUTPUT_DIR is force-added by stage_and_guard.sh
-# after the run; LOG_DIR's prompt.txt + claude_result.txt are
-# force-added by the same script, the remaining log files stay locally
-# ignored via the repository `.git/info/exclude` entry.
-mkdir -p "$(dirname "${WORKTREE_DIR}")"
-git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
+if [ "${WORKTREE_REUSE}" = true ]; then
+  # In-place branch switch: create or reset ${LOCAL_ATTEMPT_BRANCH} at
+  # ${BASE_REF} inside the existing worktree, overwriting any tracked
+  # files modified by the previous attempt. Untracked files (Claude
+  # Code's scratch state, intermediate notes, etc.) are NOT touched by
+  # `git checkout` and therefore survive into this attempt — that is the
+  # whole point of sharing a worktree across attempts. Prior local
+  # attempt branches (e.g. ${WORK_BRANCH}-att001) remain in the registry
+  # for audit; only the worktree's HEAD moves.
+  git -C "${WORKTREE_DIR}" checkout -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force
+else
+  # First attempt for this IID (or recovery from a broken state). Create
+  # the shared per-issue linked worktree branched from ${BASE_REF}. This
+  # is the cwd Claude Code runs in; OUTPUT_DIR and LOG_DIR are inside it.
+  # OUTPUT_DIR is force-added by stage_and_guard.sh after the run;
+  # LOG_DIR's prompt.txt + claude_result.txt are force-added by the same
+  # script, the remaining log files stay locally ignored via the
+  # repository `.git/info/exclude` entry.
+  mkdir -p "$(dirname "${WORKTREE_DIR}")"
+  git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
+fi
 mkdir -p "${OUTPUT_DIR}"
 
-# Recreate only the current attempt's log dir so stale evidence from a
+# Recreate ONLY the current attempt's log dir so stale evidence from a
 # same-(IID, attempt) rerun is not mixed with the current run. The
-# worktree was just checked out from BASE_REF; in continue mode that
-# ref may already contain prior attempts' tracked `log/attempt-<earlier>/`
-# directories, but those use a different attempt number and so do not
-# collide with the current LOG_DIR. The rm is defensive against an exact
-# same-(IID, attempt) rerun (rare — attempt numbers are monotonic).
-# Done AFTER `git worktree add` so the directory is created inside the
-# freshly-checked-out worktree.
+# worktree is now on ${BASE_REF}; in continue mode that ref may already
+# contain prior attempts' tracked `log/attempt-<earlier>/` directories,
+# but those use different attempt numbers and so do not collide with the
+# current LOG_DIR. Other attempts' log dirs that exist as UNTRACKED files
+# in the shared worktree from earlier runs are NOT touched here — only
+# the exact current-attempt LOG_DIR is reset. The rm is defensive against
+# an exact same-(IID, attempt) rerun (rare — attempt numbers are
+# monotonic).
 if [ -d "${LOG_DIR}" ]; then
   rm -rf "${LOG_DIR}"
 fi

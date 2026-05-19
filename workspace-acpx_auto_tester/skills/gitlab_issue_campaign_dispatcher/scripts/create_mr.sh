@@ -21,9 +21,10 @@
 #
 # Required env vars:
 #   PROJECT_FULL    "${GROUP}/${PROJECT}"
-#   WORKTREE_DIR    per-attempt linked git worktree (cwd for the glab call;
-#                   glab `mr create` invokes `git` internally even with
-#                   `--repo`, so we MUST run inside a valid git work tree)
+#   WORKTREE_DIR    shared per-issue linked git worktree for this IID
+#                   (cwd for the glab call; glab `mr create` invokes
+#                   `git` internally even with `--repo`, so we MUST run
+#                   inside a valid git work tree)
 #   ISSUE_IID       from env_paths.sh
 #   ISSUE_MODE      "fresh" or "continue" (kept for log correlation only;
 #                   no longer changes MR rotation behavior)
@@ -120,7 +121,7 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
   echo "prompt.txt and claude_result.txt for this attempt are committed inside the MR"
   echo "diff under \`${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}/\`."
   echo "Raw acpx logs, git status/diff snapshots, and Wiki bookkeeping live only in"
-  echo "the per-attempt worktree on the runner (\`${LOG_DIR}\`) until housekeeping"
+  echo "the shared per-issue worktree on the runner (\`${LOG_DIR}\`) until housekeeping"
   echo "removes the worktree."
   echo
   echo "Attempt prompt/result logs are also published to the project Wiki before"

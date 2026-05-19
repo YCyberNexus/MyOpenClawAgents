@@ -143,7 +143,7 @@ quota_launched_this_tick  = 0
 | `run_timeout_seconds`   | int             | Post-override snapshot of the trigger's `run_timeout_seconds`. Defaults to `18000` (5 hours). Must be integer ≥ 60 and `≥ acpx_timeout_seconds`. Read by Phase 5 when constructing `sessions_spawn(..., runTimeoutSeconds=<value>, ...)`. Callback path does not re-read the trigger override; the persisted value from the most recent scheduled wake-up is authoritative for any callback-path readers (post-mortem inspection, future tooling). Not directly compared against `spawned_at` at eviction time — that comparison uses `stuck_after_minutes`, which the operator is responsible for keeping consistent with this value (see `trigger_command.md` §`stuck_after_minutes` rule of thumb). |
 | `acpx_timeout_seconds`  | int             | Post-override snapshot of the trigger's `acpx_timeout_seconds`. Defaults to `18000`. Must be integer ≥ 60 and `≤ run_timeout_seconds`. Rendered into the executor prompt in Phase 4 step 7 as `{ACPX_TIMEOUT_SECONDS}` and `{ACPX_TIMEOUT_MINUTES} = floor(value / 60)`. Persisted for audit; callback path reads it for diagnostic purposes only. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
-| `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target (the parent checkout; the per-attempt linked worktree at `${WORKTREE_DIR}` is acpx's cwd). Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
+| `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target (the parent checkout; the shared per-issue linked worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/` is acpx's cwd, reused across attempts of the same IID). Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
 | `result_basename`       | string          | Post-override snapshot of the trigger's `result_basename`. Defaults to `"ifp-result"`. Used by `env_paths.sh` to derive `RESULT_ROOT=${REPO_PATH}/${result_basename}` and forwarded to every script as `RESULT_BASENAME=...`. Tick aborts with `"invalid_result_basename"` when the value contains `/`, `..`, or whitespace. |
 | `data_basename`         | string          | Post-override snapshot of the trigger's `data_basename`. Defaults to `"ifp-data"`. Forwarded as `DATA_BASENAME=...` and rendered into the subagent prompt. Same validation as `result_basename`. |
 
@@ -246,9 +246,9 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "no_reviewer_comments": false,
   "prior_attempt_count": 1,
   "local_branch": "issue/14-auto-fix-att002",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14-att-002/<RESULT_BASENAME>/issue-14/log/attempt-002",
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-002",
   "commit_sha": "abc1234...",
-  "wiki_artifacts_file": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14-att-002/<RESULT_BASENAME>/issue-14/log/attempt-002/wiki_artifacts.md",
+  "wiki_artifacts_file": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-002/wiki_artifacts.md",
   "attempt_artifacts_posted_to_wiki": true,
   "status": "done",
   "block_reason": null,
@@ -298,7 +298,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "labels_removed": ["doing"],
   "summary_posted": true,
   "block_reason": "",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14-att-003/<RESULT_BASENAME>/issue-14/log/attempt-003"
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-003"
 }
 ```
 
