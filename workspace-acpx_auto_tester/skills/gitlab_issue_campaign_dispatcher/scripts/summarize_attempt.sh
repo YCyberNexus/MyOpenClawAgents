@@ -31,9 +31,9 @@
 # so future build_prompt.sh runs distinguish agent-posted summaries from
 # reviewer comments:
 #
-#   <!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->
+#   <!-- acpx_auto_tester_test:attempt-summary v2 attempt=NNN -->
 #   ...short summary...
-#   <!-- /acpx_auto_tester:attempt-summary -->
+#   <!-- /acpx_auto_tester_test:attempt-summary -->
 
 set -euo pipefail
 
@@ -71,8 +71,8 @@ if [ -s "${LOG_DIR}/git_status.txt" ]; then
 fi
 
 {
-  echo "<!-- acpx_auto_tester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
-  echo "## acpx_auto_tester attempt ${ATTEMPT_NUMBER_PADDED}"
+  echo "<!-- acpx_auto_tester_test:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
+  echo "## acpx_auto_tester_test attempt ${ATTEMPT_NUMBER_PADDED}"
   echo
   echo "- **Mode**: ${ISSUE_MODE}"
   echo "- **Status**: ${ATTEMPT_STATUS}"
@@ -107,7 +107,7 @@ fi
   fi
 
   echo
-  echo "<!-- /acpx_auto_tester:attempt-summary -->"
+  echo "<!-- /acpx_auto_tester_test:attempt-summary -->"
 } > "${SUMMARY_FILE}"
 
 if [ "${SUMMARY_POST_TO_ISSUE}" = "true" ]; then

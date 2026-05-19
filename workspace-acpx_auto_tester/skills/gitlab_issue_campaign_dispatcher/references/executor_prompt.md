@@ -57,7 +57,7 @@ Everything between the fenced lines below is what the dispatcher writes into `se
 The very first line is a **payload sentinel** the dispatcher's Phase 5 step 0 checks via fixed-string grep before each `sessions_spawn` call (see SKILL.md). Keep it verbatim — do not edit, translate, or move it. If the sentinel is missing from the rendered string the orchestrator hands to `sessions_spawn`, that is a strong signal the orchestrator is about to ship the wrong prompt (e.g. `${LOG_DIR}/prompt.txt`), and the spawn MUST be aborted.
 
 ```
-# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1
+# ACPX_AUTO_TESTER_TEST_EXECUTOR_PROMPT_V1
 You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
 The dispatcher has already prepared everything. Your job: run acpx → commit/push/wiki/MR/labels/summarize → return ONE compact JSON line.
 

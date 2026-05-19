@@ -124,7 +124,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
        gymnastics). Postcondition grep for any leftover `{[A-Z_…]+}`
        and fail-fast on unsubstituted placeholders.
     9. Sentinel check: rendered first line MUST equal
-       `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1`. Mismatch → `prep_blocked`
+       `# ACPX_AUTO_TESTER_TEST_EXECUTOR_PROMPT_V1`. Mismatch → `prep_blocked`
        with the verbatim `block_reason` from SKILL.md §Phase 5 step 0.
     10. Write the rendered payload to `${LOG_DIR}/spawn_payload.txt`.
         The renderer replaces only dispatcher placeholders like

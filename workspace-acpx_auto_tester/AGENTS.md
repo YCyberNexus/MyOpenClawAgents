@@ -1,4 +1,4 @@
-# acpx_auto_tester Workspace Notes
+# acpx_auto_tester_test Workspace Notes
 
 This workspace implements a quota-carryover GitLab issue campaign with blocked skip-and-retry, executed as **one thick orchestrator session + one anonymous subagent run per IID**, in an **async-callback model** (see [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm). There is exactly ONE skill in this workspace (the orchestrator); the subagent never loads a skill — it receives a fully-rendered self-contained fixed-format prompt as its `sessions_spawn` payload and emits one compact JSON line on its last turn. The runtime captures that line and forwards it to the orchestrator inside `RUN_CHILD_COMPLETION_CALLBACK`.
 
@@ -6,8 +6,8 @@ The repo follows a **two-branch model**: a clean baseline branch (typically `dev
 
 ## Agent Identity
 
-- Agent name: `acpx_auto_tester`
-- Orchestrator session: `agent:acpx_auto_tester:main`
+- Agent name: `acpx_auto_tester_test`
+- Orchestrator session: `agent:acpx_auto_tester_test:main`
 
 ## Execution Model (async-callback, two execution paths)
 
@@ -47,7 +47,7 @@ Operators are expected to confirm with the OpenClaw maintainer that (1) and (2) 
 
 ## Session Naming
 
-Logical issue subagent name: `issue-<project>-<iid>` (e.g. `issue-px_ifp_hulat-1`). Used for `active_issue_sessions` bookkeeping and human-readable logging only. **The runtime session name is always anonymous** — the orchestrator does not pass any name to `sessions_spawn`. The runtime returns its own auto-generated key (e.g. `agent:acpx_auto_tester:subagent:<uuid>`) which the orchestrator records into `pending_subagents[iid].child_session_key` for audit and stuck-pending detection. Callbacks are matched back to dispatched IIDs by the `iid` field of the compact JSON, not by the runtime session-key label. Detailed session policy lives in [`SOUL.md`](SOUL.md) §Session Policy.
+Logical issue subagent name: `issue-<project>-<iid>` (e.g. `issue-px_ifp_hulat-1`). Used for `active_issue_sessions` bookkeeping and human-readable logging only. **The runtime session name is always anonymous** — the orchestrator does not pass any name to `sessions_spawn`. The runtime returns its own auto-generated key (e.g. `agent:acpx_auto_tester_test:subagent:<uuid>`) which the orchestrator records into `pending_subagents[iid].child_session_key` for audit and stuck-pending detection. Callbacks are matched back to dispatched IIDs by the `iid` field of the compact JSON, not by the runtime session-key label. Detailed session policy lives in [`SOUL.md`](SOUL.md) §Session Policy.
 
 Separately from session naming, the dispatcher MUST pass `label="#<iid>-att-<NNN>"` on every `sessions_spawn` so the OpenClaw Sessions UI LABEL column shows the IID and attempt number. `label=` is a cosmetic UI field, not a session-name field — it does NOT trigger `thread_required`. Full parameter-name resolution and 3-attempt identical-payload launch retry policy lives in [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Concurrency Policy "Session label for runtime UI".
 
