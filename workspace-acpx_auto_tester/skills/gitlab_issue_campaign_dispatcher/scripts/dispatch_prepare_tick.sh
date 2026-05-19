@@ -16,7 +16,7 @@
 #         "payload_path": "/data/.../spawn_payload.txt"
 #       }, ...
 #     ],
-#     "run_timeout_seconds": 18000,
+#     "run_timeout_seconds": 18120,
 #     "max_launch_retries": 3,
 #     "backoff_seconds": 2,
 #     "chat_summary": "...",
@@ -249,14 +249,14 @@ to_bool() {
 MAX_CONCURRENT="${T[max_concurrent_subagents]:-}"
 MAX_ACCOUNTS="${T[max_accounts_per_issue]:-}"
 STUCK_AFTER="${T[stuck_after_minutes]:-}"
-RUN_TIMEOUT="${T[run_timeout_seconds]:-}"
 ACPX_TIMEOUT="${T[acpx_timeout_seconds]:-}"
+RUN_TIMEOUT="${T[run_timeout_seconds]:-}"
+OUTER_TIMEOUT_GRACE_SECONDS=120
 
 # Defaults when trigger omits.
 [ -z "${MAX_CONCURRENT}" ] && MAX_CONCURRENT=1
 [ -z "${MAX_ACCOUNTS}"   ] && MAX_ACCOUNTS=14
 [ -z "${STUCK_AFTER}"    ] && STUCK_AFTER=330
-[ -z "${RUN_TIMEOUT}"    ] && RUN_TIMEOUT=18000
 [ -z "${ACPX_TIMEOUT}"   ] && ACPX_TIMEOUT=18000
 
 case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;; esac
@@ -265,11 +265,13 @@ case "${MAX_ACCOUNTS}" in *[!0-9]*|"") emit_chat_failure "invalid_max_accounts_p
 [ "${MAX_ACCOUNTS}" -ge 1 ] || emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1"
 case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
 [ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
-case "${RUN_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_run_timeout_seconds: must be >= 60" ;; esac
-[ "${RUN_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_run_timeout_seconds: must be >= 60"
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
 [ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
-[ "${ACPX_TIMEOUT}" -le "${RUN_TIMEOUT}" ] || emit_chat_failure "run_timeout_seconds_below_acpx_timeout_seconds"
+[ -z "${RUN_TIMEOUT}"    ] && RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
+case "${RUN_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_run_timeout_seconds: must be >= 60" ;; esac
+[ "${RUN_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_run_timeout_seconds: must be >= 60"
+MIN_RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
+[ "${RUN_TIMEOUT}" -ge "${MIN_RUN_TIMEOUT}" ] || emit_chat_failure "run_timeout_seconds_below_acpx_timeout_seconds_plus_${OUTER_TIMEOUT_GRACE_SECONDS}"
 
 KILL_TERMINAL="${T[kill_subagent_on_terminal]:-}"
 if [ -n "${KILL_TERMINAL}" ]; then
@@ -539,12 +541,14 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
         elif $e.needs_continue == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
+          | .blocked_iids   = (.blocked_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
           | .timeout_iids   = (.timeout_iids - [$e.iid])
           | .campaign_status = "running"
         elif $e.user_reopened == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
+          | .blocked_iids   = (.blocked_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
           | .timeout_iids   = (.timeout_iids - [$e.iid])
         elif $e.has_timeout == true then

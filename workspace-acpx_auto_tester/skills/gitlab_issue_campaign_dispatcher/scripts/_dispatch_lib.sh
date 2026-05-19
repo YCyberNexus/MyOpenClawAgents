@@ -85,7 +85,7 @@ fresh_init_state() {
       max_concurrent_subagents: 1,
       max_accounts_per_issue: 14,
       stuck_after_minutes: 330,
-      run_timeout_seconds: 18000,
+      run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
       kill_subagent_on_terminal: true,
       kill_subagent_on_done: true,
@@ -383,7 +383,7 @@ phase6_write_state_files() {
 #
 # `timeout` lands in `timeout_iids` and is NOT added to `unfinished_iids`,
 # so the dispatcher does NOT auto-retry it. A human reviewer strips the
-# `timeout` label (or applies `continue` / `retry`) to re-enqueue.
+# `timeout`, adds `retry`, or applies `continue` to re-enqueue.
 phase6_apply_state_classify() {
   local state_json="$1" iid="$2" final_status="$3"
   printf '%s' "${state_json}" | jq -c \
