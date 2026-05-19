@@ -104,6 +104,7 @@ fresh_init_state() {
       completed_iids: [],
       blocked_iids: [],
       failed_iids: [],
+      timeout_iids: [],
       campaign_status: "running",
       quota_launched_this_tick: 0,
       last_reconcile_evidence: null,
@@ -167,7 +168,7 @@ phase6_normalize_reply() {
     return 0
   fi
   # Normalize: tolerate null/empty fields, normalize legacy no_changes,
-  # require non-empty block_reason for blocked/failed.
+  # require non-empty block_reason for blocked/failed/timeout.
   printf '%s' "${parsed}" | jq -c \
     --argjson exp_iid "${exp_iid}" \
     --argjson exp_attempt "${exp_attempt}" '
@@ -194,34 +195,43 @@ phase6_normalize_reply() {
         .status = "blocked"
         | (if (.block_reason | length) == 0 then .block_reason = "subagent produced no staged changes" else . end)
       else . end
-    | if ((.status == "blocked" or .status == "failed") and (.block_reason | length) == 0) then
+    | if ((.status == "blocked" or .status == "failed" or .status == "timeout") and (.block_reason | length) == 0) then
         .block_reason = ("subagent reply status=" + .status + " with empty block_reason")
       else . end
   '
 }
 
 # Synchronize live workflow labels via set_issue_label.sh.
-# Inputs: $1=iid, $2=final_status (done|blocked|failed)
+# Inputs: $1=iid, $2=final_status (done|blocked|failed|timeout)
 # Returns: 0 on success, non-zero with stderr if any required op fails.
 phase6_sync_labels() {
   local iid="$1" final_status="$2"
   local rc=0
   case "${final_status}" in
     done)
-      _label_op "${iid}" remove doing  || rc=$?
+      _label_op "${iid}" remove doing   || rc=$?
       _label_op "${iid}" remove blocked || rc=$?
       _label_op "${iid}" remove failed  || rc=$?
+      _label_op "${iid}" remove timeout || rc=$?
       _label_op "${iid}" add done       || rc=$?
       _label_op "${iid}" add pr         || rc=$?
       ;;
     blocked)
       _label_op "${iid}" remove doing   || rc=$?
+      _label_op "${iid}" remove timeout || rc=$?
       _label_op "${iid}" add blocked    || rc=$?
       ;;
     failed)
       _label_op "${iid}" remove doing   || rc=$?
       _label_op "${iid}" remove blocked || rc=$?
+      _label_op "${iid}" remove timeout || rc=$?
       _label_op "${iid}" add failed     || rc=$?
+      ;;
+    timeout)
+      _label_op "${iid}" remove doing   || rc=$?
+      _label_op "${iid}" remove blocked || rc=$?
+      _label_op "${iid}" remove failed  || rc=$?
+      _label_op "${iid}" add timeout    || rc=$?
       ;;
     *)
       echo "phase6_sync_labels: unsupported final_status=${final_status}" >&2
@@ -285,7 +295,8 @@ phase6_write_state_files() {
   local now
   now="$(utc_now)"
 
-  # Compute retry_count.
+  # Compute retry_count. `timeout` is terminal-but-not-failed and DOES NOT
+  # consume retry budget — it stays parked until a human strips the label.
   local prior_retry_count
   prior_retry_count="$(printf '%s' "${prior_issue_state}" | jq -r '.retry_count // 0')"
   local new_retry_count="${prior_retry_count}"
@@ -361,7 +372,7 @@ phase6_write_state_files() {
 # Inputs:
 #   $1 = current state JSON
 #   $2 = iid
-#   $3 = final_status (done|blocked|failed)
+#   $3 = final_status (done|blocked|failed|timeout)
 # Output: the updated state JSON on stdout.
 # Caller persists.
 #
@@ -369,6 +380,10 @@ phase6_write_state_files() {
 # using the canonical `issue-<project>-<iid>` format (per state_schema.md
 # §active_issue_iids / active_issue_sessions semantics). This avoids the
 # substring trap of regex-filtering by IID suffix (IID 14 vs 114).
+#
+# `timeout` lands in `timeout_iids` and is NOT added to `unfinished_iids`,
+# so the dispatcher does NOT auto-retry it. A human reviewer strips the
+# `timeout` label (or applies `continue` / `retry`) to re-enqueue.
 phase6_apply_state_classify() {
   local state_json="$1" iid="$2" final_status="$3"
   printf '%s' "${state_json}" | jq -c \
@@ -385,6 +400,7 @@ phase6_apply_state_classify() {
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
          | .blocked_iids    = ((.blocked_iids    // []) | map(select(. != $iid)))
          | .failed_iids     = ((.failed_iids     // []) | map(select(. != $iid)))
+         | .timeout_iids    = ((.timeout_iids    // []) | map(select(. != $iid)))
          | .quota_completed_this_tick = (((.quota_completed_this_tick // 0)) + 1)
        elif $final_status == "blocked" then
          .blocked_iids      = (((.blocked_iids   // []) + [$iid]) | unique)
@@ -392,12 +408,21 @@ phase6_apply_state_classify() {
          | .unfinished_iids = (((.unfinished_iids // []) + [$iid]) | unique)
          | .completed_iids  = ((.completed_iids // []) | map(select(. != $iid)))
          | .failed_iids     = ((.failed_iids    // []) | map(select(. != $iid)))
+         | .timeout_iids    = ((.timeout_iids   // []) | map(select(. != $iid)))
+       elif $final_status == "timeout" then
+         .timeout_iids      = (((.timeout_iids   // []) + [$iid]) | unique)
+         | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
+         | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
+         | .completed_iids  = ((.completed_iids // []) | map(select(. != $iid)))
+         | .blocked_iids    = ((.blocked_iids   // []) | map(select(. != $iid)))
+         | .failed_iids     = ((.failed_iids    // []) | map(select(. != $iid)))
        else
          .failed_iids       = (((.failed_iids    // []) + [$iid]) | unique)
          | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
          | .blocked_iids    = ((.blocked_iids    // []) | map(select(. != $iid)))
          | .completed_iids  = ((.completed_iids  // []) | map(select(. != $iid)))
+         | .timeout_iids    = ((.timeout_iids    // []) | map(select(. != $iid)))
        end)
   '
 }
@@ -434,7 +459,7 @@ phase6_decide_cleanup() {
   fi
 
   # Local-evidence gate for non-done outcomes.
-  if [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ]; then
+  if [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ] || [ "${final_status}" = "timeout" ]; then
     if [ ! -f "${issue_state_file}" ] || [ ! -f "${attempt_state_file}" ] || [ ! -f "${summary_file}" ]; then
       jq -n --arg target "${child_session_key}" \
         '{action:"skip", target:$target, reason:"local_evidence_missing"}'
@@ -468,13 +493,27 @@ phase6_process() {
   child_session_key="$(printf '%s' "${state_json}" \
     | jq -r --argjson iid "${iid}" '.pending_subagents[($iid|tostring)].child_session_key // ""')"
 
-  # Sync labels for the preliminary status.
+  # Sync labels for the preliminary status. On sync failure:
+  #   - `failed`  → keep `failed` (retry-budget exhaustion is sticky).
+  #   - `timeout` → keep `timeout` (terminal, no retry; only append diagnostic
+  #                 to block_reason and retry the sync best-effort once).
+  #   - else      → demote to `blocked` (the historical safety net for
+  #                 transient GitLab API failures on done/blocked outcomes).
   local label_err=""
   local final_status="${reply_status}"
   local _err=""
   if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" 2>&1 >/dev/null)"; then
     label_err="${_err}"
-    if [ "${final_status}" != "failed" ]; then
+    if [ "${final_status}" = "timeout" ]; then
+      reply_json="$(printf '%s' "${reply_json}" | jq -c \
+        --arg le "phase6 label sync failed: ${label_err}" '
+        (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
+      ')"
+      # best-effort timeout sync — leaves issue without `doing` removal in worst case,
+      # but the dispatcher refuses to spawn for an IID in timeout_iids on the next tick,
+      # so no parallel acpx can start regardless.
+      phase6_sync_labels "${iid}" timeout >/dev/null 2>&1 || true
+    elif [ "${final_status}" != "failed" ]; then
       final_status="blocked"
       # append to block_reason
       reply_json="$(printf '%s' "${reply_json}" | jq -c \

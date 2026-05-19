@@ -241,12 +241,14 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
    → stale, exit 0.
 6. Run `phase6_process` with `is_launch_synth=false`:
    - sync labels (`done` → done+pr; `blocked` → blocked; `failed` →
-     failed; label sync failure on non-failed → append to block_reason
-     and demote to blocked)
+     failed; `timeout` → timeout; label sync failure on a
+     non-failed / non-timeout outcome → append to block_reason and
+     demote to blocked)
    - write `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` per
      state_schema.md §Phase 6 Write Mapping
-   - bump retry_count + maybe promote `blocked → failed`
-   - drain pending entry, classify into completed/blocked/failed lists
+   - bump retry_count + maybe promote `blocked → failed` (`timeout`
+     never consumes retry_count and never promotes)
+   - drain pending entry, classify into completed/blocked/failed/timeout lists
 7. Decide cleanup (`phase6_decide_cleanup`).
 8. Persist campaign_state.json (with `campaign_status="running"` when
    `pending_subagents` reaches empty).
@@ -258,7 +260,7 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 | ----- | ----- |
 | `callback_status` | `"handled"` or `"stale_or_already_drained"` |
 | `iid`, `attempt_number` | echo |
-| `terminal_status` | final status after label sync + retry promotion |
+| `terminal_status` | final status after label sync + retry promotion (`done` / `blocked` / `failed` / `timeout`) |
 | `merge_request_url` | from the compact reply |
 | `block_reason` | from the compact reply (with any label-sync error appended) |
 | `cleanup` | `{action, target, reason}`. LLM should call `subagents kill --target <target>` iff `action == "kill"` |

@@ -20,7 +20,7 @@
 #   SUMMARY_FILE             ${ISSUE_ROOT}/summary.md
 #
 # Optional env vars:
-#   ATTEMPT_STATUS           "done" | "blocked" | "failed" ("no_changes" is legacy)
+#   ATTEMPT_STATUS           "done" | "blocked" | "failed" | "timeout" ("no_changes" is legacy)
 #   COMMIT_SHA               last commit on the work branch (if pushed)
 #   MERGE_REQUEST_URL        MR URL (if known)
 #   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed

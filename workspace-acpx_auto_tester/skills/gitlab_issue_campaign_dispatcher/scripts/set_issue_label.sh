@@ -32,7 +32,7 @@ fi
 OP="$1"
 LABEL="$2"
 
-WORKFLOW_LABELS=(todo retry new doing pr done blocked failed continue contiune)
+WORKFLOW_LABELS=(todo retry new doing pr done blocked failed timeout continue contiune)
 
 is_workflow_label() {
   local label="$1"

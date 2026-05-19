@@ -16,7 +16,7 @@ This workspace has exactly one skill: `skills/gitlab_issue_campaign_dispatcher/`
 The orchestrator handles two trigger commands:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` (scheduled wake-up) — Phases 1–5: parse + reconcile + per-IID prep + serial anonymous `sessions_spawn`, then returns `waiting_for_callbacks`.
-- `RUN_CHILD_COMPLETION_CALLBACK` (callback wake-up) — Phase 6 for ONE IID: validate the subagent's compact JSON reply (in `worker_result_json`), sync live labels, write terminal `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}`, drain `pending_subagents[iid]`, classify into `completed/blocked/failed_iids`, and best-effort clean up the terminal child runtime session when enabled. The callback path NEVER spawns a replacement subagent.
+- `RUN_CHILD_COMPLETION_CALLBACK` (callback wake-up) — Phase 6 for ONE IID: validate the subagent's compact JSON reply (in `worker_result_json`), sync live labels, write terminal `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}`, drain `pending_subagents[iid]`, classify into `completed / blocked / failed / timeout_iids`, and best-effort clean up the terminal child runtime session when enabled. The callback path NEVER spawns a replacement subagent.
 
 Full Phase-by-Phase step list with env-var contract per script: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm.
 

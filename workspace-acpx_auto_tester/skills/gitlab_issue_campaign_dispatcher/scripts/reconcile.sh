@@ -31,7 +31,8 @@
 #       "has_done_pr":       bool,   # labels include both "done" and "pr"
 #       "is_closed_on_gitlab": bool,  # state is "closed"
 #       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR done+pr
-#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue/contiune label
+#       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it)
+#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/timeout/continue/contiune label
 #       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
@@ -111,6 +112,7 @@ for iid in "${IIDS[@]}"; do
       (($labels | index("done") != null) and ($labels | index("pr") != null)) as $done_with_pr |
       ($issue.state == "closed") as $closed |
       (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
+      (($labels | index("timeout") != null)) as $has_timeout |
       {
         iid: $iid,
         state: $issue.state,
@@ -119,18 +121,20 @@ for iid in "${IIDS[@]}"; do
         has_done_pr: $done_with_pr,
         is_closed_on_gitlab: $closed,
         is_done_on_gitlab: ($closed or $done_with_pr),
+        has_timeout: $has_timeout,
         user_reopened: (
           ($closed | not) and
           ($done_with_pr | not) and
           ($labels | index("failed") == null) and
           ($labels | index("blocked") == null) and
+          ($has_timeout | not) and
           ($needs_continue | not)
         ),
         needs_continue: (($closed | not) and $needs_continue),
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, user_reopened:false, needs_continue:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, user_reopened:false, needs_continue:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

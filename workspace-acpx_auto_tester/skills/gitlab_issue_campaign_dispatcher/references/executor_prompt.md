@@ -123,10 +123,24 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
     bash {SCRIPTS_DIR}/run_acpx_attempt.sh
   CAPTURE: acpx_exit (the script's exit code; stdout also prints `ACPX_EXIT=<n>`).
-  If acpx_exit != 0 → FAIL status=blocked block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
-  Do NOT inspect or tail acpx logs after this failure; preserve the logs and enter the FAIL flow immediately.
+  Exit-code routing:
+    - acpx_exit == 0           → continue to Step 2.
+    - acpx_exit == 124 or 137  → the script's `timeout` wrapper killed acpx
+                                 because it exceeded {ACPX_TIMEOUT_SECONDS}s
+                                 (124 = SIGTERM kill, 137 = SIGKILL kill-after).
+                                 The acpx process is already gone. Enter the
+                                 dedicated TIMEOUT flow described in
+                                 <timeout_flow> below — do NOT enter the
+                                 normal FAIL flow and do NOT mark the issue
+                                 blocked. The partial work in the worktree
+                                 still gets force-pushed to {WORK_BRANCH},
+                                 but no MR / `pr` is opened.
+    - any other non-zero exit  → FAIL status=blocked
+                                 block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
+  Do NOT inspect or tail acpx logs after a non-timeout failure; preserve the logs and enter the FAIL flow immediately.
 
   TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
@@ -142,9 +156,10 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
 
   Tool-exec requirements for Step 1:
   - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
-  - Use a command timeout that covers the whole expected Claude Code run; the deployment value is {ACPX_TIMEOUT_SECONDS} seconds (configurable via the `acpx_timeout_seconds` trigger field — see [`trigger_command.md`](./trigger_command.md)). Pass exactly this value as the Bash tool's command timeout when invoking `run_acpx_attempt.sh`.
+  - Use a command timeout that covers the whole expected Claude Code run AND gives the script's internal `timeout` wrapper enough headroom to fire first. The deployment value is {ACPX_TIMEOUT_SECONDS} seconds (configurable via the `acpx_timeout_seconds` trigger field — see [`trigger_command.md`](./trigger_command.md)). Pass `{ACPX_TIMEOUT_SECONDS} + 120` seconds (i.e. ~2 minutes of extra grace) as the Bash tool's command timeout so the script can return its exit code 124/137 before the outer tool gives up.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
-  - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits. If no pollable process/session exists after a tool timeout, FAIL status=blocked block_reason="acpx exec timed out and no pollable process session was available"; do not start another acpx for the same attempt.
+  - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits (the script's own `timeout` will eventually kill acpx and return 124/137; you read the exit code from there).
+  - If the Bash tool itself returns a tool-side timeout (no `ACPX_EXIT=` line captured) — which should not normally happen because the script's `timeout` fires first — treat the situation identically to acpx_exit=124 and enter the TIMEOUT flow below. The acpx process tree has already been killed by the Bash tool's own cleanup; do not start another acpx for the same attempt.
   - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. Cross-attempt continuity comes from: the self-contained prompt (incl. prior attempt summaries + reviewer comments), the work-branch contents that continue-mode resets check out, AND any untracked scratch the previous attempt left behind in the shared per-issue worktree (the in-place branch switch in `prepare_attempt.sh` preserves it).
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
@@ -266,16 +281,17 @@ Step 9 — SUMMARIZE
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
+  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
 
   Field rules:
   - status = done           when Steps 0-8 all succeeded.
   - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
   - status = blocked        when any FAIL flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
-  - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr".
-  - mr_action = none when no MR step ran (no_changes / blocked before Step 7).
-  - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries, use false.
+  - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137} or tool-side timeout). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
+  - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
+  - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / timeout).
+  - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
   This single JSON line is the ONLY artifact the dispatcher reads from your reply. Do NOT additionally write the terminal issue state or attempt state files yourself; the dispatcher (Phase 6) writes those files from this JSON.
@@ -306,6 +322,108 @@ When any step instructs "FAIL with status=X, block_reason=Y":
 
 Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.
 </fail_flow>
+
+<timeout_flow>
+Entered ONLY when Step 1 saw acpx_exit ∈ {124, 137} (the script's `timeout`
+wrapper killed acpx because it exceeded {ACPX_TIMEOUT_SECONDS}s) OR when
+the Bash tool itself reported a tool-side timeout for the same call.
+
+Set ATTEMPT_STATUS=timeout and
+    BLOCK_REASON="acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"
+up front; these stick through the rest of the flow regardless of which
+sub-steps succeed.
+
+T1 — STAGE (same script as Step 2 of the normal flow)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/stage_and_guard.sh
+  CAPTURE: stage_status.
+  - "STAGED_OK"   → continue to T2.
+  - "NO_CHANGES"  → SKIP T2 + T3 (nothing to push). commit_sha stays "".
+                    Append "; no staged changes to push" to BLOCK_REASON.
+                    Jump to T4.
+  - non-zero exit → SKIP T2 + T3. Append "; stage step failed: <stderr>"
+                    to BLOCK_REASON. Jump to T4.
+
+T2 — COMMIT + force-push (same script as Step 3 of the normal flow)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
+    bash {SCRIPTS_DIR}/commit_and_push.sh
+  CAPTURE: commit_sha (script stdout).
+  Non-zero exit → leave commit_sha empty, append "; commit_and_push step
+  failed: <last stderr line>" to BLOCK_REASON, jump to T4. The timeout
+  status itself is preserved either way (commit OR push failure does NOT
+  re-classify the issue as blocked).
+
+T3 — POST-PUSH verify (best-effort; same script as Step 4)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/post_push_verify.sh
+  Non-zero exit → append "; post-push verify failed: <last stderr line>"
+  to BLOCK_REASON. Do NOT abandon the timeout flow on this failure.
+
+T4 — LABEL doing → timeout
+  Each invocation MUST be a separate Bash exec.
+  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      REPO_PATH={REPO_PATH} \
+      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+      bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
+  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      REPO_PATH={REPO_PATH} \
+      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+      bash {SCRIPTS_DIR}/set_issue_label.sh add timeout
+  If either exec fails, append "; timeout label sync failed: <stderr>"
+  to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
+  the compact reply.
+  CAPTURE: record successful operations in labels_removed (include
+  "doing") and labels_added (include "timeout").
+
+T5 — SUMMARIZE (local-only; SAME script as Step 9)
+  ATTEMPT_STATUS=timeout \
+    SUMMARY_POST_TO_ISSUE=false \
+    COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
+    BLOCK_REASON=<BLOCK_REASON> \
+    PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_MODE={ISSUE_MODE} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/summarize_attempt.sh
+  Always SUMMARY_POST_TO_ISSUE=false for timeout — evidence stays local
+  under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for timeouts.
+
+T6 — REPLY
+  Emit the compact JSON per Step 10 with:
+    status            = "timeout"
+    mr_action         = "none"
+    merge_request_url = ""
+    wiki_url          = ""
+    commit_sha        = <captured in T2; "" if T2 was skipped or failed>
+    labels_added      = ["timeout"]      (plus any other successfully-added)
+    labels_removed    = ["doing"]        (plus any other successfully-removed)
+    summary_posted    = false
+    block_reason      = <BLOCK_REASON, non-empty>
+
+HARD rules for the timeout flow:
+- Do NOT run Step 5 (Wiki upload), Step 6 (doing → done), Step 7
+  (create_mr.sh), or Step 8 (add `pr`). The issue gets `timeout`, NOT
+  `done` + `pr`.
+- Do NOT prefer `blocked` over `timeout` here — `timeout` is its own
+  terminal status and is what the dispatcher's bookkeeping expects for
+  this signal. The dispatcher does NOT auto-retry timeouts; reviewers
+  must strip the label (or apply `continue` / `retry`) to re-run.
+- Do NOT call `acpx` again. The script already killed acpx; restarting
+  it would burn another full timeout window for the same attempt.
+</timeout_flow>
 ```
 
 ---

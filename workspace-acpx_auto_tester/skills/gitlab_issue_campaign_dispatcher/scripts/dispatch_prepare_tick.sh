@@ -380,6 +380,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
   | if .pending_subagents == null then .pending_subagents = {} else . end
   | if has("blocked_at_tick_by_iid") | not then .blocked_at_tick_by_iid = {} else . end
   | if .blocked_at_tick_by_iid == null then .blocked_at_tick_by_iid = {} else . end
+  | if has("timeout_iids") | not then .timeout_iids = [] else . end
+  | if .timeout_iids == null then .timeout_iids = [] else . end
   ')"
 
 # Drop active_issue_iids entries with no matching pending entry (legacy stale).
@@ -523,23 +525,35 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
       | .unfinished_iids = (.unfinished_iids // [])
       | .blocked_iids   = (.blocked_iids // [])
       | .failed_iids    = (.failed_iids // [])
+      | .timeout_iids   = (.timeout_iids // [])
       | if $e.is_closed_on_gitlab == true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
           | .unfinished_iids = (.unfinished_iids - [$e.iid])
           | .blocked_iids    = (.blocked_iids    - [$e.iid])
           | .failed_iids     = (.failed_iids     - [$e.iid])
+          | .timeout_iids    = (.timeout_iids    - [$e.iid])
         elif $e.has_done_pr == true and $e.needs_continue != true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
           | .unfinished_iids = (.unfinished_iids - [$e.iid])
+          | .timeout_iids    = (.timeout_iids    - [$e.iid])
         elif $e.needs_continue == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
+          | .timeout_iids   = (.timeout_iids - [$e.iid])
           | .campaign_status = "running"
         elif $e.user_reopened == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
+          | .timeout_iids   = (.timeout_iids - [$e.iid])
+        elif $e.has_timeout == true then
+          # Live label says timeout but our cache disagrees — adopt the truth.
+          .timeout_iids     = (([$e.iid] + .timeout_iids) | unique)
+          | .unfinished_iids = (.unfinished_iids - [$e.iid])
+          | .completed_iids  = (.completed_iids - [$e.iid])
+          | .blocked_iids    = (.blocked_iids - [$e.iid])
+          | .failed_iids     = (.failed_iids - [$e.iid])
         else .
       end)
   ')"
@@ -646,6 +660,7 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       ))) as $eligible
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
+      and (($s.timeout_iids // []) | index($i) | not)
       and (($s.unfinished_iids // []) | index($i))
     )) | sort) as $backlog
   | ($eligible | map(select(. as $i |
@@ -653,9 +668,13 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       and (($s.unfinished_iids // []) | index($i) | not)
       and (($s.completed_iids // []) | index($i) | not)
       and (($s.failed_iids // []) | index($i) | not)
+      and (($s.timeout_iids // []) | index($i) | not)
       and ($i >= $next_new)
     )) | sort) as $fresh
-  | ($eligible | map(select(. as $i | ($s.blocked_iids // []) | index($i))) | sort) as $blocked_retryable_raw
+  | ($eligible | map(select(. as $i |
+      (($s.blocked_iids // []) | index($i))
+      and (($s.timeout_iids // []) | index($i) | not)
+    )) | sort) as $blocked_retryable_raw
   | # blocked_iids invariant: only retryable entries are in this list.
     # Phase 6 promotes blocked → failed (and moves the IID into failed_iids)
     # whenever retry_count > blocked_retry_limit. Launch-side synthesized
@@ -878,7 +897,10 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
   # Transition labels: remove entry labels + add doing.
-  REMOVE_LBLS=(todo retry new continue contiune blocked done pr)
+  # `timeout` is included so that a reviewer who re-enqueued the IID (e.g. by
+  # adding `retry` on top of `timeout`) doesn't end up with a `timeout +
+  # doing` mix between this prep and `set_issue_label.sh add doing`.
+  REMOVE_LBLS=(todo retry new continue contiune blocked done pr timeout)
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \
