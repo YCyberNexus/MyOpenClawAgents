@@ -70,7 +70,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    `max_concurrent_subagents` (1..pool_size), `max_accounts_per_issue`,
    `run_timeout_seconds`, `acpx_timeout_seconds`, `require_labels_match`.
 6. Migrate legacy on-disk shapes (`active_issue_iid` → array,
-   `accounts_per_issue` dropped).
+   stale account-count fields dropped).
 7. Call `load_ui_accounts.sh`; map exit codes 10–15 to the documented
    tick-level abort strings (`ui_account_pool_too_small`, etc.).
 8. **Stuck-pending eviction.** For each `pending_subagents` entry where

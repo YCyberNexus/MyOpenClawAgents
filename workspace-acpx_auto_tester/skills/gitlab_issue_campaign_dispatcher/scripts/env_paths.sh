@@ -93,10 +93,8 @@
 #   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
 #   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
 #
-# Note: HULAT_DIR is NOT a trigger input. It is derived as
-# `${REPO_PATH}/hulat` because the test team committed the hulat
-# materials into the repo. Triggers that still pass `hulat_dir=...` are
-# silently ignored (the override never reaches a script).
+# Note: HULAT_DIR is derived as `${REPO_PATH}/hulat` because the test
+# team committed the hulat materials into the repo.
 #
 # Outputs (exported into the calling shell): see lists above. Plus:
 #   GITLAB_HOST, GITLAB_API_PROTOCOL    (loaded via glab_auth.sh)
