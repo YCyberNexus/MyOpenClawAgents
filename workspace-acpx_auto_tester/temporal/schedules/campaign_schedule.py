@@ -44,6 +44,10 @@ def build_campaign_schedule(
         input_payload: the :class:`CampaignInput` the workflow receives.
         note: free-text annotation surfaced in Temporal Web UI.
     """
+    tick_timeout = max(
+        interval * 4,
+        timedelta(minutes=input_payload.stuck_after_minutes + 30),
+    )
     return Schedule(
         action=ScheduleActionStartWorkflow(
             workflow="CampaignWorkflow",
@@ -51,7 +55,7 @@ def build_campaign_schedule(
             id=f"{schedule_id}:run",
             task_queue=task_queue,
             id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
-            execution_timeout=interval * 4,  # one tick should never run >4 cycles
+            execution_timeout=tick_timeout,
         ),
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=interval)]),
         policy=SchedulePolicy(

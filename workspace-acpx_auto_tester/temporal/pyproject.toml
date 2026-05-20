@@ -31,16 +31,25 @@ dev = [
 acpx-temporal-worker = "acpx_temporal.worker:main"
 acpx-temporal-client = "acpx_temporal.client:main"
 
-[tool.setuptools.packages.find]
-where = ["."]
-include = ["acpx_temporal*"]
-
 # The package layout is flat ─ the `acpx_temporal` package lives in this
 # directory tree even though the directory name on disk is `temporal/`. We add
 # an explicit src layout map below so `import acpx_temporal.workflows.campaign`
 # resolves regardless of where pip installs it.
+[tool.setuptools]
+packages = [
+    "acpx_temporal",
+    "acpx_temporal.activities",
+    "acpx_temporal.schedules",
+    "acpx_temporal.shared",
+    "acpx_temporal.workflows",
+]
+
 [tool.setuptools.package-dir]
 acpx_temporal = "."
+"acpx_temporal.activities" = "activities"
+"acpx_temporal.schedules" = "schedules"
+"acpx_temporal.shared" = "shared"
+"acpx_temporal.workflows" = "workflows"
 
 [tool.mypy]
 python_version = "3.11"

@@ -21,9 +21,11 @@ docstring on :func:`run_script` for the heartbeat hook.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import shlex
+import signal
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Awaitable, Callable, Mapping
@@ -175,6 +177,7 @@ async def run_script(
         stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
+        start_new_session=True,
     )
 
     # Feed stdin if requested. Done up front so the script never blocks on
@@ -185,25 +188,32 @@ async def run_script(
         proc.communicate(input=stdin_bytes)
     )
 
-    while True:
-        try:
-            stdout_b, stderr_b = await asyncio.wait_for(
-                asyncio.shield(communicate_task),
-                timeout=heartbeat_every_s if heartbeat is not None else None,
-            )
-            break
-        except asyncio.TimeoutError:
-            # Heartbeat tick — subprocess still running. Re-loop the wait
-            # on the SAME shielded task so we don't restart communicate().
-            if heartbeat is not None:
-                try:
-                    await heartbeat()
-                except asyncio.CancelledError:
-                    # MUST propagate cancellation; activity cancellation is
-                    # one of the Temporal-side liveness signals we depend on.
-                    raise
-                except Exception:  # noqa: BLE001 — heartbeat must never crash run_script
-                    LOG.exception("heartbeat callback raised; continuing")
+    try:
+        while True:
+            try:
+                stdout_b, stderr_b = await asyncio.wait_for(
+                    asyncio.shield(communicate_task),
+                    timeout=heartbeat_every_s if heartbeat is not None else None,
+                )
+                break
+            except asyncio.TimeoutError:
+                # Heartbeat tick — subprocess still running. Re-loop the wait
+                # on the SAME shielded task so we don't restart communicate().
+                if heartbeat is not None:
+                    try:
+                        await heartbeat()
+                    except asyncio.CancelledError:
+                        # MUST propagate cancellation; activity cancellation is
+                        # one of the Temporal-side liveness signals we depend on.
+                        raise
+                    except Exception:  # noqa: BLE001 — heartbeat must never crash run_script
+                        LOG.exception("heartbeat callback raised; continuing")
+    except asyncio.CancelledError:
+        await _terminate_process(proc, script_name)
+        communicate_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await communicate_task
+        raise
 
     stdout_text = stdout_b.decode("utf-8", errors="replace") if stdout_b else ""
     stderr_text = stderr_b.decode("utf-8", errors="replace") if stderr_b else ""
@@ -239,6 +249,34 @@ async def run_script(
         len(stderr_text),
     )
     return ScriptResult(exit_code=exit_code, stdout=stdout_text, stderr=stderr_text)
+
+
+async def _terminate_process(
+    proc: asyncio.subprocess.Process, script_name: str
+) -> None:
+    """Stop the child process when Temporal cancels the activity."""
+    if proc.returncode is not None:
+        return
+
+    LOG.warning("activity cancelled; terminating subprocess %s", script_name)
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        proc.terminate()
+
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=10.0)
+    except asyncio.TimeoutError:
+        LOG.warning("subprocess %s ignored terminate; killing", script_name)
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return
+        except PermissionError:
+            proc.kill()
+        await proc.wait()
 
 
 # ---------------------------------------------------------------------------

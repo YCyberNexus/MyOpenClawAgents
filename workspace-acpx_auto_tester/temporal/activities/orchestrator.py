@@ -7,9 +7,12 @@ already exist:
 * A1 ``reconcile_gitlab``           ← ``reconcile.sh``
 * A2 ``ensure_workflow_labels``     ← ``ensure_labels.sh``
 * A3 ``clone_or_pull_repo``         ← ``clone_or_pull.sh``
-* A4 ``load_ui_account_pool``       ← ``load_ui_accounts.sh`` + parser
+* A4 ``load_ui_account_pool``       ← ``config/ui_accounts.env`` parser
+* A4b ``allocate_attempt_number``   ← ``allocate_attempt.sh``
 * A5 ``prepare_attempt_worktree``   ← ``prepare_attempt.sh``
 * A6 ``build_executor_prompt``      ← ``build_prompt.sh``
+* A6a ``mark_issue_doing``          ← ``set_issue_label.sh add doing``
+* A6b ``record_attempt_outcome``    ← update per-issue ``state.json``
 
 Each leaf script keeps its existing contract; the activity layer only adds
 typed inputs/outputs and ApplicationError translation.
@@ -21,6 +24,7 @@ import json
 import logging
 import os
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
@@ -30,11 +34,12 @@ from ..shared.env import build_attempt_env, build_dispatcher_env
 from ..shared.errors import AcpxErrorType, raise_app_error
 from ..shared.types import (
     AttemptInput,
+    AttemptOutcome,
     CampaignInput,
     IssueLiveState,
     PreparedAttempt,
     ReconcileEvidence,
-    UiAccount,
+    UiAccountPoolInfo,
 )
 from ..shared.ui_accounts import load_pool
 from .leaf import _derive_paths  # share path computation logic
@@ -92,13 +97,14 @@ async def reconcile_gitlab(
     evidence_path = res.stdout.strip().splitlines()[-1].strip()
     return _parse_reconcile_evidence(
         evidence_path,
+        camp,
         camp.issue_min_iid if single_iid is None else single_iid,
         camp.issue_max_iid if single_iid is None else single_iid,
     )
 
 
 def _parse_reconcile_evidence(
-    path: str, min_iid: int, max_iid: int
+    path: str, camp: CampaignInput, min_iid: int, max_iid: int
 ) -> ReconcileEvidence:
     """Read the evidence JSON written by ``reconcile.sh`` into a typed
     :class:`ReconcileEvidence`. The evidence file shape is documented in
@@ -121,9 +127,11 @@ def _parse_reconcile_evidence(
     per_iid: list[IssueLiveState] = []
     for entry in digest if isinstance(digest, list) else []:
         labels = tuple(entry.get("labels", ()) or ())
+        state = _read_issue_disk_state(camp, int(entry["iid"]))
         per_iid.append(
             IssueLiveState(
                 iid=int(entry["iid"]),
+                title=str(entry.get("title") or ""),
                 is_closed_on_gitlab=bool(entry.get("is_closed_on_gitlab", False)),
                 has_done_pr=bool(entry.get("has_done_pr", False)),
                 needs_continue=bool(entry.get("needs_continue", False)),
@@ -133,6 +141,8 @@ def _parse_reconcile_evidence(
                 has_failed="failed" in labels,
                 has_retry="retry" in labels,
                 labels=labels,
+                retry_count=int(state.get("retry_count", 0) or 0),
+                blocked_at_tick=int(state.get("blocked_at_tick", -1) or -1),
             )
         )
 
@@ -142,6 +152,25 @@ def _parse_reconcile_evidence(
         queried_at_ms=int(activity.info().current_attempt_scheduled_time.timestamp() * 1000),
         per_iid=tuple(per_iid),
     )
+
+
+def _issue_state_path(camp: CampaignInput, iid: int) -> Path:
+    repo_path = f"{camp.repo_parent_path.rstrip('/')}/{camp.project}"
+    return (
+        Path(repo_path)
+        / camp.result_basename
+        / "issues"
+        / f"issue-{iid}"
+        / "state.json"
+    )
+
+
+def _read_issue_disk_state(camp: CampaignInput, iid: int) -> dict[str, object]:
+    path = _issue_state_path(camp, iid)
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
 # ---------------------------------------------------------------------------
@@ -222,15 +251,55 @@ def _resolve_pool_path() -> Path:
 
 
 @activity.defn(name="load_ui_account_pool")
-async def load_ui_account_pool() -> tuple[UiAccount, ...]:
-    """Parse ``<workspace>/config/ui_accounts.env`` into a tuple of accounts.
+async def load_ui_account_pool() -> UiAccountPoolInfo:
+    """Parse ``<workspace>/config/ui_accounts.env`` and return only its size.
 
     The legacy dispatcher's ``load_ui_accounts.sh`` divides the pool into
     per-IID slots; under Temporal that math moves into
     :func:`shared.ui_accounts.allocate_slots` (pure, deterministic) so the
-    activity only returns the raw pool.
+    activity only returns a non-secret summary. Credentials stay worker-local
+    and are read directly inside :func:`build_executor_prompt`.
     """
-    return load_pool(_resolve_pool_path())
+    return UiAccountPoolInfo(count=len(load_pool(_resolve_pool_path())))
+
+
+# ---------------------------------------------------------------------------
+# A4b — allocate_attempt_number
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="allocate_attempt_number")
+async def allocate_attempt_number(camp: CampaignInput, iid: int) -> int:
+    """Allocate the next attempt number through the existing durable script.
+
+    The previous Temporal PoC derived ``attempt_number`` from workflow-local
+    retry counters, which reset when each Schedule firing created a fresh
+    CampaignWorkflow execution. Reusing ``allocate_attempt.sh`` keeps the
+    monotonic per-IID counter in the existing per-issue state file and preserves
+    the legacy "dispatcher allocates once, executor only consumes" contract.
+    """
+    env = build_dispatcher_env(camp)
+    env["IID"] = str(iid)
+    res = await run_script("allocate_attempt.sh", env=env)
+    if res.exit_code != 0:
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            f"allocate_attempt.sh exit {res.exit_code}: {res.stderr[-500:]}",
+        )
+    value = res.stdout.strip().splitlines()[-1].strip()
+    try:
+        attempt_number = int(value)
+    except ValueError:
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            f"allocate_attempt.sh stdout did not end with an integer: {res.stdout!r}",
+        )
+    if attempt_number < 1:
+        raise_app_error(
+            AcpxErrorType.INVARIANT_VIOLATION,
+            f"allocate_attempt.sh returned invalid attempt number {attempt_number}",
+        )
+    return attempt_number
 
 
 # ---------------------------------------------------------------------------
@@ -323,7 +392,8 @@ async def build_executor_prompt(
     **inside this activity** by reading
     ``<workspace>/config/ui_accounts.env`` on the worker host, slicing by
     ``att.ui_account_index_start`` / ``att.ui_account_count``, and feeding
-    JSON into the ``UI_ACCOUNTS=`` env var that ``build_prompt.sh`` reads.
+    legacy ``{"u": "...", "p": "..."}`` JSON into the ``UI_ACCOUNTS=`` env
+    var that ``build_prompt.sh`` reads.
     The calling workflow only passes integer slot indices — plaintext
     passwords never enter Temporal workflow history.
 
@@ -345,7 +415,7 @@ async def build_executor_prompt(
     slot_accounts = pool[slot_start:slot_end]
     ui_accounts_json = json.dumps(
         [
-            {"index": acc.index, "username": acc.username, "password": acc.password}
+            {"u": acc.username, "p": acc.password}
             for acc in slot_accounts
         ]
     )
@@ -371,6 +441,99 @@ async def build_executor_prompt(
 
 
 # ---------------------------------------------------------------------------
+# A6a — mark_issue_doing
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="mark_issue_doing")
+async def mark_issue_doing(camp: CampaignInput, att: AttemptInput) -> None:
+    """Transition the GitLab issue into the in-progress workflow state.
+
+    This preserves the legacy Phase 4 label contract: entry labels such as
+    ``todo`` / ``retry`` / ``new`` / ``continue`` / ``blocked`` are removed by
+    ``set_issue_label.sh add doing`` before the attempt is allowed to run.
+    """
+    env = build_attempt_env(camp, att)
+    env.update(_derive_paths(camp, att))
+    res = await run_script("set_issue_label.sh", env=env, args=("add", "doing"))
+    if res.exit_code != 0:
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            f"set_issue_label.sh add doing exit {res.exit_code}: {res.stderr[-500:]}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# A6b — record_attempt_outcome
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="record_attempt_outcome")
+async def record_attempt_outcome(
+    camp: CampaignInput,
+    att: AttemptInput,
+    outcome: AttemptOutcome,
+    final_status: str,
+    tick_seq: int,
+) -> int:
+    """Persist terminal attempt status into the existing per-issue state file.
+
+    Temporal history is the durable scheduler record, but the legacy scripts
+    still rely on ``allocate_attempt.sh``'s ``state.json`` for monotonic attempt
+    allocation. Keeping terminal status and retry budget in the same file lets
+    fresh Schedule firings honor ``blocked_cooldown_ticks`` and
+    ``blocked_retry_limit`` without storing secrets in workflow history.
+
+    Returns the post-write retry_count.
+    """
+    state_path = _issue_state_path(camp, att.iid)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state = _read_issue_disk_state(camp, att.iid)
+    retry_count = int(state.get("retry_count", 0) or 0)
+
+    if final_status == "done":
+        retry_count = 0
+        blocked_at_tick: int | None = None
+    elif final_status in ("blocked", "failed"):
+        retry_count += 1
+        blocked_at_tick = tick_seq if final_status == "blocked" else None
+    else:
+        # timeout parks the IID and does not consume retry budget.
+        blocked_at_tick = None
+
+    state.update(
+        {
+            "iid": att.iid,
+            "status": final_status,
+            "mode": outcome.mode_actual,
+            "attempts_total": max(
+                int(state.get("attempts_total", 0) or 0),
+                att.attempt_number,
+            ),
+            "latest_attempt_number": att.attempt_number,
+            "latest_attempt_dir": str(state_path.parent),
+            "retry_count": retry_count,
+            "block_reason": outcome.block_reason or None,
+            "commit_sha": outcome.commit_sha or None,
+            "merge_request_url": outcome.merge_request_url or None,
+            "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+    )
+    if blocked_at_tick is None:
+        state.pop("blocked_at_tick", None)
+    else:
+        state["blocked_at_tick"] = blocked_at_tick
+
+    tmp = state_path.with_name(f".{state_path.name}.tmp")
+    tmp.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(state_path)
+    return retry_count
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
@@ -386,9 +549,12 @@ async def _idle_heartbeat() -> None:
 
 __all__ = [
     "build_executor_prompt",
+    "allocate_attempt_number",
     "clone_or_pull_repo",
     "ensure_workflow_labels",
     "load_ui_account_pool",
+    "mark_issue_doing",
     "prepare_attempt_worktree",
+    "record_attempt_outcome",
     "reconcile_gitlab",
 ]

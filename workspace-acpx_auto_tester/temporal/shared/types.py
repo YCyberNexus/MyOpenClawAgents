@@ -23,7 +23,7 @@ Mirrors:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Literal
 
 # Status enums kept as ``Literal`` aliases so JSON round-trips as plain strings
@@ -89,10 +89,11 @@ class CampaignInput:
 
     # ── Workflow-internal tunables (not in the legacy trigger) ──────────────
     ticks_before_continue_as_new: int = 200
-    """How many tick iterations before ``CampaignWorkflow`` checkpoints with
-    ``workflow.continue_as_new`` to keep event history bounded. Per Temporal
-    encyclopedia best practice ~50 MB event history is safe; 200 ticks at
-    one minor mutation per tick stays well under that."""
+    """Reserved for a future long-lived entity workflow mode.
+
+    The current Schedule integration starts one CampaignWorkflow per tick, so
+    event history is naturally bounded by that tick.
+    """
 
     # Secrets are NOT inputs. ``gitlab_token`` is sourced from the worker's
     # env (forwarded to ``glab_auth.sh`` by ``activities/subprocess.py``).
@@ -216,6 +217,7 @@ class IssueLiveState:
     """
 
     iid: int
+    title: str
     is_closed_on_gitlab: bool   # hard terminal — never schedule
     has_done_pr: bool           # both `done` and `pr` present → completed
     needs_continue: bool        # opened + has `continue`/`contiune` → reviewer resume
@@ -225,6 +227,8 @@ class IssueLiveState:
     has_failed: bool
     has_retry: bool
     labels: tuple[str, ...]
+    retry_count: int = 0
+    blocked_at_tick: int = -1
 
 
 @dataclass(frozen=True)
@@ -253,6 +257,18 @@ class UiAccount:
     index: int                  # 0-based; stable across reads (file order)
     username: str
     password: str
+
+
+@dataclass(frozen=True)
+class UiAccountPoolInfo:
+    """Non-secret summary of the UI account pool.
+
+    Workflows must not receive usernames/passwords because Activity return
+    values are stored in Temporal history. Activities that need credentials
+    read the pool directly on the worker host.
+    """
+
+    count: int
 
 
 @dataclass(frozen=True)
@@ -329,11 +345,11 @@ class LabelsState:
 @dataclass(frozen=True)
 class CampaignSummary:
     """Returned by ``CampaignWorkflow.run`` when the campaign reaches the
-    ``completed`` state or when a ``continue_as_new`` chain ends.
+    end of one scheduled tick.
 
-    For a campaign that's still rolling (most common), the workflow normally
-    ``continue_as_new`` and never returns this summary directly — operators
-    read the same fields from ``workflow.query`` ``pending_status`` instead.
+    For a campaign that's still rolling, operators normally inspect the same
+    fields through ``workflow.query`` ``pending_status`` while the tick is
+    active, and use Schedule history for past tick summaries.
     """
 
     final_tick_seq: int
@@ -410,5 +426,6 @@ __all__ = [
     "ReconcileEvidence",
     "StagedDiff",
     "UiAccount",
+    "UiAccountPoolInfo",
     "UiAccountSlot",
 ]

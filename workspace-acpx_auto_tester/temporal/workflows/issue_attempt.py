@@ -2,8 +2,8 @@
 
 Driven by :class:`CampaignWorkflow` as a child workflow with
 ``WorkflowIDReusePolicy.REJECT_DUPLICATE`` on
-``id=f"issue:{project}:{iid}"`` — Temporal Service enforces "same IID never
-runs twice concurrently".
+``id=f"issue:{project}:{iid}:att-{attempt_number:03d}"`` — Temporal Service
+enforces that the same attempt is not started twice.
 
 Replaces the executor-prompt Steps 0–10 in
 ``../skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md``.
@@ -179,7 +179,7 @@ class IssueAttemptWorkflow:
                 commit_and_push,
                 args=[camp, att],
                 start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
             self._commit_sha = push_res.commit_sha
         except ActivityError as ae:
@@ -210,7 +210,7 @@ class IssueAttemptWorkflow:
                 upload_wiki_artifacts,
                 args=[camp, att],
                 start_to_close_timeout=timedelta(seconds=20),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
         except ActivityError as ae:
             cause = _root_application_error(ae)
@@ -225,7 +225,7 @@ class IssueAttemptWorkflow:
                 transition_label_doing_to_done,
                 args=[camp, att],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
             self._labels_removed.append("doing")
             self._labels_added.append("done")
@@ -261,7 +261,7 @@ class IssueAttemptWorkflow:
                 add_pr_label,
                 args=[camp, att],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
             self._labels_added.append("pr")
         except ActivityError as ae:
@@ -286,7 +286,7 @@ class IssueAttemptWorkflow:
                     True,
                 ],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
         except ActivityError:
             # Summarize failure is non-fatal: status stays done, summary not posted.
@@ -340,7 +340,7 @@ class IssueAttemptWorkflow:
                 sync_terminal_labels,
                 args=[camp, att, terminal_status],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
             self._labels_removed.append("doing")
             self._labels_added.append(terminal_status)
@@ -358,7 +358,7 @@ class IssueAttemptWorkflow:
                 args=[camp, att, terminal_status, self._commit_sha, self._mr_url,
                       block_reason, False],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
         except ActivityError:
             LOG.warning("summarize_attempt failed during FAIL flow; continuing")
@@ -449,7 +449,7 @@ class IssueAttemptWorkflow:
                 sync_terminal_labels,
                 args=[camp, att, "timeout"],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
             self._labels_removed.append("doing")
             self._labels_added.append("timeout")
@@ -463,7 +463,7 @@ class IssueAttemptWorkflow:
                 summarize_attempt,
                 args=[camp, att, "timeout", self._commit_sha, "", block_reason, False],
                 start_to_close_timeout=timedelta(seconds=10),
-                retry_policy=_RP_2_ATTEMPTS,
+                retry_policy=_RP_1_ATTEMPT,
             )
         except ActivityError:
             LOG.warning("summarize_attempt failed during TIMEOUT flow; continuing")

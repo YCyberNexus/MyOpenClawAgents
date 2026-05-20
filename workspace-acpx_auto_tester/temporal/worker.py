@@ -54,11 +54,14 @@ from .activities.leaf import (
     upload_wiki_artifacts,
 )
 from .activities.orchestrator import (
+    allocate_attempt_number,
     build_executor_prompt,
     clone_or_pull_repo,
     ensure_workflow_labels,
     load_ui_account_pool,
+    mark_issue_doing,
     prepare_attempt_worktree,
+    record_attempt_outcome,
     reconcile_gitlab,
 )
 
@@ -147,8 +150,11 @@ async def _run(args: argparse.Namespace) -> None:
             ensure_workflow_labels,
             clone_or_pull_repo,
             load_ui_account_pool,
+            allocate_attempt_number,
             prepare_attempt_worktree,
             build_executor_prompt,
+            mark_issue_doing,
+            record_attempt_outcome,
             # Leaf (A7–A16)
             run_claude_code_attempt,
             stage_and_guard,

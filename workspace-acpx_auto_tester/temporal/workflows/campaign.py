@@ -14,41 +14,42 @@ Each tick:
 4. For each batch IID:
 
    * acquire one UI account slot from :class:`AccountSemaphore`;
-   * run ``prepare_attempt_worktree`` + ``build_executor_prompt`` activities;
+   * run ``prepare_attempt_worktree`` + ``mark_issue_doing`` +
+     ``build_executor_prompt`` activities;
    * start :class:`IssueAttemptWorkflow` as a child with
      ``WorkflowIDReusePolicy.REJECT_DUPLICATE`` (same IID never runs twice).
 
 5. Await all children in this batch (single-batch invariant — no mid-batch
    top-up). Drain semaphore on each child completion.
-6. After every ``ticks_before_continue_as_new`` iterations,
-   :meth:`workflow.continue_as_new` to keep event history bounded.
-
-This file intentionally implements the **core loop only** — the legacy
-backlog-first ordering / cooldown promotion / launch-retry are simplified
-to "form one batch, await it, return". A reviewer comment block under
-``# TODO(post-PoC):`` highlights what remains.
+6. Persist per-IID terminal outcome into the existing issue state cache so
+   later Schedule firings retain attempt numbering and blocked retry budget.
 """
 
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from datetime import timedelta
 from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy, WorkflowIDReusePolicy
-from temporalio.exceptions import ChildWorkflowError
+from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError
 from temporalio.workflow import ChildWorkflowCancellationType, ParentClosePolicy
 
 with workflow.unsafe.imports_passed_through():
     from ..activities.orchestrator import (
+        allocate_attempt_number,
         build_executor_prompt,
         clone_or_pull_repo,
         ensure_workflow_labels,
         load_ui_account_pool,
+        mark_issue_doing,
         prepare_attempt_worktree,
+        record_attempt_outcome,
         reconcile_gitlab,
     )
+    from ..activities.leaf import sync_terminal_labels
     from ..shared.types import (
         AttemptInput,
         AttemptOutcome,
@@ -94,8 +95,9 @@ class CampaignWorkflow:
         self._timeout: set[int] = set()
         self._blocked: set[int] = set()
         self._pending: set[int] = set()
-        # Retry budget bookkeeping (replaces issue_state.retry_count + blocked_at_tick).
-        # Lives only within one tick execution — see TODO(post-PoC) in `run`.
+        self._active_ui_accounts_in_use: int = 0
+        # Tick-local mirrors of retry bookkeeping. Cross-tick values are loaded
+        # from per-issue state during reconcile.
         self._retry_count: dict[int, int] = {}
         self._blocked_at_tick: dict[int, int] = {}
 
@@ -116,7 +118,7 @@ class CampaignWorkflow:
         return CampaignSnapshot(
             tick_seq=self._tick_seq,
             pending_iids=tuple(sorted(self._pending)),
-            active_ui_accounts_in_use=0,  # filled in tick body when sem is alive
+            active_ui_accounts_in_use=self._active_ui_accounts_in_use,
             completed_iids=tuple(sorted(self._completed)),
             failed_iids=tuple(sorted(self._failed)),
             timeout_iids=tuple(sorted(self._timeout)),
@@ -137,23 +139,14 @@ class CampaignWorkflow:
         4. form a batch and run it to completion;
         5. return a summary.
 
-        Cross-tick state (retry_count, blocked_at_tick) is **not** persisted
-        in this workflow instance because the next tick is a fresh execution.
-        v1 derives status from reconcile labels each tick — ``blocked``/
-        ``failed``/``timeout`` are GitLab labels, so the source of truth
-        re-classifies us automatically. The ``_retry_count`` /
-        ``_blocked_at_tick`` instance attributes still exist but only matter
-        within the current tick's ``_run_batch`` for the promotion-to-failed
-        decision after the children of THIS batch return.
-
-        TODO(post-PoC): persist ``retry_count`` across ticks. Options:
-        Workflow Search Attributes on the IssueAttemptWorkflow id-chain, or
-        a sidecar GitLab label like ``retries:N``. CLAUDE.md §Source of
-        Truth Policy mandates GitLab is canonical, so the label-based path
-        is cleanest.
+        GitLab labels remain the source of truth for issue workflow state.
+        The existing per-issue ``state.json`` stores only counters GitLab
+        labels do not encode: monotonic attempt number, retry_count, and
+        blocked_at_tick.
         """
         inp = inp.validated()
         self._tick_seq += 1
+        tick_started_at = workflow.now()
         LOG.info("CampaignWorkflow tick=%d project=%s", self._tick_seq, inp.project)
 
         # Honour pause signal between Schedule firings — the operator can
@@ -179,7 +172,15 @@ class CampaignWorkflow:
 
         # ── Reconcile + classify ────────────────────────────────────────────
         evidence = await self._reconcile(inp)
-        self._classify(evidence)
+        self._classify(inp, evidence)
+
+        if workflow.now() - tick_started_at >= timedelta(minutes=inp.max_runtime_minutes):
+            LOG.info(
+                "CampaignWorkflow tick=%d exhausted max_runtime_minutes=%d before batching",
+                self._tick_seq,
+                inp.max_runtime_minutes,
+            )
+            return self._final_summary()
 
         # ── Batch + run ─────────────────────────────────────────────────────
         # "Nothing to do this tick" = no IID survives the eligibility scan.
@@ -206,9 +207,10 @@ class CampaignWorkflow:
         self._last_reconcile_ms = ev.queried_at_ms
         return ev
 
-    def _classify(self, ev: ReconcileEvidence) -> None:
+    def _classify(self, inp: CampaignInput, ev: ReconcileEvidence) -> None:
         """Re-derive IID buckets from reconcile evidence — GitLab labels are
-        the source of truth, disk cache is gone.
+        the source of truth; per-issue disk state only carries retry/cooldown
+        counters that GitLab labels do not encode.
 
         Ordering note (per reviewer I2): ``needs_continue`` wins over
         ``has_failed`` / ``has_blocked`` / ``has_timeout`` — a reviewer who
@@ -230,9 +232,9 @@ class CampaignWorkflow:
                 self._pending.add(entry.iid)
             elif entry.has_done_pr:
                 self._completed.add(entry.iid)
-            elif entry.has_timeout:
+            elif entry.has_timeout and not entry.has_retry:
                 self._timeout.add(entry.iid)
-            elif entry.has_failed:
+            elif entry.has_failed or entry.retry_count > inp.blocked_retry_limit:
                 self._failed.add(entry.iid)
             elif entry.has_blocked and not entry.has_retry:
                 self._blocked.add(entry.iid)
@@ -250,21 +252,27 @@ class CampaignWorkflow:
             3. Fresh new IIDs (ascending from ``next_new_iid``).
             4. Blocked-with-cooldown-elapsed IIDs (only after no backlog).
         """
-        # TODO(post-PoC): blocked_cooldown_ticks / retry budget promotion to
-        # `failed` once retry_count > blocked_retry_limit. v0 keeps it simple.
         candidates: list[IssueLiveState] = []
         seen: set[int] = set()
+        limit = min(inp.max_concurrent_subagents, inp.hourly_issue_quota)
+        if limit <= 0:
+            return candidates
 
         def admit(entry: IssueLiveState) -> bool:
             if entry.iid in seen or entry.iid in self._completed:
                 return False
+            blocked_at = self._blocked_at_tick.get(entry.iid, entry.blocked_at_tick)
+            if blocked_at >= 0:
+                elapsed = self._tick_seq - blocked_at
+                if elapsed < inp.blocked_cooldown_ticks:
+                    return False
             if not _whitelist_ok(entry, inp):
                 return False
             if not _required_labels_ok(entry.labels, inp):
                 return False
             seen.add(entry.iid)
             candidates.append(entry)
-            return len(candidates) >= inp.max_concurrent_subagents
+            return len(candidates) >= limit
 
         # By-priority scan over evidence.
         for entry in ev.per_iid:
@@ -275,6 +283,9 @@ class CampaignWorkflow:
                 return candidates
         for entry in sorted(ev.per_iid, key=lambda e: e.iid):
             if entry.iid in self._pending and admit(entry):
+                return candidates
+        for entry in sorted(ev.per_iid, key=lambda e: e.iid):
+            if entry.iid in self._blocked and admit(entry):
                 return candidates
 
         return candidates
@@ -288,16 +299,14 @@ class CampaignWorkflow:
         before this method returns; the tick's `_classify` already accounts
         for any in-flight state from a prior tick.
         """
-        # Discover pool size cheaply — we don't need passwords in workflow
-        # context (those are a secret; activities read them on the worker
-        # side). load_ui_account_pool returns the full pool; we only consult
-        # its length here.
-        pool = await workflow.execute_activity(
+        # Discover pool size only. Account secrets stay worker-local and never
+        # enter workflow history.
+        pool_info = await workflow.execute_activity(
             load_ui_account_pool,
             start_to_close_timeout=timedelta(seconds=5),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
-        pool_size = len(pool)
+        pool_size = pool_info.count
         slots = allocate_slots(
             pool_size=pool_size,
             max_concurrent_subagents=inp.max_concurrent_subagents,
@@ -309,12 +318,30 @@ class CampaignWorkflow:
         # repo.lock; concurrent invocations would serialize on bash flock).
         # Then start children with WAIT_CANCELLATION_COMPLETED so a tick
         # cancellation drains gracefully.
-        child_handles: list[tuple[workflow.ChildWorkflowHandle[Any, AttemptOutcome], int]] = []
+        child_handles: list[
+            tuple[
+                workflow.ChildWorkflowHandle[Any, AttemptOutcome],
+                int,
+                AttemptInput,
+                IssueLiveState,
+            ]
+        ] = []
 
         for entry in batch:
             slot = sem.acquire_for(entry.iid)
+            self._active_ui_accounts_in_use = sem.in_use_count
             mode: str = "continue" if entry.needs_continue else "fresh"
-            attempt_number = self._retry_count.get(entry.iid, 0) + 1
+            try:
+                attempt_number = await workflow.execute_activity(
+                    allocate_attempt_number,
+                    args=[inp, entry.iid],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except ActivityError:
+                sem.release(entry.iid)
+                self._active_ui_accounts_in_use = sem.in_use_count
+                raise
 
             att = AttemptInput(
                 project=inp.project,
@@ -331,28 +358,49 @@ class CampaignWorkflow:
                 dev_branch=inp.dev_branch,
                 work_branch=f"issue/{entry.iid}-auto-fix",
                 acpx_timeout_seconds=inp.acpx_timeout_seconds,
-                issue_title="",
+                issue_title=entry.title or f"issue-{entry.iid}",
                 issue_url="",
                 issue_labels=entry.labels,
             )
 
-            await workflow.execute_activity(
-                prepare_attempt_worktree,
-                args=[inp, att],
-                start_to_close_timeout=timedelta(seconds=60),
-                retry_policy=_RP_2_ATTEMPTS,
-            )
+            try:
+                prepared = await workflow.execute_activity(
+                    prepare_attempt_worktree,
+                    args=[inp, att],
+                    start_to_close_timeout=timedelta(seconds=60),
+                    retry_policy=_RP_2_ATTEMPTS,
+                )
+                if prepared.mode_actual != att.mode:
+                    att = replace(att, mode=prepared.mode_actual)
 
-            # SECURITY: pass slot indices only — the build_executor_prompt
-            # activity de-references passwords from the env-mounted pool on
-            # the worker side, so plaintext credentials never enter
-            # workflow event history.
-            await workflow.execute_activity(
-                build_executor_prompt,
-                args=[inp, att],
-                start_to_close_timeout=timedelta(seconds=30),
-                retry_policy=_RP_2_ATTEMPTS,
-            )
+                await workflow.execute_activity(
+                    mark_issue_doing,
+                    args=[inp, att],
+                    start_to_close_timeout=timedelta(seconds=10),
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+
+                # SECURITY: pass slot indices only — the build_executor_prompt
+                # activity de-references passwords from the env-mounted pool on
+                # the worker side, so plaintext credentials never enter
+                # workflow event history.
+                await workflow.execute_activity(
+                    build_executor_prompt,
+                    args=[inp, att],
+                    start_to_close_timeout=timedelta(seconds=30),
+                    retry_policy=_RP_2_ATTEMPTS,
+                )
+            except ActivityError as ae:
+                sem.release(entry.iid)
+                self._active_ui_accounts_in_use = sem.in_use_count
+                await self._record_pre_child_blocked(
+                    inp,
+                    att,
+                    entry,
+                    "dispatcher prep failed: "
+                    f"{_activity_error_message(ae, default=str(ae))}",
+                )
+                continue
 
             # WorkflowIDReusePolicy.REJECT_DUPLICATE rejects any *existing*
             # workflow with the same id — including completed ones. To allow
@@ -371,36 +419,72 @@ class CampaignWorkflow:
                 cancellation_type=ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
                 task_queue=workflow.info().task_queue,  # worktree affinity
             )
-            child_handles.append((handle, entry.iid))
+            child_handles.append((handle, entry.iid, att, entry))
 
         # Await every child via ``.result()`` (the canonical Temporal Python
         # SDK accessor for child outcomes).
-        for handle, iid in child_handles:
+        for handle, iid, att, entry in child_handles:
             try:
                 outcome: AttemptOutcome = await handle.result()
             except ChildWorkflowError as cwe:
                 LOG.warning("child workflow iid=%d failed: %s", iid, cwe)
-                self._retry_count[iid] = self._retry_count.get(iid, 0) + 1
+                self._retry_count[iid] = entry.retry_count + 1
                 self._blocked_at_tick[iid] = self._tick_seq
                 sem.release(iid)
+                self._active_ui_accounts_in_use = sem.in_use_count
+                final_status = (
+                    "failed"
+                    if self._retry_count[iid] > inp.blocked_retry_limit
+                    else "blocked"
+                )
+                synthetic = AttemptOutcome(
+                    iid=iid,
+                    attempt_number=att.attempt_number,
+                    status=final_status,  # type: ignore[arg-type]
+                    mode_actual=att.mode,
+                    work_branch=att.work_branch,
+                    local_branch=f"{att.work_branch}-att{att.attempt_number:03d}",
+                    block_reason=f"child workflow failed before returning outcome: {cwe}",
+                )
+                if final_status == "failed":
+                    self._failed.add(iid)
+                    self._blocked_at_tick.pop(iid, None)
+                else:
+                    self._blocked.add(iid)
+                try:
+                    await workflow.execute_activity(
+                        sync_terminal_labels,
+                        args=[inp, att, final_status],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                except ActivityError:
+                    LOG.warning(
+                        "failed to sync %s label for failed child iid=%d",
+                        final_status,
+                        iid,
+                    )
+                await self._record_outcome(inp, att, synthetic, final_status)
                 continue
 
             sem.release(iid)
+            self._active_ui_accounts_in_use = sem.in_use_count
             if outcome.status == "done":
                 self._completed.add(iid)
                 self._retry_count.pop(iid, None)
                 self._blocked_at_tick.pop(iid, None)
+                await self._record_outcome(inp, att, outcome, "done")
             elif outcome.status == "timeout":
                 self._timeout.add(iid)
+                await self._record_outcome(inp, att, outcome, "timeout")
             elif outcome.status == "failed":
                 self._failed.add(iid)
+                await self._record_outcome(inp, att, outcome, "failed")
             else:  # blocked / no_changes (normalized to blocked)
                 self._blocked.add(iid)
-                self._retry_count[iid] = self._retry_count.get(iid, 0) + 1
+                self._retry_count[iid] = entry.retry_count + 1
                 self._blocked_at_tick[iid] = self._tick_seq
-                # Promote to failed when retry budget exhausted within this
-                # tick. Cross-tick promotion would require persisted
-                # retry_count (TODO post-PoC).
+                # Promote to failed when the persisted retry budget is exhausted.
                 if self._retry_count[iid] > inp.blocked_retry_limit:
                     LOG.info(
                         "iid=%d promoted blocked → failed (retry=%d > limit=%d)",
@@ -410,6 +494,77 @@ class CampaignWorkflow:
                     )
                     self._blocked.discard(iid)
                     self._failed.add(iid)
+                    self._blocked_at_tick.pop(iid, None)
+                    await workflow.execute_activity(
+                        sync_terminal_labels,
+                        args=[inp, att, "failed"],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                    await self._record_outcome(inp, att, outcome, "failed")
+                else:
+                    await self._record_outcome(inp, att, outcome, "blocked")
+
+    async def _record_outcome(
+        self,
+        inp: CampaignInput,
+        att: AttemptInput,
+        outcome: AttemptOutcome,
+        final_status: str,
+    ) -> int:
+        return await workflow.execute_activity(
+            record_attempt_outcome,
+            args=[inp, att, outcome, final_status, self._tick_seq],
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+
+    async def _record_pre_child_blocked(
+        self,
+        inp: CampaignInput,
+        att: AttemptInput,
+        entry: IssueLiveState,
+        block_reason: str,
+    ) -> None:
+        """Mirror legacy prep_blocked for prepare/label/prompt failures."""
+        iid = att.iid
+        self._retry_count[iid] = entry.retry_count + 1
+        self._blocked_at_tick[iid] = self._tick_seq
+        final_status = (
+            "failed" if self._retry_count[iid] > inp.blocked_retry_limit else "blocked"
+        )
+
+        if final_status == "failed":
+            self._failed.add(iid)
+            self._blocked.discard(iid)
+            self._blocked_at_tick.pop(iid, None)
+        else:
+            self._blocked.add(iid)
+
+        try:
+            await workflow.execute_activity(
+                sync_terminal_labels,
+                args=[inp, att, final_status],
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except ActivityError as ae:
+            block_reason = (
+                block_reason
+                + f"; {final_status} label sync failed: "
+                f"{_activity_error_message(ae, default=str(ae))}"
+            )
+
+        synthetic = AttemptOutcome(
+            iid=iid,
+            attempt_number=att.attempt_number,
+            status=final_status,  # type: ignore[arg-type]
+            mode_actual=att.mode,
+            work_branch=att.work_branch,
+            local_branch=f"{att.work_branch}-att{att.attempt_number:03d}",
+            block_reason=block_reason,
+        )
+        await self._record_outcome(inp, att, synthetic, final_status)
 
     def _final_summary(self) -> CampaignSummary:
         return CampaignSummary(
@@ -440,6 +595,13 @@ def _required_labels_ok(labels: tuple[str, ...], inp: CampaignInput) -> bool:
     if inp.require_labels_match == "and":
         return all(req in label_set for req in inp.require_labels)
     return any(req in label_set for req in inp.require_labels)
+
+
+def _activity_error_message(ae: ActivityError, *, default: str) -> str:
+    cause = ae.cause
+    if isinstance(cause, ApplicationError) and cause.message:
+        return str(cause.message)
+    return default
 
 
 __all__ = ["CampaignWorkflow"]

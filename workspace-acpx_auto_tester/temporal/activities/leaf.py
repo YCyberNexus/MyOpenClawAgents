@@ -292,6 +292,7 @@ async def upload_wiki_artifacts(camp: CampaignInput, att: AttemptInput) -> str:
     """Publish ``prompt.txt`` + ``claude_result.txt`` (+ optional report.html)
     to the project Wiki and link from the issue. Returns first Wiki page URL.
     """
+    paths = _derive_paths(camp, att)
     res = await run_script(
         "upload_attempt_artifacts.sh",
         env=_full_env(camp, att),
@@ -307,8 +308,15 @@ async def upload_wiki_artifacts(camp: CampaignInput, att: AttemptInput) -> str:
             AcpxErrorType.SUBPROCESS_FAILED,
             f"upload_attempt_artifacts.sh exit {res.exit_code}: {res.stderr[-500:]}",
         )
-    # Convention: script's first stdout line is the Wiki URL.
-    return _first_nonempty_line(res.stdout)
+    links_file = Path(paths["LOG_DIR"]) / "wiki_artifact_links.md"
+    wiki_url = _first_url_from_markdown_links(links_file)
+    if not wiki_url:
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            "upload_attempt_artifacts.sh succeeded but did not write a Wiki URL "
+            f"to {links_file}",
+        )
+    return wiki_url
 
 
 # ---------------------------------------------------------------------------
@@ -422,8 +430,9 @@ async def summarize_attempt(
     )
     res = await run_script("summarize_attempt.sh", env=env)
     _raise_on_failed_subprocess("summarize_attempt.sh", res, allow_glab_retry=True)
-    # Convention: script prints "POSTED" on its last line iff it posted a note.
-    return "POSTED" in res.stdout
+    # summarize_attempt.sh writes SUMMARY_POSTED=true|false to stderr and the
+    # summary file path to stdout.
+    return "SUMMARY_POSTED=true" in res.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -524,11 +533,14 @@ def _last_nonempty_line(text: str) -> str:
     return ""
 
 
-def _first_nonempty_line(text: str) -> str:
-    for line in text.splitlines():
-        if line.strip():
-            return line.strip()
-    return ""
+def _first_url_from_markdown_links(path: Path) -> str:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+    match = re.search(r"https?://\S+", text)
+    return match.group(0).rstrip(").,") if match else ""
 
 
 def _changed_file_count(stdout: str) -> int:
