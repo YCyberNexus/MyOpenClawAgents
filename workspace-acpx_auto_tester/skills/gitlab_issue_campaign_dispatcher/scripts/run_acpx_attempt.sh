@@ -53,6 +53,30 @@ fi
 
 mkdir -p "${LOG_DIR}"
 
+# Progress marker for Temporal activity heartbeat (added 2026-05-20 for the
+# Temporal port; see workspace-acpx_auto_tester/temporal/activities/subprocess.py
+# §make_marker_file_heartbeat). A short background loop refreshes this file's
+# mtime every 30s while acpx runs; the Temporal activity polls the mtime and
+# calls activity.heartbeat() with the timestamp. If the worker hosting the
+# activity dies, the marker stops advancing, the activity's heartbeat_timeout
+# fires, and Temporal force-fails the activity — letting the workflow decide
+# between TIMEOUT-flow vs blocked-retry without waiting for the full
+# StartToClose budget. The legacy OpenClaw path (which has no Temporal worker)
+# is unaffected: the marker is harmless extra mtime traffic on the same LOG_DIR.
+marker_file="${LOG_DIR}/acpx_progress.marker"
+: > "${marker_file}"
+(
+  # `sleep 30` keeps the loop CPU-quiet and lets `kill` from the EXIT trap
+  # interrupt the sleep promptly. The loop exits on its own if the marker
+  # file disappears (e.g. LOG_DIR rotated mid-run).
+  while sleep 30; do
+    [ -e "${marker_file}" ] || exit 0
+    touch "${marker_file}" 2>/dev/null || exit 0
+  done
+) &
+ACPX_MARKER_PID=$!
+trap '[ -n "${ACPX_MARKER_PID:-}" ] && kill "${ACPX_MARKER_PID}" 2>/dev/null; true' EXIT
+
 prompt_file="${LOG_DIR}/prompt.txt"
 stdout_log="${LOG_DIR}/claude_result.txt"
 stderr_log="${LOG_DIR}/acpx_raw.log"

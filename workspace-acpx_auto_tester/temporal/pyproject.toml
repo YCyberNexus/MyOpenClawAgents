@@ -1,0 +1,69 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "acpx-auto-tester-temporal"
+version = "0.1.0"
+description = "Temporal (Python SDK) port of the acpx_auto_tester dispatcher. Replaces the bash + flock + JSON state machine with durable workflows."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietary" }
+authors = [{ name = "acpx_auto_tester maintainers" }]
+
+# Runtime deps — keep tight; everything else stays in bash leaf scripts that the
+# activities shell out to.
+dependencies = [
+    "temporalio>=1.7,<2",
+    "pydantic>=2.6,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.10",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+]
+
+[project.scripts]
+# `pip install -e .` exposes these so the runner can invoke them by name.
+acpx-temporal-worker = "acpx_temporal.worker:main"
+acpx-temporal-client = "acpx_temporal.client:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["acpx_temporal*"]
+
+# The package layout is flat ─ the `acpx_temporal` package lives in this
+# directory tree even though the directory name on disk is `temporal/`. We add
+# an explicit src layout map below so `import acpx_temporal.workflows.campaign`
+# resolves regardless of where pip installs it.
+[tool.setuptools.package-dir]
+acpx_temporal = "."
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+plugins = []
+
+[[tool.mypy.overrides]]
+# temporalio ships with .pyi stubs; pydantic v2 too. No third-party loose ends.
+module = ["temporalio.*"]
+ignore_missing_imports = false
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+ignore = ["E501"]  # line length handled by formatter

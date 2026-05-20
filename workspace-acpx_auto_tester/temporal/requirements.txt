@@ -1,0 +1,6 @@
+# Pinned runtime deps for the Temporal worker / client. Mirror of pyproject.toml
+# [project.dependencies] for runners that prefer `pip install -r`.
+# Dev-only deps live in pyproject.toml [project.optional-dependencies.dev].
+
+temporalio>=1.7,<2
+pydantic>=2.6,<3
