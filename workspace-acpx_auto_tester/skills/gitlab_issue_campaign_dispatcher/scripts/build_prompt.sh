@@ -140,14 +140,14 @@ fi
     cat <<EOF
 This is a CONTINUE-MODE re-run of GitLab issue #${ISSUE_IID}.
 
-A prior run on this issue produced a merge request and was marked \`done\` + \`pr\`,
-but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside the shared per-issue git worktree at ${WORKTREE_DIR}
-(reused across every attempt of this IID). Tracked files have just been
-reset to \`origin/${WORK_BRANCH}\` (the work-in-progress branch from the
-prior run); any untracked scratch the previous attempt left here is still
-on disk. Read what's already there, then continue or correct it according
-to the past-attempt summaries and reviewer guidance below.
+A prior attempt on this issue already ran, and a human reviewer requested
+resume by applying the \`continue\` label. You are running inside the shared
+per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt of
+this IID). The dispatcher has prepared the worktree from the latest available
+same-IID work branch or local prior-attempt branch, and it restores prior
+files under ${RESULT_BASENAME}/issue-${ISSUE_IID}/ so you can inspect them
+and continue. Read what's already there, then continue or correct it
+according to the past-attempt summaries and reviewer guidance below.
 
 EOF
   else
@@ -193,7 +193,7 @@ EOF
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
-- Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
+- Source baseline:            prepared by dispatcher for this mode (fresh uses ${DEV_BRANCH}; continue/resume uses ${WORK_BRANCH} or the latest local prior-attempt branch)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
 # UI test accounts (dispatcher-allocated — overrides any account in the issue body)

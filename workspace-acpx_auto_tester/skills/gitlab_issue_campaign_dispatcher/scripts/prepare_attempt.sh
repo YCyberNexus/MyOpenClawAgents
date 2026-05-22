@@ -21,15 +21,12 @@
 # it under ${WORK_ROOT}/locks/repo.lock).
 #
 # Modes (env var ISSUE_MODE):
-#   fresh     — base attempt on origin/${DEV_BRANCH} (clean baseline,
-#               no past spec accumulation visible to Claude on TRACKED
-#               files). Prior attempts' COMMITTED work on ${WORK_BRANCH}
-#               is intentionally not used; however, untracked scratch
-#               files left in the shared per-issue worktree by an earlier
-#               attempt survive the in-place branch switch, which is
-#               required so `acpx claude exec` can resume on retries.
+#   fresh     — first attempt for this IID; base on origin/${DEV_BRANCH}
+#               (clean baseline, no past spec accumulation from other issues).
 #   continue  — base attempt on origin/${WORK_BRANCH} if it exists, else
-#               downgrade to fresh (and use origin/${DEV_BRANCH})
+#               the latest local prior attempt branch if one exists, else
+#               downgrade to fresh (and use origin/${DEV_BRANCH}). This mode
+#               is used only when the live issue label requests continue.
 #
 # Why DEV_BRANCH and not BRANCH for fresh mode:
 #   BRANCH is the integration target (e.g. master) and accumulates every
@@ -47,12 +44,27 @@
 #   the most recent legacy path as a salvage source, rsync's its
 #   untracked content into the freshly-created shared worktree with
 #   `--ignore-existing` (so BASE_REF's tracked files and the new
-#   worktree's `.git` gitfile are never overwritten), then deletes the
-#   legacy paths. This preserves the "later attempts can see earlier
-#   attempts' files" contract that the worktree restructure was meant to
-#   provide. The same salvage shape is also applied to the local
-#   pre-recreate backup when WORKTREE_REUSE=false but ${WORKTREE_DIR}
-#   was a real directory before this script ran (broken registry state).
+#   worktree's `.git` gitfile are never overwritten), then archives the
+#   legacy paths under `${WORKTREES_ROOT}/.preserved-legacy/`. This
+#   preserves the "later attempts can see earlier attempts' files" contract
+#   that the worktree restructure was meant to provide without physically
+#   deleting prior attempt files. The same salvage shape is also applied to
+#   the local pre-recreate backup when WORKTREE_REUSE=false but
+#   ${WORKTREE_DIR} was a real directory before this script ran (broken
+#   registry state).
+#
+# Branch-switch preservation:
+#   Reusing the shared per-IID worktree is not enough by itself: `git
+#   checkout -B ... --force` can remove files that are tracked on the prior
+#   attempt branch but absent from the next BASE_REF. Before an in-place
+#   branch switch on attempt N>1, this script snapshots the current
+#   `${RESULT_BASENAME}/issue-<iid>/` subtree. Continue mode restores that
+#   snapshot after checkout so prior attempt output/log files are visible
+#   for resume. Fresh reset mode (all non-continue entry labels, including
+#   `todo`, `retry`, `new`, `blocked`, and trigger require_labels) archives
+#   the snapshot under `${WORKTREES_ROOT}/.preserved-attempts/` instead, so
+#   the files are not physically deleted but also do not contaminate the
+#   reset run.
 #
 # What this script does NOT do:
 #   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
@@ -109,15 +121,31 @@ git fetch --prune origin
 
 # Resolve the actual base ref.
 # Fresh mode bases on DEV_BRANCH (clean baseline). Continue mode tries
-# WORK_BRANCH first; if missing, downgrade to fresh on DEV_BRANCH.
+# WORK_BRANCH first; if missing, fall back to the latest local prior
+# attempt branch; if that is missing too, downgrade to fresh on DEV_BRANCH.
 BASE_REF="origin/${DEV_BRANCH}"
 ACTUAL_MODE="${ISSUE_MODE}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
   if git ls-remote --exit-code --heads origin "${WORK_BRANCH}" >/dev/null 2>&1; then
     BASE_REF="origin/${WORK_BRANCH}"
   else
-    ACTUAL_MODE=fresh
-    BASE_REF="origin/${DEV_BRANCH}"
+    PREVIOUS_LOCAL_BRANCH=""
+    prev=$((ATTEMPT_NUMBER - 1))
+    while [ "${prev}" -ge 1 ]; do
+      prev_padded="$(printf '%03d' "${prev}")"
+      candidate="${WORK_BRANCH}-att${prev_padded}"
+      if git rev-parse --verify --quiet "refs/heads/${candidate}" >/dev/null; then
+        PREVIOUS_LOCAL_BRANCH="${candidate}"
+        break
+      fi
+      prev=$((prev - 1))
+    done
+    if [ -n "${PREVIOUS_LOCAL_BRANCH}" ]; then
+      BASE_REF="${PREVIOUS_LOCAL_BRANCH}"
+    else
+      ACTUAL_MODE=fresh
+      BASE_REF="origin/${DEV_BRANCH}"
+    fi
   fi
 fi
 
@@ -207,7 +235,9 @@ fi
 # the backup lives at ${WORKTREE_DIR}.recreate-backup.<old-pid>.
 # Enumerate those now so they can join the salvage chain.
 WORKTREE_RECREATE_BACKUP=""
+WORKTREE_SWITCH_BACKUP=""
 STALE_RECREATE_BACKUP=""
+STALE_SWITCH_BACKUP=""
 stale_backup_mtime=0
 for stale in "${WORKTREE_DIR}.recreate-backup."*; do
   [ -d "${stale}" ] || continue
@@ -221,6 +251,20 @@ for stale in "${WORKTREE_DIR}.recreate-backup."*; do
   if [ "${mt}" -gt "${stale_backup_mtime}" ]; then
     stale_backup_mtime="${mt}"
     STALE_RECREATE_BACKUP="${stale}"
+  fi
+done
+stale_backup_mtime=0
+for stale in "${WORKTREE_DIR}.switch-backup."*; do
+  [ -d "${stale}" ] || continue
+  mt=0
+  if ts="$(stat -c %Y "${stale}" 2>/dev/null)"; then
+    mt="${ts}"
+  elif ts="$(stat -f %m "${stale}" 2>/dev/null)"; then
+    mt="${ts}"
+  fi
+  if [ "${mt}" -gt "${stale_backup_mtime}" ]; then
+    stale_backup_mtime="${mt}"
+    STALE_SWITCH_BACKUP="${stale}"
   fi
 done
 
@@ -256,15 +300,67 @@ git worktree prune
 # correct base ref.
 mkdir -p "${ATTEMPT_DIR}"
 
+ISSUE_WORKTREE_REL="${RESULT_BASENAME}/issue-${ISSUE_IID}"
+ISSUE_WORKTREE_RUNTIME_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}"
+
+snapshot_issue_runtime_tree() {
+  local dst="$1"
+  if [ ! -d "${ISSUE_WORKTREE_RUNTIME_DIR}" ]; then
+    return 0
+  fi
+  if ! command -v rsync >/dev/null 2>&1; then
+    echo "prepare_attempt: rsync is required to preserve prior attempt files from ${ISSUE_WORKTREE_RUNTIME_DIR} but is missing on PATH" >&2
+    exit 6
+  fi
+  mkdir -p "${dst}/${RESULT_BASENAME}"
+  echo "prepare_attempt: preserving prior attempt files from ${ISSUE_WORKTREE_RUNTIME_DIR} before branch switch" >&2
+  rsync -rltD "${ISSUE_WORKTREE_RUNTIME_DIR}/" "${dst}/${ISSUE_WORKTREE_REL}/"
+}
+
+restore_issue_runtime_tree() {
+  local src="$1"
+  if [ -z "${src}" ] || [ ! -d "${src}/${ISSUE_WORKTREE_REL}" ]; then
+    return 0
+  fi
+  if ! command -v rsync >/dev/null 2>&1; then
+    echo "prepare_attempt: rsync is required to restore prior attempt files from ${src} but is missing on PATH" >&2
+    exit 6
+  fi
+  echo "prepare_attempt: restoring prior attempt files from ${src}/${ISSUE_WORKTREE_REL} into ${ISSUE_WORKTREE_RUNTIME_DIR}" >&2
+  mkdir -p "${ISSUE_WORKTREE_RUNTIME_DIR}"
+  rsync -rltD "${src}/${ISSUE_WORKTREE_REL}/" "${ISSUE_WORKTREE_RUNTIME_DIR}/"
+}
+
+PRESERVED_ATTEMPT_ROOT="${WORKTREES_ROOT}/.preserved-attempts/issue-${ISSUE_IID}"
+archive_switch_backup() {
+  local src="$1"
+  local label="$2"
+  if [ -z "${src}" ] || [ ! -d "${src}" ]; then
+    return 0
+  fi
+  mkdir -p "${PRESERVED_ATTEMPT_ROOT}"
+  local dest="${PRESERVED_ATTEMPT_ROOT}/${label}.preserved.$$"
+  local suffix=1
+  while [ -e "${dest}" ]; do
+    dest="${PRESERVED_ATTEMPT_ROOT}/${label}.preserved.$$.${suffix}"
+    suffix=$((suffix + 1))
+  done
+  mv "${src}" "${dest}"
+  echo "prepare_attempt: archived prior attempt files from ${src} at ${dest}" >&2
+}
+
 if [ "${WORKTREE_REUSE}" = true ]; then
+  if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
+    WORKTREE_SWITCH_BACKUP="${WORKTREE_DIR}.switch-backup.$$"
+    snapshot_issue_runtime_tree "${WORKTREE_SWITCH_BACKUP}"
+  fi
   # In-place branch switch: create or reset ${LOCAL_ATTEMPT_BRANCH} at
-  # ${BASE_REF} inside the existing worktree, overwriting any tracked
-  # files modified by the previous attempt. Untracked files (Claude
-  # Code's scratch state, intermediate notes, etc.) are NOT touched by
-  # `git checkout` and therefore survive into this attempt — that is the
-  # whole point of sharing a worktree across attempts. Prior local
-  # attempt branches (e.g. ${WORK_BRANCH}-att001) remain in the registry
-  # for audit; only the worktree's HEAD moves.
+  # ${BASE_REF} inside the existing worktree. The issue runtime subtree
+  # is snapshotted above before the switch can remove tracked paths absent
+  # from ${BASE_REF}; continue mode restores it, while fresh reset mode
+  # archives it outside the active worktree. Prior local attempt branches
+  # (e.g. ${WORK_BRANCH}-att001) remain in the registry for audit; only the
+  # worktree's HEAD moves.
   git -C "${WORKTREE_DIR}" checkout -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force
 else
   # First attempt for this IID (or recovery from a broken state). Create
@@ -278,8 +374,15 @@ else
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 fi
 mkdir -p "${OUTPUT_DIR}"
+if [ "${ACTUAL_MODE}" = "continue" ]; then
+  restore_issue_runtime_tree "${STALE_SWITCH_BACKUP}"
+  restore_issue_runtime_tree "${WORKTREE_SWITCH_BACKUP}"
+else
+  archive_switch_backup "${STALE_SWITCH_BACKUP}" "stale-switch-before-attempt-${ATTEMPT_NUMBER_PADDED}"
+  archive_switch_backup "${WORKTREE_SWITCH_BACKUP}" "before-attempt-${ATTEMPT_NUMBER_PADDED}"
+fi
 
-# ─── Salvage untracked scratch from salvage sources into the worktree ─
+# ─── Continue-mode salvage from backup sources into the worktree ─────
 #
 # Priority chain (first existing source wins; only one is chosen):
 #   1. WORKTREE_RECREATE_BACKUP — fresh mv-aside a few lines above.
@@ -288,9 +391,11 @@ mkdir -p "${OUTPUT_DIR}"
 #   3. SALVAGE_SRC             — legacy `-att-<NNN>` or very-old
 #      single-worktree path, picked above before deregistration.
 #
-# Sources 2 and 3 only fire when this is a genuine recreate (not the
-# shared-worktree REUSE path). When REUSE=true the existing untracked
-# scratch already on disk is authoritative; rsyncing from a stale
+# This block runs only in continue mode. Fresh reset mode (all non-continue
+# entry labels) deliberately leaves these sources out of the active worktree
+# and archives them below. Sources 2 and 3 only fire when this is a genuine
+# recreate (not the shared-worktree REUSE path). When REUSE=true the existing
+# untracked scratch already on disk is authoritative; rsyncing from a stale
 # backup or legacy path would resurrect files Claude Code deliberately
 # deleted in a prior successful attempt.
 #
@@ -318,32 +423,57 @@ salvage_into_worktree() {
     "${src}/" "${WORKTREE_DIR}/"
 }
 
-salvage_into_worktree "${WORKTREE_RECREATE_BACKUP}"
-if [ "${WORKTREE_REUSE}" = false ]; then
-  if [ -z "${WORKTREE_RECREATE_BACKUP}" ] || [ ! -d "${WORKTREE_RECREATE_BACKUP}" ]; then
-    salvage_into_worktree "${STALE_RECREATE_BACKUP}"
-    if [ -z "${STALE_RECREATE_BACKUP}" ] || [ ! -d "${STALE_RECREATE_BACKUP}" ]; then
-      salvage_into_worktree "${SALVAGE_SRC}"
+if [ "${ACTUAL_MODE}" = "continue" ]; then
+  salvage_into_worktree "${WORKTREE_RECREATE_BACKUP}"
+  if [ "${WORKTREE_REUSE}" = false ]; then
+    if [ -z "${WORKTREE_RECREATE_BACKUP}" ] || [ ! -d "${WORKTREE_RECREATE_BACKUP}" ]; then
+      salvage_into_worktree "${STALE_RECREATE_BACKUP}"
+      if [ -z "${STALE_RECREATE_BACKUP}" ] || [ ! -d "${STALE_RECREATE_BACKUP}" ]; then
+        salvage_into_worktree "${SALVAGE_SRC}"
+      fi
     fi
   fi
 fi
 
 # Now that any meaningful scratch has been salvaged, drop the
-# pre-recreate backups, stale backups, and every legacy worktree path.
+# pre-recreate backups and archive every leftover switch backup / legacy
+# worktree path.
 # From here on out the shared per-issue worktree at ${WORKTREE_DIR} is
-# the only place this IID's untracked state lives.
+# the only place this IID's current resume state lives, while old physical
+# directories stay available under .preserved-* for forensics.
 for stale in "${WORKTREE_DIR}.recreate-backup."*; do
   [ -d "${stale}" ] || continue
-  rm -rf "${stale}"
+  archive_switch_backup "${stale}" "leftover-recreate-before-attempt-${ATTEMPT_NUMBER_PADDED}"
 done
+for stale in "${WORKTREE_DIR}.switch-backup."*; do
+  [ -d "${stale}" ] || continue
+  archive_switch_backup "${stale}" "leftover-switch-before-attempt-${ATTEMPT_NUMBER_PADDED}"
+done
+
+PRESERVED_LEGACY_ROOT="${WORKTREES_ROOT}/.preserved-legacy/issue-${ISSUE_IID}"
+archive_legacy_path() {
+  local src="$1"
+  local label="$2"
+  if [ ! -e "${src}" ]; then
+    return 0
+  fi
+  mkdir -p "${PRESERVED_LEGACY_ROOT}"
+  local dest="${PRESERVED_LEGACY_ROOT}/${label}.preserved.$$"
+  local suffix=1
+  while [ -e "${dest}" ]; do
+    dest="${PRESERVED_LEGACY_ROOT}/${label}.preserved.$$.${suffix}"
+    suffix=$((suffix + 1))
+  done
+  mv "${src}" "${dest}"
+  echo "prepare_attempt: archived legacy worktree path ${src} at ${dest}" >&2
+}
+
 for d in "${LEGACY_PER_ATTEMPT_DIRS[@]:-}"; do
   [ -n "${d}" ] || continue
-  git worktree remove --force "${d}" 2>/dev/null || true
-  rm -rf "${d}"
+  archive_legacy_path "${d}" "$(basename "${d}")"
 done
 if [ -e "${LEGACY_SINGLE_WORKTREE_DIR}" ]; then
-  git worktree remove --force "${LEGACY_SINGLE_WORKTREE_DIR}" 2>/dev/null || true
-  rm -rf "${LEGACY_SINGLE_WORKTREE_DIR}"
+  archive_legacy_path "${LEGACY_SINGLE_WORKTREE_DIR}" "legacy-single-worktree"
 fi
 git worktree prune
 

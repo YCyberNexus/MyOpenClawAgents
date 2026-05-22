@@ -812,17 +812,18 @@ for iid in "${BATCH_IIDS[@]}"; do
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
-  # Resolve ISSUE_MODE.
+  # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
+  # resume signal. Every other entry path (`todo`, `retry`, `new`,
+  # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
+  # baseline, even if this IID has prior attempts on disk.
   ISSUE_MODE="fresh"
   NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
-  if [ "${NEEDS_CONTINUE}" = "true" ]; then
+  RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
+    (.[] | select(.iid==$i) | .labels // []) as $labels
+    | (($labels | index("retry") != null) or ($labels | index("todo") != null))
+  ')"
+  if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
     ISSUE_MODE="continue"
-  else
-    issue_state_path="${ISSUES_ROOT}/issue-${iid}/state.json"
-    if [ -f "${issue_state_path}" ]; then
-      PERSISTED_MODE="$(jq -r '.mode // ""' "${issue_state_path}")"
-      [ "${PERSISTED_MODE}" = "continue" ] && ISSUE_MODE="continue"
-    fi
   fi
 
   prep_blocked() {
