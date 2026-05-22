@@ -71,18 +71,23 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    `run_timeout_seconds`, `acpx_timeout_seconds`, `require_labels_match`.
 6. Migrate legacy on-disk shapes (`active_issue_iid` → array,
    stale account-count fields dropped).
-7. Call `load_ui_accounts.sh`; map exit codes 10–15 to the documented
+7. Compute `effective_iid_universe` (`[issue_min_iid,issue_max_iid]`
+   intersected with `issue_iids` when supplied). This is the hard
+   trigger scope for new dispatch and for scope eviction of old pending
+   entries.
+8. Call `load_ui_accounts.sh`; map exit codes 10–15 to the documented
    tick-level abort strings (`ui_account_pool_too_small`, etc.).
-8. **Stuck-pending eviction.** For each `pending_subagents` entry where
-   `(now - spawned_at) >= stuck_after_minutes` (or a placeholder with
-   `spawned_at = null`), synthesize a Phase 6 blocked reply and run it
-   through `phase6_process`. Drains the entry, classifies as blocked,
-   persists. No `subagents kill` is fired — that's the LLM's job on
-   the next callback path; evicted entries do not have an associated
-   callback so cleanup is best-effort skipped.
-9. If `pending_subagents` is still non-empty after eviction → emit
+9. **Pending eviction.** First, any `pending_subagents` entry whose IID
+   is outside `effective_iid_universe` is scope-evicted: synthesize a
+   Phase 6 blocked reply, drain it, persist it, and add a
+   `cleanup_actions[]` kill request for the recorded child session key
+   when present. Then apply the stuck-pending backstop to remaining
+   entries where `(now - spawned_at) >= stuck_after_minutes` (or a
+   placeholder with `spawned_at = null`). Stuck eviction is still
+   classified as blocked but does not emit a kill request unless future
+   tooling adds one.
+10. If `pending_subagents` is still non-empty after eviction → emit
    `status:"waiting_for_callbacks"` envelope and exit 0.
-10. Compute `effective_iid_universe` (range ∩ whitelist).
 11. Run `reconcile.sh` (range mode when whitelist empty, list mode
     otherwise). Failure → `status:"tick_failed", chat_summary:"reconcile_failed: …"`.
 12. Apply disk-cache correction from the evidence file.
@@ -99,7 +104,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     `min(max_concurrent_subagents, hourly_issue_quota - quota_launched_this_tick)`.
 17. For each IID in the batch (sequential):
     1. `allocate_attempt.sh` → attempt number.
-18. `load_ui_accounts.sh` already ran in step 7; slice the captured
+18. `load_ui_accounts.sh` already ran in step 8; slice the captured
     pool into per-IID account slots via `SLOT_SIZES` from stderr.
 19. **Pre-spawn persist.** Write placeholder pending entries
     (`placeholder:true`, `spawned_at:null`) for every batch IID.
@@ -142,7 +147,9 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 | `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |
 | `backoff_seconds` | Always `2` today. Sleep between retries. |
-| `evicted_iids` | IIDs that were stuck-evicted at the top of this tick. |
+| `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. |
+| `scope_evicted_iids` | Subset of `evicted_iids` evicted because the IID was outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`. |
+| `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked blocked. |
 | `label_filtered_in` / `label_filtered_out` | Optional — only emitted when `require_labels` is non-empty. |
 | `tick_outcome_per_iid` | Optional map; populated when per-IID prep failures pushed an IID into blocked. |
 | `last_reconcile_evidence` | Absolute path to the `reconcile-<ts>.json` evidence file this tick produced. |

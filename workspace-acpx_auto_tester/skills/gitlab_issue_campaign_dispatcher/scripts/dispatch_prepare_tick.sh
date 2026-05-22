@@ -19,6 +19,9 @@
 #     "run_timeout_seconds": 18120,
 #     "max_launch_retries": 3,
 #     "backoff_seconds": 2,
+#     "cleanup_actions": [
+#       {"action":"kill","target":"agent:...","reason":"scope_evicted_outside_trigger_range","iid":350}
+#     ],
 #     "chat_summary": "...",
 #     "tick_outcome_per_iid": {"15": "blocked: prep failed: ..."},
 #     "launch_retries_seed": {}
@@ -55,6 +58,7 @@ TRIGGER_FILE="$(mktemp)"
 POOL_OUT=""
 POOL_ERR=""
 RECONCILE_OUT=""
+CLEANUP_ACTIONS_JSON="[]"
 declare -a CLEANUP_FILES=()
 retire_temp_file() {
   local path="${1:-}"
@@ -110,8 +114,10 @@ done <"${TRIGGER_FILE}"
 
 emit_chat_failure() {
   local msg="$1"
+  local cleanup_actions="${CLEANUP_ACTIONS_JSON:-[]}"
   jq -nc --arg msg "${msg}" \
-    '{status:"tick_failed", chat_summary:$msg, dispatch_entries:[]}'
+    --argjson cleanup_actions "${cleanup_actions}" \
+    '{status:"tick_failed", chat_summary:$msg, dispatch_entries:[], cleanup_actions:$cleanup_actions}'
   exit 0
 }
 
@@ -246,7 +252,7 @@ fi
 # ─── 5. Flock ─────────────────────────────────────────────────────
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
-  jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[]}'
+  jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[], cleanup_actions:[]}'
   exit 0
 fi
 
@@ -414,6 +420,16 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --arg project "${PROJECT}" '
   | .active_issue_iids     = $pk
   | .active_issue_sessions = ($pk | map("issue-" + $project + "-" + (.|tostring)))')"
 
+# ─── 7. Effective IID universe ────────────────────────────────────
+EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
+  (.issue_min_iid) as $lo | (.issue_max_iid) as $hi
+  | (.issue_iids_whitelist // []) as $wl
+  | if ($wl | length) == 0 then
+      [range($lo; $hi+1)]
+    else
+      [range($lo; $hi+1)] | map(select(. as $i | $wl | index($i) != null)) | unique | sort
+    end')"
+
 # Validate ui_account pool. load_ui_accounts.sh exit code 13 → pool too small.
 POOL_OUT="$(mktemp)"
 POOL_ERR="$(mktemp)"
@@ -450,19 +466,27 @@ mapfile -t POOL_LINES <"${POOL_OUT}"
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
 
-# ─── 7. Stuck-pending eviction ────────────────────────────────────
+# ─── 8. Pending eviction ──────────────────────────────────────────
 NOW_TS="$(date -u +%s)"
 EVICTED_IIDS_JSON="[]"
+SCOPE_EVICTED_IIDS_JSON="[]"
 PENDING_KEYS="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys[]?')"
 for piid in ${PENDING_KEYS}; do
   ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --arg k "${piid}" '.pending_subagents[$k]')"
   SP_AT="$(printf '%s' "${ENTRY}" | jq -r '.spawned_at // ""')"
   PA_NUM="$(printf '%s' "${ENTRY}" | jq -r '.attempt_number')"
+  CHILD_SESSION_KEY="$(printf '%s' "${ENTRY}" | jq -r '.child_session_key // ""')"
   EVICT=false
-  if [ -z "${SP_AT}" ] || [ "${SP_AT}" = "null" ]; then
+  EVICT_KIND=""
+  if ! printf '%s' "${EFF_UNIVERSE_JSON}" | jq -e --argjson iid "${piid}" 'index($iid) != null' >/dev/null; then
+    EVICT=true
+    EVICT_KIND="scope"
+    REASON="pending IID outside current trigger scope issue_iids∩[issue_min_iid,issue_max_iid]"
+  elif [ -z "${SP_AT}" ] || [ "${SP_AT}" = "null" ]; then
     # placeholder that survived a previous crash — evict on next tick
     if [ "$(printf '%s' "${ENTRY}" | jq -r '.placeholder // false')" = "true" ]; then
       EVICT=true
+      EVICT_KIND="stuck"
       REASON="placeholder pending entry survived: spawn was never observed to land"
     fi
   else
@@ -472,21 +496,32 @@ for piid in ${PENDING_KEYS}; do
       DELTA=$(( (NOW_TS - SP_EPOCH) / 60 ))
       if [ "${DELTA}" -ge "${STUCK_AFTER}" ]; then
         EVICT=true
+        EVICT_KIND="stuck"
         REASON="no callback received within stuck_after_minutes (${DELTA} min)"
       fi
     fi
   fi
   if [ "${EVICT}" = true ]; then
-    wrapper_log prepare_tick "stuck-evict iid=${piid} reason='${REASON}'"
+    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} reason='${REASON}'"
     REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     EVICTED_IIDS_JSON="$(printf '%s' "${EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
+    if [ "${EVICT_KIND}" = "scope" ]; then
+      SCOPE_EVICTED_IIDS_JSON="$(printf '%s' "${SCOPE_EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
+      if [ -n "${CHILD_SESSION_KEY}" ] && [ "${CHILD_SESSION_KEY}" != "null" ]; then
+        CLEANUP_ACTIONS_JSON="$(printf '%s' "${CLEANUP_ACTIONS_JSON}" | jq -c \
+          --arg target "${CHILD_SESSION_KEY}" \
+          --arg reason "scope_evicted_outside_trigger_range" \
+          --argjson iid "${piid}" \
+          '. + [{action:"kill", target:$target, reason:$reason, iid:$iid}]')"
+      fi
+    fi
   fi
 done
 persist_state "${STATE_JSON}"
 
-# ─── 8. If pending still non-empty → waiting_for_callbacks ───────
+# ─── 9. If pending still non-empty → waiting_for_callbacks ───────
 PENDING_COUNT="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys | length')"
 if [ "${PENDING_COUNT}" -gt 0 ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
@@ -495,20 +530,14 @@ if [ "${PENDING_COUNT}" -gt 0 ]; then
   jq -nc \
     --argjson pending "${PENDING_IIDS_JSON}" \
     --argjson evicted "${EVICTED_IIDS_JSON}" \
-    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}")" '
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}") scope_evicted=$(jq -c . <<<"${SCOPE_EVICTED_IIDS_JSON}")" '
     {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
-     evicted_iids:$evicted, chat_summary:$chat}'
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions, chat_summary:$chat}'
   exit 0
 fi
-
-# ─── 9. Effective IID universe ────────────────────────────────────
-EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
-  (.issue_min_iid) as $lo | (.issue_max_iid) as $hi
-  | if (.issue_iids_whitelist | length) == 0 then
-      [range($lo; $hi+1)]
-    else
-      ([range($lo; $hi+1)] | (. - (. - .issue_iids_whitelist)) | unique | sort)
-    end')"
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
@@ -594,8 +623,9 @@ if [ "${ALL_DONE}" = "true" ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "completed"')"
   persist_state "${STATE_JSON}"
   jq -nc --arg ev "${EVIDENCE_PATH}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     '{status:"completed", dispatch_entries:[], chat_summary:"all IIDs in range terminal — campaign completed",
-      last_reconcile_evidence:$ev}'
+      last_reconcile_evidence:$ev, cleanup_actions:$cleanup_actions}'
   exit 0
 fi
 
@@ -648,7 +678,8 @@ fi
 ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
 if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
-    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
 
@@ -733,7 +764,8 @@ BATCH_JSON="$(jq -nc \
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
-    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
 
@@ -1134,9 +1166,14 @@ if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
   jq -nc \
     --argjson run_timeout "${RUN_TIMEOUT}" \
     --argjson outcomes "${TICK_OUTCOMES}" \
+    --argjson evicted "${EVICTED_IIDS_JSON}" \
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     --arg ev "${EVIDENCE_PATH}" \
     --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
     {status:"no_eligible_iids", dispatch_entries:[], run_timeout_seconds:$run_timeout,
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions,
      max_launch_retries:3, backoff_seconds:2,
      tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev, chat_summary:$chat}'
   exit 0
@@ -1147,12 +1184,16 @@ jq -nc \
   --argjson run_timeout "${RUN_TIMEOUT}" \
   --argjson outcomes "${TICK_OUTCOMES}" \
   --argjson evicted "${EVICTED_IIDS_JSON}" \
+  --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+  --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
   --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
   --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
   --arg ev "${EVIDENCE_PATH}" \
   --arg chat "${SUMMARY}" '
   {status:"ready", dispatch_entries:$dispatch_entries,
    run_timeout_seconds:$run_timeout, max_launch_retries:3, backoff_seconds:2,
-   evicted_iids:$evicted, label_filtered_in:$label_in, label_filtered_out:$label_out,
+   evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+   cleanup_actions:$cleanup_actions,
+   label_filtered_in:$label_in, label_filtered_out:$label_out,
    tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev,
    chat_summary:$chat}'

@@ -16,7 +16,7 @@ There are three state files in this workspace:
 
 | Wrapper | Writes |
 | ------- | ------ |
-| `dispatch_prepare_tick.sh` | `campaign_state.json` (trigger overrides, stuck-eviction Phase 6 results, post-reconcile cache correction, batch placeholders); per-IID `state.json` + `attempt_state.json` initial `status=in_progress` blocks; `${LOG_DIR}/spawn_payload.txt` (the rendered executor prompt). |
+| `dispatch_prepare_tick.sh` | `campaign_state.json` (trigger overrides, scope/stuck-eviction Phase 6 results, post-reconcile cache correction, batch placeholders); per-IID `state.json` + `attempt_state.json` initial `status=in_progress` blocks; `${LOG_DIR}/spawn_payload.txt` (the rendered executor prompt). |
 | `dispatch_record_spawn.sh` | `campaign_state.json` (post-launch ack writeback of `run_id` / `child_session_key` / `spawned_at`, or — on launch failure — Phase 6 blocked synth + drain). |
 | `dispatch_followup.sh` | `campaign_state.json` (drain + classify + `campaign_status` flip back to `running` when pending hits empty); per-IID `state.json` + `attempt_state.json` terminal blocks per §Phase 6 Write Mapping below. |
 
@@ -78,7 +78,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
 
 ### `pending_subagents` — async-callback bookkeeping
 
-Map keyed by stringified IID. Each entry tracks one in-flight subagent from spawn (`sessions_spawn` launch ack) to drain (`RUN_CHILD_COMPLETION_CALLBACK` processed by Phase 6) or eviction (stuck-pending past `stuck_after_minutes`).
+Map keyed by stringified IID. Each entry tracks one in-flight subagent from spawn (`sessions_spawn` launch ack) to drain (`RUN_CHILD_COMPLETION_CALLBACK` processed by Phase 6) or eviction. Eviction can happen because the entry is stuck past `stuck_after_minutes`, or because a later scheduled trigger narrows the hard IID scope so this pending IID is outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`.
 
 | Field                | Type   | Notes                                                                                          |
 | -------------------- | ------ | ---------------------------------------------------------------------------------------------- |
@@ -138,7 +138,7 @@ quota_launched_this_tick  = 0
 | `max_accounts_per_issue` | int             | Post-override snapshot of the trigger's per-IID UI account cap. Defaults to `14`. Must be a positive integer. Used only when forming the next scheduled batch; callback processing reads the persisted value for audit but does not recalculate allocations. |
 | `tick_seq`               | int             | Monotonic scheduled-wake counter. `dispatch_prepare_tick.sh` increments it once after acquiring the dispatcher lock and uses it with `blocked_at_tick_by_iid` to enforce `blocked_cooldown_ticks`. Callback wake-ups do not increment it. |
 | `blocked_at_tick_by_iid` | object          | Map from stringified IID to the `tick_seq` at which the IID most recently entered `blocked`. Removed when the IID becomes `done` or `failed`. Missing legacy entries are treated as immediately retryable so old state is not stranded. |
-| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
+| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Pending entries outside the effective universe are scope-evicted at the top of the scheduled tick, marked `blocked`, and returned with a best-effort runtime kill action when a `child_session_key` is known. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
 | `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
@@ -337,7 +337,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 The compact reply arrives in two ways:
 
 - **Callback path** — the runtime delivers `RUN_CHILD_COMPLETION_CALLBACK` carrying the full compact JSON in `worker_result_json`. One callback per subagent.
-- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot. Phase 5 launch failures are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
+- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / scope or stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot. Phase 5 launch failures and pending evictions are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
 
 The validation pipeline is the same in both paths:
 
