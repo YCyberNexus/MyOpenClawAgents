@@ -39,6 +39,21 @@
 #   output) so each fresh attempt starts from zero. PRs still target
 #   BRANCH — only the source baseline changes.
 #
+# Legacy-path salvage:
+#   On the first run after the per-(IID,attempt) worktree scheme was
+#   replaced by the shared per-IID scheme, this IID's untracked scratch
+#   may still live at ${WORKTREES_ROOT}/issue-<iid>-att-<NNN>/ or at the
+#   even older ${RESULT_ROOT}/issue-<iid>/worktree/. This script picks
+#   the most recent legacy path as a salvage source, rsync's its
+#   untracked content into the freshly-created shared worktree with
+#   `--ignore-existing` (so BASE_REF's tracked files and the new
+#   worktree's `.git` gitfile are never overwritten), then deletes the
+#   legacy paths. This preserves the "later attempts can see earlier
+#   attempts' files" contract that the worktree restructure was meant to
+#   provide. The same salvage shape is also applied to the local
+#   pre-recreate backup when WORKTREE_REUSE=false but ${WORKTREE_DIR}
+#   was a real directory before this script ran (broken registry state).
+#
 # What this script does NOT do:
 #   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
 #     `git fetch` runs against it; HEAD stays where clone_or_pull put it.
@@ -114,27 +129,53 @@ if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
   exit 5
 fi
 
-# One-time migration cleanup: older deployments placed a linked worktree
-# at ifp-result/issue-<iid>/worktree (BEFORE the issues/ nesting — the
-# old path was ${RESULT_ROOT}/issue-<iid>/worktree). Remove it if present
-# so stale worktree metadata cannot hold old local attempt branches open.
-LEGACY_WORKTREE_DIR="${RESULT_ROOT}/issue-${ISSUE_IID}/worktree"
-if [ -e "${LEGACY_WORKTREE_DIR}" ]; then
-  git worktree remove --force "${LEGACY_WORKTREE_DIR}" 2>/dev/null || true
-  rm -rf "${LEGACY_WORKTREE_DIR}"
-fi
+# ─── Identify legacy worktree paths whose untracked scratch must be
+#     salvaged before they get deregistered ───────────────────────────
+#
+# Earlier path schemes for this IID's worktree:
+#   - very old: ${RESULT_ROOT}/issue-<iid>/worktree
+#                (single-worktree, pre-`issues/` nesting)
+#   - intermediate: ${WORKTREES_ROOT}/issue-<iid>-att-<NNN>
+#                (per-(IID,attempt), pre-shared-per-IID)
+#
+# Both can hold untracked scratch (Claude Code local state, intermediate
+# notes, log files) that continue-mode attempts must carry forward —
+# that is the whole reason the worktree was restructured to be shared
+# per IID. The previous version of this script deleted legacy paths
+# unconditionally, which silently discarded the very data the new
+# scheme was supposed to preserve. We now collect the legacy paths
+# here, pick the most recent one as a salvage source, defer deletion
+# until AFTER the new shared worktree is created, then rsync untracked
+# content from the salvage source into the new shared worktree with
+# `--ignore-existing` (so BASE_REF's freshly-checked-out tracked files
+# and the new worktree's `.git` gitfile are never overwritten).
+LEGACY_SINGLE_WORKTREE_DIR="${RESULT_ROOT}/issue-${ISSUE_IID}/worktree"
 
-# Migration cleanup: an earlier scheme used per-attempt worktree paths
-# at ${WORKTREES_ROOT}/issue-<iid>-att-<NNN>/. We now reuse ONE shared
-# worktree at ${WORKTREES_ROOT}/issue-<iid>/ across every attempt of an
-# IID, so drop any leftover per-attempt directories (with their git
-# registry entries) before we touch the shared path. A literal-`*` shell
-# loop with a no-match guard avoids spurious removal of the new path.
+LEGACY_PER_ATTEMPT_DIRS=()
 for legacy_per_attempt_dir in "${WORKTREES_ROOT}/issue-${ISSUE_IID}"-att-*; do
-  [ -e "${legacy_per_attempt_dir}" ] || continue
-  git worktree remove --force "${legacy_per_attempt_dir}" 2>/dev/null || true
-  rm -rf "${legacy_per_attempt_dir}"
+  [ -d "${legacy_per_attempt_dir}" ] || continue
+  LEGACY_PER_ATTEMPT_DIRS+=("${legacy_per_attempt_dir}")
 done
+
+# Pick salvage source: latest `-att-<NNN>` wins over the very-old
+# single-worktree path because per-attempt paths are more recent.
+SALVAGE_SRC=""
+salvage_src_num=-1
+for d in "${LEGACY_PER_ATTEMPT_DIRS[@]:-}"; do
+  [ -n "${d}" ] || continue
+  suffix="${d##*-att-}"
+  case "${suffix}" in
+    ''|*[!0-9]*) continue ;;
+  esac
+  n="$((10#${suffix}))"
+  if [ "${n}" -gt "${salvage_src_num}" ]; then
+    salvage_src_num="${n}"
+    SALVAGE_SRC="${d}"
+  fi
+done
+if [ -z "${SALVAGE_SRC}" ] && [ -d "${LEGACY_SINGLE_WORKTREE_DIR}" ]; then
+  SALVAGE_SRC="${LEGACY_SINGLE_WORKTREE_DIR}"
+fi
 
 # Look up whether ${WORKTREE_DIR} is currently a registered linked
 # worktree (the registry lives in ${REPO_PATH}/.git/worktrees/...).
@@ -152,23 +193,59 @@ if [ -f "${WORKTREE_DIR}/.git" ] && worktree_registered; then
   WORKTREE_REUSE=true
 fi
 
+# When we are about to recreate the shared worktree and the existing
+# path is a real directory, move it aside FIRST so its untracked
+# scratch can be rsync'd back into the rebuilt worktree. The mv-aside
+# MUST happen before any `git worktree remove --force` call because
+# remove deletes the directory including untracked files (even when
+# the registry is intact but the `.git` gitfile is missing/corrupt —
+# a `registered=T + dir=present + .gitfile-broken` state would
+# otherwise lose scratch silently).
+#
+# Stale recreate backups: if a prior run of *this very script* was
+# killed between mv and the trailing rm -rf (OOM, SIGTERM, acpx kill),
+# the backup lives at ${WORKTREE_DIR}.recreate-backup.<old-pid>.
+# Enumerate those now so they can join the salvage chain.
+WORKTREE_RECREATE_BACKUP=""
+STALE_RECREATE_BACKUP=""
+stale_backup_mtime=0
+for stale in "${WORKTREE_DIR}.recreate-backup."*; do
+  [ -d "${stale}" ] || continue
+  # stat -c %Y (GNU) / stat -f %m (BSD) for mtime; pick the newest.
+  mt=0
+  if ts="$(stat -c %Y "${stale}" 2>/dev/null)"; then
+    mt="${ts}"
+  elif ts="$(stat -f %m "${stale}" 2>/dev/null)"; then
+    mt="${ts}"
+  fi
+  if [ "${mt}" -gt "${stale_backup_mtime}" ]; then
+    stale_backup_mtime="${mt}"
+    STALE_RECREATE_BACKUP="${stale}"
+  fi
+done
+
 if [ "${WORKTREE_REUSE}" = false ]; then
-  # Recreate path. This is normal on attempt 1 of an IID, but on later
-  # attempts it implies prior scratch state was lost (operator removed the
-  # directory, the registry was pruned, etc.). Log to stderr so the caller
-  # captures it in wrapper.log for post-mortems — otherwise "Claude lost
-  # its memory across attempts" symptoms are hard to attribute.
   if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
     dir_present=false; [ -e "${WORKTREE_DIR}" ] && dir_present=true
     reg_present=false; worktree_registered && reg_present=true
-    echo "prepare_attempt: recreating worktree at ${WORKTREE_DIR} for attempt ${ATTEMPT_NUMBER_PADDED} (dir_present=${dir_present} registered=${reg_present}); any untracked scratch from prior attempts will be lost" >&2
+    echo "prepare_attempt: recreating worktree at ${WORKTREE_DIR} for attempt ${ATTEMPT_NUMBER_PADDED} (dir_present=${dir_present} registered=${reg_present}); will salvage untracked scratch after recreate" >&2
   fi
-  # Defensive cleanup for half-broken state — either an orphan directory
-  # without a registry entry, or a registry entry pointing at a missing
-  # directory. Then prune before recreating.
-  if [ -e "${WORKTREE_DIR}" ] || worktree_registered; then
+  # Salvage: if the directory exists, move it aside BEFORE we touch the
+  # registry. Only then call `git worktree remove --force` on the
+  # now-empty path to clear the registry entry (the `--force` flag is
+  # still needed because git will otherwise refuse to remove a worktree
+  # that has uncommitted changes on its active branch; but the directory
+  # is already gone, so the scratch is safe).
+  if [ -d "${WORKTREE_DIR}" ]; then
+    WORKTREE_RECREATE_BACKUP="${WORKTREE_DIR}.recreate-backup.$$"
+    mv "${WORKTREE_DIR}" "${WORKTREE_RECREATE_BACKUP}"
+  elif [ -e "${WORKTREE_DIR}" ]; then
+    # Non-directory (broken symlink, leftover file). Nothing meaningful
+    # to salvage; remove so `git worktree add` can claim the path.
+    rm -f "${WORKTREE_DIR}"
+  fi
+  if worktree_registered; then
     git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
-    rm -rf "${WORKTREE_DIR}"
   fi
 fi
 git worktree prune
@@ -201,6 +278,74 @@ else
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
 fi
 mkdir -p "${OUTPUT_DIR}"
+
+# ─── Salvage untracked scratch from salvage sources into the worktree ─
+#
+# Priority chain (first existing source wins; only one is chosen):
+#   1. WORKTREE_RECREATE_BACKUP — fresh mv-aside a few lines above.
+#   2. STALE_RECREATE_BACKUP   — orphan backup left by a prior crashed
+#      run of this script (mv succeeded, trailing rm -rf never ran).
+#   3. SALVAGE_SRC             — legacy `-att-<NNN>` or very-old
+#      single-worktree path, picked above before deregistration.
+#
+# Sources 2 and 3 only fire when this is a genuine recreate (not the
+# shared-worktree REUSE path). When REUSE=true the existing untracked
+# scratch already on disk is authoritative; rsyncing from a stale
+# backup or legacy path would resurrect files Claude Code deliberately
+# deleted in a prior successful attempt.
+#
+# `rsync -rltD --ignore-existing` (no -pgo ownership flags) because:
+#   - `--ignore-existing` prevents clobbering BASE_REF tracked files
+#     and the new worktree's `.git` gitfile.
+#   - `-rltD` excludes ownership (–pgo) to avoid non-root code-23
+#     partial-transfer warnings when the backup was written by a
+#     different uid.
+#   - `--exclude='/.git'` blocks the source-root gitfile; the new
+#     worktree already has its own correct `.git` from `git worktree
+#     add`.
+salvage_into_worktree() {
+  local src="$1"
+  if [ -z "${src}" ] || [ ! -d "${src}" ]; then
+    return 0
+  fi
+  if ! command -v rsync >/dev/null 2>&1; then
+    echo "prepare_attempt: rsync is required to salvage untracked scratch from ${src} but is missing on PATH" >&2
+    exit 6
+  fi
+  echo "prepare_attempt: salvaging untracked scratch from ${src} into ${WORKTREE_DIR}" >&2
+  rsync -rltD --ignore-existing \
+    --exclude='/.git' \
+    "${src}/" "${WORKTREE_DIR}/"
+}
+
+salvage_into_worktree "${WORKTREE_RECREATE_BACKUP}"
+if [ "${WORKTREE_REUSE}" = false ]; then
+  if [ -z "${WORKTREE_RECREATE_BACKUP}" ] || [ ! -d "${WORKTREE_RECREATE_BACKUP}" ]; then
+    salvage_into_worktree "${STALE_RECREATE_BACKUP}"
+    if [ -z "${STALE_RECREATE_BACKUP}" ] || [ ! -d "${STALE_RECREATE_BACKUP}" ]; then
+      salvage_into_worktree "${SALVAGE_SRC}"
+    fi
+  fi
+fi
+
+# Now that any meaningful scratch has been salvaged, drop the
+# pre-recreate backups, stale backups, and every legacy worktree path.
+# From here on out the shared per-issue worktree at ${WORKTREE_DIR} is
+# the only place this IID's untracked state lives.
+for stale in "${WORKTREE_DIR}.recreate-backup."*; do
+  [ -d "${stale}" ] || continue
+  rm -rf "${stale}"
+done
+for d in "${LEGACY_PER_ATTEMPT_DIRS[@]:-}"; do
+  [ -n "${d}" ] || continue
+  git worktree remove --force "${d}" 2>/dev/null || true
+  rm -rf "${d}"
+done
+if [ -e "${LEGACY_SINGLE_WORKTREE_DIR}" ]; then
+  git worktree remove --force "${LEGACY_SINGLE_WORKTREE_DIR}" 2>/dev/null || true
+  rm -rf "${LEGACY_SINGLE_WORKTREE_DIR}"
+fi
+git worktree prune
 
 # Recreate ONLY the current attempt's log dir so stale evidence from a
 # same-(IID, attempt) rerun is not mixed with the current run. The
