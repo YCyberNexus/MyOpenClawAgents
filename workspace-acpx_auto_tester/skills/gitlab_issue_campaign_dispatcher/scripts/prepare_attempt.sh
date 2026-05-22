@@ -117,7 +117,7 @@ flock 8
 # Refresh refs. clone_or_pull.sh has already fetched, but do it again
 # defensively in case this script is run standalone.
 cd "${REPO_PATH}"
-git fetch --prune origin
+git fetch --prune origin >&2
 
 # Resolve the actual base ref.
 # Fresh mode bases on DEV_BRANCH (clean baseline). Continue mode tries
@@ -289,10 +289,10 @@ if [ "${WORKTREE_REUSE}" = false ]; then
     rm -f "${WORKTREE_DIR}"
   fi
   if worktree_registered; then
-    git worktree remove --force "${WORKTREE_DIR}" 2>/dev/null || true
+    git worktree remove --force "${WORKTREE_DIR}" >/dev/null 2>&1 || true
   fi
 fi
-git worktree prune
+git worktree prune >&2
 
 # Ensure the cross-attempt ISSUE_ROOT exists for state.json /
 # attempt_state.json / summary.md. The log dir itself lives inside the
@@ -361,7 +361,7 @@ if [ "${WORKTREE_REUSE}" = true ]; then
   # archives it outside the active worktree. Prior local attempt branches
   # (e.g. ${WORK_BRANCH}-att001) remain in the registry for audit; only the
   # worktree's HEAD moves.
-  git -C "${WORKTREE_DIR}" checkout -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force
+  git -C "${WORKTREE_DIR}" checkout -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force >&2
 else
   # First attempt for this IID (or recovery from a broken state). Create
   # the shared per-issue linked worktree branched from ${BASE_REF}. This
@@ -371,7 +371,7 @@ else
   # script, the remaining log files stay locally ignored via the
   # repository `.git/info/exclude` entry.
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
-  git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}"
+  git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
 mkdir -p "${OUTPUT_DIR}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
@@ -475,7 +475,7 @@ done
 if [ -e "${LEGACY_SINGLE_WORKTREE_DIR}" ]; then
   archive_legacy_path "${LEGACY_SINGLE_WORKTREE_DIR}" "legacy-single-worktree"
 fi
-git worktree prune
+git worktree prune >&2
 
 # Recreate ONLY the current attempt's log dir so stale evidence from a
 # same-(IID, attempt) rerun is not mixed with the current run. The

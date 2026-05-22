@@ -864,6 +864,13 @@ for iid in "${BATCH_IIDS[@]}"; do
     prep_blocked "prepare_attempt: empty stdout (script printed no mode/branch lines)"
     continue
   fi
+  case "${MODE_ACTUAL}" in
+    fresh|continue) ;;
+    *)
+      prep_blocked "prepare_attempt: invalid mode_actual on stdout: ${MODE_ACTUAL}"
+      continue
+      ;;
+  esac
 
   # claude_settings_path
   if [ -n "${T[claude_settings_path]:-}" ]; then
