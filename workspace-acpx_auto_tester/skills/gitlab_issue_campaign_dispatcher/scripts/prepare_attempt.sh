@@ -231,8 +231,8 @@ fi
 # otherwise lose scratch silently).
 #
 # Stale recreate backups: if a prior run of *this very script* was
-# killed between mv and the trailing rm -rf (OOM, SIGTERM, acpx kill),
-# the backup lives at ${WORKTREE_DIR}.recreate-backup.<old-pid>.
+# killed after mv but before the backup was archived (OOM, SIGTERM,
+# acpx kill), the backup lives at ${WORKTREE_DIR}.recreate-backup.<old-pid>.
 # Enumerate those now so they can join the salvage chain.
 WORKTREE_RECREATE_BACKUP=""
 WORKTREE_SWITCH_BACKUP=""
@@ -284,9 +284,10 @@ if [ "${WORKTREE_REUSE}" = false ]; then
     WORKTREE_RECREATE_BACKUP="${WORKTREE_DIR}.recreate-backup.$$"
     mv "${WORKTREE_DIR}" "${WORKTREE_RECREATE_BACKUP}"
   elif [ -e "${WORKTREE_DIR}" ]; then
-    # Non-directory (broken symlink, leftover file). Nothing meaningful
-    # to salvage; remove so `git worktree add` can claim the path.
-    rm -f "${WORKTREE_DIR}"
+    # Non-directory (broken symlink, leftover file). Move it aside so
+    # `git worktree add` can claim the path without deleting operator data.
+    WORKTREE_OBSTRUCTION_BACKUP="${WORKTREE_DIR}.obstruction-backup.$$"
+    mv "${WORKTREE_DIR}" "${WORKTREE_OBSTRUCTION_BACKUP}"
   fi
   if worktree_registered; then
     git worktree remove --force "${WORKTREE_DIR}" >/dev/null 2>&1 || true
@@ -387,7 +388,7 @@ fi
 # Priority chain (first existing source wins; only one is chosen):
 #   1. WORKTREE_RECREATE_BACKUP — fresh mv-aside a few lines above.
 #   2. STALE_RECREATE_BACKUP   — orphan backup left by a prior crashed
-#      run of this script (mv succeeded, trailing rm -rf never ran).
+#      run of this script after the mv-aside step.
 #   3. SALVAGE_SRC             — legacy `-att-<NNN>` or very-old
 #      single-worktree path, picked above before deregistration.
 #
@@ -484,11 +485,14 @@ git worktree prune >&2
 # but those use different attempt numbers and so do not collide with the
 # current LOG_DIR. Other attempts' log dirs that exist as UNTRACKED files
 # in the shared worktree from earlier runs are NOT touched here — only
-# the exact current-attempt LOG_DIR is reset. The rm is defensive against
-# an exact same-(IID, attempt) rerun (rare — attempt numbers are
-# monotonic).
+# the exact current-attempt LOG_DIR is reset by archiving the old path.
+# This is defensive against an exact same-(IID, attempt) rerun (rare —
+# attempt numbers are monotonic).
 if [ -d "${LOG_DIR}" ]; then
-  rm -rf "${LOG_DIR}"
+  LOG_RERUN_ARCHIVE_ROOT="${WORKTREES_ROOT}/.preserved-log-reruns/issue-${ISSUE_IID}"
+  mkdir -p "${LOG_RERUN_ARCHIVE_ROOT}"
+  LOG_RERUN_ARCHIVE="${LOG_RERUN_ARCHIVE_ROOT}/attempt-${ATTEMPT_NUMBER_PADDED}.$(date +%Y%m%dT%H%M%S).$$"
+  mv "${LOG_DIR}" "${LOG_RERUN_ARCHIVE}"
 fi
 mkdir -p "${LOG_DIR}"
 

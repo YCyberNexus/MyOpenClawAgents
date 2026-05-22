@@ -44,6 +44,15 @@ cd "${WORKTREE_DIR}"
 git status --porcelain > "${LOG_DIR}/git_status.txt"
 git diff > "${LOG_DIR}/git_diff.patch"
 
+deleted_paths="$(git diff --name-only --diff-filter=D)"
+if [ -n "${deleted_paths}" ]; then
+  {
+    echo "stage_and_guard: refusing to stage deleted files; destructive deletion is forbidden"
+    echo "${deleted_paths}"
+  } >&2
+  exit 2
+fi
+
 git add -A
 
 # In continue mode the worktree is checked out from origin/${WORK_BRANCH}
@@ -55,6 +64,15 @@ git add -A
 # anything under that subtree before the explicit force-add for the
 # current attempt's two files.
 git reset -q -- "${RESULT_BASENAME}/issue-${ISSUE_IID}/log/" 2>/dev/null || true
+
+staged_deleted_paths="$(git diff --cached --name-only --diff-filter=D)"
+if [ -n "${staged_deleted_paths}" ]; then
+  {
+    echo "stage_and_guard: refusing to commit deleted files; destructive deletion is forbidden"
+    echo "${staged_deleted_paths}"
+  } >&2
+  exit 2
+fi
 
 if [ -f "${OUTPUT_DIR}" ]; then
   git add -f "${OUTPUT_DIR}"

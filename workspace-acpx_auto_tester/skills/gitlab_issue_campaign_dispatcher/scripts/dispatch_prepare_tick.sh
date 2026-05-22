@@ -56,14 +56,34 @@ POOL_OUT=""
 POOL_ERR=""
 RECONCILE_OUT=""
 declare -a CLEANUP_FILES=()
+retire_temp_file() {
+  local path="${1:-}"
+  [ -n "${path}" ] || return 0
+  [ -e "${path}" ] || return 0
+
+  # Trigger/payload temp files can contain credentials. Blank the file before
+  # moving it out of the active temp path; keep the inode around for audit
+  # instead of deleting it.
+  : >"${path}" 2>/dev/null || true
+
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
+  mkdir -p "${retire_dir}" 2>/dev/null || return 0
+  mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
+}
 cleanup_temps() {
   # Guard CLEANUP_FILES expansion: on bash <4.4 (and zsh), expanding an
   # empty array under `set -u` raises an unbound-variable error before
-  # rm runs, leaving the temps on disk AND propagating a non-zero exit
-  # back to the orchestrator.
-  rm -f "${TRIGGER_FILE}" "${POOL_OUT}" "${POOL_ERR}" "${RECONCILE_OUT}"
+  # cleanup runs, leaving the temps on disk AND propagating a non-zero
+  # exit back to the orchestrator.
+  retire_temp_file "${TRIGGER_FILE}"
+  retire_temp_file "${POOL_OUT}"
+  retire_temp_file "${POOL_ERR}"
+  retire_temp_file "${RECONCILE_OUT}"
   if [ "${#CLEANUP_FILES[@]}" -gt 0 ]; then
-    rm -f "${CLEANUP_FILES[@]}"
+    local cleanup_file
+    for cleanup_file in "${CLEANUP_FILES[@]}"; do
+      retire_temp_file "${cleanup_file}"
+    done
   fi
 }
 trap cleanup_temps EXIT
@@ -854,12 +874,14 @@ for iid in "${BATCH_IIDS[@]}"; do
   cat "${PA_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
   if [ "${PA_RC}" -ne 0 ]; then
     prep_blocked "prepare_attempt: $(tail -n 1 "${PA_ERR}")"
-    rm -f "${PA_OUT}" "${PA_ERR}"
+    retire_temp_file "${PA_OUT}"
+    retire_temp_file "${PA_ERR}"
     continue
   fi
   MODE_ACTUAL="$(sed -n '1p' "${PA_OUT}")"
   LOCAL_ATTEMPT_BRANCH="$(sed -n '2p' "${PA_OUT}")"
-  rm -f "${PA_OUT}" "${PA_ERR}"
+  retire_temp_file "${PA_OUT}"
+  retire_temp_file "${PA_ERR}"
   if [ -z "${MODE_ACTUAL}" ] || [ -z "${LOCAL_ATTEMPT_BRANCH}" ]; then
     prep_blocked "prepare_attempt: empty stdout (script printed no mode/branch lines)"
     continue
