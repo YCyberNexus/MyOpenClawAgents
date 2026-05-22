@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# stage_and_guard.sh — stage Claude's changes from inside the per-attempt
-# linked git worktree at ${WORKTREE_DIR} (created by prepare_attempt.sh).
+# stage_and_guard.sh — stage Claude's changes from inside the shared
+# per-issue linked git worktree at ${WORKTREE_DIR} (created on attempt 1
+# and reused on later attempts by prepare_attempt.sh).
 #
 # All path-based protection has been removed: any file Claude wrote (or
 # any file already tracked on the base branch) goes through. The script
@@ -17,7 +18,7 @@
 # can short-circuit empty diffs.
 #
 # Required env vars:
-#   WORKTREE_DIR    per-attempt worktree cwd (set by env_paths.sh)
+#   WORKTREE_DIR    shared per-issue worktree cwd (set by env_paths.sh)
 #   OUTPUT_DIR      current issue's primary result directory inside the worktree (force-added)
 #   LOG_DIR         current-attempt log dir INSIDE the worktree (force-add list above);
 #                   evidence files (git_status.txt / git_diff.patch) are written here

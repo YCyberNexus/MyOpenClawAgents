@@ -6,7 +6,7 @@
 #   GITLAB_HOST    from glab_auth.sh
 #   PROJECT_URI    URI-encoded "${GROUP}/${PROJECT}"
 #
-# Workflow labels: todo retry new doing pr done blocked failed continue
+# Workflow labels: todo retry new doing pr done blocked failed timeout continue
 #
 # `continue` is a human-applied review label. Reviewers set it on an issue
 # whose MR was created and labeled `done` + `pr` by the agent, but where the
@@ -14,6 +14,12 @@
 # When the dispatcher's reconciliation sees `continue` on an issue, it
 # re-enqueues the IID and the executor restarts the resolution flow on
 # the existing work branch (or creates one from master if none exists).
+#
+# `timeout` is a subagent-applied terminal label set when `acpx claude exec`
+# exceeded its wall-clock cap. Whatever Claude Code managed to produce is
+# still committed and force-pushed to `${WORK_BRANCH}`, but no MR / `pr`
+# is opened. Treated by the dispatcher as terminal (NOT auto-retried) until
+# a human strips the label.
 
 set -euo pipefail
 
@@ -23,7 +29,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}"
 
-REQUIRED_LABELS=(todo retry new doing pr done blocked failed continue)
+REQUIRED_LABELS=(todo retry new doing pr done blocked failed timeout continue)
 
 existing="$(
   glab api --paginate \

@@ -64,8 +64,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 # with the integer remainder front-loaded, then capped by
 # max_accounts_per_issue). The dispatcher
 # ensures distinct accounts across concurrent batch members AND across
-# concurrent robot executions within a subagent — see SKILL.md
-# §UI Account Allocation Policy. If UI_ACCOUNTS is missing or invalid,
+# concurrent robot executions within a subagent. If UI_ACCOUNTS is missing or invalid,
 # this script exits non-zero and the dispatcher marks the IID `blocked`.
 if [ -z "${UI_ACCOUNTS:-}" ]; then
   echo "build_prompt: UI_ACCOUNTS is required (dispatcher must pass a JSON array of {\"u\":\"<user>\",\"p\":\"<pass>\"} objects)" >&2
@@ -143,21 +142,25 @@ This is a CONTINUE-MODE re-run of GitLab issue #${ISSUE_IID}.
 
 A prior run on this issue produced a merge request and was marked \`done\` + \`pr\`,
 but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside a per-attempt git worktree at ${WORKTREE_DIR},
-branched from \`origin/${WORK_BRANCH}\` (the work-in-progress branch
-from the prior run). Read what's already there, then continue or
-correct it according to the past-attempt summaries and reviewer
-guidance below.
+You are running inside the shared per-issue git worktree at ${WORKTREE_DIR}
+(reused across every attempt of this IID). Tracked files have just been
+reset to \`origin/${WORK_BRANCH}\` (the work-in-progress branch from the
+prior run); any untracked scratch the previous attempt left here is still
+on disk. Read what's already there, then continue or correct it according
+to the past-attempt summaries and reviewer guidance below.
 
 EOF
   else
     cat <<EOF
 You are working on GitLab issue #${ISSUE_IID}. Implement the change
-requested in the issue description. You are running inside a per-attempt
-git worktree at ${WORKTREE_DIR}, branched from \`origin/${DEV_BRANCH}\`
-(the clean baseline). The integration branch \`${BRANCH}\` already
-contains spec output from previously completed issues, but you should
-NOT see that here when ${DEV_BRANCH} is kept clean.
+requested in the issue description. You are running inside the shared
+per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt
+of this IID). Tracked files have just been reset to
+\`origin/${DEV_BRANCH}\` (the clean baseline); any untracked scratch a
+previous attempt of this IID left here is still on disk. The integration
+branch \`${BRANCH}\` already contains spec output from previously
+completed issues, but you should NOT see that on tracked files here
+when ${DEV_BRANCH} is kept clean.
 
 EOF
   fi
@@ -184,7 +187,7 @@ EOF
 
   cat <<EOF
 # Working environment
-- Repository cwd:             ${WORKTREE_DIR} (per-attempt linked git worktree)
+- Repository cwd:             ${WORKTREE_DIR} (shared per-issue linked git worktree)
 - Output directory:           ${OUTPUT_DIR} (the only place to write spec results — force-added at commit time)
 - Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)

@@ -36,14 +36,21 @@
 #                   state.json
 #                   attempt_state.json
 #                   summary.md
-#           .worktrees/                  ← per-attempt linked git worktrees
-#               issue-<iid>-att-<NNN>/   ← WORKTREE_DIR; acpx cwd; created by
-#                                          `git worktree add -B` in prepare_attempt.sh
+#           .worktrees/                  ← per-issue linked git worktrees
+#               issue-<iid>/             ← WORKTREE_DIR; acpx cwd; reused across every
+#                                          attempt of this IID. prepare_attempt.sh
+#                                          creates it on attempt 1 via `git worktree add -B`
+#                                          and on attempt N>1 force-switches the checked-out
+#                                          branch to BASE_REF in place (untracked files
+#                                          Claude wrote in earlier attempts survive, so
+#                                          `acpx claude exec` can pick up where it left off).
 #                   .claude/ hulat/ ${DATA_BASENAME}/    (from base branch checkout)
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
-#                                                        ← OUTPUT_DIR (force-added)
+#                                                        ← OUTPUT_DIR (force-added; shared
+#                                                          across attempts of this IID)
 #                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
-#                                                        ← LOG_DIR (inside worktree;
+#                                                        ← LOG_DIR (still attempt-scoped
+#                                                          inside the shared worktree;
 #                                                          prompt.txt + claude_result.txt
 #                                                          force-added by stage_and_guard.sh,
 #                                                          other files stay locally ignored
@@ -86,10 +93,8 @@
 #   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
 #   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
 #
-# Note: HULAT_DIR is NOT a trigger input. It is derived as
-# `${REPO_PATH}/hulat` because the test team committed the hulat
-# materials into the repo. Triggers that still pass `hulat_dir=...` are
-# silently ignored (the override never reaches a script).
+# Note: HULAT_DIR is derived as `${REPO_PATH}/hulat` because the test
+# team committed the hulat materials into the repo.
 #
 # Outputs (exported into the calling shell): see lists above. Plus:
 #   GITLAB_HOST, GITLAB_API_PROTOCOL    (loaded via glab_auth.sh)
@@ -198,10 +203,11 @@ export DISPATCHER_LOG_DIR="${LOG_ROOT}"
 export ISSUES_ROOT="${RESULT_ROOT}/issues"
 export LOCK_FILE="${STATE_DIR}/campaign.lock"
 
-# Per-attempt git worktrees live under a single root inside the agent
+# Per-issue git worktrees live under a single root inside the agent
 # runtime tree (already covered by `.git/info/exclude`). Always exported
 # so housekeeper / cleanup scripts can find them even when ISSUE_IID is
-# unset.
+# unset. Each IID gets exactly one worktree (reused across attempts);
+# see WORKTREE_DIR below.
 export WORKTREES_ROOT="${RESULT_ROOT}/.worktrees"
 
 # Only mkdir inside the repo if the repo has actually been cloned. Before
@@ -251,21 +257,29 @@ if [ -n "${ISSUE_IID:-}" ]; then
   ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
   export ATTEMPT_NUMBER_PADDED
 
-  # Each attempt runs inside its own linked git worktree at WORKTREE_DIR.
-  # The parent checkout at ${REPO_PATH} is only used as the shared object
-  # database / `git fetch` target and is NEVER mutated by an attempt, so
-  # multiple attempts can run concurrently without colliding on a single
-  # working tree. ATTEMPT_DIR remains a compatibility alias for
-  # ISSUE_ROOT (the per-issue persistent subtree). Cross-attempt state
-  # (state.json, attempt_state.json, summary.md) lives in ISSUE_ROOT so
-  # it survives worktree teardown by a housekeeper. LOG_DIR now lives
-  # INSIDE the worktree (under ${RESULT_BASENAME}/issue-<iid>/log/) so
-  # `prompt.txt` and `claude_result.txt` can be force-added into the MR;
-  # the rest of the log files stay locally ignored via the repository
-  # `.git/info/exclude` entry for `/${RESULT_BASENAME}/` and disappear
-  # when the worktree is removed.
+  # Every attempt of this IID runs inside one shared linked git worktree at
+  # WORKTREE_DIR (the path does NOT include the attempt number). The parent
+  # checkout at ${REPO_PATH} is only used as the shared object database /
+  # `git fetch` target and is NEVER mutated by an attempt. Cross-IID
+  # parallelism is still safe because different IIDs get different worktree
+  # paths; same-IID attempts never run concurrently (single-batch-in-flight
+  # invariant enforced by the dispatcher's `pending_subagents` bookkeeping),
+  # so it is safe to reuse one working tree across attempts. The benefit:
+  # any local scratch state Claude Code wrote during attempt N (untracked
+  # files under .claude/, intermediate artifacts, etc.) survives in place
+  # so `acpx claude exec` on attempt N+1 can pick up where it left off.
+  # prepare_attempt.sh owns the create-or-reuse logic.
+  #
+  # ATTEMPT_DIR remains a compatibility alias for ISSUE_ROOT (the per-issue
+  # persistent subtree). Cross-attempt state (state.json, attempt_state.json,
+  # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
+  # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree
+  # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/ so successive attempts
+  # do NOT overwrite each other's prompt.txt / claude_result.txt. Only those
+  # two files are force-added into the MR; the rest stay locally ignored via
+  # the repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
-  export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}"
+  export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
   export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"

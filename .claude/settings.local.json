@@ -128,7 +128,9 @@
       "Bash(find /Users/yuanchenxiang/IdeaProjects/MyOpenClawAgents -maxdepth 2 -type f -name \"AGENTS.md\" 2>/dev/null; find /Users/yuanchenxiang -maxdepth 4 -type d -name \"*acpx*\" 2>/dev/null | head -20)",
       "Read(//Users/yuanchenxiang/**)",
       "Skill(git-commit-chinese)",
-      "Skill(git-commit-chinese:*)"
+      "Skill(git-commit-chinese:*)",
+      "Bash(/opt/homebrew/bin/bash --version)",
+      "Bash(/opt/homebrew/bin/bash -c 'set -euo pipefail; declare -a A=\\(\\); rm -f /tmp/__nonexistent_xyz_abc \"${A[@]}\"; echo \"OK bash4\"')"
     ]
   }
 }

@@ -65,12 +65,21 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
   flock 7
   if [ ! -d "${REPO_PATH}/.git" ]; then  # re-check after acquiring lock
     if [ -d "${REPO_PATH}" ]; then
-      # Partial state from a prior interrupted bootstrap (e.g. env_paths.sh
-      # mkdir'd the ifp-result subtree before we got here on a previous
-      # tick that crashed before clone). git clone refuses a non-empty
-      # target, so wipe and retry. Safe because no .git/ means no real
-      # work is in this directory.
-      rm -rf "${REPO_PATH}"
+      # REPO_PATH exists but is not a git clone. Could be partial state
+      # from a prior interrupted bootstrap (e.g. env_paths.sh mkdir'd
+      # the ifp-result subtree before a previous tick crashed before
+      # `git clone`), OR could be a directory the operator put there on
+      # purpose. We refuse to delete it — `rm -rf` on a path the
+      # operator chose is too destructive to do silently. Fail the tick
+      # with a clear message; the operator decides whether the directory
+      # is safe to remove and does it manually.
+      echo "clone_or_pull: ${REPO_PATH} exists but is not a git clone (no .git/ inside)." >&2
+      echo "  Refusing to delete automatically. If this is leftover state from an" >&2
+      echo "  interrupted bootstrap and the directory contains nothing important," >&2
+      echo "  remove it manually (e.g. \`rm -rf ${REPO_PATH}\`) and re-trigger the" >&2
+      echo "  scheduled wake-up. Otherwise investigate what put it there before retrying." >&2
+      flock -u 7
+      exit 12
     fi
     git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
   fi

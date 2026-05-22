@@ -16,13 +16,13 @@ The next dispatcher tick will pick the issue up and re-run.
 
 In continue mode:
 
-1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh` to create a fresh per-attempt linked git worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-${ISSUE_IID}-att-${ATTEMPT_NUMBER_PADDED}/` based on `origin/${WORK_BRANCH}` (the existing work-in-progress branch). Local `attempt_state.json` and `summary.md` are updated in place under `${ISSUE_ROOT}` (outside the worktree, so they survive worktree teardown). Per-attempt logs are written at `${WORKTREE_DIR}/${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/` INSIDE the worktree; `prompt.txt` and `claude_result.txt` are force-added by `stage_and_guard.sh` and therefore preserved on `${WORK_BRANCH}`, so a later continue-mode attempt sees prior attempts' `log/attempt-001/`, `log/attempt-002/`, ... in its fresh worktree. The remaining log files (`acpx_raw.log`, `git_status.txt`, `git_diff.patch`, `wiki_*`, `mr_description.md`) stay locally ignored and disappear when housekeeping removes the worktree. Prior attempt summaries also remain available as GitLab issue notes.
+1. **Dispatcher prep:** Resolves a fresh attempt number (monotonically increasing) via `scripts/allocate_attempt.sh` and runs `ISSUE_MODE=continue scripts/prepare_attempt.sh`. The shared per-issue worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-${ISSUE_IID}/` (path has NO `-att-<NNN>` suffix) is created on attempt 1; for continue-mode attempts (attempt N>1) the script does an in-place `git checkout -B ${LOCAL_ATTEMPT_BRANCH} origin/${WORK_BRANCH} --force` inside the existing worktree, which resets tracked files to the work-in-progress branch's contents while leaving untracked scratch (Claude Code's local state, intermediate notes) on disk for `acpx claude exec` to pick up. Local `attempt_state.json` and `summary.md` are updated in place under `${ISSUE_ROOT}` (outside the worktree, so they survive worktree teardown). Per-attempt logs are written at `${WORKTREE_DIR}/${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/` INSIDE the shared worktree (still attempt-scoped so successive attempts don't overwrite each other); `prompt.txt` and `claude_result.txt` are force-added by `stage_and_guard.sh` and therefore preserved on `${WORK_BRANCH}`, so a later continue-mode attempt sees prior attempts' `log/attempt-001/`, `log/attempt-002/`, ... reappear in the worktree after the reset. The remaining log files (`acpx_raw.log`, `git_status.txt`, `git_diff.patch`, `wiki_*`, `mr_description.md`) stay locally ignored and disappear when housekeeping removes the worktree. Prior attempt summaries also remain available as GitLab issue notes.
 2. **Dispatcher prep:** Reads the issue (`G1` in `glab_commands.md`) for title, description, current labels.
 3. **Dispatcher prep:** Runs `scripts/build_prompt.sh` which reads the issue notes (`G1b`) and **partitions them in two buckets**:
    - **Past attempt summaries** — notes whose body contains `<!-- acpx_auto_tester:attempt-summary ` or the legacy pre-rename summary marker. These are posted by the agent for successful prior attempts and contain compact status, commit / MR pointers, changed-file preview, and the runner evidence path. Failure summaries are local-only and are not injected into continue-mode prompts unless a human copies relevant guidance into a reviewer comment.
    - **Reviewer comments** — every other non-system note except auto-posted Wiki artifact notes (`<!-- acpx_auto_tester:attempt-wiki-artifacts ... -->`) and legacy pre-rename Wiki artifact notes. This is where humans write supplemental instructions.
 4. **Dispatcher prep:** `build_prompt.sh` writes the Claude Code prompt at `${LOG_DIR}/prompt.txt` with both buckets, in chronological order, in distinct sections (see template below).
-5. **Subagent:** Runs Claude Code via the same script-owned one-shot invocation used in all modes: `scripts/run_acpx_attempt.sh` `cd`s into `${WORKTREE_DIR}` (the per-attempt worktree) and runs `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"`. Same No-Fallback Policy applies. Cross-attempt continuity comes from the checked-out `origin/${WORK_BRANCH}` contents plus the prompt's "Past attempt summaries" and "Reviewer comments" sections.
+5. **Subagent:** Runs Claude Code via the same script-owned one-shot invocation used in all modes: `scripts/run_acpx_attempt.sh` `cd`s into `${WORKTREE_DIR}` (the shared per-issue worktree) and runs `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"`. Same No-Fallback Policy applies. Cross-attempt continuity comes from three sources: the checked-out `origin/${WORK_BRANCH}` contents, the prompt's "Past attempt summaries" and "Reviewer comments" sections, AND any untracked scratch the previous attempt left in the shared per-issue worktree (the in-place branch switch in `prepare_attempt.sh` preserves it).
 6. **Subagent:** After the attempt finishes (terminal status, any of done / blocked / failed; legacy no_changes is normalized to blocked), `scripts/summarize_attempt.sh` always writes `${SUMMARY_FILE}` locally. Successful `done` attempts also post that summary as a marked GitLab issue comment (`<!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->`) for future continue-mode context. Failure paths keep evidence local only and do not publish Wiki evidence.
 7. **Subagent — MR rotation.** Continue mode does NOT reuse the previous attempt's merge request — and neither does fresh mode any more. Both modes now share the same rotation policy in `scripts/create_mr.sh`:
    - looks up all open MRs currently pointing at `${WORK_BRANCH}` (G6)
@@ -39,9 +39,11 @@ This is a CONTINUE-MODE re-run of GitLab issue #<iid>.
 
 A prior run on this issue produced a merge request and was marked `done` + `pr`,
 but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside a per-attempt git worktree at <worktree-dir>, branched
-from `origin/<work-branch>` (the work-in-progress branch from the prior
-run). Read what's already there, then continue or correct it according
+You are running inside the shared per-issue git worktree at <worktree-dir>
+(reused across every attempt of this IID). Tracked files have just been
+reset to `origin/<work-branch>` (the work-in-progress branch from the
+prior run); untracked scratch left by the previous attempt is still on
+disk. Read what's already there, then continue or correct it according
 to the past-attempt summaries and reviewer guidance below.
 
 # Issue
@@ -63,7 +65,7 @@ Description:
 ...
 
 # Working environment
-- Repository cwd:             <worktree-dir> (per-attempt linked git worktree)
+- Repository cwd:             <worktree-dir> (shared per-issue linked git worktree)
 - Output directory:           <worktree-dir>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
 - Hulat materials:            <worktree-dir>/hulat   (committed in <branch>/<dev-branch>, available in this worktree)
 - Claude runtime config:      <worktree-dir>/.claude (committed in <branch>/<dev-branch>, available in this worktree)
