@@ -58,6 +58,37 @@ wrapper_log() {
   printf '[%s] [%s] %s\n' "${ts}" "${phase}" "$*" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
 }
 
+# Self-heal the executable bit on every file under scripts/safety_bin/.
+# Some deployment pipelines (rsync without -p, zip/tar extraction under a
+# restrictive umask, git clones with core.fileMode=false) strip the mode
+# bit when shipping this workspace to the runner. run_acpx_attempt.sh
+# asserts `[ -x safety_bin/rm ]` before invoking acpx — when the assertion
+# fails the attempt exits 2 in FAIL flow before any business logic runs.
+# Restoring the bit here keeps the no-fallback rule intact at the business
+# layer while preventing a deployment-side regression from blocking every
+# subagent. No-op when files are already executable (steady state).
+ensure_safety_bin_executable() {
+  local lib_dir
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local safety_bin="${lib_dir}/safety_bin"
+  [ -d "${safety_bin}" ] || return 0
+  local f
+  for f in "${safety_bin}"/*; do
+    # Skip symlinks: chmod without -h follows the link and would touch a
+    # target outside safety_bin/. Today the dir holds only regular files;
+    # this is forward-defense for future contributors.
+    if [ ! -f "${f}" ] || [ -L "${f}" ]; then
+      continue
+    fi
+    [ -x "${f}" ] && continue
+    if chmod +x "${f}" 2>/dev/null; then
+      wrapper_log dispatch_bootstrap "self-heal: chmod +x ${f} (deployment dropped mode bit)"
+    else
+      wrapper_log dispatch_bootstrap "self-heal failed: chmod +x ${f} returned non-zero"
+    fi
+  done
+}
+
 load_state() {
   if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     cat "${CAMPAIGN_STATE_FILE}"

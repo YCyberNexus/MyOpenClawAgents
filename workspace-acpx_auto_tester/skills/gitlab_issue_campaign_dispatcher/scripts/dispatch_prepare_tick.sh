@@ -259,6 +259,13 @@ fi
 wrapper_log prepare_tick "tick started project=${PROJECT}"
 TICK_START_TS="$(date -u +%s)"
 
+# Self-heal: restore +x on scripts/safety_bin/* in case deployment dropped
+# the mode bit. Must run before any Phase 4 prep that ends up invoking
+# run_acpx_attempt.sh inside the subagent (which asserts the bit). Safe to
+# call here because the wrapper log is now writeable; chmod is local-only
+# (no GitLab traffic, no flock contention).
+ensure_safety_bin_executable
+
 # ─── 6. Load state + apply trigger override ──────────────────────
 STATE_JSON="$(load_state)"
 

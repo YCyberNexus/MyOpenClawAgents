@@ -68,6 +68,9 @@ if ! command -v timeout >/dev/null 2>&1; then
   exit 2
 fi
 
+# Mode-bit heal lives in the dispatcher: _dispatch_lib.sh::ensure_safety_bin_executable
+# runs once per scheduled tick. If this assertion ever trips, the heal didn't run for
+# this tick — investigate dispatch_prepare_tick.sh / deployment sync, not this script.
 if [ ! -x "${safety_bin}/rm" ]; then
   echo "run_acpx_attempt.sh: rm safety wrapper missing or not executable: ${safety_bin}/rm" >&2
   exit 2
