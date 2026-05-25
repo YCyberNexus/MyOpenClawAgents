@@ -189,7 +189,12 @@ export REPO_PARENT_PATH REPO_PATH
 # projects that never ship the new fields.
 : "${RESULT_BASENAME:=ifp-result}"
 : "${DATA_BASENAME:=ifp-data}"
-export RESULT_BASENAME DATA_BASENAME
+# Relative path of the UI test-account pool file under ${DATA_DIR}.
+# Optional trigger field `ui_accounts_relpath` overrides this; same
+# carry-forward semantics as `result_basename` / `data_basename`. The
+# default keeps the legacy hard-coded location.
+: "${UI_ACCOUNTS_RELPATH:=ifp-common/ifp_users.json}"
+export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export HULAT_DIR="${REPO_PATH}/hulat"

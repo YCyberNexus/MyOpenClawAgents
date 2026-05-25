@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # load_ui_accounts.sh — read the test-team-owned UI test account pool
-# (${REPO_PATH}/${DATA_BASENAME}/ifp-common/ifp_users.json) and print
-# accounts to stdout, one per line in "user:pass" form, in JSON order.
+# (${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}, default
+# ifp-common/ifp_users.json) and print accounts to stdout, one per line
+# in "user:pass" form, in JSON order.
 #
 # The dispatcher uses this to allocate distinct test accounts per IID in
 # a concurrent batch. The system under test logs out an account when the
@@ -21,6 +22,18 @@
 #   MAX_ACCOUNTS_PER_ISSUE     integer ≥ 1. Defaults to 14. Caps each
 #                              per-IID slot after pool/concurrency
 #                              division.
+#   UI_ACCOUNTS_RELPATH        Relative path of the JSON pool file under
+#                              ${DATA_DIR} (= ${REPO_PATH}/${DATA_BASENAME}).
+#                              Defaults to `ifp-common/ifp_users.json`.
+#                              Must be a non-empty relative path with no
+#                              leading "/", no "." / ".." segments, no
+#                              whitespace, and characters limited to
+#                              [A-Za-z0-9_./-]. Forwarded by the
+#                              dispatcher from the trigger field
+#                              `ui_accounts_relpath` (carry-forward
+#                              semantics, see references/trigger_command.md).
+#                              Validation here is defense-in-depth;
+#                              the dispatcher validates first.
 #
 # When MAX_CONCURRENT_SUBAGENTS is set:
 #   - The script validates 1 ≤ MAX_CONCURRENT_SUBAGENTS ≤ pool_size.
@@ -58,6 +71,9 @@
 #       MUST hold at least one distinct UI account; cannot satisfy)
 #   14  MAX_CONCURRENT_SUBAGENTS is set but not a positive integer
 #   15  MAX_ACCOUNTS_PER_ISSUE is set but not a positive integer
+#   16  UI_ACCOUNTS_RELPATH violates the relative-path safety rules
+#       (empty, absolute, contains dot segments, whitespace, or
+#       characters outside [A-Za-z0-9_./-])
 #
 # On failure: the dispatcher MUST abort the tick (No-Fallback Policy —
 # never improvise an account; never share an account between subagents).
@@ -83,7 +99,35 @@ fi
 : "${DATA_BASENAME:=ifp-data}"
 DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
 
-POOL_FILE="${DATA_DIR}/ifp-common/ifp_users.json"
+# Relative path under ${DATA_DIR}. Trigger field `ui_accounts_relpath`
+# carries through dispatch_prepare_tick.sh as UI_ACCOUNTS_RELPATH; this
+# script defaults to the legacy hard-coded location when the env var is
+# absent so projects that never adopt the trigger field keep working.
+: "${UI_ACCOUNTS_RELPATH:=ifp-common/ifp_users.json}"
+
+# Defense-in-depth validation. dispatch_prepare_tick.sh already rejects
+# unsafe values before calling this script, but keep the same gate here
+# so direct/manual invocations cannot escape ${DATA_DIR}.
+case "${UI_ACCOUNTS_RELPATH}" in
+  "")
+    echo "load_ui_accounts: UI_ACCOUNTS_RELPATH must not be empty" >&2
+    exit 16 ;;
+  /*)
+    echo "load_ui_accounts: UI_ACCOUNTS_RELPATH must be a relative path, got '${UI_ACCOUNTS_RELPATH}'" >&2
+    exit 16 ;;
+esac
+case "${UI_ACCOUNTS_RELPATH}" in
+  *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+    echo "load_ui_accounts: UI_ACCOUNTS_RELPATH must not contain dot segments or whitespace, got '${UI_ACCOUNTS_RELPATH}'" >&2
+    exit 16 ;;
+esac
+case "${UI_ACCOUNTS_RELPATH}" in
+  *[!A-Za-z0-9_./-]*)
+    echo "load_ui_accounts: UI_ACCOUNTS_RELPATH contains unsupported characters, got '${UI_ACCOUNTS_RELPATH}'" >&2
+    exit 16 ;;
+esac
+
+POOL_FILE="${DATA_DIR}/${UI_ACCOUNTS_RELPATH}"
 
 if [ ! -f "${POOL_FILE}" ]; then
   echo "load_ui_accounts: missing pool file ${POOL_FILE}; deployment incomplete" >&2

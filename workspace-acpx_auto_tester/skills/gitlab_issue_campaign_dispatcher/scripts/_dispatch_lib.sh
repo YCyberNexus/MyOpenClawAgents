@@ -103,6 +103,7 @@ fresh_init_state() {
     --arg repo_path "${REPO_PARENT_PATH}" \
     --arg result_basename "${RESULT_BASENAME}" \
     --arg data_basename "${DATA_BASENAME}" \
+    --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
     '{
       project: $project,
       repo_path: $repo_path,
@@ -125,6 +126,7 @@ fresh_init_state() {
       require_labels_match: "or",
       result_basename: $result_basename,
       data_basename: $data_basename,
+      ui_accounts_relpath: $ui_accounts_relpath,
       next_new_issue_iid: null,
       tick_seq: 0,
       active_issue_iids: [],

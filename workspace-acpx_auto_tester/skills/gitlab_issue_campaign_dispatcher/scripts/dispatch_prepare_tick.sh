@@ -198,6 +198,26 @@ done
 [ -n "${T[result_basename]:-}" ] && export RESULT_BASENAME="${T[result_basename]}"
 [ -n "${T[data_basename]:-}" ]   && export DATA_BASENAME="${T[data_basename]}"
 
+# ui_accounts_relpath: relative path of the UI account pool file under
+# ${DATA_DIR}. Same carry-forward semantics as result_basename /
+# data_basename — applied here so env_paths.sh sees the exported value
+# below. Validation matches the rules enforced in load_ui_accounts.sh.
+if [ -n "${T[ui_accounts_relpath]:-}" ]; then
+  case "${T[ui_accounts_relpath]}" in
+    /*)
+      emit_chat_failure "invalid_ui_accounts_relpath: must be a relative path" ;;
+  esac
+  case "${T[ui_accounts_relpath]}" in
+    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+      emit_chat_failure "invalid_ui_accounts_relpath: dot segments or whitespace not allowed" ;;
+  esac
+  case "${T[ui_accounts_relpath]}" in
+    *[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_ui_accounts_relpath: unsupported characters" ;;
+  esac
+  export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
+fi
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
@@ -207,7 +227,7 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
 # Discover the existing runtime root under REPO_PATH before falling back to
 # a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
    && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
   shopt -s nullglob
   for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
@@ -222,6 +242,10 @@ if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
     if [ -z "${T[data_basename]:-}" ]; then
       PERSISTED_DB="$(jq -r '.data_basename // empty' "${candidate_state}")"
       [ -n "${PERSISTED_DB}" ] && export DATA_BASENAME="${PERSISTED_DB}"
+    fi
+    if [ -z "${T[ui_accounts_relpath]:-}" ]; then
+      PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
+      [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
     fi
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
@@ -246,6 +270,12 @@ if [ -z "${T[data_basename]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     export DATA_BASENAME="${PERSISTED_DB}"
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
+  fi
+fi
+if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+  PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
+  if [ -n "${PERSISTED_UAR}" ] && [ "${PERSISTED_UAR}" != "${UI_ACCOUNTS_RELPATH}" ]; then
+    export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
   fi
 fi
 
@@ -357,6 +387,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg repo_path "${REPO_PARENT_PATH}" \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
+  --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -379,6 +410,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     repo_path: $repo_path,
     result_basename: $result_basename,
     data_basename: $data_basename,
+    ui_accounts_relpath: $ui_accounts_relpath,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
@@ -513,7 +545,7 @@ fi
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}")
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
@@ -604,7 +636,7 @@ fi
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
 set -e
@@ -613,7 +645,7 @@ set -e
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   BRANCH="${T[branch]}" \
   bash "${SCRIPT_DIR}/clone_or_pull.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 CP_RC=$?
@@ -629,7 +661,7 @@ chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
   MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
   bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
@@ -637,14 +669,15 @@ POOL_RC=$?
 set -e
 case "${POOL_RC}" in
   0) ;;
-  10) emit_chat_failure "ifp_users.json missing (deployment incomplete)" ;;
-  11) emit_chat_failure "ifp_users.json account pool is empty" ;;
-  12) emit_chat_failure "ifp_users.json malformed account pool" ;;
+  10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
+  11) emit_chat_failure "ui_accounts_pool_empty: ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
+  12) emit_chat_failure "ui_accounts_pool_malformed: ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
   13)
     POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
     emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
   14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
   15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
+  16) emit_chat_failure "invalid_ui_accounts_relpath: ${UI_ACCOUNTS_RELPATH}" ;;
   *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
 esac
 POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
@@ -794,7 +827,7 @@ mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
 for iid in "${BATCH_IIDS[@]}"; do
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
        IID="${iid}" \
        bash "${SCRIPT_DIR}/allocate_attempt.sh")"
   ATTEMPT["${iid}"]="${N}"
@@ -869,7 +902,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}"
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
