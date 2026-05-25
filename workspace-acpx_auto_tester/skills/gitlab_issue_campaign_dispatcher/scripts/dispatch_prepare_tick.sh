@@ -70,7 +70,7 @@ retire_temp_file() {
   # instead of deleting it.
   : >"${path}" 2>/dev/null || true
 
-  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester_temporal.retired"
   mkdir -p "${retire_dir}" 2>/dev/null || return 0
   mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
 }
@@ -1099,7 +1099,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # opener so a future markdown edit introducing extra code fences in
   # the surrounding documentation does not silently mis-extract.
   template="$(awk '
-    /^# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1$/ { found=1 }
+    /^# ACPX_AUTO_TESTER_TEMPORAL_EXECUTOR_PROMPT_V1$/ { found=1 }
     found {
       if ($0 == "```") exit
       print
@@ -1111,7 +1111,7 @@ for iid in "${BATCH_IIDS[@]}"; do
     continue
   fi
   first_template_line="$(printf '%s\n' "${template}" | head -n 1)"
-  if [ "${first_template_line}" != "# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1" ]; then
+  if [ "${first_template_line}" != "# ACPX_AUTO_TESTER_TEMPORAL_EXECUTOR_PROMPT_V1" ]; then
     prep_blocked "executor_prompt.md fenced block does not start with sentinel"
     continue
   fi
@@ -1174,7 +1174,7 @@ PYEOF
 
   # Sentinel check.
   sentinel_first_line="$(printf '%s\n' "${rendered}" | head -n 1)"
-  if [ "${sentinel_first_line}" != "# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1" ]; then
+  if [ "${sentinel_first_line}" != "# ACPX_AUTO_TESTER_TEMPORAL_EXECUTOR_PROMPT_V1" ]; then
     prep_blocked "spawn payload missing executor sentinel — refused to ship inner Claude Code prompt (${LOG_DIR_X}/prompt.txt) as the outer spawn payload"
     continue
   fi

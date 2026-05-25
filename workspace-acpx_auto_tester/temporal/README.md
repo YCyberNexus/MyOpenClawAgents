@@ -1,4 +1,4 @@
-# acpx-auto-tester Temporal port
+# acpx-auto-tester-temporal
 
 Replacement for the bash + JSON + `flock` dispatcher that previously lived under
 [`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/`](../skills/gitlab_issue_campaign_dispatcher/).
@@ -50,7 +50,7 @@ scripts via the `[project.scripts]` entry in `pyproject.toml`.
 
 ```bash
 export TEMPORAL_ADDRESS="<region>.tmprl.cloud:7233"
-export TEMPORAL_NAMESPACE="acpx-auto-tester-prod"
+export TEMPORAL_NAMESPACE="acpx-auto-tester-temporal-prod"
 export TEMPORAL_TLS_CERT="/etc/acpx/temporal-client.pem"
 export TEMPORAL_TLS_KEY="/etc/acpx/temporal-client.key"
 export NODE_ID="${HOSTNAME}"            # worktree affinity key

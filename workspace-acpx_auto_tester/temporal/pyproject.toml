@@ -5,11 +5,11 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "acpx-auto-tester-temporal"
 version = "0.1.0"
-description = "Temporal (Python SDK) port of the acpx_auto_tester dispatcher. Replaces the bash + flock + JSON state machine with durable workflows."
+description = "Temporal (Python SDK) port of the acpx_auto_tester_temporal dispatcher. Replaces the bash + flock + JSON state machine with durable workflows."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "Proprietary" }
-authors = [{ name = "acpx_auto_tester maintainers" }]
+authors = [{ name = "acpx_auto_tester_temporal maintainers" }]
 
 # Runtime deps — keep tight; everything else stays in bash leaf scripts that the
 # activities shell out to.

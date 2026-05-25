@@ -19,7 +19,7 @@ Why a host-specific task queue:
 
 Environment contract:
     * ``TEMPORAL_ADDRESS``     — required, e.g. ``us-east-1.tmprl.cloud:7233``
-    * ``TEMPORAL_NAMESPACE``   — required, e.g. ``acpx-auto-tester-prod``
+    * ``TEMPORAL_NAMESPACE``   — required, e.g. ``acpx-auto-tester-temporal-prod``
     * ``TEMPORAL_TLS_CERT``    — required (path), mTLS client cert PEM
     * ``TEMPORAL_TLS_KEY``     — required (path), mTLS client private key PEM
     * ``NODE_ID``              — required, e.g. ``runner-01`` (used in task queue)
@@ -90,7 +90,7 @@ def _required_env(name: str) -> str:
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="acpx-temporal-worker",
-        description="Run the acpx_auto_tester Temporal worker on this host.",
+        description="Run the acpx_auto_tester_temporal Temporal worker on this host.",
     )
     parser.add_argument(
         "--task-queue",

@@ -51,7 +51,7 @@ LOG = logging.getLogger("acpx_temporal.client")
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="acpx-temporal-client",
-        description="Manage acpx_auto_tester Temporal schedules and one-off workflows.",
+        description="Manage acpx_auto_tester_temporal Temporal schedules and one-off workflows.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 

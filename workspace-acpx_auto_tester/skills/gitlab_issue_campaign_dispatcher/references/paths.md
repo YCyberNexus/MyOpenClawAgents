@@ -51,7 +51,7 @@ ${REPO_PATH}/                                            ← parent checkout (de
 
 The first-time clone bootstrap order (handled by `scripts/clone_or_pull.sh`):
 
-1. `git clone -b ${BRANCH}` into `${REPO_PATH}` (uses a tmpfs lock at `/tmp/acpx_auto_tester.clone.${PROJECT}.lock` since the in-repo lock dir does not exist yet).
+1. `git clone -b ${BRANCH}` into `${REPO_PATH}` (uses a tmpfs lock at `/tmp/acpx_auto_tester_temporal.clone.${PROJECT}.lock` since the in-repo lock dir does not exist yet).
 2. `mkdir -p` the dispatcher subtree (`_dispatcher/`, `_dispatcher/log/`, `_dispatcher/locks/`) and `${RESULT_ROOT}/`.
 3. Acquire the in-repo flock at `${RESULT_ROOT}/_dispatcher/locks/repo.lock` and run `git fetch --prune` + `git worktree prune` (the prune is only for legacy linked-worktree metadata).
 4. Idempotently append `/<basename RESULT_ROOT>/` (e.g. `/${RESULT_BASENAME}/`) to `${REPO_PATH}/.git/info/exclude`. This is the agent's local-only equivalent of a `.gitignore` rule; `.git/info/exclude` is never committed/pushed, so per-project runtime-root names (`ifp-result/`, `<project>-result/`, …) are handled here without requiring the test team to maintain a tracked `.gitignore` rule on master + dev. The current issue's `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which bypasses `.gitignore` and `info/exclude` alike), so the single committable path stays committable.

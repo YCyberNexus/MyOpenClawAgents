@@ -27,7 +27,7 @@ from temporalio.exceptions import ApplicationError
 
 
 class AcpxErrorType(StrEnum):
-    """Closed enum of error ``type`` strings used by acpx_auto_tester
+    """Closed enum of error ``type`` strings used by acpx_auto_tester_temporal
     activities. The names mirror the migration plan §Activity registry rows;
     the wire string is the lowercase identifier (StrEnum default).
     """

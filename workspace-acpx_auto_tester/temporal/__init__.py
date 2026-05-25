@@ -1,4 +1,4 @@
-"""acpx_temporal — Temporal (Python SDK) port of the acpx_auto_tester dispatcher.
+"""acpx_temporal — Temporal (Python SDK) port of the acpx_auto_tester_temporal dispatcher.
 
 See README.md for layout and runtime contract. The on-disk directory is named
 ``temporal/`` but the Python package is importable as ``acpx_temporal``
