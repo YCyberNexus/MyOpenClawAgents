@@ -6,6 +6,8 @@ Five subcommands:
 * ``pause-schedule``    — pause a running Schedule.
 * ``resume-schedule``   — unpause.
 * ``delete-schedule``   — tear down.
+* ``update-scope``      — signal a running :class:`CampaignWorkflow` with a
+                          new hard IID scope.
 * ``start-attempt``     — kick off a one-off :class:`IssueAttemptWorkflow` for
                           PoC / manual replay.
 
@@ -65,6 +67,24 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
         sp.add_argument("--schedule-id", required=True)
         if cmd != "delete-schedule":
             sp.add_argument("--note", default="")
+
+    sp = subparsers.add_parser(
+        "update-scope",
+        help="signal a running CampaignWorkflow with a new IID scope",
+    )
+    workflow_selector = sp.add_mutually_exclusive_group(required=True)
+    workflow_selector.add_argument(
+        "--schedule-id",
+        help="schedule id; workflow id is derived as '<schedule-id>:run'",
+    )
+    workflow_selector.add_argument("--workflow-id", help="CampaignWorkflow id")
+    sp.add_argument("--issue-min-iid", required=True, type=int)
+    sp.add_argument("--issue-max-iid", required=True, type=int)
+    sp.add_argument(
+        "--issue-iids",
+        default="",
+        help="optional comma-separated IID whitelist layered on top of the range",
+    )
 
     sp = subparsers.add_parser("start-attempt", help="one-off IssueAttemptWorkflow")
     sp.add_argument("--task-queue", required=True)
@@ -132,6 +152,24 @@ def _dataclass_from_json(path: str, cls: type) -> Any:
         raise TypeError(f"{cls} is not a dataclass")
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     return _hydrate(cls, raw)
+
+
+def _parse_iid_csv(value: str) -> tuple[int, ...]:
+    if not value.strip():
+        return ()
+    iids: list[int] = []
+    for part in value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        try:
+            iid = int(item)
+        except ValueError as exc:
+            raise SystemExit(f"invalid --issue-iids value: {value!r}") from exc
+        if iid < 1:
+            raise SystemExit(f"invalid --issue-iids value: {value!r}")
+        iids.append(iid)
+    return tuple(sorted(set(iids)))
 
 
 def _hydrate(cls: Any, raw: Any) -> Any:
@@ -226,6 +264,31 @@ async def _cmd_delete_schedule(args: argparse.Namespace, client: Client) -> int:
     return 0
 
 
+async def _cmd_update_scope(args: argparse.Namespace, client: Client) -> int:
+    workflow_id = args.workflow_id or f"{args.schedule_id}:run"
+    if args.issue_min_iid < 1:
+        raise SystemExit("--issue-min-iid must be >= 1")
+    if args.issue_max_iid < args.issue_min_iid:
+        raise SystemExit("--issue-max-iid must be >= --issue-min-iid")
+
+    issue_iids = _parse_iid_csv(args.issue_iids)
+    handle = client.get_workflow_handle(workflow_id)
+    await handle.signal(
+        "update_scope",
+        args.issue_min_iid,
+        args.issue_max_iid,
+        issue_iids,
+    )
+    LOG.info(
+        "signaled workflow %s update_scope min=%d max=%d issue_iids=%s",
+        workflow_id,
+        args.issue_min_iid,
+        args.issue_max_iid,
+        list(issue_iids),
+    )
+    return 0
+
+
 async def _cmd_start_attempt(args: argparse.Namespace, client: Client) -> int:
     inp: IssueAttemptWorkflowInput = _dataclass_from_json(
         args.input_file, IssueAttemptWorkflowInput
@@ -253,6 +316,7 @@ _COMMANDS = {
     "pause-schedule": _cmd_pause_schedule,
     "resume-schedule": _cmd_resume_schedule,
     "delete-schedule": _cmd_delete_schedule,
+    "update-scope": _cmd_update_scope,
     "start-attempt": _cmd_start_attempt,
 }
 

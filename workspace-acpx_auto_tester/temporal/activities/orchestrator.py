@@ -522,9 +522,28 @@ async def mark_issue_doing(camp: CampaignInput, att: AttemptInput) -> None:
     This preserves the legacy Phase 4 label contract: entry labels such as
     ``todo`` / ``retry`` / ``new`` / ``continue`` / ``blocked`` are removed by
     ``set_issue_label.sh add doing`` before the attempt is allowed to run.
+    Trigger ``require_labels`` are one-shot entry labels too, so matched labels
+    are removed explicitly before adding ``doing``.
     """
     env = build_attempt_env(camp, att)
     env.update(_derive_paths(camp, att))
+
+    current_labels = set(att.issue_labels)
+    for label in camp.require_labels:
+        if label not in current_labels:
+            continue
+        remove_res = await run_script(
+            "set_issue_label.sh",
+            env=env,
+            args=("remove", label),
+        )
+        if remove_res.exit_code != 0:
+            raise_app_error(
+                AcpxErrorType.SUBPROCESS_FAILED,
+                "set_issue_label.sh remove required label "
+                f"{label!r} exit {remove_res.exit_code}: {remove_res.stderr[-500:]}",
+            )
+
     res = await run_script("set_issue_label.sh", env=env, args=("add", "doing"))
     if res.exit_code != 0:
         raise_app_error(
@@ -545,6 +564,7 @@ async def record_attempt_outcome(
     outcome: AttemptOutcome,
     final_status: str,
     tick_seq: int,
+    consume_retry: bool = True,
 ) -> int:
     """Persist terminal attempt status into the existing per-issue state file.
 
@@ -564,9 +584,11 @@ async def record_attempt_outcome(
     if final_status == "done":
         retry_count = 0
         blocked_at_tick: int | None = None
-    elif final_status in ("blocked", "failed"):
+    elif final_status in ("blocked", "failed") and consume_retry:
         retry_count += 1
         blocked_at_tick = tick_seq if final_status == "blocked" else None
+    elif final_status == "blocked":
+        blocked_at_tick = tick_seq
     else:
         # timeout parks the IID and does not consume retry budget.
         blocked_at_tick = None

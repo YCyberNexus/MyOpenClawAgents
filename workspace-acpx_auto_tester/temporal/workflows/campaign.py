@@ -95,8 +95,16 @@ class CampaignWorkflow:
         self._failed: set[int] = set()
         self._timeout: set[int] = set()
         self._blocked: set[int] = set()
+        self._open: set[int] = set()
+        # Temporal-owned equivalent of legacy pending_subagents: IIDs whose
+        # child workflow has been started and not yet drained.
         self._pending: set[int] = set()
         self._active_ui_accounts_in_use: int = 0
+        self._child_handles: dict[int, Any] = {}
+        self._scope_min_iid: int | None = None
+        self._scope_max_iid: int | None = None
+        self._scope_iids_whitelist: tuple[int, ...] = ()
+        self._scope_evicted_iids: set[int] = set()
         # Tick-local mirrors of retry bookkeeping. Cross-tick values are loaded
         # from per-issue state during reconcile.
         self._retry_count: dict[int, int] = {}
@@ -111,6 +119,51 @@ class CampaignWorkflow:
     @workflow.signal
     def resume(self) -> None:
         self._paused = False
+
+    @workflow.signal
+    async def update_scope(
+        self,
+        issue_min_iid: int,
+        issue_max_iid: int,
+        issue_iids_whitelist: tuple[int, ...] = (),
+    ) -> None:
+        """Apply a new hard IID scope to already-running child workflows.
+
+        Legacy scheduled ticks scope-evicted ``pending_subagents`` before the
+        waiting-for-callbacks gate. Under Temporal, the pending set is the child
+        workflow handles kept in this parent. A scope update signal gives the
+        same control plane a way to cancel any in-flight child that no longer
+        belongs to ``issue_iids ∩ [issue_min_iid, issue_max_iid]``.
+        """
+        if issue_min_iid < 1 or issue_max_iid < issue_min_iid:
+            LOG.warning(
+                "ignored invalid scope update min=%s max=%s",
+                issue_min_iid,
+                issue_max_iid,
+            )
+            return
+
+        self._scope_min_iid = issue_min_iid
+        self._scope_max_iid = issue_max_iid
+        self._scope_iids_whitelist = tuple(sorted(set(issue_iids_whitelist)))
+
+        for iid in tuple(sorted(self._pending)):
+            if self._scope_contains_iid(iid):
+                continue
+            self._scope_evicted_iids.add(iid)
+            handle = self._child_handles.get(iid)
+            if handle is None:
+                continue
+            cancel = getattr(handle, "cancel", None)
+            if cancel is None:
+                LOG.warning("child handle for iid=%d has no cancel() method", iid)
+                continue
+            try:
+                maybe_awaitable = cancel()
+                if hasattr(maybe_awaitable, "__await__"):
+                    await maybe_awaitable
+            except Exception as exc:  # noqa: BLE001 - signal must not fail workflow
+                LOG.warning("scope-evict cancel failed iid=%d: %s", iid, exc)
 
     # ── Queries ─────────────────────────────────────────────────────────────
 
@@ -146,6 +199,7 @@ class CampaignWorkflow:
         blocked_at_tick.
         """
         inp = inp.validated()
+        self._set_scope_from_input(inp)
         self._tick_seq += 1
         tick_started_at = workflow.now()
         LOG.info("CampaignWorkflow tick=%d project=%s", self._tick_seq, inp.project)
@@ -233,14 +287,14 @@ class CampaignWorkflow:
         self._failed.clear()
         self._timeout.clear()
         self._blocked.clear()
-        self._pending.clear()
+        self._open.clear()
 
         for entry in ev.per_iid:
             if entry.is_closed_on_gitlab:
                 self._completed.add(entry.iid)
             elif entry.needs_continue:
                 # Reviewer asked to resume — wins over every other label state.
-                self._pending.add(entry.iid)
+                self._open.add(entry.iid)
             elif entry.has_done_pr:
                 self._completed.add(entry.iid)
             elif entry.has_timeout and not entry.has_retry:
@@ -250,7 +304,7 @@ class CampaignWorkflow:
             elif entry.has_blocked and not entry.has_retry:
                 self._blocked.add(entry.iid)
             else:
-                self._pending.add(entry.iid)
+                self._open.add(entry.iid)
 
     def _select_batch(
         self, inp: CampaignInput, ev: ReconcileEvidence
@@ -269,35 +323,45 @@ class CampaignWorkflow:
         if limit <= 0:
             return candidates
 
-        def admit(entry: IssueLiveState) -> bool:
-            if entry.iid in seen or entry.iid in self._completed:
-                return False
+        def admit(entry: IssueLiveState) -> None:
+            if len(candidates) >= limit:
+                return
+            if entry.iid in seen or entry.iid in self._completed or entry.iid in self._pending:
+                return
             blocked_at = self._blocked_at_tick.get(entry.iid, entry.blocked_at_tick)
             if blocked_at >= 0:
                 elapsed = self._tick_seq - blocked_at
                 if elapsed < inp.blocked_cooldown_ticks:
-                    return False
+                    return
             if not _whitelist_ok(entry, inp):
-                return False
+                return
             if not _required_labels_ok(entry.labels, inp):
-                return False
+                return
             seen.add(entry.iid)
             candidates.append(entry)
-            return len(candidates) >= limit
+            return
+
+        def collect_phase(entries: list[IssueLiveState]) -> bool:
+            for entry in entries:
+                admit(entry)
+                if len(candidates) >= limit:
+                    return True
+            return False
 
         # By-priority scan over evidence.
-        for entry in ev.per_iid:
-            if entry.needs_continue and admit(entry):
-                return candidates
-        for entry in ev.per_iid:
-            if entry.user_reopened and admit(entry):
-                return candidates
-        for entry in sorted(ev.per_iid, key=lambda e: e.iid):
-            if entry.iid in self._pending and admit(entry):
-                return candidates
-        for entry in sorted(ev.per_iid, key=lambda e: e.iid):
-            if entry.iid in self._blocked and admit(entry):
-                return candidates
+        if collect_phase(
+            [entry for entry in ev.per_iid if _attempt_mode_for_entry(entry) == "continue"]
+        ):
+            return candidates
+        if collect_phase([entry for entry in ev.per_iid if entry.user_reopened]):
+            return candidates
+        if collect_phase(
+            [entry for entry in sorted(ev.per_iid, key=lambda e: e.iid) if entry.iid in self._open]
+        ):
+            return candidates
+        collect_phase(
+            [entry for entry in sorted(ev.per_iid, key=lambda e: e.iid) if entry.iid in self._blocked]
+        )
 
         return candidates
 
@@ -344,7 +408,7 @@ class CampaignWorkflow:
         for entry in batch:
             slot = sem.acquire_for(entry.iid)
             self._active_ui_accounts_in_use = sem.in_use_count
-            mode: str = "continue" if entry.needs_continue else "fresh"
+            mode: str = _attempt_mode_for_entry(entry)
             try:
                 attempt_number = await workflow.execute_activity(
                     allocate_attempt_number,
@@ -433,6 +497,8 @@ class CampaignWorkflow:
                 cancellation_type=ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
                 task_queue=workflow.info().task_queue,  # worktree affinity
             )
+            self._pending.add(entry.iid)
+            self._child_handles[entry.iid] = handle
             child_handles.append((handle, entry.iid, att, entry))
 
         # Await every child via ``.result()`` (the canonical Temporal Python
@@ -442,14 +508,27 @@ class CampaignWorkflow:
                 outcome: AttemptOutcome = await handle.result()
             except ChildWorkflowError as cwe:
                 LOG.warning("child workflow iid=%d failed: %s", iid, cwe)
-                self._retry_count[iid] = entry.retry_count + 1
+                scope_evicted = iid in self._scope_evicted_iids
+                self._open.discard(iid)
+                self._pending.discard(iid)
+                self._child_handles.pop(iid, None)
+                if scope_evicted:
+                    self._retry_count[iid] = entry.retry_count
+                else:
+                    self._retry_count[iid] = entry.retry_count + 1
                 self._blocked_at_tick[iid] = self._tick_seq
                 sem.release(iid)
                 self._active_ui_accounts_in_use = sem.in_use_count
                 final_status = (
                     "failed"
-                    if self._retry_count[iid] > inp.blocked_retry_limit
+                    if (not scope_evicted and self._retry_count[iid] > inp.blocked_retry_limit)
                     else "blocked"
+                )
+                block_reason = (
+                    "pending IID outside current trigger scope "
+                    "issue_iids∩[issue_min_iid,issue_max_iid]"
+                    if scope_evicted
+                    else f"child workflow failed before returning outcome: {cwe}"
                 )
                 synthetic = AttemptOutcome(
                     iid=iid,
@@ -458,7 +537,7 @@ class CampaignWorkflow:
                     mode_actual=att.mode,
                     work_branch=att.work_branch,
                     local_branch=f"{att.work_branch}-att{att.attempt_number:03d}",
-                    block_reason=f"child workflow failed before returning outcome: {cwe}",
+                    block_reason=block_reason,
                 )
                 if final_status == "failed":
                     self._failed.add(iid)
@@ -472,17 +551,74 @@ class CampaignWorkflow:
                         start_to_close_timeout=timedelta(seconds=10),
                         retry_policy=RetryPolicy(maximum_attempts=1),
                     )
-                except ActivityError:
-                    LOG.warning(
-                        "failed to sync %s label for failed child iid=%d",
-                        final_status,
-                        iid,
-                    )
-                await self._record_outcome(inp, att, synthetic, final_status)
+                except ActivityError as ae:
+                    if scope_evicted:
+                        synthetic = replace(
+                            synthetic,
+                            block_reason=(
+                                synthetic.block_reason
+                                + "; blocked label sync failed: "
+                                f"{_activity_error_message(ae, default=str(ae))}"
+                            ),
+                        )
+                    else:
+                        LOG.warning(
+                            "failed to sync %s label for failed child iid=%d",
+                            final_status,
+                            iid,
+                        )
+                await self._record_outcome(
+                    inp,
+                    att,
+                    synthetic,
+                    final_status,
+                    consume_retry=not scope_evicted,
+                )
+                self._scope_evicted_iids.discard(iid)
                 continue
 
+            self._open.discard(iid)
+            self._pending.discard(iid)
+            self._child_handles.pop(iid, None)
+            scope_evicted = iid in self._scope_evicted_iids
             sem.release(iid)
             self._active_ui_accounts_in_use = sem.in_use_count
+            if scope_evicted:
+                self._retry_count[iid] = entry.retry_count
+                self._blocked_at_tick[iid] = self._tick_seq
+                self._blocked.add(iid)
+                block_reason = (
+                    "pending IID outside current trigger scope "
+                    "issue_iids∩[issue_min_iid,issue_max_iid]"
+                )
+                try:
+                    await workflow.execute_activity(
+                        sync_terminal_labels,
+                        args=[inp, att, "blocked"],
+                        start_to_close_timeout=timedelta(seconds=10),
+                        retry_policy=RetryPolicy(maximum_attempts=1),
+                    )
+                except ActivityError as ae:
+                    block_reason = (
+                        block_reason
+                        + "; blocked label sync failed: "
+                        f"{_activity_error_message(ae, default=str(ae))}"
+                    )
+                synthetic = replace(
+                    outcome,
+                    status="blocked",
+                    block_reason=block_reason,
+                )
+                await self._record_outcome(
+                    inp,
+                    att,
+                    synthetic,
+                    "blocked",
+                    consume_retry=False,
+                )
+                self._scope_evicted_iids.discard(iid)
+                continue
+            self._scope_evicted_iids.discard(iid)
             if outcome.status == "done":
                 self._completed.add(iid)
                 self._retry_count.pop(iid, None)
@@ -525,10 +661,12 @@ class CampaignWorkflow:
         att: AttemptInput,
         outcome: AttemptOutcome,
         final_status: str,
+        *,
+        consume_retry: bool = True,
     ) -> int:
         return await workflow.execute_activity(
             record_attempt_outcome,
-            args=[inp, att, outcome, final_status, self._tick_seq],
+            args=[inp, att, outcome, final_status, self._tick_seq, consume_retry],
             start_to_close_timeout=timedelta(seconds=10),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
@@ -542,6 +680,7 @@ class CampaignWorkflow:
     ) -> None:
         """Mirror legacy prep_blocked for prepare/label/prompt failures."""
         iid = att.iid
+        self._open.discard(iid)
         self._retry_count[iid] = entry.retry_count + 1
         self._blocked_at_tick[iid] = self._tick_seq
         final_status = (
@@ -587,8 +726,22 @@ class CampaignWorkflow:
             failed_iids=tuple(sorted(self._failed)),
             timeout_iids=tuple(sorted(self._timeout)),
             blocked_iids=tuple(sorted(self._blocked)),
-            pending_iids=tuple(sorted(self._pending)),
+            pending_iids=tuple(sorted(self._open | self._pending)),
         )
+
+    def _set_scope_from_input(self, inp: CampaignInput) -> None:
+        self._scope_min_iid = inp.issue_min_iid
+        self._scope_max_iid = inp.issue_max_iid
+        self._scope_iids_whitelist = inp.issue_iids_whitelist
+
+    def _scope_contains_iid(self, iid: int) -> bool:
+        if self._scope_min_iid is None or self._scope_max_iid is None:
+            return True
+        if iid < self._scope_min_iid or iid > self._scope_max_iid:
+            return False
+        if self._scope_iids_whitelist and iid not in self._scope_iids_whitelist:
+            return False
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +762,35 @@ def _required_labels_ok(labels: tuple[str, ...], inp: CampaignInput) -> bool:
     if inp.require_labels_match == "and":
         return all(req in label_set for req in inp.require_labels)
     return any(req in label_set for req in inp.require_labels)
+
+
+_CONTINUE_RESET_LABELS = frozenset(
+    {
+        "todo",
+        "retry",
+        "new",
+        "doing",
+        "blocked",
+        "failed",
+        "timeout",
+        "done",
+        "pr",
+    }
+)
+
+
+def _attempt_mode_for_entry(entry: IssueLiveState) -> str:
+    """Continue only when continue/contiune is the sole workflow-state signal.
+
+    If a reviewer accidentally leaves another workflow label next to continue,
+    use fresh mode. That matches the requested reset semantics while preserving
+    custom non-workflow labels such as priority or team tags.
+    """
+    if not entry.needs_continue:
+        return "fresh"
+    if set(entry.labels) & _CONTINUE_RESET_LABELS:
+        return "fresh"
+    return "continue"
 
 
 def _activity_error_message(ae: ActivityError, *, default: str) -> str:
