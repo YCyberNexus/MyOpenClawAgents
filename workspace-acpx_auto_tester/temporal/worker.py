@@ -25,7 +25,11 @@ Environment contract:
     * ``NODE_ID``              — required, e.g. ``runner-01`` (used in task queue)
     * ``GITLAB_TOKEN``         — required; forwarded to glab_auth.sh by activities
     * ``ACPX_SCRIPTS_DIR``     — optional; defaults to the SKILL's scripts dir
-    * ``ACPX_UI_ACCOUNTS_PATH``— optional; defaults to ``../config/ui_accounts.env``
+    * ``ACPX_UI_ACCOUNTS_PATH``— optional absolute-path escape hatch (used by
+                                 local tests). In production the pool path is
+                                 derived from the CampaignInput trigger as
+                                 ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``
+                                 (default subpath ``ifp-common/ifp_users.json``).
 """
 
 from __future__ import annotations
@@ -63,6 +67,7 @@ from .activities.orchestrator import (
     prepare_attempt_worktree,
     record_attempt_outcome,
     reconcile_gitlab,
+    self_heal_safety_bin,
 )
 
 # Workflows
@@ -145,9 +150,13 @@ async def _run(args: argparse.Namespace) -> None:
         task_queue=task_queue,
         workflows=[CampaignWorkflow, IssueAttemptWorkflow],
         activities=[
+            # Registration order mirrors the CampaignWorkflow bootstrap
+            # sequence (A1 → A2 → A2b → A3 → A4 → …) so a reader can
+            # follow the tick lifecycle top-to-bottom.
             # Orchestrator (A1–A6)
             reconcile_gitlab,
             ensure_workflow_labels,
+            self_heal_safety_bin,
             clone_or_pull_repo,
             load_ui_account_pool,
             allocate_attempt_number,

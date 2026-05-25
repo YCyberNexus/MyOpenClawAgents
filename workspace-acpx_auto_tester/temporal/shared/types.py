@@ -23,8 +23,53 @@ Mirrors:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Literal
+
+
+# Mirrors load_ui_accounts.sh's defense-in-depth check on UI_ACCOUNTS_RELPATH.
+# Keep the regex anchored at both ends so a single bad character anywhere in
+# the path rejects the whole value (the bash version uses case patterns to
+# the same effect).
+_UI_ACCOUNTS_RELPATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+
+
+def _validate_ui_accounts_relpath(value: str) -> None:
+    """Reject paths that would let UI_ACCOUNTS_RELPATH escape ${DATA_DIR}.
+
+    Same rules the legacy ``load_ui_accounts.sh`` enforces (exit code 16):
+    non-empty, not absolute, no ``.`` / ``..`` segments, no whitespace,
+    characters limited to ``[A-Za-z0-9_./-]``. The dispatcher-side
+    validation here is the first line of defense; the bash script still
+    re-validates so a manually-invoked script can't bypass the rule either.
+
+    Strictness note: this Python validator is slightly stricter than the
+    bash ``case`` patterns. Bash's pattern set does NOT explicitly reject
+    trailing slash (``foo/``) or doubled slashes (``foo//bar``) — those
+    would slip through and then fail later at ``[ ! -f "${POOL_FILE}" ]``.
+    The Python ``split("/")`` walk rejects empty segments, so the same
+    inputs fail loudly at validation time instead of producing a confusing
+    "pool file missing" message. The extra strictness is a deliberate
+    defense-in-depth tightening, not a contract divergence.
+    """
+    if not value:
+        raise ValueError("invalid_ui_accounts_relpath: must not be empty")
+    if value.startswith("/"):
+        raise ValueError(
+            f"invalid_ui_accounts_relpath: must be relative, got '{value}'"
+        )
+    segments = value.split("/")
+    if any(seg in (".", "..") or seg == "" for seg in segments):
+        raise ValueError(
+            "invalid_ui_accounts_relpath: must not contain '.' / '..' / empty "
+            f"segments, got '{value}'"
+        )
+    if not _UI_ACCOUNTS_RELPATH_RE.fullmatch(value):
+        raise ValueError(
+            "invalid_ui_accounts_relpath: characters limited to [A-Za-z0-9_./-], "
+            f"got '{value}'"
+        )
 
 # Status enums kept as ``Literal`` aliases so JSON round-trips as plain strings
 # while ``mypy --strict`` still catches typos. Mirrors the dispatch SKILL's
@@ -77,6 +122,12 @@ class CampaignInput:
     repo_parent_path: str = "/data"               # ${REPO_PATH} = repo_parent_path/<project>
     result_basename: str = "ifp-result"
     data_basename: str = "ifp-data"
+    # Relative path of the test-team-owned UI account pool JSON file under
+    # ${REPO_PATH}/${data_basename}/. Mirrors trigger field
+    # `ui_accounts_relpath` (carry-forward semantics in the legacy bash
+    # dispatcher; here it's just a tick-level CampaignInput value because
+    # Temporal's Schedule input is the carry-forward equivalent).
+    ui_accounts_relpath: str = "ifp-common/ifp_users.json"
     max_concurrent_subagents: int = 1
     max_accounts_per_issue: int = 14
     stuck_after_minutes: int = 330
@@ -135,6 +186,7 @@ class CampaignInput:
             raise ValueError("run_timeout_seconds_below_acpx_timeout_seconds_plus_120")
         if self.require_labels_match not in ("or", "and"):
             raise ValueError("invalid_require_labels_match")
+        _validate_ui_accounts_relpath(self.ui_accounts_relpath)
         return self
 
 
@@ -252,7 +304,8 @@ class ReconcileEvidence:
 
 @dataclass(frozen=True)
 class UiAccount:
-    """One row of config/ui_accounts.env."""
+    """One entry from the project's UI account JSON pool
+    (``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``)."""
 
     index: int                  # 0-based; stable across reads (file order)
     username: str

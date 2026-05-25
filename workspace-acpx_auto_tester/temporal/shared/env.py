@@ -69,6 +69,10 @@ def build_dispatcher_env(inp: CampaignInput) -> dict[str, str]:
         "REPO_PARENT_PATH": inp.repo_parent_path,
         "RESULT_BASENAME": inp.result_basename,
         "DATA_BASENAME": inp.data_basename,
+        # Forwarded to load_ui_accounts.sh / build_prompt.sh / env_paths.sh so
+        # subprocess-side defaults stay aligned with the CampaignInput value
+        # the Workflow validated.
+        "UI_ACCOUNTS_RELPATH": inp.ui_accounts_relpath,
         "BRANCH": inp.branch,
         "DEV_BRANCH": inp.dev_branch,
         "MAX_CONCURRENT_SUBAGENTS": str(inp.max_concurrent_subagents),

@@ -8,9 +8,11 @@ deterministic + persisted in event history.
 
 Public surface:
 
-* :func:`load_pool` — parses ``<workspace>/config/ui_accounts.env``.
-  Called by the ``load_ui_account_pool`` activity (file I/O is non-deterministic
-  and forbidden from workflow code).
+* :func:`load_pool` — parses the test-team-owned JSON pool file (default
+  path ``${REPO_PATH}/${DATA_BASENAME}/ifp-common/ifp_users.json``;
+  override via the trigger's ``ui_accounts_relpath``). Called by the
+  ``load_ui_account_pool`` activity (file I/O is non-deterministic and
+  forbidden from workflow code).
 * :func:`allocate_slots` — pure function: ``(pool_size, max_concurrent_subagents,
   max_accounts_per_issue) -> list[(index_start, count)]``. Safe to call from
   workflow code.
@@ -21,6 +23,7 @@ Public surface:
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,21 +37,30 @@ from .types import UiAccount
 
 
 def load_pool(config_path: str | Path) -> tuple[UiAccount, ...]:
-    """Parse ``ui_accounts.env`` into a tuple of :class:`UiAccount`.
+    """Parse the test-team-owned JSON pool file into :class:`UiAccount` entries.
 
-    File format: one ``username:password`` per line. Blank lines and lines
-    starting with ``#`` are ignored. Whitespace around the colon is trimmed.
+    File format (mirrors ``load_ui_accounts.sh`` parsing):
+    ``[{"username": "F100001", "password": "123456", "name": "..."}, ...]``.
+    Only ``username`` / ``password`` are consumed; extra keys are ignored.
 
     Args:
-        config_path: absolute path to ``<workspace>/config/ui_accounts.env``.
+        config_path: absolute path to the pool JSON. The caller composes this
+            as ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``
+            (default subpath ``ifp-common/ifp_users.json``).
 
     Returns:
-        Tuple of accounts in file order. Index in the tuple is the
+        Tuple of accounts in JSON-array order. Index in the tuple is the
         ``ui_account_index_start`` referenced by allocations.
 
     Raises:
-        ApplicationError(type=pool_empty): when the file has zero non-comment
-            lines or is unreadable.
+        ApplicationError(type=pool_empty): when the file is missing,
+            unreadable, malformed, has the wrong top-level shape, contains
+            entries that fail the same checks the legacy bash script runs
+            (missing/empty username/password, colon in username, newline in
+            either field), or has zero valid entries. The bash script
+            distinguishes exit codes 10/11/12; here all of them collapse to
+            ``pool_empty`` because the Temporal taxonomy already marks this
+            type non-retryable and the message text carries the specifics.
     """
     p = Path(config_path)
     try:
@@ -59,22 +71,63 @@ def load_pool(config_path: str | Path) -> tuple[UiAccount, ...]:
             f"could not read UI account pool at {p}: {exc}",
         )
 
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise_app_error(
+            AcpxErrorType.POOL_EMPTY,
+            f"UI account pool at {p} is not valid JSON: {exc}",
+        )
+
+    if not isinstance(parsed, list):
+        raise_app_error(
+            AcpxErrorType.POOL_EMPTY,
+            f"UI account pool at {p}: top-level JSON must be an array",
+        )
+
     accounts: list[UiAccount] = []
-    for i, line in enumerate(raw.splitlines()):
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#"):
-            continue
-        if ":" not in stripped:
+    for i, entry in enumerate(parsed):
+        if not isinstance(entry, dict):
             raise_app_error(
                 AcpxErrorType.POOL_EMPTY,
-                f"line {i + 1} in {p} is malformed (expected username:password)",
+                f"UI account pool at {p}: entry {i} must be an object",
             )
-        username, _, password = stripped.partition(":")
+        username = entry.get("username")
+        password = entry.get("password")
+        if username is None or password is None:
+            missing = [k for k in ("username", "password") if entry.get(k) is None]
+            raise_app_error(
+                AcpxErrorType.POOL_EMPTY,
+                f"UI account pool at {p}: entry {i} missing key(s) {missing}",
+            )
+        if not isinstance(username, str) or not isinstance(password, str):
+            raise_app_error(
+                AcpxErrorType.POOL_EMPTY,
+                f"UI account pool at {p}: entry {i} username/password must be "
+                f"strings, got {type(username).__name__}/{type(password).__name__}",
+            )
+        if not username or not password:
+            raise_app_error(
+                AcpxErrorType.POOL_EMPTY,
+                f"UI account pool at {p}: entry {i} has empty username/password",
+            )
+        if ":" in username or any(ch in username for ch in ("\n", "\r")):
+            raise_app_error(
+                AcpxErrorType.POOL_EMPTY,
+                f"UI account pool at {p}: entry {i} username must not contain "
+                "colon or newline",
+            )
+        if any(ch in password for ch in ("\n", "\r")):
+            raise_app_error(
+                AcpxErrorType.POOL_EMPTY,
+                f"UI account pool at {p}: entry {i} password must not contain "
+                "newline",
+            )
         accounts.append(
             UiAccount(
                 index=len(accounts),
-                username=username.strip(),
-                password=password.strip(),
+                username=username,
+                password=password,
             )
         )
 

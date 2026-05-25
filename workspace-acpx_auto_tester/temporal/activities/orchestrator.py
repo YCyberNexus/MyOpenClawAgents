@@ -7,7 +7,7 @@ already exist:
 * A1 ``reconcile_gitlab``           ← ``reconcile.sh``
 * A2 ``ensure_workflow_labels``     ← ``ensure_labels.sh``
 * A3 ``clone_or_pull_repo``         ← ``clone_or_pull.sh``
-* A4 ``load_ui_account_pool``       ← ``config/ui_accounts.env`` parser
+* A4 ``load_ui_account_pool``       ← ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` JSON parser
 * A4b ``allocate_attempt_number``   ← ``allocate_attempt.sh``
 * A5 ``prepare_attempt_worktree``   ← ``prepare_attempt.sh``
 * A6 ``build_executor_prompt``      ← ``build_prompt.sh``
@@ -43,7 +43,7 @@ from ..shared.types import (
 )
 from ..shared.ui_accounts import load_pool
 from .leaf import _derive_paths  # share path computation logic
-from .subprocess import run_script
+from .subprocess import SCRIPTS_DIR, run_script
 
 LOG = logging.getLogger("acpx_temporal.activities.orchestrator")
 
@@ -196,6 +196,57 @@ async def ensure_workflow_labels(camp: CampaignInput) -> tuple[str, ...]:
 
 
 # ---------------------------------------------------------------------------
+# A2b — self_heal_safety_bin
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="self_heal_safety_bin")
+async def self_heal_safety_bin() -> tuple[str, ...]:
+    """Restore +x on every regular file under ``scripts/safety_bin/``.
+
+    Mirrors ``_dispatch_lib.sh::ensure_safety_bin_executable``: some
+    deployment pipelines (rsync without ``-p``, tar extraction under a
+    restrictive umask, ``core.fileMode=false``) strip the execute bit when
+    shipping this workspace to the runner. ``run_acpx_attempt.sh`` then
+    asserts ``[ -x safety_bin/rm ]`` before invoking ``acpx`` and exits 2 in
+    FAIL flow before any business logic runs.
+
+    Restoring the bit here keeps the no-fallback rule intact at the business
+    layer while preventing a deployment-side regression from blocking every
+    subagent. No-op when files are already executable (steady state). Symlinks
+    are skipped to avoid chmod following the link out of ``safety_bin/``.
+
+    Returns:
+        Tuple of file basenames that were healed (empty in steady state). The
+        return value is used only for logging / Schedule history visibility.
+    """
+    healed: list[str] = []
+    safety_bin = SCRIPTS_DIR / "safety_bin"
+    if not safety_bin.is_dir():
+        return tuple(healed)
+
+    for entry in safety_bin.iterdir():
+        try:
+            # is_symlink() must be checked BEFORE is_file() because is_file()
+            # follows symlinks; a link pointing outside safety_bin/ should be
+            # skipped even when the target is a regular executable.
+            if entry.is_symlink() or not entry.is_file():
+                continue
+            if os.access(entry, os.X_OK):
+                continue
+            mode = entry.stat().st_mode
+            # ``0o111`` sets the three execute bits directly; unlike bash
+            # ``chmod +x`` this is umask-agnostic — correct here because
+            # we want to recover the exact bits deployment dropped.
+            entry.chmod(mode | 0o111)
+            healed.append(entry.name)
+            LOG.info("self-heal: chmod +x %s (deployment dropped mode bit)", entry)
+        except OSError as exc:
+            LOG.warning("self_heal_safety_bin: chmod %s failed: %s", entry, exc)
+    return tuple(healed)
+
+
+# ---------------------------------------------------------------------------
 # A3 — clone_or_pull_repo
 # ---------------------------------------------------------------------------
 
@@ -231,8 +282,17 @@ async def clone_or_pull_repo(camp: CampaignInput) -> str:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_pool_path() -> Path:
-    """Resolve ``<workspace>/config/ui_accounts.env`` with env override.
+def _resolve_pool_path(camp: CampaignInput) -> Path:
+    """Resolve the pool JSON path from CampaignInput (with env override).
+
+    The test-team-owned account pool lives inside the cloned project repo at
+    ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` (default subpath
+    ``ifp-common/ifp_users.json``). This mirrors ``load_ui_accounts.sh``'s
+    derivation so the Python read of the pool stays in lock-step with the
+    bash read.
+
+    ``ACPX_UI_ACCOUNTS_PATH`` is honored as an absolute-path escape hatch for
+    local tests; in production deployments the trigger drives the path.
 
     Extracted as a sync helper so :func:`build_executor_prompt` can read the
     pool inline (via :func:`shared.ui_accounts.load_pool`) without invoking
@@ -242,25 +302,35 @@ def _resolve_pool_path() -> Path:
     activity) inherit the outer's two-attempts policy. See round-2 review
     Critical-2.
     """
-    workspace_dir = Path(__file__).resolve().parents[2]
-    pool_path = workspace_dir / "config" / "ui_accounts.env"
     override = os.environ.get("ACPX_UI_ACCOUNTS_PATH")
     if override:
-        pool_path = Path(override)
-    return pool_path
+        p = Path(override)
+        if not p.is_absolute():
+            raise_app_error(
+                AcpxErrorType.INVALID_REPO_PATH,
+                f"ACPX_UI_ACCOUNTS_PATH must be absolute, got {override!r}",
+            )
+        return p
+    repo_path = Path(camp.repo_parent_path.rstrip("/")) / camp.project
+    return repo_path / camp.data_basename / camp.ui_accounts_relpath
 
 
 @activity.defn(name="load_ui_account_pool")
-async def load_ui_account_pool() -> UiAccountPoolInfo:
-    """Parse ``<workspace>/config/ui_accounts.env`` and return only its size.
+async def load_ui_account_pool(camp: CampaignInput) -> UiAccountPoolInfo:
+    """Parse the project's UI account JSON pool and return only its size.
 
     The legacy dispatcher's ``load_ui_accounts.sh`` divides the pool into
     per-IID slots; under Temporal that math moves into
     :func:`shared.ui_accounts.allocate_slots` (pure, deterministic) so the
     activity only returns a non-secret summary. Credentials stay worker-local
     and are read directly inside :func:`build_executor_prompt`.
+
+    Args:
+        camp: CampaignInput used to derive the pool path
+            ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``.
+            Must run after :func:`clone_or_pull_repo` so the repo is on disk.
     """
-    return UiAccountPoolInfo(count=len(load_pool(_resolve_pool_path())))
+    return UiAccountPoolInfo(count=len(load_pool(_resolve_pool_path(camp))))
 
 
 # ---------------------------------------------------------------------------
@@ -389,11 +459,11 @@ async def build_executor_prompt(
     ``run_acpx_attempt.sh`` reads via ``-f``.
 
     Security note (review B6): UI account credentials are de-referenced
-    **inside this activity** by reading
-    ``<workspace>/config/ui_accounts.env`` on the worker host, slicing by
-    ``att.ui_account_index_start`` / ``att.ui_account_count``, and feeding
-    legacy ``{"u": "...", "p": "..."}`` JSON into the ``UI_ACCOUNTS=`` env
-    var that ``build_prompt.sh`` reads.
+    **inside this activity** by reading the project JSON pool from
+    ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` on the worker
+    host, slicing by ``att.ui_account_index_start`` /
+    ``att.ui_account_count``, and feeding legacy ``{"u": "...", "p": "..."}``
+    JSON into the ``UI_ACCOUNTS=`` env var that ``build_prompt.sh`` reads.
     The calling workflow only passes integer slot indices — plaintext
     passwords never enter Temporal workflow history.
 
@@ -404,7 +474,7 @@ async def build_executor_prompt(
     inner call inherit this activity's RetryPolicy. See round-2 review
     Critical-2.
     """
-    pool = load_pool(_resolve_pool_path())
+    pool = load_pool(_resolve_pool_path(camp))
     slot_start = att.ui_account_index_start
     slot_end = slot_start + att.ui_account_count
     if slot_end > len(pool):
@@ -557,4 +627,5 @@ __all__ = [
     "prepare_attempt_worktree",
     "record_attempt_outcome",
     "reconcile_gitlab",
+    "self_heal_safety_bin",
 ]

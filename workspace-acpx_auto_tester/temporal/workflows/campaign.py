@@ -48,6 +48,7 @@ with workflow.unsafe.imports_passed_through():
         prepare_attempt_worktree,
         record_attempt_outcome,
         reconcile_gitlab,
+        self_heal_safety_bin,
     )
     from ..activities.leaf import sync_terminal_labels
     from ..shared.types import (
@@ -161,6 +162,16 @@ class CampaignWorkflow:
             args=[inp],
             start_to_close_timeout=timedelta(seconds=20),
             retry_policy=_RP_2_ATTEMPTS,
+        )
+        # Restore +x on scripts/safety_bin/* before any acpx run. Equivalent
+        # to dispatch_prepare_tick.sh's ensure_safety_bin_executable call;
+        # without it a deployment that drops the mode bit blocks every
+        # subsequent IssueAttemptWorkflow at run_acpx_attempt.sh's
+        # `[ -x safety_bin/rm ]` fail-fast.
+        await workflow.execute_activity(
+            self_heal_safety_bin,
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=1),
         )
         await workflow.execute_activity(
             clone_or_pull_repo,
@@ -300,9 +311,12 @@ class CampaignWorkflow:
         for any in-flight state from a prior tick.
         """
         # Discover pool size only. Account secrets stay worker-local and never
-        # enter workflow history.
+        # enter workflow history. The activity reads the test-team-owned JSON
+        # pool inside the cloned project repo, so it must run after the
+        # bootstrap clone_or_pull_repo activity above.
         pool_info = await workflow.execute_activity(
             load_ui_account_pool,
+            args=[inp],
             start_to_close_timeout=timedelta(seconds=5),
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
