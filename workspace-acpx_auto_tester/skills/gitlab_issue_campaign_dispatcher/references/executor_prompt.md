@@ -64,6 +64,7 @@ The dispatcher has already prepared everything. Your job: run acpx → commit/pu
 DO NOT load any SKILL.md, SOUL.md, or AGENTS.md.
 DO NOT call sessions_spawn or sessions_history.
 DO NOT search the workspace for additional rules. Everything you need is below.
+DO NOT run `rm` in any Bash tool call. Do not delete files or directories yourself; only invoke the dispatcher scripts listed in these steps.
 
 <config>
 PROJECT={PROJECT}
@@ -303,6 +304,7 @@ Step 10 — REPLY
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
 - Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
+- Destructive deletion is forbidden. Do NOT call `rm`, `/bin/rm`, `git rm`, `unlink`, `find -delete`, or script file deletion through another runtime. If cleanup appears necessary, leave files in place and FAIL status=blocked with a clear reason.
 - Hard timeout: {ACPX_TIMEOUT_MINUTES} minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded {ACPX_TIMEOUT_MINUTES}-minute soft cap".
 - Never paste full diffs, full claude_result.txt, or long issue bodies into chat.
 </constraints>

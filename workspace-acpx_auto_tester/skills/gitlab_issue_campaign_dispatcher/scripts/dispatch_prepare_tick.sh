@@ -19,6 +19,9 @@
 #     "run_timeout_seconds": 18120,
 #     "max_launch_retries": 3,
 #     "backoff_seconds": 2,
+#     "cleanup_actions": [
+#       {"action":"kill","target":"agent:...","reason":"scope_evicted_outside_trigger_range","iid":350}
+#     ],
 #     "chat_summary": "...",
 #     "tick_outcome_per_iid": {"15": "blocked: prep failed: ..."},
 #     "launch_retries_seed": {}
@@ -55,15 +58,36 @@ TRIGGER_FILE="$(mktemp)"
 POOL_OUT=""
 POOL_ERR=""
 RECONCILE_OUT=""
+CLEANUP_ACTIONS_JSON="[]"
 declare -a CLEANUP_FILES=()
+retire_temp_file() {
+  local path="${1:-}"
+  [ -n "${path}" ] || return 0
+  [ -e "${path}" ] || return 0
+
+  # Trigger/payload temp files can contain credentials. Blank the file before
+  # moving it out of the active temp path; keep the inode around for audit
+  # instead of deleting it.
+  : >"${path}" 2>/dev/null || true
+
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
+  mkdir -p "${retire_dir}" 2>/dev/null || return 0
+  mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
+}
 cleanup_temps() {
   # Guard CLEANUP_FILES expansion: on bash <4.4 (and zsh), expanding an
   # empty array under `set -u` raises an unbound-variable error before
-  # rm runs, leaving the temps on disk AND propagating a non-zero exit
-  # back to the orchestrator.
-  rm -f "${TRIGGER_FILE}" "${POOL_OUT}" "${POOL_ERR}" "${RECONCILE_OUT}"
+  # cleanup runs, leaving the temps on disk AND propagating a non-zero
+  # exit back to the orchestrator.
+  retire_temp_file "${TRIGGER_FILE}"
+  retire_temp_file "${POOL_OUT}"
+  retire_temp_file "${POOL_ERR}"
+  retire_temp_file "${RECONCILE_OUT}"
   if [ "${#CLEANUP_FILES[@]}" -gt 0 ]; then
-    rm -f "${CLEANUP_FILES[@]}"
+    local cleanup_file
+    for cleanup_file in "${CLEANUP_FILES[@]}"; do
+      retire_temp_file "${cleanup_file}"
+    done
   fi
 }
 trap cleanup_temps EXIT
@@ -90,8 +114,10 @@ done <"${TRIGGER_FILE}"
 
 emit_chat_failure() {
   local msg="$1"
+  local cleanup_actions="${CLEANUP_ACTIONS_JSON:-[]}"
   jq -nc --arg msg "${msg}" \
-    '{status:"tick_failed", chat_summary:$msg, dispatch_entries:[]}'
+    --argjson cleanup_actions "${cleanup_actions}" \
+    '{status:"tick_failed", chat_summary:$msg, dispatch_entries:[], cleanup_actions:$cleanup_actions}'
   exit 0
 }
 
@@ -172,6 +198,26 @@ done
 [ -n "${T[result_basename]:-}" ] && export RESULT_BASENAME="${T[result_basename]}"
 [ -n "${T[data_basename]:-}" ]   && export DATA_BASENAME="${T[data_basename]}"
 
+# ui_accounts_relpath: relative path of the UI account pool file under
+# ${DATA_DIR}. Same carry-forward semantics as result_basename /
+# data_basename — applied here so env_paths.sh sees the exported value
+# below. Validation matches the rules enforced in load_ui_accounts.sh.
+if [ -n "${T[ui_accounts_relpath]:-}" ]; then
+  case "${T[ui_accounts_relpath]}" in
+    /*)
+      emit_chat_failure "invalid_ui_accounts_relpath: must be a relative path" ;;
+  esac
+  case "${T[ui_accounts_relpath]}" in
+    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+      emit_chat_failure "invalid_ui_accounts_relpath: dot segments or whitespace not allowed" ;;
+  esac
+  case "${T[ui_accounts_relpath]}" in
+    *[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_ui_accounts_relpath: unsupported characters" ;;
+  esac
+  export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
+fi
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
@@ -181,7 +227,7 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
 # Discover the existing runtime root under REPO_PATH before falling back to
 # a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
    && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
   shopt -s nullglob
   for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
@@ -196,6 +242,10 @@ if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
     if [ -z "${T[data_basename]:-}" ]; then
       PERSISTED_DB="$(jq -r '.data_basename // empty' "${candidate_state}")"
       [ -n "${PERSISTED_DB}" ] && export DATA_BASENAME="${PERSISTED_DB}"
+    fi
+    if [ -z "${T[ui_accounts_relpath]:-}" ]; then
+      PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
+      [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
     fi
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
@@ -222,16 +272,29 @@ if [ -z "${T[data_basename]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     source "${SCRIPT_DIR}/env_paths.sh"
   fi
 fi
+if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+  PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
+  if [ -n "${PERSISTED_UAR}" ] && [ "${PERSISTED_UAR}" != "${UI_ACCOUNTS_RELPATH}" ]; then
+    export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
+  fi
+fi
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
-  jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[]}'
+  jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[], cleanup_actions:[]}'
   exit 0
 fi
 
 wrapper_log prepare_tick "tick started project=${PROJECT}"
 TICK_START_TS="$(date -u +%s)"
+
+# Self-heal: restore +x on scripts/safety_bin/* in case deployment dropped
+# the mode bit. Must run before any Phase 4 prep that ends up invoking
+# run_acpx_attempt.sh inside the subagent (which asserts the bit). Safe to
+# call here because the wrapper log is now writeable; chmod is local-only
+# (no GitLab traffic, no flock contention).
+ensure_safety_bin_executable
 
 # ─── 6. Load state + apply trigger override ──────────────────────
 STATE_JSON="$(load_state)"
@@ -324,6 +387,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg repo_path "${REPO_PARENT_PATH}" \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
+  --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -346,6 +410,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     repo_path: $repo_path,
     result_basename: $result_basename,
     data_basename: $data_basename,
+    ui_accounts_relpath: $ui_accounts_relpath,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
@@ -394,55 +459,37 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --arg project "${PROJECT}" '
   | .active_issue_iids     = $pk
   | .active_issue_sessions = ($pk | map("issue-" + $project + "-" + (.|tostring)))')"
 
-# Validate ui_account pool. load_ui_accounts.sh exit code 13 → pool too small.
-POOL_OUT="$(mktemp)"
-POOL_ERR="$(mktemp)"
-chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
-set +e
-PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-  MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
-  MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
-  bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
-POOL_RC=$?
-set -e
-case "${POOL_RC}" in
-  0) ;;
-  10) emit_chat_failure "ui_accounts.env missing (deployment incomplete)" ;;
-  11) emit_chat_failure "ui_accounts.env pool is empty" ;;
-  12) emit_chat_failure "ui_accounts.env malformed pool line" ;;
-  13)
-    POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-    emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
-  14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
-  15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
-  *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
-esac
-POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
-mapfile -t POOL_LINES <"${POOL_OUT}"
-# POOL_OUT now lives only in the bash array; scrub the on-disk copy
-# before any other step can fail and leak passwords via trap cleanup.
-: >"${POOL_OUT}"
+# ─── 7. Effective IID universe ────────────────────────────────────
+EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
+  (.issue_min_iid) as $lo | (.issue_max_iid) as $hi
+  | (.issue_iids_whitelist // []) as $wl
+  | if ($wl | length) == 0 then
+      [range($lo; $hi+1)]
+    else
+      [range($lo; $hi+1)] | map(select(. as $i | $wl | index($i) != null)) | unique | sort
+    end')"
 
-# Cache pool data on state for the chat summary.
-STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
-  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
-
-# ─── 7. Stuck-pending eviction ────────────────────────────────────
+# ─── 8. Pending eviction ──────────────────────────────────────────
 NOW_TS="$(date -u +%s)"
 EVICTED_IIDS_JSON="[]"
+SCOPE_EVICTED_IIDS_JSON="[]"
 PENDING_KEYS="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys[]?')"
 for piid in ${PENDING_KEYS}; do
   ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --arg k "${piid}" '.pending_subagents[$k]')"
   SP_AT="$(printf '%s' "${ENTRY}" | jq -r '.spawned_at // ""')"
   PA_NUM="$(printf '%s' "${ENTRY}" | jq -r '.attempt_number')"
+  CHILD_SESSION_KEY="$(printf '%s' "${ENTRY}" | jq -r '.child_session_key // ""')"
   EVICT=false
-  if [ -z "${SP_AT}" ] || [ "${SP_AT}" = "null" ]; then
+  EVICT_KIND=""
+  if ! printf '%s' "${EFF_UNIVERSE_JSON}" | jq -e --argjson iid "${piid}" 'index($iid) != null' >/dev/null; then
+    EVICT=true
+    EVICT_KIND="scope"
+    REASON="pending IID outside current trigger scope issue_iids∩[issue_min_iid,issue_max_iid]"
+  elif [ -z "${SP_AT}" ] || [ "${SP_AT}" = "null" ]; then
     # placeholder that survived a previous crash — evict on next tick
     if [ "$(printf '%s' "${ENTRY}" | jq -r '.placeholder // false')" = "true" ]; then
       EVICT=true
+      EVICT_KIND="stuck"
       REASON="placeholder pending entry survived: spawn was never observed to land"
     fi
   else
@@ -452,21 +499,32 @@ for piid in ${PENDING_KEYS}; do
       DELTA=$(( (NOW_TS - SP_EPOCH) / 60 ))
       if [ "${DELTA}" -ge "${STUCK_AFTER}" ]; then
         EVICT=true
+        EVICT_KIND="stuck"
         REASON="no callback received within stuck_after_minutes (${DELTA} min)"
       fi
     fi
   fi
   if [ "${EVICT}" = true ]; then
-    wrapper_log prepare_tick "stuck-evict iid=${piid} reason='${REASON}'"
+    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} reason='${REASON}'"
     REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     EVICTED_IIDS_JSON="$(printf '%s' "${EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
+    if [ "${EVICT_KIND}" = "scope" ]; then
+      SCOPE_EVICTED_IIDS_JSON="$(printf '%s' "${SCOPE_EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
+      if [ -n "${CHILD_SESSION_KEY}" ] && [ "${CHILD_SESSION_KEY}" != "null" ]; then
+        CLEANUP_ACTIONS_JSON="$(printf '%s' "${CLEANUP_ACTIONS_JSON}" | jq -c \
+          --arg target "${CHILD_SESSION_KEY}" \
+          --arg reason "scope_evicted_outside_trigger_range" \
+          --argjson iid "${piid}" \
+          '. + [{action:"kill", target:$target, reason:$reason, iid:$iid}]')"
+      fi
+    fi
   fi
 done
 persist_state "${STATE_JSON}"
 
-# ─── 8. If pending still non-empty → waiting_for_callbacks ───────
+# ─── 9. If pending still non-empty → waiting_for_callbacks ───────
 PENDING_COUNT="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys | length')"
 if [ "${PENDING_COUNT}" -gt 0 ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
@@ -475,25 +533,19 @@ if [ "${PENDING_COUNT}" -gt 0 ]; then
   jq -nc \
     --argjson pending "${PENDING_IIDS_JSON}" \
     --argjson evicted "${EVICTED_IIDS_JSON}" \
-    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}")" '
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}") scope_evicted=$(jq -c . <<<"${SCOPE_EVICTED_IIDS_JSON}")" '
     {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
-     evicted_iids:$evicted, chat_summary:$chat}'
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions, chat_summary:$chat}'
   exit 0
 fi
-
-# ─── 9. Effective IID universe ────────────────────────────────────
-EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
-  (.issue_min_iid) as $lo | (.issue_max_iid) as $hi
-  | if (.issue_iids_whitelist | length) == 0 then
-      [range($lo; $hi+1)]
-    else
-      ([range($lo; $hi+1)] | (. - (. - .issue_iids_whitelist)) | unique | sort)
-    end')"
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}")
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
@@ -574,8 +626,9 @@ if [ "${ALL_DONE}" = "true" ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "completed"')"
   persist_state "${STATE_JSON}"
   jq -nc --arg ev "${EVIDENCE_PATH}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     '{status:"completed", dispatch_entries:[], chat_summary:"all IIDs in range terminal — campaign completed",
-      last_reconcile_evidence:$ev}'
+      last_reconcile_evidence:$ev, cleanup_actions:$cleanup_actions}'
   exit 0
 fi
 
@@ -583,7 +636,7 @@ fi
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
 set -e
@@ -592,14 +645,53 @@ set -e
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   BRANCH="${T[branch]}" \
   bash "${SCRIPT_DIR}/clone_or_pull.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 CP_RC=$?
 set -e
 [ "${CP_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (exit ${CP_RC})"
 
-# ─── 14. require_labels filter ────────────────────────────────────
+# ─── 14. Validate UI account pool ────────────────────────────────
+# The source lives inside the cloned project data directory, so this must
+# run after clone_or_pull.sh.
+POOL_OUT="$(mktemp)"
+POOL_ERR="$(mktemp)"
+chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
+set +e
+PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+  MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
+  MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
+  bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
+POOL_RC=$?
+set -e
+case "${POOL_RC}" in
+  0) ;;
+  10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
+  11) emit_chat_failure "ui_accounts_pool_empty: ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
+  12) emit_chat_failure "ui_accounts_pool_malformed: ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
+  13)
+    POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+    emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
+  14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
+  15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
+  16) emit_chat_failure "invalid_ui_accounts_relpath: ${UI_ACCOUNTS_RELPATH}" ;;
+  *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
+esac
+POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
+mapfile -t POOL_LINES <"${POOL_OUT}"
+# POOL_OUT now lives only in the bash array; scrub the on-disk copy
+# before any other step can fail and leak passwords via trap cleanup.
+: >"${POOL_OUT}"
+
+# Cache pool data on state for the chat summary.
+STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
+
+# ─── 15. require_labels filter ────────────────────────────────────
 LABEL_FILTERED_IN_JSON="[]"
 LABEL_FILTERED_OUT_JSON="[]"
 if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
@@ -624,11 +716,12 @@ if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]
   LABEL_FILTERED_OUT_JSON="$(printf '%s' "${LF_OUT}" | jq -c '.out')"
 fi
 
-# ─── 15. Batch formation ──────────────────────────────────────────
+# ─── 16. Batch formation ──────────────────────────────────────────
 ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
 if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
-    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
 
@@ -713,7 +806,8 @@ BATCH_JSON="$(jq -nc \
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
-    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
 
@@ -727,19 +821,19 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       .next_new_issue_iid = ([.next_new_issue_iid // .issue_min_iid, (($fresh_batch | max) + 1)] | max)
     else . end')"
 
-# ─── 16. Allocate attempt numbers ─────────────────────────────────
+# ─── 17. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
 mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
 for iid in "${BATCH_IIDS[@]}"; do
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
        IID="${iid}" \
        bash "${SCRIPT_DIR}/allocate_attempt.sh")"
   ATTEMPT["${iid}"]="${N}"
 done
 
-# ─── 17. Slice UI accounts per IID using SLOT_SIZES ─────────────
+# ─── 18. Slice UI accounts per IID using SLOT_SIZES ─────────────
 IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
 declare -A UI_OFFSET UI_COUNT UI_ACCOUNTS_JSON
 offset=0
@@ -763,7 +857,7 @@ for k in "${!BATCH_IIDS[@]}"; do
   offset=$(( offset + size ))
 done
 
-# ─── 18. Pre-spawn persist (placeholder pending entries) ──────────
+# ─── 19. Pre-spawn persist (placeholder pending entries) ──────────
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"
@@ -784,7 +878,7 @@ FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $proje
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c "${PRE_PENDING_JQ_ARGS[@]}" "${FILTER}")"
 persist_state "${STATE_JSON}"
 
-# ─── 19. Per-IID prep ─────────────────────────────────────────────
+# ─── 20. Per-IID prep ─────────────────────────────────────────────
 TICK_OUTCOMES='{}'
 DISPATCH_ENTRIES='[]'
 declare -A PAYLOAD_PATH CHILD_LABEL_BY_IID
@@ -808,21 +902,22 @@ for iid in "${BATCH_IIDS[@]}"; do
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}"
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
-  # Resolve ISSUE_MODE.
+  # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
+  # resume signal. Every other entry path (`todo`, `retry`, `new`,
+  # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
+  # baseline, even if this IID has prior attempts on disk.
   ISSUE_MODE="fresh"
   NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
-  if [ "${NEEDS_CONTINUE}" = "true" ]; then
+  RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
+    (.[] | select(.iid==$i) | .labels // []) as $labels
+    | (($labels | index("retry") != null) or ($labels | index("todo") != null))
+  ')"
+  if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
     ISSUE_MODE="continue"
-  else
-    issue_state_path="${ISSUES_ROOT}/issue-${iid}/state.json"
-    if [ -f "${issue_state_path}" ]; then
-      PERSISTED_MODE="$(jq -r '.mode // ""' "${issue_state_path}")"
-      [ "${PERSISTED_MODE}" = "continue" ] && ISSUE_MODE="continue"
-    fi
   fi
 
   prep_blocked() {
@@ -853,16 +948,25 @@ for iid in "${BATCH_IIDS[@]}"; do
   cat "${PA_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
   if [ "${PA_RC}" -ne 0 ]; then
     prep_blocked "prepare_attempt: $(tail -n 1 "${PA_ERR}")"
-    rm -f "${PA_OUT}" "${PA_ERR}"
+    retire_temp_file "${PA_OUT}"
+    retire_temp_file "${PA_ERR}"
     continue
   fi
   MODE_ACTUAL="$(sed -n '1p' "${PA_OUT}")"
   LOCAL_ATTEMPT_BRANCH="$(sed -n '2p' "${PA_OUT}")"
-  rm -f "${PA_OUT}" "${PA_ERR}"
+  retire_temp_file "${PA_OUT}"
+  retire_temp_file "${PA_ERR}"
   if [ -z "${MODE_ACTUAL}" ] || [ -z "${LOCAL_ATTEMPT_BRANCH}" ]; then
     prep_blocked "prepare_attempt: empty stdout (script printed no mode/branch lines)"
     continue
   fi
+  case "${MODE_ACTUAL}" in
+    fresh|continue) ;;
+    *)
+      prep_blocked "prepare_attempt: invalid mode_actual on stdout: ${MODE_ACTUAL}"
+      continue
+      ;;
+  esac
 
   # claude_settings_path
   if [ -n "${T[claude_settings_path]:-}" ]; then
@@ -1095,7 +1199,7 @@ PYEOF
   wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"
 done
 
-# ─── 20. Emit envelope ───────────────────────────────────────────
+# ─── 21. Emit envelope ───────────────────────────────────────────
 SURVIVOR_COUNT="$(printf '%s' "${DISPATCH_ENTRIES}" | jq 'length')"
 SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s, pool=%s)' \
   "${SURVIVOR_COUNT}" "${BATCH_SIZE}" "${MAX_CONCURRENT}" "${POOL_SIZE}")"
@@ -1104,9 +1208,14 @@ if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
   jq -nc \
     --argjson run_timeout "${RUN_TIMEOUT}" \
     --argjson outcomes "${TICK_OUTCOMES}" \
+    --argjson evicted "${EVICTED_IIDS_JSON}" \
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     --arg ev "${EVIDENCE_PATH}" \
     --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
     {status:"no_eligible_iids", dispatch_entries:[], run_timeout_seconds:$run_timeout,
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions,
      max_launch_retries:3, backoff_seconds:2,
      tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev, chat_summary:$chat}'
   exit 0
@@ -1117,12 +1226,16 @@ jq -nc \
   --argjson run_timeout "${RUN_TIMEOUT}" \
   --argjson outcomes "${TICK_OUTCOMES}" \
   --argjson evicted "${EVICTED_IIDS_JSON}" \
+  --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+  --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
   --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
   --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
   --arg ev "${EVIDENCE_PATH}" \
   --arg chat "${SUMMARY}" '
   {status:"ready", dispatch_entries:$dispatch_entries,
    run_timeout_seconds:$run_timeout, max_launch_retries:3, backoff_seconds:2,
-   evicted_iids:$evicted, label_filtered_in:$label_in, label_filtered_out:$label_out,
+   evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+   cleanup_actions:$cleanup_actions,
+   label_filtered_in:$label_in, label_filtered_out:$label_out,
    tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev,
    chat_summary:$chat}'

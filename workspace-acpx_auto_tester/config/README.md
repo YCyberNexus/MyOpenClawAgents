@@ -27,21 +27,31 @@ The agent runs unattended for long stretches. Re-parsing the host out of `${GITL
 
 This workspace assumes a single GitLab deployment per runner. If you ever need to point a different runner at a different GitLab, change `gitlab.env` on that runner. Do not try to make the agent multi-tenant by reading the host from trigger inputs — that defeats the whole point of pinning.
 
-## `ui_accounts.env`
+## UI account pool: `${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}` (default `${DATA_BASENAME}/ifp-common/ifp_users.json`)
 
-Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents.
+Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents. This file is committed/maintained by the test team inside the cloned project repo, not edited in this agent workspace.
 
 Per the test team's confirmed behavior, the system under test logs out an account when the same credentials log in twice. Each subagent therefore receives a distinct slot of UI accounts (one per robot test file) — sharing an account between concurrent subagents (or between concurrent robot files within a subagent) would let them kick each other out. The pool size acts as the hard upper bound on `max_concurrent_subagents` (the pool is divided into exactly that many slots): a tick whose `max_concurrent_subagents` exceeds the pool aborts with `"ui_account_pool_too_small"`.
 
 ### Format
 
-One account per line, `username:password`. Lines starting with `#` and blank lines are ignored. Example (40-account pool for 4 concurrent subagents — slot sizes auto-computed as `10,10,10,10`):
+The dispatcher reads `${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}`, where `REPO_PATH` is the final project checkout path, `DATA_BASENAME` defaults to `ifp-data` (override with trigger field `data_basename`), and `UI_ACCOUNTS_RELPATH` defaults to `ifp-common/ifp_users.json` (override with trigger field `ui_accounts_relpath`; same carry-forward persistence as `data_basename`). Both overrides let a project keep credentials under a project-specific layout (e.g. `data_basename=pts-data`, `ui_accounts_relpath=pts-common/pts_users.json`) without code changes — see [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](../skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md) for the full override contract.
 
-```
-F100001:123456
-F100002:123456
-...
-F100040:123456
+The JSON must be a top-level array. Each entry must contain non-empty string `username` and `password` fields. `name` and any other fields are ignored. Example:
+
+```json
+[
+  {
+    "username": "F100001",
+    "password": "123456",
+    "name": "..."
+  },
+  {
+    "username": "F100002",
+    "password": "123456",
+    "name": "..."
+  }
+]
 ```
 
 ### Sizing rule
@@ -50,7 +60,7 @@ The pool must contain at least `max_concurrent_subagents` valid accounts (each i
 
 ### How it flows through the agent
 
-1. Dispatcher reads `<workspace>/config/ui_accounts.env` via `scripts/load_ui_accounts.sh` at the top of every batch, passing `MAX_CONCURRENT_SUBAGENTS` and `MAX_ACCOUNTS_PER_ISSUE` (default `14`). The script prints the full pool on stdout and the metadata `POOL_SIZE=<n>` / capped `SLOT_SIZES=<csv>` on stderr.
+1. Dispatcher runs `clone_or_pull.sh` first, then reads `${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}` via `scripts/load_ui_accounts.sh`, passing `MAX_CONCURRENT_SUBAGENTS`, `MAX_ACCOUNTS_PER_ISSUE` (default `14`), and `UI_ACCOUNTS_RELPATH` (default `ifp-common/ifp_users.json`). The script prints the full pool on stdout as `username:password` lines and the metadata `POOL_SIZE=<n>` / capped `SLOT_SIZES=<csv>` on stderr.
 2. Dispatcher slices the stdout into per-IID blocks using `SLOT_SIZES`: the `k`-th IID of the batch (k=0..batch_size-1) gets `SLOT_SIZES[k]` accounts starting at offset `sum(SLOT_SIZES[0..k-1])`. When `batch_size < max_concurrent_subagents`, only the first `batch_size` slots are consumed; the remaining accounts stay unused for the tick. If `max_accounts_per_issue` caps a raw slot, the surplus accounts also stay unused for the tick.
 3. For each IID, the dispatcher invokes `scripts/build_prompt.sh` with that IID's `UI_ACCOUNTS='[{"u":"<user>","p":"<pass>"},...]'` — a JSON array of all accounts allocated to this IID. The script renders them as a numbered list in the `# Working environment` section of the Claude Code prompt at `${LOG_DIR}/prompt.txt` with an explicit override note. The credentials are NOT injected into the rendered subagent prompt — they live in the Claude Code prompt only, where Claude Code reads them.
 4. After each callback drains the corresponding pending subagent, that subagent's account block implicitly returns to the pool — the dispatcher does not persist allocations across batches; the next batch re-allocates from the head of the file (the single-batch-in-flight invariant guarantees `pending_subagents` is empty before the next batch forms).
@@ -58,6 +68,8 @@ The pool must contain at least `max_concurrent_subagents` valid accounts (each i
 ### Setup
 
 1. Create the accounts on the system under test (e.g. `F100001`–`F100040` for a 40-account pool sized to support 4 concurrent subagents × 10 robot files each, or a larger pool if you want spare accounts while keeping `max_accounts_per_issue` capped).
-2. Edit `ui_accounts.env` with the credentials.
-3. Make sure there are at least `max_concurrent_subagents` valid non-comment account lines, and set `max_accounts_per_issue` high enough to cover the worst-case robot-file count for one issue.
+2. Ask the test team to commit/update `${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}` (default `${DATA_BASENAME}/ifp-common/ifp_users.json`) on the project branch the dispatcher clones.
+3. Make sure there are at least `max_concurrent_subagents` valid JSON account entries, and set `max_accounts_per_issue` high enough to cover the worst-case robot-file count for one issue.
 4. Re-run the scheduled tick.
+
+`config/ui_accounts.env` is kept only as a legacy placeholder. The dispatcher no longer reads it.

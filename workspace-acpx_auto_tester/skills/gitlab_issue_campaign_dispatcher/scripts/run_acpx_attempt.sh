@@ -80,6 +80,7 @@ trap '[ -n "${ACPX_MARKER_PID:-}" ] && kill "${ACPX_MARKER_PID}" 2>/dev/null; tr
 prompt_file="${LOG_DIR}/prompt.txt"
 stdout_log="${LOG_DIR}/claude_result.txt"
 stderr_log="${LOG_DIR}/acpx_raw.log"
+safety_bin="${SCRIPT_DIR}/safety_bin"
 
 if [ ! -f "${prompt_file}" ]; then
   echo "run_acpx_attempt.sh: prompt file missing: ${prompt_file}" >&2
@@ -91,9 +92,18 @@ if ! command -v timeout >/dev/null 2>&1; then
   exit 2
 fi
 
+# Mode-bit heal lives in the dispatcher: _dispatch_lib.sh::ensure_safety_bin_executable
+# runs once per scheduled tick. If this assertion ever trips, the heal didn't run for
+# this tick — investigate dispatch_prepare_tick.sh / deployment sync, not this script.
+if [ ! -x "${safety_bin}/rm" ]; then
+  echo "run_acpx_attempt.sh: rm safety wrapper missing or not executable: ${safety_bin}/rm" >&2
+  exit 2
+fi
+
 {
   printf 'cwd=%s\n' "${WORKTREE_DIR}"
   printf 'TASK_OUTPUT_DIR=%s\n' "${OUTPUT_DIR}"
+  printf 'PATH_PREFIX=%s\n' "${safety_bin}"
   printf 'timeout=%ss (kill-after=30s)\n' "${ACPX_TIMEOUT_SECONDS}"
   printf 'command=timeout --kill-after=30s %ss acpx --auth-policy skip claude exec -f %s\n' \
     "${ACPX_TIMEOUT_SECONDS}" "${prompt_file}"
@@ -102,6 +112,7 @@ fi
 cd "${WORKTREE_DIR}"
 
 set +e
+PATH="${safety_bin}:${PATH}" \
 TASK_OUTPUT_DIR="${OUTPUT_DIR}" \
   timeout --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s" \
   acpx --auth-policy skip claude exec -f "${prompt_file}" \

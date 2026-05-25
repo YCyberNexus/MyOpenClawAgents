@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-20.2] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output requests it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), per-batch UI-account allocation from a deployment-pinned pool with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-05-25.2] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${DATA_BASENAME}, default ifp-common/ifp_users.json, overridable via trigger field ui_accounts_relpath with carry-forward persistence) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -21,7 +21,10 @@ locks, per-issue state/logs/summaries, and one shared per-issue linked
 git worktree per IID at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/`.
 The worktree is reused across every attempt of an IID (created on
 attempt 1 via `git worktree add -B`, then force-switched in place on
-attempt N>1 so untracked scratch survives between attempts).
+attempt N>1 after preserving the same-IID runtime subtree; `continue`
+restores it for resume, while all non-continue entry labels reset from
+the clean baseline and archive the preserved subtree outside the active
+worktree).
 See [`references/paths.md`](references/paths.md) for the complete layout.
 (`${RESULT_BASENAME}` / `${DATA_BASENAME}` default to `ifp-result` / `ifp-data`;
 per-project `result_basename` / `data_basename` trigger fields override
@@ -62,14 +65,17 @@ reduced to a small fixed shape.
 ```
 1. cd "${SKILL_DIR}"
 2. echo "$trigger_text" | bash scripts/dispatch_prepare_tick.sh   → envelope
-3. switch envelope.status:
-     "ready"                    → enter spawn loop (step 4)
+3. for each action in envelope.cleanup_actions where action.action == "kill":
+     try: subagents kill --target action.target
+     except: pass    # best-effort; state is already persisted as blocked
+4. switch envelope.status:
+     "ready"                    → enter spawn loop (step 5)
      "waiting_for_callbacks"    → print chat_summary, EXIT
      "no_eligible_iids"         → print chat_summary, EXIT
      "completed"                → print chat_summary, EXIT
      "lock_held"                → print chat_summary, EXIT
      "tick_failed"              → print chat_summary, EXIT
-4. for each entry in envelope.dispatch_entries (STRICTLY one at a time):
+5. for each entry in envelope.dispatch_entries (STRICTLY one at a time):
      payload   = Read(entry.payload_path)         # tool: Read
      attempts  = 0
      ack       = null
@@ -103,7 +109,7 @@ reduced to a small fixed shape.
          (+ standard env) \
          bash scripts/dispatch_record_spawn.sh                    → record_envelope
      print record_envelope.chat_summary
-5. print envelope.chat_summary, EXIT (still "waiting_for_callbacks" overall)
+6. print envelope.chat_summary, EXIT (still "waiting_for_callbacks" overall)
 ```
 
 The 3-attempt + 2-second-backoff retry loop is the **only** retry logic
@@ -160,10 +166,10 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | ----- | ------------------ |
 | Trigger field schema + override rules + fixed-value preflight | `dispatch_prepare_tick.sh` step 1; reference: [`trigger_command.md`](references/trigger_command.md) |
 | `campaign_state.json` schema + per-issue state + compact reply | reference: [`state_schema.md`](references/state_schema.md) |
-| Stuck-pending eviction (`stuck_after_minutes`) | `dispatch_prepare_tick.sh` step 8 |
+| Pending eviction (`stuck_after_minutes` plus trigger-scope eviction) | `dispatch_prepare_tick.sh` pending-eviction block |
 | Reconcile + disk-cache correction + Source-of-Truth Policy | `dispatch_prepare_tick.sh` steps 10–11; `dispatch_followup.sh` step 2 |
 | Eligibility batch formation (backlog → blocked retry, quota cap) | `dispatch_prepare_tick.sh` step 16 |
-| UI account allocation (slot sizes, `max_accounts_per_issue` cap, pool-too-small abort) | `dispatch_prepare_tick.sh` steps 7 + 18 |
+| UI account allocation (slot sizes, `max_accounts_per_issue` cap, pool-too-small abort) | `dispatch_prepare_tick.sh` steps 14 + 18 |
 | Per-IID prep (allocate_attempt, prepare_attempt, claude_settings copy, glab issue read, label transitions to `doing`, build_prompt, state-file init) | `dispatch_prepare_tick.sh` step 20 |
 | Executor prompt rendering + sentinel check | `dispatch_prepare_tick.sh` step 20.8–20.9 |
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |
