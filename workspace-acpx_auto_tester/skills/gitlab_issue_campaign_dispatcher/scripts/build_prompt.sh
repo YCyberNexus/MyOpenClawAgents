@@ -26,7 +26,7 @@
 # relative to the repo root).
 #
 # UI_ACCOUNTS is a JSON array of {"u":"<username>","p":"<password>"} objects,
-# allocated by the dispatcher from the deployment-pinned pool. Each subagent
+# allocated by the dispatcher from the test-team-owned pool. Each subagent
 # receives the slot it was assigned by load_ui_accounts.sh — slot size
 # = floor(pool_size / max_concurrent_subagents) with the integer remainder
 # front-loaded onto the first slots, then capped by max_accounts_per_issue
@@ -58,11 +58,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
-# UI accounts are allocated by the dispatcher per-batch from the pool pinned
-# at <workspace>/config/ui_accounts.env. Each subagent receives its assigned
-# slot (count derived automatically from pool_size / max_concurrent_subagents
-# with the integer remainder front-loaded, then capped by
-# max_accounts_per_issue). The dispatcher
+# UI accounts are allocated by the dispatcher per-batch from the pool at
+# ${REPO_PATH}/${DATA_BASENAME}/ifp-common/ifp_users.json. Each subagent
+# receives its assigned slot (count derived automatically from
+# pool_size / max_concurrent_subagents with the integer remainder
+# front-loaded, then capped by max_accounts_per_issue). The dispatcher
 # ensures distinct accounts across concurrent batch members AND across
 # concurrent robot executions within a subagent. If UI_ACCOUNTS is missing or invalid,
 # this script exits non-zero and the dispatcher marks the IID `blocked`.

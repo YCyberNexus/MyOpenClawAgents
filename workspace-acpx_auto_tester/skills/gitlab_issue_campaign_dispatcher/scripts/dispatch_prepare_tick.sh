@@ -437,42 +437,6 @@ EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
       [range($lo; $hi+1)] | map(select(. as $i | $wl | index($i) != null)) | unique | sort
     end')"
 
-# Validate ui_account pool. load_ui_accounts.sh exit code 13 → pool too small.
-POOL_OUT="$(mktemp)"
-POOL_ERR="$(mktemp)"
-chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
-set +e
-PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-  MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
-  MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
-  bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
-POOL_RC=$?
-set -e
-case "${POOL_RC}" in
-  0) ;;
-  10) emit_chat_failure "ui_accounts.env missing (deployment incomplete)" ;;
-  11) emit_chat_failure "ui_accounts.env pool is empty" ;;
-  12) emit_chat_failure "ui_accounts.env malformed pool line" ;;
-  13)
-    POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-    emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
-  14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
-  15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
-  *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
-esac
-POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
-mapfile -t POOL_LINES <"${POOL_OUT}"
-# POOL_OUT now lives only in the bash array; scrub the on-disk copy
-# before any other step can fail and leak passwords via trap cleanup.
-: >"${POOL_OUT}"
-
-# Cache pool data on state for the chat summary.
-STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
-  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
-
 # ─── 8. Pending eviction ──────────────────────────────────────────
 NOW_TS="$(date -u +%s)"
 EVICTED_IIDS_JSON="[]"
@@ -656,7 +620,45 @@ CP_RC=$?
 set -e
 [ "${CP_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (exit ${CP_RC})"
 
-# ─── 14. require_labels filter ────────────────────────────────────
+# ─── 14. Validate UI account pool ────────────────────────────────
+# The source lives inside the cloned project data directory, so this must
+# run after clone_or_pull.sh.
+POOL_OUT="$(mktemp)"
+POOL_ERR="$(mktemp)"
+chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
+set +e
+PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
+  MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
+  bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
+POOL_RC=$?
+set -e
+case "${POOL_RC}" in
+  0) ;;
+  10) emit_chat_failure "ifp_users.json missing (deployment incomplete)" ;;
+  11) emit_chat_failure "ifp_users.json account pool is empty" ;;
+  12) emit_chat_failure "ifp_users.json malformed account pool" ;;
+  13)
+    POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+    emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
+  14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
+  15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
+  *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
+esac
+POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
+mapfile -t POOL_LINES <"${POOL_OUT}"
+# POOL_OUT now lives only in the bash array; scrub the on-disk copy
+# before any other step can fail and leak passwords via trap cleanup.
+: >"${POOL_OUT}"
+
+# Cache pool data on state for the chat summary.
+STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
+
+# ─── 15. require_labels filter ────────────────────────────────────
 LABEL_FILTERED_IN_JSON="[]"
 LABEL_FILTERED_OUT_JSON="[]"
 if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
@@ -681,7 +683,7 @@ if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]
   LABEL_FILTERED_OUT_JSON="$(printf '%s' "${LF_OUT}" | jq -c '.out')"
 fi
 
-# ─── 15. Batch formation ──────────────────────────────────────────
+# ─── 16. Batch formation ──────────────────────────────────────────
 ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
 if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
@@ -786,7 +788,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       .next_new_issue_iid = ([.next_new_issue_iid // .issue_min_iid, (($fresh_batch | max) + 1)] | max)
     else . end')"
 
-# ─── 16. Allocate attempt numbers ─────────────────────────────────
+# ─── 17. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
 mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
 for iid in "${BATCH_IIDS[@]}"; do
@@ -798,7 +800,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   ATTEMPT["${iid}"]="${N}"
 done
 
-# ─── 17. Slice UI accounts per IID using SLOT_SIZES ─────────────
+# ─── 18. Slice UI accounts per IID using SLOT_SIZES ─────────────
 IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
 declare -A UI_OFFSET UI_COUNT UI_ACCOUNTS_JSON
 offset=0
@@ -822,7 +824,7 @@ for k in "${!BATCH_IIDS[@]}"; do
   offset=$(( offset + size ))
 done
 
-# ─── 18. Pre-spawn persist (placeholder pending entries) ──────────
+# ─── 19. Pre-spawn persist (placeholder pending entries) ──────────
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"
@@ -843,7 +845,7 @@ FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $proje
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c "${PRE_PENDING_JQ_ARGS[@]}" "${FILTER}")"
 persist_state "${STATE_JSON}"
 
-# ─── 19. Per-IID prep ─────────────────────────────────────────────
+# ─── 20. Per-IID prep ─────────────────────────────────────────────
 TICK_OUTCOMES='{}'
 DISPATCH_ENTRIES='[]'
 declare -A PAYLOAD_PATH CHILD_LABEL_BY_IID
@@ -1164,7 +1166,7 @@ PYEOF
   wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"
 done
 
-# ─── 20. Emit envelope ───────────────────────────────────────────
+# ─── 21. Emit envelope ───────────────────────────────────────────
 SURVIVOR_COUNT="$(printf '%s' "${DISPATCH_ENTRIES}" | jq 'length')"
 SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s, pool=%s)' \
   "${SURVIVOR_COUNT}" "${BATCH_SIZE}" "${MAX_CONCURRENT}" "${POOL_SIZE}")"
