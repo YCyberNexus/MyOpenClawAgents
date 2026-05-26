@@ -159,11 +159,12 @@ You are working on GitLab issue #${ISSUE_IID}. Implement the change
 requested in the issue description. You are running inside the shared
 per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt
 of this IID). Tracked files have just been reset to
-\`origin/${DEV_BRANCH}\` (the clean baseline); any untracked scratch a
-previous attempt of this IID left here is still on disk. The integration
-branch \`${BRANCH}\` already contains spec output from previously
-completed issues, but you should NOT see that on tracked files here
-when ${DEV_BRANCH} is kept clean.
+\`origin/${DEV_BRANCH}\` (the clean baseline). Any same-IID runtime
+output/log subtree that survived a previous attempt has been quarantined
+outside this active worktree before this prompt was written. The integration
+branch \`${BRANCH}\` already contains spec output from previously completed
+issues, but you should NOT see that on tracked files here when ${DEV_BRANCH}
+is kept clean.
 
 EOF
   fi

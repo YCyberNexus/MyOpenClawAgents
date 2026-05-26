@@ -35,7 +35,7 @@ blocked_policy=skip_and_retry
 | `group`                 | GitLab group slug                                                     |
 | `project`               | GitLab project slug                                                   |
 | `branch`                | **Integration / target branch** (typically `master`). MRs are opened against this branch; spec accumulation happens here. |
-| `dev_branch`            | **Clean baseline branch** (typically `dev`). Fresh-mode attempts reset the shared per-issue worktree's tracked files to `origin/${dev_branch}` so Claude Code starts from a clean tree without past spec accumulation; untracked scratch left by an earlier attempt of the same IID is preserved by the in-place branch switch in `prepare_attempt.sh`. If the project does not maintain a separate clean baseline, set `dev_branch=<same-as-branch>` to fall back to single-branch behavior. |
+| `dev_branch`            | **Clean baseline branch** (typically `dev`). Fresh-mode attempts reset the shared per-issue worktree's tracked files to `origin/${dev_branch}` and quarantine same-IID runtime residue before recreating empty current output/log directories, so Claude Code starts without past same-IID spec output. If the project does not maintain a separate clean baseline, set `dev_branch=<same-as-branch>` to fall back to single-branch behavior. |
 | `gitlab_token`          | Token used by `glab auth login` against the deployment-pinned host    |
 | `issue_min_iid`         | Integer, inclusive                                                    |
 | `issue_max_iid`         | Integer, inclusive                                                    |
