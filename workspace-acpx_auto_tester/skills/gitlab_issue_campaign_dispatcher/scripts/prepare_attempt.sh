@@ -8,10 +8,10 @@
 # linked worktree at ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}
 # (note: NO -att-<NNN> suffix). On attempt 1 this script creates the
 # worktree via `git worktree add -B`. On attempt N>1 it force-switches
-# the already-existing worktree's checked-out branch to BASE_REF; this
-# leaves untracked files in the worktree alone, so any scratch state
-# `acpx claude exec` wrote during attempt N (intermediate notes, Claude
-# Code's local caches, etc.) is still on disk for attempt N+1. The local
+# the already-existing worktree's checked-out branch to BASE_REF; the
+# checkout itself leaves untracked files alone. Continue mode restores the
+# same-IID runtime subtree for resume, while fresh reset mode quarantines
+# that subtree before recreating empty output/log directories. The local
 # attempt branch is force-pushed to ${WORK_BRANCH} at commit time.
 # Cross-IID parallelism stays safe because different IIDs use different
 # worktree paths; same-IID attempts never run concurrently (single-batch
@@ -56,15 +56,15 @@
 # Branch-switch preservation:
 #   Reusing the shared per-IID worktree is not enough by itself: `git
 #   checkout -B ... --force` can remove files that are tracked on the prior
-#   attempt branch but absent from the next BASE_REF. Before an in-place
-#   branch switch on attempt N>1, this script snapshots the current
-#   `${RESULT_BASENAME}/issue-<iid>/` subtree. Continue mode restores that
-#   snapshot after checkout so prior attempt output/log files are visible
-#   for resume. Fresh reset mode (all non-continue entry labels, including
-#   `todo`, `retry`, `new`, `blocked`, and trigger require_labels) archives
-#   the snapshot under `${WORKTREES_ROOT}/.preserved-attempts/` instead, so
-#   the files are not physically deleted but also do not contaminate the
-#   reset run.
+#   attempt branch but absent from the next BASE_REF, while leaving untracked
+#   files alone. Before an in-place branch switch on attempt N>1, this script
+#   snapshots the current `${RESULT_BASENAME}/issue-<iid>/` subtree. Continue
+#   mode restores that snapshot after checkout so prior attempt output/log
+#   files are visible for resume. Fresh reset mode (all non-continue entry
+#   labels, including `todo`, `retry`, `new`, `blocked`, and trigger
+#   require_labels) archives the snapshot and then quarantines any active
+#   same-IID runtime subtree that survived checkout, so old files are not
+#   physically deleted but also do not contaminate the reset run.
 #
 # What this script does NOT do:
 #   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
@@ -350,6 +350,26 @@ archive_switch_backup() {
   echo "prepare_attempt: archived prior attempt files from ${src} at ${dest}" >&2
 }
 
+archive_fresh_active_runtime_tree() {
+  if [ ! -d "${ISSUE_WORKTREE_RUNTIME_DIR}" ]; then
+    return 0
+  fi
+
+  local tracked_paths
+  if ! tracked_paths="$(git -C "${WORKTREE_DIR}" ls-files -- "${ISSUE_WORKTREE_REL}")"; then
+    echo "prepare_attempt: failed to inspect tracked paths under ${ISSUE_WORKTREE_REL}" >&2
+    exit 7
+  fi
+  if [ -n "${tracked_paths}" ]; then
+    echo "prepare_attempt: fresh reset refusing to quarantine ${ISSUE_WORKTREE_RUNTIME_DIR} because ${BASE_REF} has tracked files under ${ISSUE_WORKTREE_REL}" >&2
+    echo "prepare_attempt: tracked paths under fresh runtime subtree:" >&2
+    printf '%s\n' "${tracked_paths}" >&2
+    exit 7
+  fi
+
+  archive_switch_backup "${ISSUE_WORKTREE_RUNTIME_DIR}" "fresh-active-before-attempt-${ATTEMPT_NUMBER_PADDED}"
+}
+
 if [ "${WORKTREE_REUSE}" = true ]; then
   if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
     WORKTREE_SWITCH_BACKUP="${WORKTREE_DIR}.switch-backup.$$"
@@ -374,14 +394,15 @@ else
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
-mkdir -p "${OUTPUT_DIR}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
   restore_issue_runtime_tree "${STALE_SWITCH_BACKUP}"
   restore_issue_runtime_tree "${WORKTREE_SWITCH_BACKUP}"
 else
   archive_switch_backup "${STALE_SWITCH_BACKUP}" "stale-switch-before-attempt-${ATTEMPT_NUMBER_PADDED}"
   archive_switch_backup "${WORKTREE_SWITCH_BACKUP}" "before-attempt-${ATTEMPT_NUMBER_PADDED}"
+  archive_fresh_active_runtime_tree
 fi
+mkdir -p "${OUTPUT_DIR}"
 
 # ─── Continue-mode salvage from backup sources into the worktree ─────
 #
@@ -483,9 +504,9 @@ git worktree prune >&2
 # worktree is now on ${BASE_REF}; in continue mode that ref may already
 # contain prior attempts' tracked `log/attempt-<earlier>/` directories,
 # but those use different attempt numbers and so do not collide with the
-# current LOG_DIR. Other attempts' log dirs that exist as UNTRACKED files
-# in the shared worktree from earlier runs are NOT touched here — only
-# the exact current-attempt LOG_DIR is reset by archiving the old path.
+# current LOG_DIR. Fresh mode has already quarantined the active same-IID
+# runtime subtree, so this reset only needs to defend against an exact
+# same-(IID, attempt) rerun.
 # This is defensive against an exact same-(IID, attempt) rerun (rare —
 # attempt numbers are monotonic).
 if [ -d "${LOG_DIR}" ]; then
