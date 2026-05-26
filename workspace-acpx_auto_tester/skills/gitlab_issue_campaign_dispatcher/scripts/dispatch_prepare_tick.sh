@@ -319,15 +319,12 @@ OUTER_TIMEOUT_GRACE_SECONDS=120
 # Defaults when trigger omits.
 [ -z "${MAX_CONCURRENT}" ] && MAX_CONCURRENT=1
 [ -z "${MAX_ACCOUNTS}"   ] && MAX_ACCOUNTS=14
-[ -z "${STUCK_AFTER}"    ] && STUCK_AFTER=330
 [ -z "${ACPX_TIMEOUT}"   ] && ACPX_TIMEOUT=18000
 
 case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;; esac
 [ "${MAX_CONCURRENT}" -ge 1 ] || emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1"
 case "${MAX_ACCOUNTS}" in *[!0-9]*|"") emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;; esac
 [ "${MAX_ACCOUNTS}" -ge 1 ] || emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1"
-case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
-[ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
 [ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
 [ -z "${RUN_TIMEOUT}"    ] && RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
@@ -335,6 +332,12 @@ case "${RUN_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_run_timeout_sec
 [ "${RUN_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_run_timeout_seconds: must be >= 60"
 MIN_RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
 [ "${RUN_TIMEOUT}" -ge "${MIN_RUN_TIMEOUT}" ] || emit_chat_failure "run_timeout_seconds_below_acpx_timeout_seconds_plus_${OUTER_TIMEOUT_GRACE_SECONDS}"
+# stuck_after_minutes defaults to ceil(run_timeout_seconds / 60) + 30, so the
+# runtime's own timeout always fires before the dispatcher's eviction backstop.
+# Operators may still override explicitly for tighter or looser eviction.
+[ -z "${STUCK_AFTER}" ] && STUCK_AFTER=$(( (RUN_TIMEOUT + 59) / 60 + 30 ))
+case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
+[ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
 
 KILL_TERMINAL="${T[kill_subagent_on_terminal]:-}"
 if [ -n "${KILL_TERMINAL}" ]; then

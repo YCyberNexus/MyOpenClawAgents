@@ -116,7 +116,7 @@ fresh_init_state() {
       blocked_cooldown_ticks: null,
       max_concurrent_subagents: 1,
       max_accounts_per_issue: 14,
-      stuck_after_minutes: 330,
+      stuck_after_minutes: 332,
       run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
       kill_subagent_on_terminal: true,
