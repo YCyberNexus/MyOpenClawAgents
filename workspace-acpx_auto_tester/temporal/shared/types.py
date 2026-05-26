@@ -130,8 +130,16 @@ class CampaignInput:
     ui_accounts_relpath: str = "ifp-common/ifp_users.json"
     max_concurrent_subagents: int = 1
     max_accounts_per_issue: int = 14
-    stuck_after_minutes: int = 330
-    run_timeout_seconds: int = 18120              # acpx_timeout_seconds + 120
+    # The two timeout fields below use the sentinel value ``0`` to mean
+    # "derive from acpx_timeout_seconds". __post_init__ fills them in so all
+    # downstream readers (workflows, schedule, validation) see the resolved
+    # value regardless of whether the caller passed it explicitly.
+    #   run_timeout_seconds  ← acpx_timeout_seconds + 120
+    #   stuck_after_minutes  ← ceil(run_timeout_seconds / 60) + 30
+    # This mirrors the bash dispatcher's per-tick defaulting in
+    # ``scripts/dispatch_prepare_tick.sh`` (see references/trigger_command.md).
+    stuck_after_minutes: int = 0                  # derived; see __post_init__
+    run_timeout_seconds: int = 0                  # derived; see __post_init__
     acpx_timeout_seconds: int = 18000             # 300 min / 5 h
     kill_subagent_on_terminal: bool = True
     issue_iids_whitelist: tuple[int, ...] = ()    # tuple (frozen-friendly)
@@ -150,6 +158,26 @@ class CampaignInput:
     # env (forwarded to ``glab_auth.sh`` by ``activities/subprocess.py``).
     # Putting it on ``CampaignInput`` would persist it into Temporal event
     # history.
+
+    def __post_init__(self) -> None:
+        # Fill derived defaults for the timeout chain so callers only need to
+        # pass ``acpx_timeout_seconds`` to retune the whole chain. ``frozen=True``
+        # forbids normal attribute assignment, so we use the documented
+        # ``object.__setattr__`` escape hatch. Idempotent: when this object is
+        # rehydrated from JSON (Temporal data converter) the previously derived
+        # non-zero values are kept as-is, so derivation never runs twice with
+        # different inputs.
+        if self.run_timeout_seconds == 0:
+            object.__setattr__(
+                self, "run_timeout_seconds", self.acpx_timeout_seconds + 120
+            )
+        if self.stuck_after_minutes == 0:
+            # Ceiling division: (n + 59) // 60 == math.ceil(n / 60) for n > 0.
+            object.__setattr__(
+                self,
+                "stuck_after_minutes",
+                (self.run_timeout_seconds + 59) // 60 + 30,
+            )
 
     def validated(self) -> "CampaignInput":
         """Return ``self`` unchanged after enforcing the same invariants the
