@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # load_ui_accounts.sh — read the test-team-owned UI test account pool
-# (${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}, default
-# ifp-common/ifp_users.json) and print accounts to stdout, one per line
-# in "user:pass" form, in JSON order.
+# (${REPO_PATH}/${UI_ACCOUNTS_RELPATH}, default
+# ifp-data/ifp-common/ifp_users.json) and print accounts to stdout, one
+# per line in "user:pass" form, in JSON order.
 #
 # The dispatcher uses this to allocate distinct test accounts per IID in
 # a concurrent batch. The system under test logs out an account when the
@@ -23,8 +23,12 @@
 #                              per-IID slot after pool/concurrency
 #                              division.
 #   UI_ACCOUNTS_RELPATH        Relative path of the JSON pool file under
-#                              ${DATA_DIR} (= ${REPO_PATH}/${DATA_BASENAME}).
-#                              Defaults to `ifp-common/ifp_users.json`.
+#                              ${REPO_PATH} (the project checkout root,
+#                              NOT under ${DATA_DIR} — the relpath itself
+#                              names the leading directory, which is
+#                              typically ${DATA_BASENAME} but does not
+#                              have to be).
+#                              Defaults to `ifp-data/ifp-common/ifp_users.json`.
 #                              Must be a non-empty relative path with no
 #                              leading "/", no "." / ".." segments, no
 #                              whitespace, and characters limited to
@@ -99,11 +103,13 @@ fi
 : "${DATA_BASENAME:=ifp-data}"
 DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
 
-# Relative path under ${DATA_DIR}. Trigger field `ui_accounts_relpath`
+# Relative path under ${REPO_PATH}. Trigger field `ui_accounts_relpath`
 # carries through dispatch_prepare_tick.sh as UI_ACCOUNTS_RELPATH; this
-# script defaults to the legacy hard-coded location when the env var is
-# absent so projects that never adopt the trigger field keep working.
-: "${UI_ACCOUNTS_RELPATH:=ifp-common/ifp_users.json}"
+# script defaults to the canonical legacy location (test team's
+# ifp-data/ifp-common/ifp_users.json under the project checkout) when
+# the env var is absent so projects that never adopt the trigger field
+# keep working.
+: "${UI_ACCOUNTS_RELPATH:=ifp-data/ifp-common/ifp_users.json}"
 
 # Defense-in-depth validation. dispatch_prepare_tick.sh already rejects
 # unsafe values before calling this script, but keep the same gate here
@@ -127,10 +133,21 @@ case "${UI_ACCOUNTS_RELPATH}" in
     exit 16 ;;
 esac
 
-POOL_FILE="${DATA_DIR}/${UI_ACCOUNTS_RELPATH}"
+POOL_FILE="${REPO_PATH}/${UI_ACCOUNTS_RELPATH}"
 
 if [ ! -f "${POOL_FILE}" ]; then
-  echo "load_ui_accounts: missing pool file ${POOL_FILE}; deployment incomplete" >&2
+  # Migration hint: the relpath schema changed — paths are now resolved
+  # under ${REPO_PATH}, not under ${REPO_PATH}/${DATA_BASENAME}/. If an
+  # older deployment's carry-forward value was `ifp-common/ifp_users.json`,
+  # it now resolves to ${REPO_PATH}/ifp-common/... (wrong). Detect that
+  # exact misconfiguration and tell the operator how to fix it.
+  LEGACY_POOL_FILE="${DATA_DIR}/${UI_ACCOUNTS_RELPATH}"
+  if [ -f "${LEGACY_POOL_FILE}" ]; then
+    echo "load_ui_accounts: missing pool file ${POOL_FILE}; deployment incomplete" >&2
+    echo "load_ui_accounts: hint: found file at ${LEGACY_POOL_FILE} (legacy '${DATA_BASENAME}/'-relative layout). ui_accounts_relpath is now relative to \${REPO_PATH}, not \${REPO_PATH}/\${DATA_BASENAME}/. Update the trigger to ui_accounts_relpath=${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH} and re-run." >&2
+  else
+    echo "load_ui_accounts: missing pool file ${POOL_FILE}; deployment incomplete" >&2
+  fi
   exit 10
 fi
 

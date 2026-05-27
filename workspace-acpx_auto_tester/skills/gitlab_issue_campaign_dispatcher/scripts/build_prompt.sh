@@ -59,8 +59,8 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
 # UI accounts are allocated by the dispatcher per-batch from the pool at
-# ${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH} (default relpath
-# ifp-common/ifp_users.json; override via trigger ui_accounts_relpath).
+# ${REPO_PATH}/${UI_ACCOUNTS_RELPATH} (default relpath
+# ifp-data/ifp-common/ifp_users.json; override via trigger ui_accounts_relpath).
 # Each subagent
 # receives its assigned slot (count derived automatically from
 # pool_size / max_concurrent_subagents with the integer remainder

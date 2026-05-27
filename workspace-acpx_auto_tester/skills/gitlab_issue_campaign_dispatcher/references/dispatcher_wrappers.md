@@ -94,10 +94,11 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 13. Run `ensure_labels.sh` + `clone_or_pull.sh`. Failure on either →
     `status:"tick_failed"`.
 14. Call `load_ui_accounts.sh`, which reads
-    `${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}` (default
-    relpath `ifp-common/ifp_users.json`; override with trigger
-    `ui_accounts_relpath`, carry-forward persisted); map exit codes
-    10–16 to the documented tick-level abort strings
+    `${REPO_PATH}/${UI_ACCOUNTS_RELPATH}` (default relpath
+    `ifp-data/ifp-common/ifp_users.json`; override with trigger
+    `ui_accounts_relpath`, carry-forward persisted; resolved under the
+    project checkout root, NOT under `${REPO_PATH}/${DATA_BASENAME}/`);
+    map exit codes 10–16 to the documented tick-level abort strings
     (`ui_account_pool_too_small`, `invalid_ui_accounts_relpath`, etc.).
 15. Apply `require_labels` / `require_labels_match` filter on the
     evidence file. Compute `label_filtered_in` / `label_filtered_out`.

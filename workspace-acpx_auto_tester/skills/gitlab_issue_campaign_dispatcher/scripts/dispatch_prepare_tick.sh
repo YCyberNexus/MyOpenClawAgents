@@ -199,7 +199,9 @@ done
 [ -n "${T[data_basename]:-}" ]   && export DATA_BASENAME="${T[data_basename]}"
 
 # ui_accounts_relpath: relative path of the UI account pool file under
-# ${DATA_DIR}. Same carry-forward semantics as result_basename /
+# ${REPO_PATH} (the project checkout root). The relpath itself names
+# the leading directory — typically ${DATA_BASENAME} but it does not
+# have to be. Same carry-forward semantics as result_basename /
 # data_basename — applied here so env_paths.sh sees the exported value
 # below. Validation matches the rules enforced in load_ui_accounts.sh.
 if [ -n "${T[ui_accounts_relpath]:-}" ]; then
@@ -672,9 +674,9 @@ POOL_RC=$?
 set -e
 case "${POOL_RC}" in
   0) ;;
-  10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
-  11) emit_chat_failure "ui_accounts_pool_empty: ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
-  12) emit_chat_failure "ui_accounts_pool_malformed: ${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}" ;;
+  10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${UI_ACCOUNTS_RELPATH}" ;;
+  11) emit_chat_failure "ui_accounts_pool_empty: ${UI_ACCOUNTS_RELPATH}" ;;
+  12) emit_chat_failure "ui_accounts_pool_malformed: ${UI_ACCOUNTS_RELPATH}" ;;
   13)
     POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
     emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
