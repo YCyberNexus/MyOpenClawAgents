@@ -129,6 +129,10 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
     | if length == 0 then "" else (join("\n---\n")) end
   ')"
 
+  if [ -z "${PAST_ATTEMPTS_BLOCK}" ]; then
+    PAST_ATTEMPTS_BLOCK="(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)"
+  fi
+
   if [ -z "${REVIEWER_BLOCK}" ]; then
     REVIEWER_BLOCK="(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)"
   else
@@ -180,7 +184,7 @@ EOF
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
 # Past attempt summaries (auto-posted by acpx_auto_tester)
-${PAST_ATTEMPTS_BLOCK:-(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)}
+${PAST_ATTEMPTS_BLOCK}
 
 # Reviewer comments (everything else, chronological)
 ${REVIEWER_BLOCK}
