@@ -106,18 +106,18 @@ The universal rule: every Bash exec MUST export the minimum vars at the front of
 
 ### Working Directory
 
-All `scripts/...` / `references/...` paths in the SKILL are relative to the SKILL directory.
+All `scripts/...` / `references/...` paths in the SKILL are relative to the SKILL directory. But per §Per-Exec Env Contract above, OpenClaw starts a fresh shell for every Bash tool call — `cd` does NOT survive across exec calls any more than `export` does. Running `cd "${SKILL_DIR}"` as its own Bash tool call leaves the NEXT Bash tool call back in OpenClaw's default cwd, so `bash scripts/dispatch_prepare_tick.sh` resolves against the wrong directory and aborts with `bash: scripts/dispatch_prepare_tick.sh: No such file or directory` (`没有那个文件或目录`).
 
-Before issuing ANY `bash scripts/...` command, the dispatcher MUST `cd` into the skill directory in the same shell session. Otherwise relative paths resolve against whatever cwd OpenClaw started the session in.
-
-Bootstrap snippet, run ONCE per session before anything else:
+The canonical pattern: chain `cd` into the SAME Bash exec as the `bash scripts/<name>.sh` invocation via `&&`. Re-issue the chain on every dispatcher script call:
 
 ```bash
-SKILL_DIR="<absolute path of this SKILL.md's parent>"
-cd "${SKILL_DIR}"
+cd "<absolute path of this SKILL.md's parent>" && \
+PROJECT=... GROUP=... GITLAB_TOKEN=... \
+... \
+bash scripts/<name>.sh
 ```
 
-Do NOT invoke scripts from any other cwd; do NOT prepend `./` or `../`; do NOT try to find scripts via `find` / `ls`. The single allowed convention: `cd ${SKILL_DIR}` once, then invoke scripts by relative path.
+The only allowed shape is `cd "<absolute path>" && … && bash scripts/<name>.sh` inside a SINGLE Bash tool call. Do NOT issue `cd` as a standalone Bash tool call expecting it to persist; do NOT split the setup across two tool calls (e.g. `SKILL_DIR=...` / `cd` in call 1 and `bash scripts/<name>.sh` in call 2 — the second call starts fresh with no `SKILL_DIR` and no cwd); do NOT prepend `./` or `../`; do NOT try to find scripts via `find` / `ls`; do NOT pass an absolute path to `bash` in place of `cd` (the scripts source `env_paths.sh` by relative path and resolve other companions from cwd).
 
 The subagent uses absolute paths: the dispatcher renders `{SCRIPTS_DIR}` (the absolute path to the dispatcher SKILL's `scripts/` directory) into every script invocation in the prompt, e.g. `bash {SCRIPTS_DIR}/<name>.sh`. At acpx time, the subagent calls `bash {SCRIPTS_DIR}/run_acpx_attempt.sh`; that script changes to `${WORKTREE_DIR}` (the shared per-issue linked worktree for this IID, reused across attempts so untracked scratch from the previous attempt is available) before invoking acpx. At all other steps, any cwd works because every script is invoked by absolute path.
 

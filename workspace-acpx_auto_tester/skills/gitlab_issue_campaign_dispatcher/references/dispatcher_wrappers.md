@@ -38,6 +38,16 @@ The LLM contract reduces to four genuinely LLM-only operations:
    `RUN_CHILD_COMPLETION_CALLBACK`.
 4. (per `cleanup.action == "kill"`) `subagents kill --target <cleanup.target>`.
 
+Every `bash scripts/<name>.sh ...` invocation above is shorthand for the
+chained form `cd "${SKILL_DIR}" && … && bash scripts/<name>.sh ...` issued
+inside a SINGLE Bash tool call. OpenClaw starts a fresh shell for every
+Bash exec — `cd` issued as its own Bash tool call does NOT persist into
+the next call, so the relative `scripts/<name>.sh` path resolves against
+OpenClaw's default cwd and aborts with `No such file or directory`. See
+[SKILL.md §Working Directory](../SKILL.md) and the rendered orchestrator
+pseudocode in [SKILL.md §The orchestrator loop](../SKILL.md) for the
+canonical form.
+
 Everything else — trigger parsing, state writes, flock, label sync, glab
 calls, prompt rendering, classification — happens inside the wrappers.
 
