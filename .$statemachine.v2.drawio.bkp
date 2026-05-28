@@ -1,0 +1,257 @@
+<mxfile host="Electron" agent="claude">
+  <diagram name="issue-lifecycle" id="issue-lifecycle">
+    <mxGraphModel dx="3577" dy="1137" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1900" pageHeight="1500" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="start" parent="1" style="ellipse;fillColor=#000000;strokeColor=#000000;" value="" vertex="1">
+          <mxGeometry height="20" width="20" x="540" y="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="end_terminal" parent="1" style="ellipse;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry height="20" width="20" x="1040" y="1290" as="geometry" />
+        </mxCell>
+        <mxCell id="end_terminal_inner" parent="1" style="ellipse;fillColor=#000000;strokeColor=#000000;" value="" vertex="1">
+          <mxGeometry height="12" width="12" x="1044" y="1294" as="geometry" />
+        </mxCell>
+
+        <mxCell id="DRAFTING" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;verticalAlign=top;fontSize=11;" value="&lt;b&gt;DRAFTING&lt;/b&gt; (human)&#xa;&#xa;entry/ blank issue form (no iid)&#xa;do/ user fills title &amp;amp; body locally&#xa;do/ may attach files / preview markdown&#xa;exit/ POST issue → iid assigned" vertex="1">
+          <mxGeometry height="170" width="240" x="260" y="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="draft_discarded" parent="1" style="ellipse;fillColor=#FFFFFF;strokeColor=#666666;strokeWidth=2;" value="" vertex="1">
+          <mxGeometry height="20" width="20" x="120" y="155" as="geometry" />
+        </mxCell>
+        <mxCell id="draft_discarded_inner" parent="1" style="ellipse;fillColor=#666666;strokeColor=#666666;" value="" vertex="1">
+          <mxGeometry height="12" width="12" x="124" y="159" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SUBMITTED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;fontSize=11;" value="&lt;b&gt;SUBMITTED&lt;/b&gt; (human)&#xa;&#xa;entry/ issue open on GitLab with iid&#xa;entry/ no workflow label yet&#xa;do/ PATCH body, POST notes, discuss&#xa;exit/ workflow label added → enter PENDING" vertex="1">
+          <mxGeometry height="170" width="280" x="820" y="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="PENDING" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;verticalAlign=top;align=left;spacingLeft=12;startSize=24;" value="&lt;b&gt;PENDING&lt;/b&gt; (dispatcher polls)" vertex="1">
+          <mxGeometry height="180" width="300" x="770" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="Queued" parent="PENDING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;verticalAlign=top;fontSize=11;" value="&lt;b&gt;Queued&lt;/b&gt;&#xa;entry/ label ∈ {todo, new, continue, retry}&#xa;do/ wait for next scheduler tick&#xa;do/ each tick runs reconcile.sh first" vertex="1">
+          <mxGeometry height="120" width="260" x="20" y="40" as="geometry" />
+        </mxCell>
+
+        <mxCell id="DOING" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;align=left;spacingLeft=12;startSize=24;" value="&lt;b&gt;DOING&lt;/b&gt;  (label = doing, in-flight batch)" vertex="1">
+          <mxGeometry height="310" width="1700" x="100" y="510" as="geometry" />
+        </mxCell>
+
+        <mxCell id="DOING_dispatcher_lane" parent="DOING" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eef4fb;strokeColor=none;verticalAlign=top;align=left;spacingLeft=10;spacingTop=8;fontSize=10;fontColor=#6c8ebf;" value="dispatcher" vertex="1">
+          <mxGeometry height="270" width="720" x="10" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="DOING_subagent_lane" parent="DOING" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eef7ec;strokeColor=none;verticalAlign=top;align=left;spacingLeft=10;spacingTop=8;fontSize=10;fontColor=#82b366;" value="subagent (anonymous run, per IID)" vertex="1">
+          <mxGeometry height="270" width="940" x="750" y="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="doing_initial" parent="DOING" style="ellipse;fillColor=#000000;strokeColor=#000000;" value="" vertex="1">
+          <mxGeometry height="14" width="14" x="18" y="168" as="geometry" />
+        </mxCell>
+
+        <mxCell id="PREPARING" parent="DOING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;PREPARING&lt;/b&gt;&#xa;entry/ allocate_attempt.sh&#xa;entry/ bind k-th UI account slot&#xa;do/ prepare_attempt.sh (per-issue worktree)&#xa;do/ if mode=continue ∧ origin/${WORK_BRANCH}&#xa;     missing → downgrade to fresh&#xa;     (only documented exception)&#xa;do/ build_prompt.sh&#xa;do/ set_issue_label.sh → doing&#xa;exit/ pending_subagents[iid] placeholder" vertex="1">
+          <mxGeometry height="230" width="320" x="40" y="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="SPAWNING" parent="DOING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;SPAWNING&lt;/b&gt;&#xa;entry/ sessions_spawn (anonymous,&#xa;       timeoutSeconds=30,&#xa;       runTimeoutSeconds=18120)&#xa;do/ wait launch ack&#xa;     (runId + childSessionKey)&#xa;exit/ record ack into&#xa;       pending_subagents[iid]" vertex="1">
+          <mxGeometry height="230" width="320" x="390" y="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="EXECUTING" parent="DOING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;EXECUTING&lt;/b&gt;&#xa;entry/ subagent Steps 0–4&#xa;       (no SKILL, no state writes)&#xa;do/ run_acpx_attempt.sh&#xa;     (acpx claude exec, one-shot)&#xa;do/ Claude Code generates spec&#xa;     in WORKTREE_DIR&#xa;exit/ stage_and_guard.sh&#xa;       + commit_and_push.sh&#xa;       (Strategy A force-push)" vertex="1">
+          <mxGeometry height="230" width="350" x="770" y="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="PUBLISHING" parent="DOING" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;PUBLISHING&lt;/b&gt;&#xa;entry/ post_push_verify.sh&#xa;do/ upload_attempt_artifacts.sh (Wiki)&#xa;do/ create_mr.sh (rotate)&#xa;do/ set_issue_label.sh add pr&#xa;do/ summarize_attempt.sh&#xa;exit/ emit ONE compact JSON line&#xa;       → runtime fires&#xa;       RUN_CHILD_COMPLETION_CALLBACK" vertex="1">
+          <mxGeometry height="230" width="320" x="1150" y="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_init_prep" edge="1" parent="DOING" source="doing_initial" target="PREPARING" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_prep_spawn" edge="1" parent="DOING" source="PREPARING" target="SPAWNING" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="prep_ok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_spawn_exec" edge="1" parent="DOING" source="SPAWNING" target="EXECUTING" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="launch_ack_ok&#xa;/ return waiting_for_callbacks">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_exec_pub" edge="1" parent="DOING" source="EXECUTING" target="PUBLISHING" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="acpx_ok &amp;&amp; push_ok">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e_spawn_self" edge="1" parent="DOING" source="SPAWNING" target="SPAWNING" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=0;entryX=0.5;entryY=0;fontSize=10;curved=1;labelBackgroundColor=#ffffff;" value="launch_err[attempts &lt; 3]&#xa;/ wait 2s, retry same payload">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="450" y="30" />
+              <mxPoint x="660" y="30" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="DONE" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;DONE&lt;/b&gt;&#xa;entry/ labels = {done, pr}, doing removed&#xa;entry/ MR open against integration branch&#xa;do/ wait for human reviewer" vertex="1">
+          <mxGeometry height="120" width="240" x="1430" y="900" as="geometry" />
+        </mxCell>
+
+        <mxCell id="BLOCKED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;BLOCKED&lt;/b&gt;&#xa;entry/ remove doing, add blocked&#xa;entry/ retry_count++&#xa;do/ retain LOG_DIR for triage&#xa;do/ kept worktree for continue resume" vertex="1">
+          <mxGeometry height="120" width="240" x="420" y="900" as="geometry" />
+        </mxCell>
+
+        <mxCell id="FAILED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;FAILED&lt;/b&gt;&#xa;entry/ remove doing, add failed&#xa;do/ retain artifacts&#xa;do/ never reschedule" vertex="1">
+          <mxGeometry height="120" width="240" x="930" y="900" as="geometry" />
+        </mxCell>
+
+        <mxCell id="CLOSED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1e1e1;strokeColor=#666666;verticalAlign=top;fontSize=11;" value="&lt;b&gt;CLOSED&lt;/b&gt;&#xa;entry/ is_closed_on_gitlab = true&#xa;do/ hard terminal skip in reconcile&#xa;do/ never scheduled again" vertex="1">
+          <mxGeometry height="120" width="240" x="930" y="1080" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_start_draft" edge="1" parent="1" source="start" target="DRAFTING" style="endArrow=classic;html=1;rounded=0;fontSize=10;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" value="user clicks New Issue">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_draft_cancel" edge="1" parent="1" source="DRAFTING" target="draft_discarded" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.5;entryX=1;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;dashed=1;strokeColor=#999999;" value="user_cancels / discard">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_draft_submit" edge="1" parent="1" source="DRAFTING" target="SUBMITTED" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="submit / POST issue, iid assigned">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_submit_self" edge="1" parent="1" source="SUBMITTED" target="SUBMITTED" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.25;entryX=1;entryY=0.75;fontSize=10;curved=1;labelBackgroundColor=#ffffff;" value="edit/write / PATCH or POST note">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1180" y="120" />
+              <mxPoint x="1180" y="208" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_submit_pending" edge="1" parent="1" source="SUBMITTED" target="PENDING" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="user_adds_label[todo|new|continue|retry] / -">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_submit_closed" edge="1" parent="1" source="SUBMITTED" target="CLOSED" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.85;entryX=1;entryY=0.3;fontSize=10;labelBackgroundColor=#ffffff;" value="user_closes">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1860" y="225" />
+              <mxPoint x="1860" y="1116" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_pending_self" edge="1" parent="1" source="PENDING" target="PENDING" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.25;entryX=0;entryY=0.75;fontSize=10;curved=1;labelBackgroundColor=#ffffff;" value="tick[!can_dispatch]&#xa;/ reconcile, no-op">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="710" y="335" />
+              <mxPoint x="710" y="425" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_pending_doing" edge="1" parent="1" source="PENDING" target="DOING" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="tick[can_dispatch] / reconcile + per-IID prep + spawn">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_pending_closed" edge="1" parent="1" source="PENDING" target="CLOSED" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=1;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="user_closes">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1830" y="380" />
+              <mxPoint x="1830" y="1140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_doing_self" edge="1" parent="1" source="DOING" target="DOING" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.15;entryX=0;entryY=0.85;fontSize=10;curved=1;labelBackgroundColor=#ffffff;" value="tick[iid_active]&#xa;/ reconcile, no-op">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="60" y="556" />
+              <mxPoint x="60" y="773" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_doing_done" edge="1" parent="1" source="DOING" target="DONE" style="endArrow=classic;html=1;rounded=0;exitX=0.9;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="callback[done]&#xa;/ remove doing, add {done, pr}, drain pending, kill child">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_doing_blocked" edge="1" parent="1" source="DOING" target="BLOCKED" style="endArrow=classic;html=1;rounded=0;exitX=0.2;exitY=1;entryX=0.4;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="callback[blocked]&#xa;/ remove doing, add blocked, retry++, drain, kill">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_doing_stuck" edge="1" parent="1" source="DOING" target="BLOCKED" style="endArrow=classic;html=1;rounded=0;exitX=0.32;exitY=1;entryX=0.7;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="tick[stuck] / evict, synth blocked">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_doing_failed" edge="1" parent="1" source="DOING" target="FAILED" style="endArrow=classic;html=1;rounded=0;exitX=0.55;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="callback[failed]&#xa;/ remove doing, add failed, drain, kill">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ef1" edge="1" parent="1" source="PREPARING" target="BLOCKED" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.5;exitY=1;entryX=0.1;entryY=0;fontSize=10;strokeColor=#B85450;labelBackgroundColor=#ffffff;" value="prep_failed / synth blocked (retry_count unchanged)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ef2" edge="1" parent="1" source="SPAWNING" target="BLOCKED" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.5;exitY=1;entryX=0.9;entryY=0;fontSize=10;strokeColor=#B85450;labelBackgroundColor=#ffffff;" value="launch_err[==3] / synth blocked (retry_count unchanged)">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ef3" edge="1" parent="1" source="EXECUTING" target="BLOCKED" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.5;exitY=1;entryX=1;entryY=0;fontSize=10;strokeColor=#B85450;labelBackgroundColor=#ffffff;" value="acpx_fail / push partial if possible&#xa;push_rejected / FAIL blocked">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1045" y="870" />
+              <mxPoint x="660" y="870" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_done_continue" edge="1" parent="1" source="DONE" target="PENDING" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0;entryY=0.55;fontSize=10;labelBackgroundColor=#ffffff;strokeColor=#82b366;" value="add_label[continue] / remove {done, pr}, re-enqueue, mode=continue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1550" y="1050" />
+              <mxPoint x="80" y="1050" />
+              <mxPoint x="80" y="389" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_done_closed" edge="1" parent="1" source="DONE" target="CLOSED" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=1;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="human_merges_MR&#xa;/ GitLab auto-close (Closes #iid)">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1550" y="1140" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_blocked_pending" edge="1" parent="1" source="BLOCKED" target="PENDING" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.5;entryX=0;entryY=0.85;fontSize=10;labelBackgroundColor=#ffffff;strokeColor=#d6b656;" value="add_label[retry|continue] / re-enqueue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="40" y="960" />
+              <mxPoint x="40" y="443" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e_blocked_failed" edge="1" parent="1" source="BLOCKED" target="FAILED" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="tick[retry_count &gt; limit] / promote">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_blocked_closed" edge="1" parent="1" source="BLOCKED" target="CLOSED" style="endArrow=classic;html=1;rounded=0;exitX=0.85;exitY=1;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ffffff;" value="user_closes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_failed_closed" edge="1" parent="1" source="FAILED" target="CLOSED" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;" value="user_closes">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e_closed_end" edge="1" parent="1" source="CLOSED" target="end_terminal" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=11;" value="&lt;b&gt;图例&lt;/b&gt;&#xa;━━ 正常转移&#xa;┄┄ subagent / dispatcher 内部失败 → 合成 blocked 回调（红色）&#xa;┄┄ 草稿丢弃路径（灰色）&#xa;&#xa;&lt;b&gt;状态颜色&lt;/b&gt;&#xa;DRAFTING(灰)·SUBMITTED(蓝)·PENDING(紫)·DOING(黄)&#xa;DONE(绿)·BLOCKED(黄)·FAILED(红)·CLOSED(灰)&#xa;DOING 内部按 executor 分两条 lane：dispatcher(浅蓝) / subagent(浅绿)&#xa;&#xa;&lt;b&gt;速记&lt;/b&gt;&#xa;tick = scheduler_tick（每次先跑 reconcile.sh 写证据文件）&#xa;can_dispatch = reconcile_ok ∧ pending_subagents 空 ∧ batch_slot_free&#xa;               ∧ launch_quota_ok ∧ ¬iid_active&#xa;stuck = pending_subagents[iid] 等待 &gt; stuck_after_minutes (默认 332)&#xa;callback[*] 共同副作用：drain pending_subagents[iid] + 尽力 subagents kill&#xa;&#xa;&lt;b&gt;source of truth&lt;/b&gt; = GitLab 实时标签；磁盘只是 dispatcher 进度缓存" vertex="1">
+          <mxGeometry height="280" width="500" x="40" y="1100" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

@@ -1,0 +1,17 @@
+[
+    {
+        "username": "F100001",
+        "password": "123456",
+        "name": "张三"
+    },
+    {
+        "username": "F100002",
+        "password": "123456",
+        "name": "李四"
+    },
+    {
+        "username": "F100003",
+        "password": "123456",
+        "name": "王五"
+    }
+]
