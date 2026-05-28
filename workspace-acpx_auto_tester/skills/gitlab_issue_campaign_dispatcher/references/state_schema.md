@@ -230,7 +230,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | ------------- | ---------------------------------------------------------------------------- | --------- |
 | `pending`     | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
 | `in_progress` | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
-| `blocked`     | Retryable failure (auth, runtime mismatch, dispatcher prep failed for this IID, post-push fetch failed, etc.). | no |
+| `blocked`     | Retryable failure (auth, runtime mismatch, dispatcher prep failed for this IID, post-push fetch failed, etc.). For acpx failures after worktree prep, the subagent first tries to stage, commit, and force-push any committable partial work to `${WORK_BRANCH}`; it still opens no MR and consumes retry budget. | no |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
 | `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes |
 | `timeout`     | `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`). The subagent still commits + force-pushes the partial work to `${WORK_BRANCH}` but does NOT open an MR. Terminal until a human strips `timeout`, adds `retry`, or applies `continue` — `retry_count` is NOT consumed and the dispatcher does NOT auto-retry. | yes (until human relabel) |
@@ -320,7 +320,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `mode_actual`        | string (enum)   | `fresh` / `continue` — what `prepare_attempt.sh` actually ran (continue can downgrade to fresh inside `prepare_attempt.sh`). |
 | `work_branch`        | string          | `issue/<iid>-auto-fix` — the single force-pushed remote branch.        |
 | `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` — per-attempt local branch kept for audit.   |
-| `commit_sha`         | string          | Empty `""` if Step 3 did not run (no_changes / blocked-before-commit). |
+| `commit_sha`         | string          | Empty `""` if commit/push did not run or failed. May be non-empty for `done`, `timeout`, or `blocked` replies when partial work was successfully force-pushed. |
 | `merge_request_url`  | string          | Empty `""` if Step 7 did not run.                                      |
 | `mr_action`          | string (enum)   | `created` / `rotated` / `none`. `rotated` when one or more prior open MRs were closed before creating the new one, `created` when no prior open MR existed, `none` when Step 7 did not run. The legacy `reused` value is retired — both fresh and continue modes now always close + create. |
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |

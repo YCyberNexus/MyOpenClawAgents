@@ -59,7 +59,7 @@ The very first line is a **payload sentinel** the dispatcher's Phase 5 step 0 ch
 ```
 # ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1
 You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
-The dispatcher has already prepared everything. Your job: run acpx → commit/push/wiki/MR/labels/summarize → return ONE compact JSON line.
+The dispatcher has already prepared everything. Your job: run acpx → commit/push/wiki/MR/labels/summarize → return ONE compact JSON line. If acpx fails after producing files, still stage/commit/push anything committable before marking the issue blocked.
 
 DO NOT load any SKILL.md, SOUL.md, or AGENTS.md.
 DO NOT call sessions_spawn or sessions_history.
@@ -139,9 +139,11 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
                                  blocked. The partial work in the worktree
                                  still gets force-pushed to {WORK_BRANCH},
                                  but no MR / `pr` is opened.
-    - any other non-zero exit  → FAIL status=blocked
+    - any other non-zero exit  → enter the dedicated BLOCKED_PUSH flow
+                                 described in <blocked_push_flow> below with
+                                 status=blocked and
                                  block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
-  Do NOT inspect or tail acpx logs after a non-timeout failure; preserve the logs and enter the FAIL flow immediately.
+  Do NOT inspect or tail acpx logs after a non-timeout failure; preserve the logs and enter the BLOCKED_PUSH flow immediately.
 
   TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
@@ -267,7 +269,7 @@ Step 9 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
     SUMMARY_POST_TO_ISSUE=<true|false> \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
-    BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed}> \
+    BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed,timeout}> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
@@ -275,9 +277,9 @@ Step 9 — SUMMARIZE
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
   CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
-  Run this on EVERY terminal path — done, no_changes, blocked, failed.
-  Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, and no_changes.
-  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note.
+  Run this on EVERY terminal path — done, no_changes, blocked, failed, timeout.
+  Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, no_changes, and timeout.
+  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
 
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
@@ -287,11 +289,11 @@ Step 10 — REPLY
   Field rules:
   - status = done           when Steps 0-8 all succeeded.
   - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
-  - status = blocked        when any FAIL flow was entered with a retryable reason. block_reason MUST be non-empty.
+  - status = blocked        when any FAIL flow or BLOCKED_PUSH flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
   - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137} or tool-side timeout). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
   - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
-  - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / timeout).
+  - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / BLOCKED_PUSH / timeout).
   - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
@@ -311,7 +313,7 @@ Step 10 — REPLY
 
 <fail_flow>
 When any step instructs "FAIL with status=X, block_reason=Y":
-  1. Stop the algorithm at this step. Do NOT continue to later steps.
+  1. Stop the algorithm at this step. Do NOT continue to later steps. Step 1 acpx non-timeout failures do not use this flow; they use <blocked_push_flow> so any committable generated files can still be pushed.
   2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
   3. Immediately sync the live issue label to blocked before summarizing:
      - Run `set_issue_label.sh remove doing` in its own Bash exec.
@@ -324,6 +326,105 @@ When any step instructs "FAIL with status=X, block_reason=Y":
 
 Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.
 </fail_flow>
+
+<blocked_push_flow>
+Entered when Step 1 saw a non-timeout acpx failure after the shared worktree
+was prepared. The current attempt still ends as `blocked`, but any committable
+generated files should be force-pushed to {WORK_BRANCH} if the normal staging
+and push scripts can do so.
+
+Set ATTEMPT_STATUS=blocked and set BLOCK_REASON to the Step 1 failure reason
+before starting this flow. Keep that status even if stage, commit, push, or
+post-push verification fails; append diagnostics to BLOCK_REASON instead of
+reclassifying.
+
+B1 — STAGE (same script as Step 2 of the normal flow)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/stage_and_guard.sh
+  CAPTURE: stage_status.
+  - "STAGED_OK"   → continue to B2.
+  - "NO_CHANGES"  → SKIP B2 + B3 (nothing to push). commit_sha stays "".
+                    Append "; no staged changes to push" to BLOCK_REASON.
+                    Jump to B4.
+  - non-zero exit → SKIP B2 + B3. Append "; stage step failed: <stderr>"
+                    to BLOCK_REASON. Jump to B4.
+
+B2 — COMMIT + force-push (same script as Step 3 of the normal flow)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
+    bash {SCRIPTS_DIR}/commit_and_push.sh
+  CAPTURE: commit_sha (script stdout).
+  Non-zero exit → leave commit_sha empty, append "; commit_and_push step
+  failed: <last stderr line>" to BLOCK_REASON, jump to B4.
+
+B3 — POST-PUSH verify (best-effort; same script as Step 4)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/post_push_verify.sh
+  Non-zero exit → append "; post-push verify failed: <last stderr line>"
+  to BLOCK_REASON. Do NOT abandon the blocked flow on this failure.
+
+B4 — LABEL doing → blocked
+  Each invocation MUST be a separate Bash exec.
+  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      REPO_PATH={REPO_PATH} \
+      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+      bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
+  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      REPO_PATH={REPO_PATH} \
+      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+      bash {SCRIPTS_DIR}/set_issue_label.sh add blocked
+  If either exec fails, append "; blocked label sync failed: <stderr>"
+  to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
+  the compact reply.
+  CAPTURE: record successful operations in labels_removed (include
+  "doing") and labels_added (include "blocked").
+
+B5 — SUMMARIZE (local-only; SAME script as Step 9)
+  ATTEMPT_STATUS=blocked \
+    SUMMARY_POST_TO_ISSUE=false \
+    COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
+    BLOCK_REASON=<BLOCK_REASON> \
+    PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_MODE={ISSUE_MODE} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/summarize_attempt.sh
+  Always SUMMARY_POST_TO_ISSUE=false for blocked — evidence stays local
+  under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for blocked
+  attempts even when a partial commit was pushed.
+
+B6 — REPLY
+  Emit the compact JSON per Step 10 with:
+    status            = "blocked"
+    mr_action         = "none"
+    merge_request_url = ""
+    wiki_url          = ""
+    commit_sha        = <captured in B2; "" if B2 was skipped or failed>
+    labels_added      = ["blocked"]      (plus any other successfully-added)
+    labels_removed    = ["doing"]        (plus any other successfully-removed)
+    summary_posted    = false
+    block_reason      = <BLOCK_REASON, non-empty>
+
+HARD rules for the blocked push flow:
+- Do NOT run Step 5 (Wiki upload), Step 6 (doing → done), Step 7
+  (create_mr.sh), or Step 8 (add `pr`). The issue gets `blocked`, NOT
+  `done` + `pr`, and no MR is opened for a known-failing attempt.
+- Do NOT call `acpx` again. The failed run already produced the only
+  worktree contents eligible for this attempt's push.
+- Do NOT use any push command except {SCRIPTS_DIR}/commit_and_push.sh.
+</blocked_push_flow>
 
 <timeout_flow>
 Entered ONLY when Step 1 saw acpx_exit ∈ {124, 137} (the script's `timeout`

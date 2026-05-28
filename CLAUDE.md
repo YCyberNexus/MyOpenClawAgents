@@ -49,7 +49,7 @@ The runtime delivers ONE callback per subagent termination, carrying the subagen
 9. `summarize_attempt.sh` writes a local per-attempt summary; successful `done` attempts also post it as a GitLab issue note, while failure summaries stay local.
 10. **Emit ONE compact JSON line** on the LAST line of its turn, carrying every fact the orchestrator's Phase 6 needs (`iid`, `attempt_number`, `status`, `mode_actual`, `work_branch`, `local_branch`, `commit_sha`, `merge_request_url`, `mr_action`, `wiki_url`, `labels_added`, `labels_removed`, `summary_posted`, `block_reason`, `log_dir`).
 
-On any subagent FAIL path, remove `doing` and add `blocked` before summarizing and returning the compact JSON. Phase 6 re-applies the final label state idempotently when the callback arrives.
+On any subagent FAIL path, remove `doing` and add `blocked` before summarizing and returning the compact JSON. For non-timeout acpx failures, the subagent first tries `stage_and_guard.sh` → `commit_and_push.sh` → `post_push_verify.sh` so committable partial work reaches `${WORK_BRANCH}` even though the issue remains `blocked` and no Wiki/MR/`pr` is produced. Phase 6 re-applies the final label state idempotently when the callback arrives.
 
 The subagent invokes scripts at `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts/<name>.sh` by absolute path (the orchestrator renders `{SCRIPTS_DIR}` into the prompt). It does NOT load any SKILL, NOT read `SOUL.md` / `AGENTS.md`, NOT call `sessions_spawn` / `sessions_history`, NOT write any state file. Its compact JSON reply is the single artifact the orchestrator reads from it.
 

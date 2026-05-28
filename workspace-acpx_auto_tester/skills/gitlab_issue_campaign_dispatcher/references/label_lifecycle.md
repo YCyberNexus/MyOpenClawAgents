@@ -36,6 +36,10 @@ When the scheduled trigger supplies `require_labels`, those labels are also trea
                 ▼
               failed   (retry exhausted, terminal)
 
+  doing ──► blocked  (retryable failure; acpx failures still force-push
+                      committable partial work to ${WORK_BRANCH} when possible,
+                      but do not open an MR / add pr)
+
   doing ──► timeout   (acpx exceeded wall-clock cap; partial work force-pushed to ${WORK_BRANCH};
                        NO MR; terminal until a human strips timeout or applies retry/continue)
 
@@ -58,7 +62,7 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 | `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `todo`, `continue`, `contiune`, `retry`, `new`, `blocked`, `done`, `pr`, and every matched trigger `require_labels` label; add `doing` |
 | `doing`    | `done`     | subagent   | branch pushed, post-push verification passed, attempt artifacts published to the project Wiki and linked from the issue | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
 | `done`     | `done+pr`  | subagent   | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr`                                           |
-| `doing`    | `blocked`  | subagent   | retryable failure during this run                    | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
+| `doing`    | `blocked`  | subagent   | retryable failure during this run; for acpx failures, committable partial work is first staged, committed, and force-pushed to `${WORK_BRANCH}` when possible, but no MR / `pr` is opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
 | `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work was committed and force-pushed to `${WORK_BRANCH}` but NO MR / `pr` was opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
 | `done`     | `done+blocked` | subagent | retryable failure after Wiki evidence and `done`, before `pr` can be added | `set_issue_label.sh add blocked`; do NOT add `pr`                     |
 | `blocked`  | `doing`    | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
