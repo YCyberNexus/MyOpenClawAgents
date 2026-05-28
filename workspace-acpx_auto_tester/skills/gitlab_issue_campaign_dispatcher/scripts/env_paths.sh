@@ -191,12 +191,15 @@ export REPO_PARENT_PATH REPO_PATH
 : "${DATA_BASENAME:=ifp-data}"
 # Relative path of the UI test-account pool file under ${REPO_PATH}
 # (the project checkout root). The relpath itself names the leading
-# directory; on the default deployment this is ${DATA_BASENAME} but the
-# pool may live under any other repo subdirectory. Optional trigger
-# field `ui_accounts_relpath` overrides this; same carry-forward
-# semantics as `result_basename` / `data_basename`. The default keeps
-# the canonical legacy location intact.
-: "${UI_ACCOUNTS_RELPATH:=ifp-data/ifp-common/ifp_users.json}"
+# directory and may point at any repo subdirectory, not only the data
+# dir. Optional trigger field `ui_accounts_relpath` overrides this with
+# carry-forward semantics (see references/trigger_command.md). There is
+# NO default value: when neither the trigger nor the persisted state
+# supplies a value, the dispatcher leaves UI_ACCOUNTS_RELPATH empty and
+# skips the entire UI-account allocation flow (no pool is read, no
+# accounts are injected into the subagent prompt). Initialize to empty
+# so downstream `set -u` reads do not trip.
+: "${UI_ACCOUNTS_RELPATH:=}"
 export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────

@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # load_ui_accounts.sh — read the test-team-owned UI test account pool
-# (${REPO_PATH}/${UI_ACCOUNTS_RELPATH}, default
-# ifp-data/ifp-common/ifp_users.json) and print accounts to stdout, one
-# per line in "user:pass" form, in JSON order.
+# at ${REPO_PATH}/${UI_ACCOUNTS_RELPATH} and print accounts to stdout,
+# one per line in "user:pass" form, in JSON order.
+#
+# UI_ACCOUNTS_RELPATH has no default value. The caller (typically
+# dispatch_prepare_tick.sh) MUST decide whether to invoke this script
+# based on whether the trigger / persisted state supplied a relpath. If
+# this script is invoked with an empty UI_ACCOUNTS_RELPATH, it exits 16
+# (invalid relpath); deployments that do not use UI accounts should NOT
+# call this script at all.
 #
 # The dispatcher uses this to allocate distinct test accounts per IID in
 # a concurrent batch. The system under test logs out an account when the
@@ -28,16 +34,17 @@
 #                              names the leading directory, which is
 #                              typically ${DATA_BASENAME} but does not
 #                              have to be).
-#                              Defaults to `ifp-data/ifp-common/ifp_users.json`.
-#                              Must be a non-empty relative path with no
-#                              leading "/", no "." / ".." segments, no
-#                              whitespace, and characters limited to
-#                              [A-Za-z0-9_./-]. Forwarded by the
-#                              dispatcher from the trigger field
-#                              `ui_accounts_relpath` (carry-forward
-#                              semantics, see references/trigger_command.md).
-#                              Validation here is defense-in-depth;
-#                              the dispatcher validates first.
+#                              No default value. Must be a non-empty
+#                              relative path with no leading "/", no
+#                              "." / ".." segments, no whitespace, and
+#                              characters limited to [A-Za-z0-9_./-].
+#                              Forwarded by the dispatcher from the
+#                              trigger field `ui_accounts_relpath`
+#                              (carry-forward semantics, see
+#                              references/trigger_command.md). Validation
+#                              here is defense-in-depth; the dispatcher
+#                              validates first AND decides whether to
+#                              invoke this script.
 #
 # When MAX_CONCURRENT_SUBAGENTS is set:
 #   - The script validates 1 ≤ MAX_CONCURRENT_SUBAGENTS ≤ pool_size.
@@ -104,12 +111,11 @@ fi
 DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
 
 # Relative path under ${REPO_PATH}. Trigger field `ui_accounts_relpath`
-# carries through dispatch_prepare_tick.sh as UI_ACCOUNTS_RELPATH; this
-# script defaults to the canonical legacy location (test team's
-# ifp-data/ifp-common/ifp_users.json under the project checkout) when
-# the env var is absent so projects that never adopt the trigger field
-# keep working.
-: "${UI_ACCOUNTS_RELPATH:=ifp-data/ifp-common/ifp_users.json}"
+# carries through dispatch_prepare_tick.sh as UI_ACCOUNTS_RELPATH. There
+# is NO default value here: callers that did not configure
+# ui_accounts_relpath MUST skip invoking this script. Reaching this
+# point with an empty value is a misconfiguration → exit 16 below.
+: "${UI_ACCOUNTS_RELPATH:=}"
 
 # Defense-in-depth validation. dispatch_prepare_tick.sh already rejects
 # unsafe values before calling this script, but keep the same gate here

@@ -657,42 +657,55 @@ CP_RC=$?
 set -e
 [ "${CP_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (exit ${CP_RC})"
 
-# ─── 14. Validate UI account pool ────────────────────────────────
-# The source lives inside the cloned project data directory, so this must
-# run after clone_or_pull.sh.
-POOL_OUT="$(mktemp)"
-POOL_ERR="$(mktemp)"
-chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
-set +e
-PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-  MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
-  MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
-  bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
-POOL_RC=$?
-set -e
-case "${POOL_RC}" in
-  0) ;;
-  10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${UI_ACCOUNTS_RELPATH}" ;;
-  11) emit_chat_failure "ui_accounts_pool_empty: ${UI_ACCOUNTS_RELPATH}" ;;
-  12) emit_chat_failure "ui_accounts_pool_malformed: ${UI_ACCOUNTS_RELPATH}" ;;
-  13)
-    POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-    emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
-  14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
-  15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
-  16) emit_chat_failure "invalid_ui_accounts_relpath: ${UI_ACCOUNTS_RELPATH}" ;;
-  *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
-esac
-POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
-mapfile -t POOL_LINES <"${POOL_OUT}"
-# POOL_OUT now lives only in the bash array; scrub the on-disk copy
-# before any other step can fail and leak passwords via trap cleanup.
-: >"${POOL_OUT}"
+# ─── 14. Validate UI account pool (only when configured) ─────────
+# Skipped entirely when UI_ACCOUNTS_RELPATH is empty (neither trigger
+# nor persisted state supplied a value). In that mode no pool is read,
+# no slots are allocated, and the subagent prompt omits the UI accounts
+# section. The max_concurrent_subagents lower-bound check has already
+# run at §6; the upper bound (≤ pool_size) only applies when a pool is
+# actually loaded.
+POOL_SIZE=0
+SLOT_SIZES_CSV=""
+POOL_LINES=()
+if [ -n "${UI_ACCOUNTS_RELPATH}" ]; then
+  # The source lives inside the cloned project, so this must run after
+  # clone_or_pull.sh.
+  POOL_OUT="$(mktemp)"
+  POOL_ERR="$(mktemp)"
+  chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
+  set +e
+  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+    MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
+    MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
+    bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
+  POOL_RC=$?
+  set -e
+  case "${POOL_RC}" in
+    0) ;;
+    10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${UI_ACCOUNTS_RELPATH}" ;;
+    11) emit_chat_failure "ui_accounts_pool_empty: ${UI_ACCOUNTS_RELPATH}" ;;
+    12) emit_chat_failure "ui_accounts_pool_malformed: ${UI_ACCOUNTS_RELPATH}" ;;
+    13)
+      POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+      emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
+    14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
+    15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
+    16) emit_chat_failure "invalid_ui_accounts_relpath: ${UI_ACCOUNTS_RELPATH}" ;;
+    *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
+  esac
+  POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+  SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
+  mapfile -t POOL_LINES <"${POOL_OUT}"
+  # POOL_OUT now lives only in the bash array; scrub the on-disk copy
+  # before any other step can fail and leak passwords via trap cleanup.
+  : >"${POOL_OUT}"
+fi
 
-# Cache pool data on state for the chat summary.
+# Cache pool data on state for the chat summary. Always written so the
+# disk schema stays consistent across UI-account-enabled and disabled
+# deployments (0 == "no pool configured this tick").
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
 
@@ -839,7 +852,14 @@ for iid in "${BATCH_IIDS[@]}"; do
 done
 
 # ─── 18. Slice UI accounts per IID using SLOT_SIZES ─────────────
-IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
+# When the pool was skipped at §14 (UI_ACCOUNTS_RELPATH empty),
+# SLOT_SIZES_CSV is "" and POOL_LINES is empty; every IID gets count=0
+# and UI_ACCOUNTS_JSON="[]". build_prompt.sh treats an empty array as
+# "no UI accounts allocated" and omits the corresponding prompt section.
+declare -a SLOT_SIZES_ARR=()
+if [ -n "${SLOT_SIZES_CSV}" ]; then
+  IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
+fi
 declare -A UI_OFFSET UI_COUNT UI_ACCOUNTS_JSON
 offset=0
 for k in "${!BATCH_IIDS[@]}"; do

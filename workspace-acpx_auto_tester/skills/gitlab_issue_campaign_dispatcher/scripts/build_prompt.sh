@@ -59,24 +59,28 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
 # UI accounts are allocated by the dispatcher per-batch from the pool at
-# ${REPO_PATH}/${UI_ACCOUNTS_RELPATH} (default relpath
-# ifp-data/ifp-common/ifp_users.json; override via trigger ui_accounts_relpath).
-# Each subagent
-# receives its assigned slot (count derived automatically from
-# pool_size / max_concurrent_subagents with the integer remainder
-# front-loaded, then capped by max_accounts_per_issue). The dispatcher
-# ensures distinct accounts across concurrent batch members AND across
-# concurrent robot executions within a subagent. If UI_ACCOUNTS is missing or invalid,
-# this script exits non-zero and the dispatcher marks the IID `blocked`.
-if [ -z "${UI_ACCOUNTS:-}" ]; then
-  echo "build_prompt: UI_ACCOUNTS is required (dispatcher must pass a JSON array of {\"u\":\"<user>\",\"p\":\"<pass>\"} objects)" >&2
-  exit 3
+# ${REPO_PATH}/${UI_ACCOUNTS_RELPATH} (no default; trigger field
+# ui_accounts_relpath, carry-forward persisted). When the deployment did
+# NOT configure ui_accounts_relpath, the dispatcher skips the pool load
+# entirely and passes either an empty UI_ACCOUNTS env var or UI_ACCOUNTS='[]'
+# to this script; in that mode the `# UI test accounts` section of the
+# rendered prompt is omitted. When configured, each subagent receives
+# its assigned slot (count derived automatically from pool_size /
+# max_concurrent_subagents with the integer remainder front-loaded,
+# then capped by max_accounts_per_issue). The dispatcher ensures
+# distinct accounts across concurrent batch members AND across
+# concurrent robot executions within a subagent. UI_ACCOUNTS must be
+# either unset, "", "[]", or a non-empty JSON array of
+# {"u":"<user>","p":"<pass>"} objects — any other shape exits non-zero
+# and the dispatcher marks the IID `blocked`.
+ACCOUNT_COUNT=0
+if [ -n "${UI_ACCOUNTS:-}" ]; then
+  if ! echo "${UI_ACCOUNTS}" | jq -e '. | type == "array"' >/dev/null 2>&1; then
+    echo "build_prompt: UI_ACCOUNTS must be a JSON array (got: ${UI_ACCOUNTS})" >&2
+    exit 4
+  fi
+  ACCOUNT_COUNT="$(echo "${UI_ACCOUNTS}" | jq 'length')"
 fi
-if ! echo "${UI_ACCOUNTS}" | jq -e '. | type == "array" and length > 0' >/dev/null 2>&1; then
-  echo "build_prompt: UI_ACCOUNTS must be a non-empty JSON array" >&2
-  exit 4
-fi
-ACCOUNT_COUNT="$(echo "${UI_ACCOUNTS}" | jq 'length')"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -203,6 +207,10 @@ EOF
 - Source baseline:            prepared by dispatcher for this mode (fresh uses ${DEV_BRANCH}; continue/resume uses ${WORK_BRANCH} or the latest local prior-attempt branch)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
+EOF
+
+  if [ "${ACCOUNT_COUNT}" -gt 0 ]; then
+    cat <<EOF
 # UI test accounts (dispatcher-allocated — overrides any account in the issue body)
 The orchestrator has allocated the following ${ACCOUNT_COUNT} test accounts for THIS run.
 When the issue description names a UI account (for example "use F100001 to log in"),
@@ -216,6 +224,10 @@ concurrently-running robots.
 
 $(echo "${UI_ACCOUNTS}" | jq -r 'to_entries | .[] | "- Account \(.key + 1): username=\(.value.u), password=\(.value.p)"')
 
+EOF
+  fi
+
+  cat <<EOF
 # Rules
 - Work only on this issue.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
