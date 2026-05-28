@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-28.2] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry with best-effort partial-work force-push after acpx failures, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-05-28.3] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry with best-effort partial-work force-push after acpx failures, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -64,7 +64,13 @@ reduced to a small fixed shape.
 
 ```
 1. cd "${SKILL_DIR}"
-2. echo "$trigger_text" | bash scripts/dispatch_prepare_tick.sh   → envelope
+2. bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'         → envelope
+   <verbatim multi-line trigger_text — every key=value line, no surrounding quotes>
+   TRIGGER_EOF
+   # MUST be a heredoc, not `echo "<multi-line literal>" | bash ...`. See
+   # §Invocation pitfall in references/dispatcher_wrappers.md — putting `|`
+   # on a new line after a closing `"` aborts the tick with a bash syntax
+   # error before the wrapper even starts.
 3. for each action in envelope.cleanup_actions where action.action == "kill":
      try: subagents kill --target action.target
      except: pass    # best-effort; state is already persisted as blocked
@@ -121,10 +127,15 @@ script returns, state is durable and the next IID can be spawned.
 
 ```
 1. cd "${SKILL_DIR}"
-2. echo "$worker_result_json" | \
-     IID=<callback.iid> ATTEMPT_NUMBER=<callback.attempt_number> \
+2. IID=<callback.iid> ATTEMPT_NUMBER=<callback.attempt_number> \
      (+ standard env from callback payload) \
-     bash scripts/dispatch_followup.sh                            → envelope
+     bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF'        → envelope
+   <verbatim worker_result_json — normally a single compact JSON line>
+   WORKER_JSON_EOF
+   # Same heredoc rule as Path A: do NOT use `echo "<literal>" | bash ...`
+   # with `|` on a separate line. The compact JSON is usually single-line,
+   # but if a future runtime delivers multi-line payloads the echo form
+   # breaks identically (bash sees a stray `|` after the closing quote).
 3. if envelope.cleanup.action == "kill":
      try: subagents kill --target envelope.cleanup.target
      except: pass    # cleanup is best-effort; failures only update chat_summary
