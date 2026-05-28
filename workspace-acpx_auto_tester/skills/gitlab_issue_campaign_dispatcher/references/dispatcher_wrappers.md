@@ -38,6 +38,16 @@ The LLM contract reduces to four genuinely LLM-only operations:
    `RUN_CHILD_COMPLETION_CALLBACK`.
 4. (per `cleanup.action == "kill"`) `subagents kill --target <cleanup.target>`.
 
+Every `bash scripts/<name>.sh ...` invocation above is shorthand for the
+chained form `cd "${SKILL_DIR}" && … && bash scripts/<name>.sh ...` issued
+inside a SINGLE Bash tool call. OpenClaw starts a fresh shell for every
+Bash exec — `cd` issued as its own Bash tool call does NOT persist into
+the next call, so the relative `scripts/<name>.sh` path resolves against
+OpenClaw's default cwd and aborts with `No such file or directory`. See
+[SKILL.md §Working Directory](../SKILL.md) and the rendered orchestrator
+pseudocode in [SKILL.md §The orchestrator loop](../SKILL.md) for the
+canonical form.
+
 Everything else — trigger parsing, state writes, flock, label sync, glab
 calls, prompt rendering, classification — happens inside the wrappers.
 
@@ -53,7 +63,11 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 - **stdin**: the full trigger text (including the `RUN_SCHEDULED_ISSUE_CAMPAIGN`
   header line and every `key=value` line). The wrapper parses this in
   bash and validates every required / optional field per
-  [`trigger_command.md`](./trigger_command.md).
+  [`trigger_command.md`](./trigger_command.md). The orchestrator MUST
+  feed this with a heredoc (`bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF' … TRIGGER_EOF`),
+  never with `echo "<multi-line literal>" | bash …`. See
+  [§Invocation pitfall](#invocation-pitfall) below — the echo form
+  silently breaks once the trigger has more than one line.
 - **env (minimum)**: none — `PROJECT` / `GROUP` / `GITLAB_TOKEN` /
   `REPO_PARENT_PATH` / `RESULT_BASENAME` / `DATA_BASENAME` are all
   derived from the trigger.
@@ -243,6 +257,12 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 - **stdin**: the subagent's terminal compact JSON (the runtime's
   `worker_result_json` payload). Empty stdin → synthesized blocked
   reply with `block_reason="callback worker_result_json was empty"`.
+  The orchestrator MUST feed this with a heredoc
+  (`… bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`),
+  never with `echo "<literal>" | … bash …`. The compact JSON is
+  normally one line, but the heredoc form is the only shape that
+  stays correct if a future runtime delivers a multi-line payload —
+  see [§Invocation pitfall](#invocation-pitfall) below.
 - **env (minimum)**: `PROJECT`, `GROUP`, `GITLAB_TOKEN`, `IID` (the
   callback IID). Optional: `ATTEMPT_NUMBER` (used only for logging when
   the JSON is unparseable), `REPO_PARENT_PATH`, `RESULT_BASENAME`,
@@ -330,5 +350,70 @@ envelope on stdout + the wrapper log:
 
 ```bash
 cd workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher
-echo "$trigger_text" | bash scripts/dispatch_prepare_tick.sh
+bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'
+RUN_SCHEDULED_ISSUE_CAMPAIGN
+group=…
+project=…
+gitlab_token=…
+…(every trigger key=value line)
+TRIGGER_EOF
 ```
+
+## Invocation pitfall
+
+`dispatch_prepare_tick.sh` and `dispatch_followup.sh` both read their
+primary input from stdin. The orchestrator MUST feed that input with a
+heredoc:
+
+```bash
+# correct — heredoc, multi-line safe
+bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'
+group=ai-infra
+project=pts_ui_testing
+…
+acpx_timeout_seconds=36000
+TRIGGER_EOF
+```
+
+The naive `echo "<multi-line literal>" | bash …` form is forbidden
+because it silently breaks once the literal spans more than one line.
+Observed failure mode in production:
+
+```bash
+# WRONG — bash aborts before the wrapper even starts
+echo "group=ai-infra
+project=pts_ui_testing
+…
+acpx_timeout_seconds=36000"
+   | bash scripts/dispatch_prepare_tick.sh 2>&1
+```
+
+```
+/bin/bash: -c:行23: 未预期的符号 `|' 附近有语法错误
+/bin/bash: -c:行23: `   | bash scripts/dispatch_prepare_tick.sh 2>&1'
+```
+
+What happens: the closing `"` on the last `key=value` line ends the
+`echo` argument and the newline terminates the `echo` command. The next
+line begins with `|`, which bash parses as a brand-new statement
+starting with a pipe operator — a syntax error.
+
+Tempting "fixes" that are still fragile and SHOULD NOT be used:
+
+- Backslash-continued echo (`echo "…" \` then `  | bash …`). Works in
+  isolation but a stray trailing space after the `\` silently re-breaks
+  it, and any embedded `$`, backtick, or `!` inside the trigger gets
+  shell-expanded before reaching the wrapper.
+- `printf '%s\n' "$trigger_text" | bash …`. Same expansion hazard, and
+  the orchestrator usually splices the literal text in place rather
+  than referencing a real `$trigger_text` variable, so the multi-line
+  problem returns.
+
+Heredocs avoid both problems: the body is read verbatim until the
+delimiter, no quoting is required, and the `bash …` command is fully
+formed on the line that opens the heredoc.
+
+The same rule applies to `dispatch_followup.sh`: even though the
+compact JSON is normally one line today, use a heredoc
+(`bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`)
+so the invocation stays correct if the payload ever grows.

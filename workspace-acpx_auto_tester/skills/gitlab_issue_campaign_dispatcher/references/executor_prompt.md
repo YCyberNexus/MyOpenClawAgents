@@ -116,8 +116,11 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
 Follow steps 0-10 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
 
 Step 0 — SETUP
-  cd {WORKTREE_DIR}
-  Confirm the shared per-issue worktree exists and the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at the worktree root (they came from the base branch checkout — `prepare_attempt.sh` reset tracked files to BASE_REF for this attempt). Confirm `{OUTPUT_DIR}` exists. If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent".
+  Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR} and that the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at its root (they came from the base branch checkout — `prepare_attempt.sh` reset tracked files to BASE_REF for this attempt). Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
+
+    ls -d {WORKTREE_DIR}/hulat {WORKTREE_DIR}/.claude {WORKTREE_DIR}/{DATA_BASENAME} {OUTPUT_DIR}
+
+  If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent". Do NOT issue a bare `cd {WORKTREE_DIR}` as a standalone Bash tool call expecting it to persist — `cd` does NOT survive across exec calls (see <env_contract>). Step 1's `bash {SCRIPTS_DIR}/run_acpx_attempt.sh` is invoked by absolute path and does its own internal `cd {WORKTREE_DIR}` before running acpx, so the subagent does not need to set cwd itself.
 
 Step 1 — EXECUTE acpx (one-shot, long-running)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
@@ -315,9 +318,17 @@ Step 10 — REPLY
 When any step instructs "FAIL with status=X, block_reason=Y":
   1. Stop the algorithm at this step. Do NOT continue to later steps. Step 1 acpx non-timeout failures do not use this flow; they use <blocked_push_flow> so any committable generated files can still be pushed.
   2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
-  3. Immediately sync the live issue label to blocked before summarizing:
-     - Run `set_issue_label.sh remove doing` in its own Bash exec.
-     - Run `set_issue_label.sh add blocked` in its own Bash exec.
+  3. Immediately sync the live issue label to blocked before summarizing. Each invocation MUST be a separate Bash exec, in the exact form used at Step 6 / B4 / T4 (full `bash {SCRIPTS_DIR}/set_issue_label.sh ...` absolute path + inline env vars):
+     - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+         REPO_PATH={REPO_PATH} \
+         RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+         bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
+     - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+         REPO_PATH={REPO_PATH} \
+         RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+         bash {SCRIPTS_DIR}/set_issue_label.sh add blocked
      - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
      - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked` and without `pr`.
   4. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
