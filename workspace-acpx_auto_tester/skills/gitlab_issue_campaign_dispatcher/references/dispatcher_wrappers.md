@@ -93,12 +93,21 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     `status:"completed"`.
 13. Run `ensure_labels.sh` + `clone_or_pull.sh`. Failure on either →
     `status:"tick_failed"`.
-14. Call `load_ui_accounts.sh`, which reads
-    `${REPO_PATH}/${DATA_BASENAME}/${UI_ACCOUNTS_RELPATH}` (default
-    relpath `ifp-common/ifp_users.json`; override with trigger
-    `ui_accounts_relpath`, carry-forward persisted); map exit codes
-    10–16 to the documented tick-level abort strings
-    (`ui_account_pool_too_small`, `invalid_ui_accounts_relpath`, etc.).
+14. **Only when `UI_ACCOUNTS_RELPATH` is non-empty** (trigger-supplied or
+    carry-forward persisted) — call `load_ui_accounts.sh`, which reads
+    `${REPO_PATH}/${UI_ACCOUNTS_RELPATH}` (no default; configured via
+    trigger `ui_accounts_relpath`, carry-forward persisted; resolved
+    under the project checkout root, NOT under
+    `${REPO_PATH}/${DATA_BASENAME}/`); map exit codes 10–16 to the
+    documented tick-level abort strings (`ui_account_pool_too_small`,
+    `invalid_ui_accounts_relpath`, etc.). When `UI_ACCOUNTS_RELPATH` is
+    empty, skip this step entirely: record `ui_account_pool_size = 0`,
+    leave `POOL_LINES` / `SLOT_SIZES_CSV` empty, and proceed with the
+    `max_concurrent_subagents ≥ 1` check already done at §6 (no
+    pool-size upper bound applies). Subsequent per-IID slicing (§18)
+    assigns `ui_account_count = 0` to every IID, and `build_prompt.sh`
+    drops the `# UI test accounts` section from the rendered Claude
+    Code prompt.
 15. Apply `require_labels` / `require_labels_match` filter on the
     evidence file. Compute `label_filtered_in` / `label_filtered_out`.
 16. **Batch formation.** Priority order:
