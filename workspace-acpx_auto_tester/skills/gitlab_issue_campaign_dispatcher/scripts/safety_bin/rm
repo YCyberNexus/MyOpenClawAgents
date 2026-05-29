@@ -1,3 +1,3 @@
 #!/usr/bin/env bash
-echo "rm is disabled for acpx_auto_tester runs; do not delete files or directories" >&2
+echo "rm is disabled for acpx_auto_tester_pts runs; do not delete files or directories" >&2
 exit 126

@@ -70,7 +70,7 @@ retire_temp_file() {
   # instead of deleting it.
   : >"${path}" 2>/dev/null || true
 
-  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester_pts.retired"
   mkdir -p "${retire_dir}" 2>/dev/null || return 0
   mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
 }
