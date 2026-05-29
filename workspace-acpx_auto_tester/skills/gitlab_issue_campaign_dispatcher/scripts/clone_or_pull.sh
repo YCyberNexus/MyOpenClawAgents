@@ -60,7 +60,7 @@ mkdir -p "$(dirname "${REPO_PATH}")"
 
 # ─── First-time bootstrap (no in-repo lock yet) ───────────────────
 if [ ! -d "${REPO_PATH}/.git" ]; then
-  BOOTSTRAP_LOCK="/tmp/acpx_auto_tester.clone.${PROJECT}.lock"
+  BOOTSTRAP_LOCK="/tmp/acpx_auto_tester_ifp.clone.${PROJECT}.lock"
   exec 7>"${BOOTSTRAP_LOCK}"
   flock 7
   if [ ! -d "${REPO_PATH}/.git" ]; then  # re-check after acquiring lock
@@ -120,6 +120,6 @@ RUNTIME_IGNORE_LINE="/$(basename "${RESULT_ROOT}")/"
 EXCLUDE_FILE="${REPO_PATH}/.git/info/exclude"
 mkdir -p "$(dirname "${EXCLUDE_FILE}")"
 if [ ! -f "${EXCLUDE_FILE}" ] || ! grep -Fxq "${RUNTIME_IGNORE_LINE}" "${EXCLUDE_FILE}"; then
-  printf '\n# acpx_auto_tester runtime root (managed by clone_or_pull.sh)\n%s\n' \
+  printf '\n# acpx_auto_tester_ifp runtime root (managed by clone_or_pull.sh)\n%s\n' \
     "${RUNTIME_IGNORE_LINE}" >> "${EXCLUDE_FILE}"
 fi
