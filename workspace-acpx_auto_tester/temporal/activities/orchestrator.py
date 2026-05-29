@@ -282,17 +282,44 @@ async def clone_or_pull_repo(camp: CampaignInput) -> str:
 # ---------------------------------------------------------------------------
 
 
+def _pool_is_configured(camp: CampaignInput) -> bool:
+    """True when this deployment opted into UI test accounts.
+
+    Mirrors the bash dispatcher's ``[ -n "${UI_ACCOUNTS_RELPATH}" ]`` gate in
+    ``dispatch_prepare_tick.sh`` §14: the pool is **opt-in**, so an empty
+    ``ui_accounts_relpath`` means "skip the whole UI-account flow". The
+    ``ACPX_UI_ACCOUNTS_PATH`` local-test escape hatch forces the pool on even
+    when the relpath is empty, so it counts as configured too.
+
+    Note: this gate (used by :func:`load_ui_account_pool`) reads ``os.environ``
+    while :func:`build_executor_prompt` instead gates on ``att.ui_account_count``.
+    The two stay consistent because all per-IID activities of a tick share one
+    worker host via worktree affinity (``task_queue=workflow.info().task_queue``)
+    and production deployments never set ``ACPX_UI_ACCOUNTS_PATH`` (the relpath
+    drives everything), so the two signals cannot disagree.
+    """
+    return bool(os.environ.get("ACPX_UI_ACCOUNTS_PATH")) or bool(
+        camp.ui_accounts_relpath
+    )
+
+
 def _resolve_pool_path(camp: CampaignInput) -> Path:
     """Resolve the pool JSON path from CampaignInput (with env override).
 
     The test-team-owned account pool lives inside the cloned project repo at
-    ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` (default subpath
-    ``ifp-common/ifp_users.json``). This mirrors ``load_ui_accounts.sh``'s
-    derivation so the Python read of the pool stays in lock-step with the
-    bash read.
+    ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``. This mirrors
+    ``load_ui_accounts.sh``'s derivation so the Python read of the pool stays
+    in lock-step with the bash read.
 
     ``ACPX_UI_ACCOUNTS_PATH`` is honored as an absolute-path escape hatch for
     local tests; in production deployments the trigger drives the path.
+
+    Precondition: only call this when :func:`_pool_is_configured` is True. The
+    UI account pool is opt-in (an empty ``ui_accounts_relpath`` skips the
+    flow), so an empty relpath reaching this point is a caller bug, not a
+    runtime input — without the guard it would resolve to the
+    ``${DATA_BASENAME}`` directory itself and fail later with a confusing
+    "not a file" error.
 
     Extracted as a sync helper so :func:`build_executor_prompt` can read the
     pool inline (via :func:`shared.ui_accounts.load_pool`) without invoking
@@ -311,6 +338,13 @@ def _resolve_pool_path(camp: CampaignInput) -> Path:
                 f"ACPX_UI_ACCOUNTS_PATH must be absolute, got {override!r}",
             )
         return p
+    if not camp.ui_accounts_relpath:
+        raise_app_error(
+            AcpxErrorType.INVARIANT_VIOLATION,
+            "_resolve_pool_path called with empty ui_accounts_relpath; the UI "
+            "account pool is opt-in and callers must gate on "
+            "_pool_is_configured()",
+        )
     repo_path = Path(camp.repo_parent_path.rstrip("/")) / camp.project
     return repo_path / camp.data_basename / camp.ui_accounts_relpath
 
@@ -325,11 +359,22 @@ async def load_ui_account_pool(camp: CampaignInput) -> UiAccountPoolInfo:
     activity only returns a non-secret summary. Credentials stay worker-local
     and are read directly inside :func:`build_executor_prompt`.
 
+    Opt-in: when ``ui_accounts_relpath`` is empty (and no ``ACPX_UI_ACCOUNTS_PATH``
+    override), the deployment does not use UI test accounts, so this skips the
+    read and reports an empty pool — mirroring ``dispatch_prepare_tick.sh`` §14,
+    which skips ``load_ui_accounts.sh`` entirely and records ``POOL_SIZE=0`` when
+    ``UI_ACCOUNTS_RELPATH`` is empty. Downstream, :func:`shared.ui_accounts.allocate_slots`
+    hands out count-0 slots and :func:`build_executor_prompt` omits the prompt's
+    ``# UI test accounts`` section.
+
     Args:
         camp: CampaignInput used to derive the pool path
-            ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``.
-            Must run after :func:`clone_or_pull_repo` so the repo is on disk.
+            ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` when the
+            pool is configured. Must run after :func:`clone_or_pull_repo` so the
+            repo is on disk.
     """
+    if not _pool_is_configured(camp):
+        return UiAccountPoolInfo(count=0)
     return UiAccountPoolInfo(count=len(load_pool(_resolve_pool_path(camp))))
 
 
@@ -467,6 +512,16 @@ async def build_executor_prompt(
     The calling workflow only passes integer slot indices — plaintext
     passwords never enter Temporal workflow history.
 
+    Opt-in: a count-0 slot means either the deployment opted out of UI test
+    accounts (empty ``ui_accounts_relpath`` → empty pool → count-0 slots) or
+    this slot drew no credentials. In both cases skip the pool read and pass
+    no ``UI_ACCOUNTS`` env var so ``build_prompt.sh`` omits the ``# UI test
+    accounts`` section. This is behaviorally identical to the bash dispatcher:
+    ``dispatch_prepare_tick.sh`` §18 assigns ``UI_ACCOUNTS_JSON="[]"`` to
+    count-0 IIDs, and ``build_prompt.sh`` defaults ``ACCOUNT_COUNT=0`` and gates
+    the section on ``[ "${ACCOUNT_COUNT}" -gt 0 ]`` — so both an empty ``"[]"``
+    and an unset ``UI_ACCOUNTS`` produce the same omitted section.
+
     We call :func:`shared.ui_accounts.load_pool` directly (sync) rather than
     ``await load_ui_account_pool()`` because awaiting another ``@activity.defn``
     from inside an activity body executes it within the *current* activity's
@@ -474,21 +529,25 @@ async def build_executor_prompt(
     inner call inherit this activity's RetryPolicy. See round-2 review
     Critical-2.
     """
-    pool = load_pool(_resolve_pool_path(camp))
-    slot_start = att.ui_account_index_start
-    slot_end = slot_start + att.ui_account_count
-    if slot_end > len(pool):
-        raise_app_error(
-            AcpxErrorType.POOL_TOO_SMALL,
-            f"UI account slot [{slot_start}, {slot_end}) exceeds pool size {len(pool)}",
+    ui_accounts_json: str | None
+    if att.ui_account_count == 0:
+        ui_accounts_json = None
+    else:
+        pool = load_pool(_resolve_pool_path(camp))
+        slot_start = att.ui_account_index_start
+        slot_end = slot_start + att.ui_account_count
+        if slot_end > len(pool):
+            raise_app_error(
+                AcpxErrorType.POOL_TOO_SMALL,
+                f"UI account slot [{slot_start}, {slot_end}) exceeds pool size {len(pool)}",
+            )
+        slot_accounts = pool[slot_start:slot_end]
+        ui_accounts_json = json.dumps(
+            [
+                {"u": acc.username, "p": acc.password}
+                for acc in slot_accounts
+            ]
         )
-    slot_accounts = pool[slot_start:slot_end]
-    ui_accounts_json = json.dumps(
-        [
-            {"u": acc.username, "p": acc.password}
-            for acc in slot_accounts
-        ]
-    )
 
     env = build_attempt_env(camp, att, ui_accounts_json=ui_accounts_json)
     paths = _derive_paths(camp, att)

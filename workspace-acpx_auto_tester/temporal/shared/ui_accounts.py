@@ -8,10 +8,11 @@ deterministic + persisted in event history.
 
 Public surface:
 
-* :func:`load_pool` — parses the test-team-owned JSON pool file (default
-  path ``${REPO_PATH}/${DATA_BASENAME}/ifp-common/ifp_users.json``;
-  override via the trigger's ``ui_accounts_relpath``). Called by the
-  ``load_ui_account_pool`` activity (file I/O is non-deterministic and
+* :func:`load_pool` — parses the test-team-owned JSON pool file at
+  ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``. The pool is
+  **opt-in**: when the trigger's ``ui_accounts_relpath`` is empty the
+  ``load_ui_account_pool`` activity skips this read entirely and reports an
+  empty pool. Called by that activity (file I/O is non-deterministic and
   forbidden from workflow code).
 * :func:`allocate_slots` — pure function: ``(pool_size, max_concurrent_subagents,
   max_accounts_per_issue) -> list[(index_start, count)]``. Safe to call from
@@ -45,8 +46,10 @@ def load_pool(config_path: str | Path) -> tuple[UiAccount, ...]:
 
     Args:
         config_path: absolute path to the pool JSON. The caller composes this
-            as ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``
-            (default subpath ``ifp-common/ifp_users.json``).
+            as ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``. This
+            function is only reached when the pool is configured (non-empty
+            ``ui_accounts_relpath``); the opt-out case is short-circuited by
+            the ``load_ui_account_pool`` activity before any read.
 
     Returns:
         Tuple of accounts in JSON-array order. Index in the tuple is the
@@ -168,8 +171,16 @@ def allocate_slots(
         is capped by max_accounts_per_issue (e.g. default cap 14:
         pool=50, max=4 → 13,13,12,12; pool=40, max=1 → 14; pool=3, max=2 → 2,1)."
 
+    Opt-in: ``pool_size == 0`` means the deployment did not configure a UI
+    account pool (empty ``ui_accounts_relpath``). In that mode every slot is
+    handed a count of 0 so the batch still spawns ``max_concurrent_subagents``
+    IIDs, each with no credentials, and the ``pool_too_small`` upper-bound
+    check is skipped — it only applies once a pool is actually loaded. This
+    mirrors ``dispatch_prepare_tick.sh`` §18: when the pool is skipped,
+    ``SLOT_SIZES`` is empty and every IID gets ``count=0`` / ``UI_ACCOUNTS_JSON="[]"``.
+
     Args:
-        pool_size: total credentials available.
+        pool_size: total credentials available (0 when the pool is opt-out).
         max_concurrent_subagents: how many slots to divide the pool into.
         max_accounts_per_issue: per-slot upper bound (defaults to 14 upstream).
 
@@ -185,6 +196,11 @@ def allocate_slots(
         raise ValueError("invalid_max_concurrent_subagents: must be >= 1")
     if max_accounts_per_issue < 1:
         raise ValueError("invalid_max_accounts_per_issue: must be >= 1")
+    if pool_size == 0:
+        return tuple(
+            _SlotPlan(index_start=0, count=0)
+            for _ in range(max_concurrent_subagents)
+        )
     if pool_size < max_concurrent_subagents:
         raise ValueError(
             "ui_account_pool_too_small: "

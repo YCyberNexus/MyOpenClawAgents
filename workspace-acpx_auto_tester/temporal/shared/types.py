@@ -122,12 +122,18 @@ class CampaignInput:
     repo_parent_path: str = "/data"               # ${REPO_PATH} = repo_parent_path/<project>
     result_basename: str = "ifp-result"
     data_basename: str = "ifp-data"
-    # Relative path of the test-team-owned UI account pool JSON file under
-    # ${REPO_PATH}/${data_basename}/. Mirrors trigger field
-    # `ui_accounts_relpath` (carry-forward semantics in the legacy bash
-    # dispatcher; here it's just a tick-level CampaignInput value because
-    # Temporal's Schedule input is the carry-forward equivalent).
-    ui_accounts_relpath: str = "ifp-common/ifp_users.json"
+    # Relative path of the test-team-owned UI account pool JSON file,
+    # resolved under the project checkout root ${REPO_PATH}/. Mirrors trigger
+    # field `ui_accounts_relpath`, which is **opt-in with no default**: the
+    # empty string means "this deployment does not use UI test accounts".
+    # In that mode the whole pool flow is skipped — ``load_ui_account_pool``
+    # returns an empty pool, ``allocate_slots`` hands out count-0 slots, and
+    # ``build_executor_prompt`` omits the prompt's ``# UI test accounts``
+    # section — matching the LLM/bash dispatcher exactly (see
+    # ``scripts/dispatch_prepare_tick.sh`` §14 + ``build_prompt.sh``). The
+    # carry-forward semantics the bash dispatcher gets from persisted
+    # ``campaign_state.json`` are provided here by Temporal's Schedule input.
+    ui_accounts_relpath: str = ""
     max_concurrent_subagents: int = 1
     max_accounts_per_issue: int = 14
     # The two timeout fields below use the sentinel value ``0`` to mean
@@ -214,7 +220,12 @@ class CampaignInput:
             raise ValueError("run_timeout_seconds_below_acpx_timeout_seconds_plus_120")
         if self.require_labels_match not in ("or", "and"):
             raise ValueError("invalid_require_labels_match")
-        _validate_ui_accounts_relpath(self.ui_accounts_relpath)
+        # UI account pool is opt-in: an empty ``ui_accounts_relpath`` means the
+        # deployment does not use UI test accounts, so the whole pool flow is
+        # skipped downstream and there is nothing to validate. Only enforce the
+        # relative-path safety rules when a value is actually configured.
+        if self.ui_accounts_relpath:
+            _validate_ui_accounts_relpath(self.ui_accounts_relpath)
         return self
 
 
