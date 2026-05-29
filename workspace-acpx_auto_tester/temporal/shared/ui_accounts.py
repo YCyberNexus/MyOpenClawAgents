@@ -9,7 +9,8 @@ deterministic + persisted in event history.
 Public surface:
 
 * :func:`load_pool` — parses the test-team-owned JSON pool file at
-  ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``. The pool is
+  ``${REPO_PATH}/${ui_accounts_relpath}`` (resolved under the project checkout
+  root, NOT under ``${REPO_PATH}/${DATA_BASENAME}/``). The pool is
   **opt-in**: when the trigger's ``ui_accounts_relpath`` is empty the
   ``load_ui_account_pool`` activity skips this read entirely and reports an
   empty pool. Called by that activity (file I/O is non-deterministic and
@@ -46,8 +47,9 @@ def load_pool(config_path: str | Path) -> tuple[UiAccount, ...]:
 
     Args:
         config_path: absolute path to the pool JSON. The caller composes this
-            as ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``. This
-            function is only reached when the pool is configured (non-empty
+            as ``${REPO_PATH}/${ui_accounts_relpath}`` (resolved under the
+            project checkout root, NOT under ``${REPO_PATH}/${DATA_BASENAME}/``).
+            This function is only reached when the pool is configured (non-empty
             ``ui_accounts_relpath``); the opt-out case is short-circuited by
             the ``load_ui_account_pool`` activity before any read.
 

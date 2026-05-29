@@ -28,7 +28,9 @@ Environment contract:
     * ``ACPX_UI_ACCOUNTS_PATH``— optional absolute-path escape hatch (used by
                                  local tests). In production the pool path is
                                  derived from the CampaignInput trigger as
-                                 ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``.
+                                 ``${REPO_PATH}/${ui_accounts_relpath}`` (resolved
+                                 under the project checkout root, NOT under
+                                 ``${REPO_PATH}/${DATA_BASENAME}/``).
                                  The pool is opt-in: an empty ``ui_accounts_relpath``
                                  skips the UI-account flow entirely.
 """

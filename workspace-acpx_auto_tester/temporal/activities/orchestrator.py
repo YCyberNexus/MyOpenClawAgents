@@ -7,7 +7,7 @@ already exist:
 * A1 ``reconcile_gitlab``           ← ``reconcile.sh``
 * A2 ``ensure_workflow_labels``     ← ``ensure_labels.sh``
 * A3 ``clone_or_pull_repo``         ← ``clone_or_pull.sh``
-* A4 ``load_ui_account_pool``       ← ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` JSON parser
+* A4 ``load_ui_account_pool``       ← ``${REPO_PATH}/${ui_accounts_relpath}`` JSON parser
 * A4b ``allocate_attempt_number``   ← ``allocate_attempt.sh``
 * A5 ``prepare_attempt_worktree``   ← ``prepare_attempt.sh``
 * A6 ``build_executor_prompt``      ← ``build_prompt.sh``
@@ -307,9 +307,13 @@ def _resolve_pool_path(camp: CampaignInput) -> Path:
     """Resolve the pool JSON path from CampaignInput (with env override).
 
     The test-team-owned account pool lives inside the cloned project repo at
-    ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``. This mirrors
-    ``load_ui_accounts.sh``'s derivation so the Python read of the pool stays
-    in lock-step with the bash read.
+    ``${REPO_PATH}/${ui_accounts_relpath}``, i.e. the relpath is resolved under
+    the project checkout root, NOT under ``${REPO_PATH}/${DATA_BASENAME}/``.
+    This mirrors ``load_ui_accounts.sh``'s derivation (``POOL_FILE=
+    "${REPO_PATH}/${UI_ACCOUNTS_RELPATH}"``) so the Python read of the pool
+    stays in lock-step with the bash read. The relpath may itself begin with
+    ``${DATA_BASENAME}/`` (e.g. ``ifp-data/ifp_users.json``), but that prefix
+    must be part of the trigger value — it is no longer auto-prepended here.
 
     ``ACPX_UI_ACCOUNTS_PATH`` is honored as an absolute-path escape hatch for
     local tests; in production deployments the trigger drives the path.
@@ -317,8 +321,8 @@ def _resolve_pool_path(camp: CampaignInput) -> Path:
     Precondition: only call this when :func:`_pool_is_configured` is True. The
     UI account pool is opt-in (an empty ``ui_accounts_relpath`` skips the
     flow), so an empty relpath reaching this point is a caller bug, not a
-    runtime input — without the guard it would resolve to the
-    ``${DATA_BASENAME}`` directory itself and fail later with a confusing
+    runtime input — without the guard ``repo_path / ""`` would resolve to the
+    project checkout root itself and fail later with a confusing
     "not a file" error.
 
     Extracted as a sync helper so :func:`build_executor_prompt` can read the
@@ -346,7 +350,7 @@ def _resolve_pool_path(camp: CampaignInput) -> Path:
             "_pool_is_configured()",
         )
     repo_path = Path(camp.repo_parent_path.rstrip("/")) / camp.project
-    return repo_path / camp.data_basename / camp.ui_accounts_relpath
+    return repo_path / camp.ui_accounts_relpath
 
 
 @activity.defn(name="load_ui_account_pool")
@@ -369,8 +373,8 @@ async def load_ui_account_pool(camp: CampaignInput) -> UiAccountPoolInfo:
 
     Args:
         camp: CampaignInput used to derive the pool path
-            ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` when the
-            pool is configured. Must run after :func:`clone_or_pull_repo` so the
+            ``${REPO_PATH}/${ui_accounts_relpath}`` when the pool is
+            configured. Must run after :func:`clone_or_pull_repo` so the
             repo is on disk.
     """
     if not _pool_is_configured(camp):
@@ -505,7 +509,7 @@ async def build_executor_prompt(
 
     Security note (review B6): UI account credentials are de-referenced
     **inside this activity** by reading the project JSON pool from
-    ``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}`` on the worker
+    ``${REPO_PATH}/${ui_accounts_relpath}`` on the worker
     host, slicing by ``att.ui_account_index_start`` /
     ``att.ui_account_count``, and feeding legacy ``{"u": "...", "p": "..."}``
     JSON into the ``UI_ACCOUNTS=`` env var that ``build_prompt.sh`` reads.

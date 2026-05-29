@@ -36,7 +36,11 @@ _UI_ACCOUNTS_RELPATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 
 
 def _validate_ui_accounts_relpath(value: str) -> None:
-    """Reject paths that would let UI_ACCOUNTS_RELPATH escape ${DATA_DIR}.
+    """Reject paths that would let UI_ACCOUNTS_RELPATH escape ${REPO_PATH}.
+
+    Post-migration the relpath is resolved under the project checkout root
+    ``${REPO_PATH}`` (NOT under ``${REPO_PATH}/${DATA_BASENAME}/``), so these
+    rules guard against escaping that root.
 
     Same rules the legacy ``load_ui_accounts.sh`` enforces (exit code 16):
     non-empty, not absolute, no ``.`` / ``..`` segments, no whitespace,
@@ -344,7 +348,7 @@ class ReconcileEvidence:
 @dataclass(frozen=True)
 class UiAccount:
     """One entry from the project's UI account JSON pool
-    (``${REPO_PATH}/${DATA_BASENAME}/${ui_accounts_relpath}``)."""
+    (``${REPO_PATH}/${ui_accounts_relpath}``)."""
 
     index: int                  # 0-based; stable across reads (file order)
     username: str
