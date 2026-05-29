@@ -79,11 +79,11 @@ ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}                     # fresh | continue
 BRANCH={BRANCH}                             # integration / target branch (MR opens against this)
-DEV_BRANCH={DEV_BRANCH}                     # clean baseline (used by dispatcher for fresh-mode checkout)
+DEV_BRANCH={DEV_BRANCH}                     # clean baseline (fresh-mode checkout; shared config refresh source for every run)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
-WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are present from the base branch checkout. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
+WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are refreshed from latest origin/{DEV_BRANCH} before every run. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
@@ -118,7 +118,7 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
 Follow steps 0-10 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
 
 Step 0 — SETUP
-  Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR} and that the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at its root (they came from the base branch checkout — `prepare_attempt.sh` reset tracked files to BASE_REF for this attempt). Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
+  Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR} and that the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at its root (tracked shared config was refreshed from latest origin/{DEV_BRANCH} by `prepare_attempt.sh`). Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
 
     ls -d {WORKTREE_DIR}/hulat {WORKTREE_DIR}/.claude {WORKTREE_DIR}/{DATA_BASENAME} {OUTPUT_DIR}
 

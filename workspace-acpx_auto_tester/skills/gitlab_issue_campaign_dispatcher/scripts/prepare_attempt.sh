@@ -27,6 +27,10 @@
 #               the latest local prior attempt branch if one exists, else
 #               downgrade to fresh (and use origin/${DEV_BRANCH}). This mode
 #               is used only when the live issue label requests continue.
+#               After the base checkout, shared test-team configuration paths
+#               (`.claude/`, `hulat/`, and `${DATA_BASENAME}/`) are refreshed
+#               from the latest origin/${DEV_BRANCH} so resume attempts do not
+#               run with stale runner config.
 #
 # Why DEV_BRANCH and not BRANCH for fresh mode:
 #   BRANCH is the integration target (e.g. master) and accumulates every
@@ -43,9 +47,10 @@
 #   even older ${RESULT_ROOT}/issue-<iid>/worktree/. This script picks
 #   the most recent legacy path as a salvage source, rsync's its
 #   untracked content into the freshly-created shared worktree with
-#   `--ignore-existing` (so BASE_REF's tracked files and the new
-#   worktree's `.git` gitfile are never overwritten), then archives the
-#   legacy paths under `${WORKTREES_ROOT}/.preserved-legacy/`. This
+#   `--ignore-existing` while excluding shared config paths (so BASE_REF's
+#   tracked files, the latest DEV_BRANCH config, and the new worktree's
+#   `.git` gitfile are never overwritten), then archives the legacy paths
+#   under `${WORKTREES_ROOT}/.preserved-legacy/`. This
 #   preserves the "later attempts can see earlier attempts' files" contract
 #   that the worktree restructure was meant to provide without physically
 #   deleting prior attempt files. The same salvage shape is also applied to
@@ -65,6 +70,14 @@
 #   require_labels) archives the snapshot and then quarantines any active
 #   same-IID runtime subtree that survived checkout, so old files are not
 #   physically deleted but also do not contaminate the reset run.
+#
+# Shared config freshness:
+#   Test-team-owned `.claude/`, `hulat/`, and `${DATA_BASENAME}/` may change on
+#   DEV_BRANCH while an issue's WORK_BRANCH is still being reviewed. Every
+#   attempt refreshes those tracked paths from the just-fetched
+#   origin/${DEV_BRANCH} after the base checkout and before acpx runs. This
+#   keeps continue-mode attempts on the latest runner/materials config without
+#   changing the resume base for issue output/log history.
 #
 # What this script does NOT do:
 #   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
@@ -370,6 +383,38 @@ archive_fresh_active_runtime_tree() {
   archive_switch_backup "${ISSUE_WORKTREE_RUNTIME_DIR}" "fresh-active-before-attempt-${ATTEMPT_NUMBER_PADDED}"
 }
 
+refresh_shared_config_from_dev() {
+  local config_ref="origin/${DEV_BRANCH}"
+  local config_paths=(".claude" "hulat" "${DATA_BASENAME}")
+  local path
+
+  for path in "${config_paths[@]}"; do
+    if ! git -C "${REPO_PATH}" cat-file -e "${config_ref}:${path}" 2>/dev/null; then
+      echo "prepare_attempt: required shared config path ${path} does not exist on ${config_ref}" >&2
+      echo "prepare_attempt: check dev_branch=${DEV_BRANCH} and the project config layout before retrying." >&2
+      exit 8
+    fi
+  done
+
+  # A prior claude_settings_path override may have marked .claude/settings.json
+  # skip-worktree. Clear that bit for tracked config paths before overlaying
+  # origin/${DEV_BRANCH}, otherwise explicit config updates can be ignored.
+  local tracked_config_paths
+  if tracked_config_paths="$(git -C "${WORKTREE_DIR}" ls-files -- "${config_paths[@]}")" \
+     && [ -n "${tracked_config_paths}" ]; then
+    while IFS= read -r path || [ -n "${path}" ]; do
+      [ -n "${path}" ] || continue
+      git -C "${WORKTREE_DIR}" update-index --no-skip-worktree -- "${path}" 2>/dev/null || true
+    done <<<"${tracked_config_paths}"
+  fi
+
+  echo "prepare_attempt: refreshing shared config paths from ${config_ref}: ${config_paths[*]}" >&2
+  git -C "${WORKTREE_DIR}" checkout "${config_ref}" -- "${config_paths[@]}" >&2
+  # `git checkout <tree> -- <path>` stages those paths. Leave them unstaged so
+  # stage_and_guard.sh captures the full pre-stage diff/evidence before commit.
+  git -C "${WORKTREE_DIR}" reset -q -- "${config_paths[@]}" 2>/dev/null || true
+}
+
 if [ "${WORKTREE_REUSE}" = true ]; then
   if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
     WORKTREE_SWITCH_BACKUP="${WORKTREE_DIR}.switch-backup.$$"
@@ -394,6 +439,7 @@ else
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
+refresh_shared_config_from_dev
 if [ "${ACTUAL_MODE}" = "continue" ]; then
   restore_issue_runtime_tree "${STALE_SWITCH_BACKUP}"
   restore_issue_runtime_tree "${WORKTREE_SWITCH_BACKUP}"
@@ -430,6 +476,8 @@ mkdir -p "${OUTPUT_DIR}"
 #   - `--exclude='/.git'` blocks the source-root gitfile; the new
 #     worktree already has its own correct `.git` from `git worktree
 #     add`.
+#   - Shared config paths are excluded from salvage because they are refreshed
+#     from origin/${DEV_BRANCH} for every attempt.
 salvage_into_worktree() {
   local src="$1"
   if [ -z "${src}" ] || [ ! -d "${src}" ]; then
@@ -442,6 +490,9 @@ salvage_into_worktree() {
   echo "prepare_attempt: salvaging untracked scratch from ${src} into ${WORKTREE_DIR}" >&2
   rsync -rltD --ignore-existing \
     --exclude='/.git' \
+    --exclude='/.claude' \
+    --exclude='/hulat' \
+    --exclude="/${DATA_BASENAME}" \
     "${src}/" "${WORKTREE_DIR}/"
 }
 
