@@ -1120,17 +1120,31 @@ for iid in "${BATCH_IIDS[@]}"; do
   mkdir -p "${LOG_DIR_X}"
 
   # Extract the fenced "Rendered Prompt" block from executor_prompt.md.
-  # Use the sentinel line (which is part of the prompt itself) as the
-  # opener so a future markdown edit introducing extra code fences in
-  # the surrounding documentation does not silently mis-extract.
+  # Use the paired sentinels (which are part of the prompt itself) as the
+  # opener AND closer so a future markdown edit introducing nested ```code```
+  # examples inside the fenced block does not silently truncate the template
+  # at the first inner fence. The closer sentinel is consumed by the awk
+  # extractor (exit before printing) and never appears in the rendered payload.
+  set +e
   template="$(awk '
     /^# ACPX_AUTO_TESTER_TEMPORAL_EXECUTOR_PROMPT_V1$/ { found=1 }
     found {
-      if ($0 == "```") exit
+      if ($0 == "# ACPX_AUTO_TESTER_TEMPORAL_EXECUTOR_PROMPT_V1_END") { closed=1; exit }
       print
     }
+    END { if (found && !closed) exit 2 }
   ' "${SKILL_DIR}/references/executor_prompt.md")"
+  template_rc=$?
+  set -e
 
+  if [ "${template_rc}" -eq 2 ]; then
+    prep_blocked "executor_prompt.md missing end-sentinel '# ACPX_AUTO_TESTER_TEMPORAL_EXECUTOR_PROMPT_V1_END' — template extraction would be truncated"
+    continue
+  fi
+  if [ "${template_rc}" -ne 0 ]; then
+    prep_blocked "executor_prompt.md awk extraction failed: rc=${template_rc}"
+    continue
+  fi
   if [ -z "${template}" ]; then
     prep_blocked "executor_prompt.md fenced block missing or sentinel not found"
     continue
