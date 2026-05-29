@@ -56,6 +56,8 @@ Everything between the fenced lines below is what the dispatcher writes into `se
 
 The very first line is a **payload sentinel** the dispatcher's Phase 5 step 0 checks via fixed-string grep before each `sessions_spawn` call (see SKILL.md). Keep it verbatim — do not edit, translate, or move it. If the sentinel is missing from the rendered string the orchestrator hands to `sessions_spawn`, that is a strong signal the orchestrator is about to ship the wrong prompt (e.g. `${LOG_DIR}/prompt.txt`), and the spawn MUST be aborted.
 
+The **last line inside the fenced block** is a paired closer sentinel `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1_END`. `dispatch_prepare_tick.sh` uses it (NOT the surrounding triple-backtick fence) as the awk terminator that bounds the rendered prompt. This means it is safe to add nested ```code``` examples inside the fenced block — the extractor will not be tricked into truncating at an inner fence. Do not delete, translate, or move the closer sentinel; if it is missing the wrapper aborts with `prep_blocked "executor_prompt.md missing end-sentinel ..."`. The closer sentinel itself is consumed by the extractor and never appears in the rendered payload.
+
 ```
 # ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1
 You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
@@ -538,6 +540,7 @@ HARD rules for the timeout flow:
 - Do NOT call `acpx` again. The script already killed acpx; restarting
   it would burn another full timeout window for the same attempt.
 </timeout_flow>
+# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1_END
 ```
 
 ---

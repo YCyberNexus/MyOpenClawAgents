@@ -153,8 +153,14 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     8. Render `references/executor_prompt.md` fenced block via
        inline `python3 -c '…'` (handles multi-line `{ISSUE_BODY}` safely;
        does pure `str.replace` of `{NAME}` → value, no format-string
-       gymnastics). Postcondition grep for any leftover `{[A-Z_…]+}`
-       and fail-fast on unsubstituted placeholders.
+       gymnastics). The template is extracted by awk bounded by the paired
+       sentinels `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1` (opener) and
+       `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1_END` (closer), NOT by the
+       surrounding triple-backtick fence — this makes nested ```code```
+       examples inside the rendered block safe. Missing closer sentinel →
+       awk exits 2 → `prep_blocked "executor_prompt.md missing end-sentinel …"`.
+       Postcondition grep for any leftover `{[A-Z_…]+}` and fail-fast on
+       unsubstituted placeholders.
     9. Sentinel check: rendered first line MUST equal
        `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1`. Mismatch → `prep_blocked`
        with the verbatim `block_reason` from SKILL.md §Phase 5 step 0.
