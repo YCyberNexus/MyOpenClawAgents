@@ -577,6 +577,17 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --arg p "${EVIDENCE_PATH}" '.l
 
 # ─── 11. Disk cache correction from evidence ─────────────────────
 EVIDENCE_JSON="$(cat "${EVIDENCE_PATH}")"
+# Defensive guard: EVIDENCE_JSON is read from a file and is fed straight to
+# `jq --argjson ev`, which on an empty / non-JSON / non-array value throws the
+# generic "invalid JSON text passed to --argjson". That message surfaces far
+# from its cause (a truncated or half-written reconcile evidence file) and
+# historically invited a misdiagnosis as a "jq bug". Validate the shape up
+# front and fail with a named, terminal reason instead. Every downstream
+# consumer ($ev[], $ev | map, $ev | length) requires a JSON array.
+EV_KIND="$(printf '%s' "${EVIDENCE_JSON}" | jq -r 'type' 2>/dev/null || echo invalid)"
+if [ "${EV_KIND}" != "array" ]; then
+  emit_chat_failure "reconcile_failed: evidence file at ${EVIDENCE_PATH} is ${EV_KIND}, expected a JSON array (reconcile.sh produced an empty or malformed file)"
+fi
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}" '
   . as $s
   | reduce $ev[] as $e ($s;
@@ -842,12 +853,27 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
 # ─── 17. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
 mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
+# allocate_attempt.sh prints ONLY the integer attempt number on stdout. Capture
+# its exit code and stderr explicitly: under `set -e` a non-zero exit inside the
+# `N="$(...)"` assignment aborts the whole tick with a raw, unclassified error
+# and no JSON envelope on stdout — exactly the failure shape a weak orchestrator
+# model tries to "diagnose" and self-heal. Convert it into a named, terminal
+# tick failure instead. (An rc=0-but-empty/non-numeric stdout is caught by the
+# integer guard before step 19.)
+ALLOC_ERR="$(mktemp)"
+CLEANUP_FILES+=("${ALLOC_ERR}")
 for iid in "${BATCH_IIDS[@]}"; do
+  set +e
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
        IID="${iid}" \
-       bash "${SCRIPT_DIR}/allocate_attempt.sh")"
+       bash "${SCRIPT_DIR}/allocate_attempt.sh" 2>"${ALLOC_ERR}")"
+  _rc=$?
+  set -e
+  if [ "${_rc}" -ne 0 ]; then
+    emit_chat_failure "allocate_attempt_failed: iid=${iid} allocate_attempt.sh exited ${_rc}: $(tail -n 1 "${ALLOC_ERR}" 2>/dev/null)"
+  fi
   ATTEMPT["${iid}"]="${N}"
 done
 
@@ -883,6 +909,26 @@ for k in "${!BATCH_IIDS[@]}"; do
 done
 
 # ─── 19. Pre-spawn persist (placeholder pending entries) ──────────
+# Defensive guard: every value below (and the same four reused in the later
+# DISPATCH_ENTRIES append, step 21) is passed to `jq --argjson`, which rejects
+# a non-JSON token with the generic "invalid JSON text passed to --argjson".
+# An empty ATTEMPT[$iid] (allocate_attempt.sh printed nothing), or a non-numeric
+# UI_OFFSET/UI_COUNT, would surface as that cryptic message at the jq call far
+# from its real cause and invite a misdiagnosis as a "jq version bug". Validate
+# all four as non-negative integers here, once, and fail with a named, terminal
+# reason that points at the IID and the field instead.
+for iid in "${BATCH_IIDS[@]}"; do
+  for _pair in "iid:${iid}" "attempt:${ATTEMPT[$iid]:-}" \
+               "ui_offset:${UI_OFFSET[$iid]:-}" "ui_count:${UI_COUNT[$iid]:-}"; do
+    _field="${_pair%%:*}"; _val="${_pair#*:}"
+    case "${_val}" in
+      ''|*[!0-9]*)
+        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a non-negative integer (allocate_attempt.sh or the UI-slot computation produced an empty/non-numeric value); refusing to build a malformed jq --argjson call"
+        ;;
+    esac
+  done
+done
+
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"

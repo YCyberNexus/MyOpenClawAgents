@@ -57,7 +57,7 @@ Both halves MUST follow the prescribed method exactly. When the prescribed metho
 
 Universal prohibitions:
 
-1. If a script in `scripts/` exits non-zero, do NOT rewrite its logic inline, skip and "do it manually", or substitute a "simpler" command. Read stdout/stderr, classify, persist state, stop.
+1. If a script in `scripts/` exits non-zero, do NOT rewrite its logic inline, skip and "do it manually", or substitute a "simpler" command. Read stdout/stderr, classify, persist state, stop. In particular, do NOT diagnose the script's *internal* tooling — `jq` (or its version), `python3`, `git`, `glab`, a `#`/brace/quote inside a `--arg` value — as the root cause and edit the script to "fix" it. These scripts are deployment-pinned and version-tested against the runner's toolchain; a non-zero exit means classify-and-stop, never patch-the-script. A surprising message ("invalid JSON text passed to --argjson", a missing path, etc.) is a signal to report the exact stderr and stop, not to invent a repair.
 2. If `glab` cannot do something, do NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library.
 3. If a required input is missing or malformed, abort the affected unit of work. Do NOT guess defaults beyond those explicitly listed in `references/trigger_command.md` or in the rendered subagent prompt.
 4. If a SKILL algorithm step or rendered-prompt step produces an unexpected result, stop and record the failure. Do NOT invent a recovery path.
