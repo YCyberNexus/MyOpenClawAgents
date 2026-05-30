@@ -44,7 +44,7 @@
 #                                          branch to BASE_REF in place (untracked files
 #                                          Claude wrote in earlier attempts survive, so
 #                                          `acpx claude exec` can pick up where it left off).
-#                   .claude/ hulat/ ${DATA_BASENAME}/    (from base branch checkout)
+#                   .claude/ hulat/ ${DATA_BASENAME}/    (tracked config refreshed from origin/${DEV_BRANCH})
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
 #                                                        ← OUTPUT_DIR (force-added; shared
 #                                                          across attempts of this IID)

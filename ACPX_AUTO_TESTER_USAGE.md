@@ -115,7 +115,7 @@ data_basename=ifp-data
 | `group` | GitLab group slug。 |
 | `project` | GitLab project slug。 |
 | `branch` | 集成/目标分支，MR 会开到这个分支，通常是 `master`。 |
-| `dev_branch` | fresh attempt 的干净基线分支，通常是 `dev`；没有独立基线时可设成和 `branch` 一样。 |
+| `dev_branch` | fresh attempt 的干净基线分支，通常是 `dev`；每次运行前也会从最新 `origin/${dev_branch}` 刷新 `.claude/`、`hulat/`、`${DATA_BASENAME}/` 这些共享配置路径。没有独立基线时可设成和 `branch` 一样。 |
 | `gitlab_token` | 用于 `glab auth login` 的 token。GitLab host 不从 trigger 推导，而是部署时固定在 `config/gitlab.env`。 |
 | `issue_min_iid` | issue IID 范围下限，包含。 |
 | `issue_max_iid` | issue IID 范围上限，包含。 |
@@ -423,7 +423,7 @@ ${REPO_PATH}/
 ${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/
 ```
 
-同一个 IID 的多次 attempt 复用这个 worktree；不同 IID 使用不同 worktree，所以跨 IID 并发不会争用同一个工作目录。
+同一个 IID 的多次 attempt 复用这个 worktree；不同 IID 使用不同 worktree，所以跨 IID 并发不会争用同一个工作目录。每次 attempt 切到本次 base 后，都会把 tracked 的 `.claude/`、`hulat/`、`${DATA_BASENAME}/` 从最新 `origin/${dev_branch}` 刷新到 worktree。
 
 ## 11. 常见运行结果
 
