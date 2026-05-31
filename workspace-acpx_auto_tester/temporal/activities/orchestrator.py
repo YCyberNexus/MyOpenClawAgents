@@ -124,8 +124,15 @@ def _parse_reconcile_evidence(
             f"reconcile evidence {path} not valid JSON: {exc}",
         )
 
+    if not isinstance(digest, list):
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            f"reconcile evidence {path} is {type(digest).__name__}, expected a JSON array "
+            "(reconcile.sh produced an empty or malformed file)",
+        )
+
     per_iid: list[IssueLiveState] = []
-    for entry in digest if isinstance(digest, list) else []:
+    for entry in digest:
         labels = tuple(entry.get("labels", ()) or ())
         state = _read_issue_disk_state(camp, int(entry["iid"]))
         per_iid.append(
