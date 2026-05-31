@@ -195,7 +195,11 @@ phase6_normalize_reply() {
   local parsed
   if ! parsed="$(printf '%s' "${raw}" | jq -c . 2>/dev/null)"; then
     local first200
-    first200="$(printf '%s' "${raw}" | head -c 200 | tr -d '\r' | tr '\n' ' ')"
+    # Codepoint-safe truncation (jq raw-input slice): a byte-wise `head -c 200`
+    # could split a multibyte UTF-8 char and leave a dangling byte. jq -Rs reads
+    # the (possibly non-JSON) raw as one string, replacing any invalid bytes with
+    # U+FFFD, then slices by codepoint and flattens CR/LF for a one-line reason.
+    first200="$(printf '%s' "${raw}" | jq -Rsr '.[0:200] | gsub("\\r";"") | gsub("\\n";" ")' 2>/dev/null || printf '%s' "${raw}" | head -c 200 | tr -d '\r' | tr '\n' ' ')"
     phase6_synthesize_blocked "${exp_iid}" "${exp_attempt}" \
       "callback worker_result_json not valid JSON: ${first200}"
     return 0
