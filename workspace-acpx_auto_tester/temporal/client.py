@@ -11,10 +11,12 @@ Five subcommands:
 * ``start-attempt``     — kick off a one-off :class:`IssueAttemptWorkflow` for
                           PoC / manual replay.
 
-All commands connect to Temporal Cloud via the same env-var contract as
-``worker.py`` (TEMPORAL_ADDRESS / TEMPORAL_NAMESPACE / TEMPORAL_TLS_CERT /
-TEMPORAL_TLS_KEY). ``--input-file`` JSON values are validated against
-:class:`CampaignInput` / :class:`IssueAttemptWorkflowInput` before sending.
+All commands connect via the same env-var contract as ``worker.py``
+(TEMPORAL_ADDRESS / TEMPORAL_NAMESPACE, plus the optional mTLS pair
+TEMPORAL_TLS_CERT / TEMPORAL_TLS_KEY — set both for Temporal Cloud, leave
+both unset for a plaintext ``temporal server start-dev``). ``--input-file``
+JSON values are validated against :class:`CampaignInput` /
+:class:`IssueAttemptWorkflowInput` before sending.
 """
 
 from __future__ import annotations
@@ -110,11 +112,35 @@ def _required_env(name: str) -> str:
 async def _connect() -> Client:
     address = _required_env("TEMPORAL_ADDRESS")
     namespace = _required_env("TEMPORAL_NAMESPACE")
-    cert = Path(_required_env("TEMPORAL_TLS_CERT")).read_bytes()
-    key = Path(_required_env("TEMPORAL_TLS_KEY")).read_bytes()
-    return await Client.connect(
-        address, namespace=namespace, tls=TLSConfig(client_cert=cert, client_private_key=key)
+    # TLS is opt-in and mirrors worker.py: set BOTH TEMPORAL_TLS_CERT and
+    # TEMPORAL_TLS_KEY for Temporal Cloud mTLS; leave both unset for a
+    # plaintext ``temporal server start-dev`` connection.
+    cert = os.environ.get("TEMPORAL_TLS_CERT")
+    key = os.environ.get("TEMPORAL_TLS_KEY")
+    tls: TLSConfig | bool = False
+    if bool(cert) != bool(key):
+        raise SystemExit(
+            "TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY must be set together "
+            "(both for Cloud mTLS, or neither for a plaintext dev server)."
+        )
+    if cert and key:
+        cert_path = Path(cert)
+        key_path = Path(key)
+        if not cert_path.is_file():
+            raise SystemExit(f"TEMPORAL_TLS_CERT does not point at a file: {cert_path}")
+        if not key_path.is_file():
+            raise SystemExit(f"TEMPORAL_TLS_KEY does not point at a file: {key_path}")
+        tls = TLSConfig(
+            client_cert=cert_path.read_bytes(),
+            client_private_key=key_path.read_bytes(),
+        )
+    LOG.info(
+        "connecting to Temporal at %s namespace=%s tls=%s",
+        address,
+        namespace,
+        bool(tls),
     )
+    return await Client.connect(address, namespace=namespace, tls=tls)
 
 
 # ---------------------------------------------------------------------------

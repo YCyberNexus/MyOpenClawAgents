@@ -19,9 +19,13 @@ Why a host-specific task queue:
 
 Environment contract:
     * ``TEMPORAL_ADDRESS``     — required, e.g. ``us-east-1.tmprl.cloud:7233``
+                                 (or ``localhost:7233`` for ``temporal server start-dev``)
     * ``TEMPORAL_NAMESPACE``   — required, e.g. ``acpx-auto-tester-temporal-prod``
-    * ``TEMPORAL_TLS_CERT``    — required (path), mTLS client cert PEM
-    * ``TEMPORAL_TLS_KEY``     — required (path), mTLS client private key PEM
+                                 (``default`` for the dev server)
+    * ``TEMPORAL_TLS_CERT``    — optional (path), mTLS client cert PEM. Set together
+                                 with TEMPORAL_TLS_KEY for Temporal Cloud; leave both
+                                 unset for a plaintext local dev-server connection.
+    * ``TEMPORAL_TLS_KEY``     — optional (path), mTLS client private key PEM
     * ``NODE_ID``              — required, e.g. ``runner-01`` (used in task queue)
     * ``GITLAB_TOKEN``         — required; forwarded to glab_auth.sh by activities
     * ``ACPX_SCRIPTS_DIR``     — optional; defaults to the SKILL's scripts dir
@@ -121,19 +125,37 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 async def _connect_client() -> Client:
     address = _required_env("TEMPORAL_ADDRESS")
     namespace = _required_env("TEMPORAL_NAMESPACE")
-    cert_path = Path(_required_env("TEMPORAL_TLS_CERT"))
-    key_path = Path(_required_env("TEMPORAL_TLS_KEY"))
 
-    if not cert_path.is_file():
-        raise SystemExit(f"TEMPORAL_TLS_CERT does not point at a file: {cert_path}")
-    if not key_path.is_file():
-        raise SystemExit(f"TEMPORAL_TLS_KEY does not point at a file: {key_path}")
-
-    tls = TLSConfig(
-        client_cert=cert_path.read_bytes(),
-        client_private_key=key_path.read_bytes(),
+    # TLS is opt-in. Set BOTH TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY for a
+    # Temporal Cloud mTLS connection; leave both unset to connect in plaintext
+    # against a local ``temporal server start-dev`` (localhost:7233, no TLS).
+    # Setting only one of the two is an operator mistake — fail loudly rather
+    # than silently downgrading a Cloud deployment to plaintext.
+    cert = os.environ.get("TEMPORAL_TLS_CERT")
+    key = os.environ.get("TEMPORAL_TLS_KEY")
+    tls: TLSConfig | bool = False
+    if bool(cert) != bool(key):
+        raise SystemExit(
+            "TEMPORAL_TLS_CERT and TEMPORAL_TLS_KEY must be set together "
+            "(both for Cloud mTLS, or neither for a plaintext dev server)."
+        )
+    if cert and key:
+        cert_path = Path(cert)
+        key_path = Path(key)
+        if not cert_path.is_file():
+            raise SystemExit(f"TEMPORAL_TLS_CERT does not point at a file: {cert_path}")
+        if not key_path.is_file():
+            raise SystemExit(f"TEMPORAL_TLS_KEY does not point at a file: {key_path}")
+        tls = TLSConfig(
+            client_cert=cert_path.read_bytes(),
+            client_private_key=key_path.read_bytes(),
+        )
+    LOG.info(
+        "connecting to Temporal at %s namespace=%s tls=%s",
+        address,
+        namespace,
+        bool(tls),
     )
-    LOG.info("connecting to Temporal at %s namespace=%s", address, namespace)
     return await Client.connect(address, namespace=namespace, tls=tls)
 
 

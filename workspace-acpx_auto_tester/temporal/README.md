@@ -48,6 +48,13 @@ scripts via the `[project.scripts]` entry in `pyproject.toml`.
 
 ## Run a worker (runner side)
 
+TLS is **opt-in**: set BOTH `TEMPORAL_TLS_CERT` and `TEMPORAL_TLS_KEY` for a
+Temporal Cloud mTLS connection, or leave BOTH unset to connect in plaintext to
+a local `temporal server start-dev`. Setting exactly one of the two is rejected
+at startup (guards against silently downgrading a Cloud deployment to plaintext).
+
+### Against Temporal Cloud (mTLS)
+
 ```bash
 export TEMPORAL_ADDRESS="<region>.tmprl.cloud:7233"
 export TEMPORAL_NAMESPACE="acpx-auto-tester-temporal-prod"
@@ -55,6 +62,28 @@ export TEMPORAL_TLS_CERT="/etc/acpx/temporal-client.pem"
 export TEMPORAL_TLS_KEY="/etc/acpx/temporal-client.key"
 export NODE_ID="${HOSTNAME}"            # worktree affinity key
 export GITLAB_TOKEN="<token>"           # forwarded to glab_auth.sh
+
+python -m acpx_temporal.worker --task-queue "acpx-worktree-${NODE_ID}"
+```
+
+### Against a local dev server (plaintext)
+
+Start the dev server first (use `--db-filename` so Schedules survive a restart —
+the dev server is in-memory by default):
+
+```bash
+temporal server start-dev --db-filename /var/lib/temporal/dev.db
+# gRPC: localhost:7233   Web UI: http://localhost:8233   namespace: default
+```
+
+Then launch the worker with the TLS pair unset:
+
+```bash
+export TEMPORAL_ADDRESS="localhost:7233"
+export TEMPORAL_NAMESPACE="default"
+unset  TEMPORAL_TLS_CERT TEMPORAL_TLS_KEY   # plaintext connection
+export NODE_ID="${HOSTNAME}"
+export GITLAB_TOKEN="<token>"
 
 python -m acpx_temporal.worker --task-queue "acpx-worktree-${NODE_ID}"
 ```
@@ -91,6 +120,11 @@ pytest tests/
 ```
 
 `pytest` uses `temporalio.testing.WorkflowEnvironment` to mock both the
-Temporal Service and the bash leaf scripts. There is no `temporal server
-start-dev` step in the local loop — the runner is the only place that ever
-talks to a live Temporal Cloud cluster.
+Temporal Service and the bash leaf scripts, so the offline lint/type/test loop
+above needs no running Temporal Service at all.
+
+A live cluster is only required to actually run workers and schedules: that is
+either Temporal Cloud (mTLS) or a local `temporal server start-dev` (plaintext)
+as shown in §Run a worker. Note that end-to-end execution still needs the full
+runner toolchain (`acpx` + Claude Code, `glab`, the cloned target repo) on the
+worker host — the dev server only replaces the Temporal control plane, not those.
