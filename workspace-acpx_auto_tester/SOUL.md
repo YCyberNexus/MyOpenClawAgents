@@ -88,7 +88,7 @@ If `glab auth status` fails after `scripts/glab_auth.sh`, the affected unit of w
 The GitLab host and protocol are **pinned at deployment time in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every tick / run. See `<workspace>/config/README.md` for setup.
 
 - Both halves MUST read the host via `scripts/glab_auth.sh`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
-- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` aborts non-zero if it does not match the pin. The affected unit of work surfaces that as a tick-level / per-issue failure.
+- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` aborts with **exit 13** if it does not match the pin. The affected unit of work surfaces that as a tick-level / per-issue failure.
 - `gitlab_token` from the trigger refreshes `glab auth login` against the pinned host (token rotation works). The host itself never changes from a trigger input.
 
 If `config/gitlab.env` is missing or malformed (`scripts/glab_auth.sh` exits 10/11/12), the deployment is incomplete; abort with a one-line operator-facing summary.

@@ -72,6 +72,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "timeout_iids": [],
   "campaign_status": "waiting_for_callbacks",
   "quota_launched_this_tick": 1,
+  "quota_completed_this_tick": 0,
   "last_reconcile_evidence": "/data/<project>/<RESULT_BASENAME>/_dispatcher/log/reconcile-20260507T100501Z.json",
   "updated_at": "2026-05-07T10:05:30Z"
 }
@@ -104,7 +105,7 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 ### Fresh-init values (when the file does not exist)
 
 ```text
-next_new_issue_iid        = issue_min_iid
+next_new_issue_iid        = null   # resolved to issue_min_iid on first read
 tick_seq                  = 0
 max_concurrent_subagents  = 1
 max_accounts_per_issue    = 14
@@ -131,6 +132,7 @@ failed_iids               = []
 timeout_iids              = []
 campaign_status           = running
 quota_launched_this_tick  = 0
+quota_completed_this_tick = 0
 ```
 
 ### Campaign-level defaulted fields
@@ -139,11 +141,14 @@ quota_launched_this_tick  = 0
 | ----------------------- | --------------- | --------------------------------------------------------------------- |
 | `max_accounts_per_issue` | int             | Post-override snapshot of the trigger's per-IID UI account cap. Defaults to `14`. Must be a positive integer. Used only when forming the next scheduled batch; callback processing reads the persisted value for audit but does not recalculate allocations. |
 | `tick_seq`               | int             | Monotonic scheduled-wake counter. `dispatch_prepare_tick.sh` increments it once after acquiring the dispatcher lock and uses it with `blocked_at_tick_by_iid` to enforce `blocked_cooldown_ticks`. Callback wake-ups do not increment it. |
+| `next_new_issue_iid`     | int \| null     | Cursor for picking the next never-attempted IID when forming a scheduled batch. Stored as `null` at fresh-init and resolved to `issue_min_iid` on first read (readers apply `// .issue_min_iid`); advanced by `dispatch_prepare_tick.sh` as fresh IIDs are consumed. Bounded by the effective IID universe (range ∩ `issue_iids_whitelist`). |
+| `unfinished_iids`        | array of int    | Working backlog of in-range IIDs not yet terminal (not in `completed_iids` / `failed_iids`, and — for `blocked` / `timeout` — still retry-eligible). Rebuilt each scheduled tick from disk state and reconcile evidence; drives which IIDs the next batch draws from. Audit/scheduling aid, not a source of truth (GitLab labels are). |
+| `quota_completed_this_tick` | int          | Per-tick counter of IIDs that reached terminal `done` during the current wake-up. Reset to `0` at the top of every scheduled wake-up (`dispatch_prepare_tick.sh`) and incremented by Phase 6 (`_dispatch_lib.sh`) on each `done` drain. Diagnostic only; pairs with `quota_launched_this_tick`. |
 | `blocked_at_tick_by_iid` | object          | Map from stringified IID to the `tick_seq` at which the IID most recently entered `blocked`. Removed when the IID becomes `done` or `failed`. Missing legacy entries are treated as immediately retryable so old state is not stranded. |
 | `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Pending entries outside the effective universe are scope-evicted at the top of the scheduled tick, marked `blocked`, and returned with a best-effort runtime kill action when a `child_session_key` is known. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
-| `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
+| `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` / `timeout` child sessions after state files are persisted; `blocked` / `failed` / `timeout` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}` (see Phase 6 step 9). |
 | `run_timeout_seconds`   | int             | Post-override snapshot of the trigger's `run_timeout_seconds`. Defaults to `acpx_timeout_seconds + 120` (18120s when `acpx_timeout_seconds` is also omitted). Must be integer ≥ 60 and `≥ acpx_timeout_seconds + 120`, so the subagent has enough outer-runtime headroom for `run_acpx_attempt.sh` to return 124/137 and enter the timeout flow. Read by Phase 5 when constructing `sessions_spawn(..., runTimeoutSeconds=<value>, ...)`. Callback path does not re-read the trigger override; the persisted value from the most recent scheduled wake-up is authoritative for any callback-path readers (post-mortem inspection, future tooling). Not directly compared against `spawned_at` at eviction time — that comparison uses `stuck_after_minutes`, whose default tracks this value automatically (`ceil(run_timeout_seconds / 60) + 30`); explicit `stuck_after_minutes` overrides still take precedence. |
 | `acpx_timeout_seconds`  | int             | Post-override snapshot of the trigger's `acpx_timeout_seconds`. Defaults to `18000`. Must be integer ≥ 60 and `acpx_timeout_seconds + 120 ≤ run_timeout_seconds`. Rendered into the executor prompt in Phase 4 step 7 as `{ACPX_TIMEOUT_SECONDS}` and `{ACPX_TIMEOUT_MINUTES} = floor(value / 60)`. Persisted for audit; callback path reads it for diagnostic purposes only. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
@@ -164,9 +169,12 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `stuck_after_minutes`** — default to `ceil(run_timeout_seconds / 60) + 30` (`332` when both timeout fields are omitted) and persist.
 - **Missing `run_timeout_seconds`** — default to `acpx_timeout_seconds + 120` and persist (18120s when both timeout fields are omitted). Older deployments did not carry this field; loading it from a legacy file is harmless because Phase 5 reads the post-override value, not the trigger directly.
 - **Missing `acpx_timeout_seconds`** — default to `18000` and persist. Same legacy-tolerance rule as `run_timeout_seconds`. If the persisted `run_timeout_seconds` somehow lacks the required 120-second headroom over `acpx_timeout_seconds` (only possible across a hand-edited file or an explicit trigger override), Phase 1's post-override validation aborts the tick with `"run_timeout_seconds_below_acpx_timeout_seconds_plus_120"` so the operator notices.
-- **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` outcomes; blocked/failed cleanup is additionally gated on local evidence existence.
+- **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` / `timeout` outcomes; `blocked` / `failed` / `timeout` cleanup is additionally gated on local evidence existence.
 - **Missing `kill_subagent_on_done`** — default to the same value as `kill_subagent_on_terminal` and persist only for backward-readable audit. New logic should not use it except for the compatibility rule above.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
+- **Missing `quota_completed_this_tick`** — default to `0` and persist (same reset-each-tick behavior; a legacy file without it is harmless because Phase 6's `// 0` guard tolerates its absence).
+- **Missing `next_new_issue_iid`** — treat as `null` and resolve to `issue_min_iid` on first read via `// .issue_min_iid` (same as fresh-init); the next scheduled wake-up advances and persists it as fresh IIDs are consumed.
+- **Missing `unfinished_iids`** — default to `[]`; rebuilt from disk state and reconcile evidence on the next scheduled tick, so a missing-on-disk list is harmless.
 - **Missing `tick_seq`** — default to `0`; the next scheduled wake-up increments and persists it.
 - **Missing `blocked_at_tick_by_iid`** — default to `{}`. A blocked IID with no map entry is considered cooldown-eligible on the next batch decision.
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
@@ -221,7 +229,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | `retry_count`           | int             | How many blocked/failed outcomes have consumed the cross-tick retry budget. Launch-side `sessions_spawn` failures after in-tick retry exhaustion do not increment it. `timeout` outcomes ALSO do not increment it (the IID is terminally parked in `timeout_iids` and the dispatcher does not auto-retry until a reviewer strips `timeout`, adds `retry`, or applies `continue`). |
 | `block_reason`          | string \| null  | Required when `status=blocked` or `failed`.                            |
 | `commit_sha`            | string \| null  | Latest pushed commit SHA when applicable.                              |
-| `merge_request_url`     | string \| null  | Strategy A: single MR per issue in fresh mode; rotated in continue mode. |
+| `merge_request_url`     | string \| null  | Strategy A: exactly one open MR per issue at any moment; every attempt rotates (closes the prior open MR, creates a fresh one) in BOTH fresh and continue modes. |
 | `updated_at`            | ISO-8601 UTC    | Update at every major step.                                            |
 
 ### Possible `status` values

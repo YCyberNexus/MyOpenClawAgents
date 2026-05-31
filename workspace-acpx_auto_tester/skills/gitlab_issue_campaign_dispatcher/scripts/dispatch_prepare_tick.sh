@@ -1092,7 +1092,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE="$(printf '%s' "${ISSUE_JSON}" | jq -r '.title // ""')"
   ISSUE_URL="$(printf '%s' "${ISSUE_JSON}" | jq -r '.web_url // ""')"
   ISSUE_LABELS="$(printf '%s' "${ISSUE_JSON}" | jq -r '.labels // [] | join(",")')"
-  ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '.description // ""' | head -c 4096)"
+  # Truncate by Unicode codepoint (jq `.[a:b]`), NOT bytes: issue bodies are
+  # almost always Chinese, and a byte-wise `head -c 4096` could split a
+  # multibyte char, leaving an invalid byte that breaks the python renderer's
+  # UTF-8 encoding and mis-classifies the IID as prep_blocked.
+  ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '(.description // "")[0:4096]')"
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
   # Transition labels: remove entry labels + add doing.
