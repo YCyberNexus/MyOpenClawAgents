@@ -306,7 +306,7 @@ Step 10 — REPLY
 </instructions>
 
 <constraints>
-- No-fallback. If any {SCRIPTS_DIR}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead.
+- No-fallback. If any {SCRIPTS_DIR}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead. Do NOT inspect a script's *internal* tooling (jq, python3, git, glab) and decide it is buggy: these scripts are deployment-pinned and version-tested against this runner. A non-zero exit or a surprising message means report the exact stderr and FAIL — not "diagnose, patch, retry".
 - acpx is script-owned. The only allowed acpx execution path is {SCRIPTS_DIR}/run_acpx_attempt.sh; do not type an acpx command in any tool call.
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
 - Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
