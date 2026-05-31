@@ -112,6 +112,14 @@ while IFS= read -r line || [ -n "${line}" ]; do
   esac
 done <"${TRIGGER_FILE}"
 
+# emit_chat_failure: emit a tick_failed envelope and exit 0.
+# CONTRACT: ${msg} MUST be a stable, named classification string (e.g.
+# "reconcile_failed", "clone_or_pull_failed", "ui_account_pool_too_small").
+# NEVER interpolate raw stderr from a sub-script or its internal tooling
+# (jq / glab / git / python3) into ${msg}. Raw diagnostics belong in
+# wrapper.log only. Rationale: a tool name surfacing in the orchestrator's
+# chat view primes a weak orchestrator model to "diagnose and patch the
+# script" instead of classify-and-stop (SOUL.md §No-Fallback rule 1).
 emit_chat_failure() {
   local msg="$1"
   local cleanup_actions="${CLEANUP_ACTIONS_JSON:-[]}"
@@ -567,7 +575,10 @@ RECONCILE_RC=$?
 set -e
 cat "${RECONCILE_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
 if [ "${RECONCILE_RC}" -ne 0 ]; then
-  emit_chat_failure "reconcile_failed: $(tail -n 1 "${RECONCILE_OUT}")"
+  # Stable, named reason only. The full reconcile.sh output (which may carry
+  # raw jq / glab / git stderr) was already appended to wrapper.log above; do
+  # NOT tail it into chat_summary (see emit_chat_failure contract).
+  emit_chat_failure "reconcile_failed (rc=${RECONCILE_RC}; full output in dispatcher wrapper.log)"
 fi
 EVIDENCE_PATH="$(grep -E '^/.+/reconcile-[0-9TZ]+\.json$' "${RECONCILE_OUT}" | tail -n 1 || true)"
 if [ -z "${EVIDENCE_PATH}" ] || [ ! -f "${EVIDENCE_PATH}" ]; then
@@ -872,7 +883,12 @@ for iid in "${BATCH_IIDS[@]}"; do
   _rc=$?
   set -e
   if [ "${_rc}" -ne 0 ]; then
-    emit_chat_failure "allocate_attempt_failed: iid=${iid} allocate_attempt.sh exited ${_rc}: $(tail -n 1 "${ALLOC_ERR}" 2>/dev/null)"
+    # Capture allocate_attempt.sh stderr to wrapper.log first, then emit a
+    # stable, named reason only — never tail raw sub-tool stderr into
+    # chat_summary (see emit_chat_failure contract + SOUL.md §No-Fallback).
+    wrapper_log prepare_tick "allocate_attempt_failed iid=${iid} rc=${_rc} (stderr follows)"
+    cat "${ALLOC_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
+    emit_chat_failure "allocate_attempt_failed: iid=${iid} (rc=${_rc}; stderr in dispatcher wrapper.log)"
   fi
   ATTEMPT["${iid}"]="${N}"
 done
@@ -1018,7 +1034,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   # progress is interesting context).
   cat "${PA_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
   if [ "${PA_RC}" -ne 0 ]; then
-    prep_blocked "prepare_attempt: $(tail -n 1 "${PA_ERR}")"
+    # PA_ERR (raw git fetch / worktree stderr) is already mirrored to
+    # wrapper.log on the preceding cat; emit a stable, named reason only so
+    # raw git output never reaches block_reason / tick_outcome_per_iid (see
+    # emit_chat_failure contract + SOUL.md §No-Fallback rule 1).
+    prep_blocked "prepare_attempt_failed (rc=${PA_RC}; stderr in dispatcher wrapper.log)"
     retire_temp_file "${PA_OUT}"
     retire_temp_file "${PA_ERR}"
     continue
