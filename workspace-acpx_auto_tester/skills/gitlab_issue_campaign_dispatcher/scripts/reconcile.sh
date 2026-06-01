@@ -70,7 +70,9 @@ if [ "${IID_LIST+set}" = "set" ]; then
   # evidence file, which is the legitimate "filter matched nothing" case.
   __raw_tokens=()
   IFS=',' read -r -a __raw_tokens <<< "${IID_LIST}"
-  # nounset-safe expansion: ${arr[@]+"${arr[@]}"} stays empty when arr is unset
+  # nounset-safe AND quote-preserving: ${arr[@]+"${arr[@]}"} stays empty when
+  # the array has no elements (safe under `set -u` even on bash < 4.4), and the
+  # inner double quotes are honored so tokens are NOT re-split or glob-expanded.
   for tok in ${__raw_tokens[@]+"${__raw_tokens[@]}"}; do
     tok="${tok#"${tok%%[![:space:]]*}"}"   # ltrim
     tok="${tok%"${tok##*[![:space:]]}"}"   # rtrim
