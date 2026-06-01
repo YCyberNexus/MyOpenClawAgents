@@ -57,7 +57,7 @@ Both halves MUST follow the prescribed method exactly. When the prescribed metho
 
 Universal prohibitions:
 
-1. If a script in `scripts/` exits non-zero, do NOT rewrite its logic inline, skip and "do it manually", or substitute a "simpler" command. Read stdout/stderr, classify, persist state, stop.
+1. If a script in `scripts/` exits non-zero, do NOT rewrite its logic inline, skip and "do it manually", or substitute a "simpler" command. Read stdout/stderr, classify, persist state, stop. In particular, do NOT diagnose the script's *internal* tooling — `jq` (or its version), `python3`, `git`, `glab`, a `#`/brace/quote inside a `--arg` value — as the root cause and edit the script to "fix" it. These scripts are deployment-pinned and version-tested against the runner's toolchain; a non-zero exit means classify-and-stop, never patch-the-script. A surprising message ("invalid JSON text passed to --argjson", a missing path, etc.) is a signal to report the exact stderr and stop, not to invent a repair.
 2. If `glab` cannot do something, do NOT fall back to `curl` / `wget` / Python HTTP / `python-gitlab` / any HTTP library.
 3. If a required input is missing or malformed, abort the affected unit of work. Do NOT guess defaults beyond those explicitly listed in `references/trigger_command.md` or in the rendered subagent prompt.
 4. If a SKILL algorithm step or rendered-prompt step produces an unexpected result, stop and record the failure. Do NOT invent a recovery path.
@@ -88,7 +88,7 @@ If `glab auth status` fails after `scripts/glab_auth.sh`, the affected unit of w
 The GitLab host and protocol are **pinned at deployment time in `<workspace>/config/gitlab.env`**, NOT derived from the trigger's `gitlab_address` on every tick / run. See `<workspace>/config/README.md` for setup.
 
 - Both halves MUST read the host via `scripts/glab_auth.sh`. Calling `sed` on `${GITLAB_ADDRESS}` outside that script is forbidden.
-- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` aborts non-zero if it does not match the pin. The affected unit of work surfaces that as a tick-level / per-issue failure.
+- The trigger's `gitlab_address` is a **verification value**. `scripts/glab_auth.sh` aborts with **exit 13** if it does not match the pin. The affected unit of work surfaces that as a tick-level / per-issue failure.
 - `gitlab_token` from the trigger refreshes `glab auth login` against the pinned host (token rotation works). The host itself never changes from a trigger input.
 
 If `config/gitlab.env` is missing or malformed (`scripts/glab_auth.sh` exits 10/11/12), the deployment is incomplete; abort with a one-line operator-facing summary.

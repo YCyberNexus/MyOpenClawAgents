@@ -112,6 +112,14 @@ while IFS= read -r line || [ -n "${line}" ]; do
   esac
 done <"${TRIGGER_FILE}"
 
+# emit_chat_failure: emit a tick_failed envelope and exit 0.
+# CONTRACT: ${msg} MUST be a stable, named classification string (e.g.
+# "reconcile_failed", "clone_or_pull_failed", "ui_account_pool_too_small").
+# NEVER interpolate raw stderr from a sub-script or its internal tooling
+# (jq / glab / git / python3) into ${msg}. Raw diagnostics belong in
+# wrapper.log only. Rationale: a tool name surfacing in the orchestrator's
+# chat view primes a weak orchestrator model to "diagnose and patch the
+# script" instead of classify-and-stop (SOUL.md §No-Fallback rule 1).
 emit_chat_failure() {
   local msg="$1"
   local cleanup_actions="${CLEANUP_ACTIONS_JSON:-[]}"
@@ -567,7 +575,10 @@ RECONCILE_RC=$?
 set -e
 cat "${RECONCILE_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
 if [ "${RECONCILE_RC}" -ne 0 ]; then
-  emit_chat_failure "reconcile_failed: $(tail -n 1 "${RECONCILE_OUT}")"
+  # Stable, named reason only. The full reconcile.sh output (which may carry
+  # raw jq / glab / git stderr) was already appended to wrapper.log above; do
+  # NOT tail it into chat_summary (see emit_chat_failure contract).
+  emit_chat_failure "reconcile_failed (rc=${RECONCILE_RC}; full output in dispatcher wrapper.log)"
 fi
 EVIDENCE_PATH="$(grep -E '^/.+/reconcile-[0-9TZ]+\.json$' "${RECONCILE_OUT}" | tail -n 1 || true)"
 if [ -z "${EVIDENCE_PATH}" ] || [ ! -f "${EVIDENCE_PATH}" ]; then
@@ -577,6 +588,17 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --arg p "${EVIDENCE_PATH}" '.l
 
 # ─── 11. Disk cache correction from evidence ─────────────────────
 EVIDENCE_JSON="$(cat "${EVIDENCE_PATH}")"
+# Defensive guard: EVIDENCE_JSON is read from a file and is fed straight to
+# `jq --argjson ev`, which on an empty / non-JSON / non-array value throws the
+# generic "invalid JSON text passed to --argjson". That message surfaces far
+# from its cause (a truncated or half-written reconcile evidence file) and
+# historically invited a misdiagnosis as a "jq bug". Validate the shape up
+# front and fail with a named, terminal reason instead. Every downstream
+# consumer ($ev[], $ev | map, $ev | length) requires a JSON array.
+EV_KIND="$(printf '%s' "${EVIDENCE_JSON}" | jq -r 'type' 2>/dev/null || echo invalid)"
+if [ "${EV_KIND}" != "array" ]; then
+  emit_chat_failure "reconcile_failed: evidence file at ${EVIDENCE_PATH} is ${EV_KIND}, expected a JSON array (reconcile.sh produced an empty or malformed file)"
+fi
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}" '
   . as $s
   | reduce $ev[] as $e ($s;
@@ -842,12 +864,32 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
 # ─── 17. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
 mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
+# allocate_attempt.sh prints ONLY the integer attempt number on stdout. Capture
+# its exit code and stderr explicitly: under `set -e` a non-zero exit inside the
+# `N="$(...)"` assignment aborts the whole tick with a raw, unclassified error
+# and no JSON envelope on stdout — exactly the failure shape a weak orchestrator
+# model tries to "diagnose" and self-heal. Convert it into a named, terminal
+# tick failure instead. (An rc=0-but-empty/non-numeric stdout is caught by the
+# integer guard before step 19.)
+ALLOC_ERR="$(mktemp)"
+CLEANUP_FILES+=("${ALLOC_ERR}")
 for iid in "${BATCH_IIDS[@]}"; do
+  set +e
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
        IID="${iid}" \
-       bash "${SCRIPT_DIR}/allocate_attempt.sh")"
+       bash "${SCRIPT_DIR}/allocate_attempt.sh" 2>"${ALLOC_ERR}")"
+  _rc=$?
+  set -e
+  if [ "${_rc}" -ne 0 ]; then
+    # Capture allocate_attempt.sh stderr to wrapper.log first, then emit a
+    # stable, named reason only — never tail raw sub-tool stderr into
+    # chat_summary (see emit_chat_failure contract + SOUL.md §No-Fallback).
+    wrapper_log prepare_tick "allocate_attempt_failed iid=${iid} rc=${_rc} (stderr follows)"
+    cat "${ALLOC_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
+    emit_chat_failure "allocate_attempt_failed: iid=${iid} (rc=${_rc}; stderr in dispatcher wrapper.log)"
+  fi
   ATTEMPT["${iid}"]="${N}"
 done
 
@@ -883,6 +925,26 @@ for k in "${!BATCH_IIDS[@]}"; do
 done
 
 # ─── 19. Pre-spawn persist (placeholder pending entries) ──────────
+# Defensive guard: every value below (and the same four reused in the later
+# DISPATCH_ENTRIES append, step 21) is passed to `jq --argjson`, which rejects
+# a non-JSON token with the generic "invalid JSON text passed to --argjson".
+# An empty ATTEMPT[$iid] (allocate_attempt.sh printed nothing), or a non-numeric
+# UI_OFFSET/UI_COUNT, would surface as that cryptic message at the jq call far
+# from its real cause and invite a misdiagnosis as a "jq version bug". Validate
+# all four as non-negative integers here, once, and fail with a named, terminal
+# reason that points at the IID and the field instead.
+for iid in "${BATCH_IIDS[@]}"; do
+  for _pair in "iid:${iid}" "attempt:${ATTEMPT[$iid]:-}" \
+               "ui_offset:${UI_OFFSET[$iid]:-}" "ui_count:${UI_COUNT[$iid]:-}"; do
+    _field="${_pair%%:*}"; _val="${_pair#*:}"
+    case "${_val}" in
+      ''|*[!0-9]*)
+        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a non-negative integer (allocate_attempt.sh or the UI-slot computation produced an empty/non-numeric value); refusing to build a malformed jq --argjson call"
+        ;;
+    esac
+  done
+done
+
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"
@@ -972,7 +1034,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   # progress is interesting context).
   cat "${PA_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
   if [ "${PA_RC}" -ne 0 ]; then
-    prep_blocked "prepare_attempt: $(tail -n 1 "${PA_ERR}")"
+    # PA_ERR (raw git fetch / worktree stderr) is already mirrored to
+    # wrapper.log on the preceding cat; emit a stable, named reason only so
+    # raw git output never reaches block_reason / tick_outcome_per_iid (see
+    # emit_chat_failure contract + SOUL.md §No-Fallback rule 1).
+    prep_blocked "prepare_attempt_failed (rc=${PA_RC}; stderr in dispatcher wrapper.log)"
     retire_temp_file "${PA_OUT}"
     retire_temp_file "${PA_ERR}"
     continue
@@ -1026,7 +1092,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE="$(printf '%s' "${ISSUE_JSON}" | jq -r '.title // ""')"
   ISSUE_URL="$(printf '%s' "${ISSUE_JSON}" | jq -r '.web_url // ""')"
   ISSUE_LABELS="$(printf '%s' "${ISSUE_JSON}" | jq -r '.labels // [] | join(",")')"
-  ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '.description // ""' | head -c 4096)"
+  # Truncate by Unicode codepoint (jq `.[a:b]`), NOT bytes: issue bodies are
+  # almost always Chinese, and a byte-wise `head -c 4096` could split a
+  # multibyte char, leaving an invalid byte that breaks the python renderer's
+  # UTF-8 encoding and mis-classifies the IID as prep_blocked.
+  ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '(.description // "")[0:4096]')"
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
   # Transition labels: remove entry labels + add doing.

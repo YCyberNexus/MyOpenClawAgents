@@ -89,9 +89,9 @@ glab api --method PUT \
   -f "remove_labels=${LABEL}"
 ```
 
-### G6 — Look up an existing open MR for the work branch (subagent)
+### G6 — Look up open MRs for the work branch (subagent)
 
-Used by `scripts/create_mr.sh` to detect "MR already exists for this branch" before creating a new one (Strategy A — single MR per issue, fresh mode).
+Used by `scripts/create_mr.sh` to list any open MRs pointing at the work branch before rotation. **Both** `fresh` and `continue` modes close every prior open MR and then create a fresh one each attempt (Strategy A — one open MR per issue at any moment, rotated per attempt). The returned JSON drives both the close loop (G10) and the final MR-URL extraction (`.[0].web_url`).
 
 ```bash
 glab mr list \
@@ -104,7 +104,7 @@ Returns a JSON array. Do not add `--state opened`: runner-installed `glab 1.93.0
 
 ### G7 — Create a merge request (subagent)
 
-Wrapped by `scripts/create_mr.sh`. Only call this when G6 returned empty (fresh mode) or after G10 closed prior MRs (continue mode).
+Wrapped by `scripts/create_mr.sh`. Called once per attempt in **both** modes, after G10 has closed every prior open MR (if any). There is no fresh-mode reuse path — every attempt produces a new MR object.
 
 ```bash
 glab mr create \
@@ -118,7 +118,9 @@ glab mr create \
 
 The inline `--description "$(cat ...)"` form is intentional. Some runner-installed `glab` versions don't recognize `--description-file`; the inline `--description` flag has been in glab since the beginning. See the "Flag compatibility" rule below.
 
-### G8 — Look up the MR URL after creation (subagent)
+### G8 — Look up the MR URL after creation (subagent, reserved)
+
+Permitted command, but `scripts/create_mr.sh` does **not** currently call it: after creating the MR it re-runs the G6 list and extracts `.[0].web_url` from the guaranteed single open MR. G8 is retained as an allowed fallback for looking up a single MR by branch.
 
 ```bash
 glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.web_url'
@@ -136,9 +138,9 @@ glab api --method POST \
 
 The `-F body=@<file>` form uploads the file contents as the form field, which avoids quoting issues for large multiline summaries.
 
-### G10 — Close (without merging) an existing MR (subagent, continue mode only)
+### G10 — Close (without merging) an existing MR (subagent)
 
-Used by `scripts/create_mr.sh` in continue mode to close the previous attempt's MR before creating a fresh one. Closing is NOT merging — the integration branch is unaffected; the closed MR remains in GitLab as historical record.
+Used by `scripts/create_mr.sh` in **both** modes to close every prior open MR for the work branch before creating a fresh one. Closing is NOT merging — the integration branch is unaffected; the closed MR remains in GitLab as historical record.
 
 ```bash
 glab mr close <mr_iid> --repo "${PROJECT_FULL}"
