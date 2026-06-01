@@ -131,24 +131,48 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
     bash {SCRIPTS_DIR}/run_acpx_attempt.sh
-  CAPTURE: acpx_exit (the script's exit code; stdout also prints `ACPX_EXIT=<n>`).
-  Exit-code routing:
-    - acpx_exit == 0           → continue to Step 2.
-    - acpx_exit == 124 or 137  → the script's `timeout` wrapper killed acpx
-                                 because it exceeded {ACPX_TIMEOUT_SECONDS}s
-                                 (124 = SIGTERM kill, 137 = SIGKILL kill-after).
-                                 The acpx process is already gone. Enter the
-                                 dedicated TIMEOUT flow described in
-                                 <timeout_flow> below — do NOT enter the
-                                 normal FAIL flow and do NOT mark the issue
-                                 blocked. The partial work in the worktree
-                                 still gets force-pushed to {WORK_BRANCH},
-                                 but no MR / `pr` is opened.
-    - any other non-zero exit  → enter the dedicated BLOCKED_PUSH flow
-                                 described in <blocked_push_flow> below with
-                                 status=blocked and
-                                 block_reason="acpx run failed (exit ${acpx_exit}); see {LOG_DIR}/acpx_raw.log".
-  Do NOT inspect or tail acpx logs after a non-timeout failure; preserve the logs and enter the BLOCKED_PUSH flow immediately.
+  CAPTURE: acpx_exit — but ONLY trust it when the script actually printed a
+  literal `ACPX_EXIT=<n>` line on stdout. That line is the script's proof that
+  acpx ran to completion (or was killed by the script's OWN `timeout` wrapper)
+  and that `<n>` is acpx's real exit code. If you do NOT see an `ACPX_EXIT=<n>`
+  line in the captured output, you do NOT have a real acpx exit code — do not
+  invent one from the Bash tool's own status (a tool-side timeout / killed
+  child can surface 124, 137, 143, 1, or nothing at all without acpx itself
+  having exited).
+  Exit-code routing (apply the FIRST matching rule, top to bottom):
+    - NO `ACPX_EXIT=<n>` line     → the acpx run did NOT cleanly terminate
+      in the captured output         under the script's control (tool-side
+                                     command timeout, tool disconnect,
+                                     truncated/streamed-away output, or the
+                                     Bash tool killed the process). Enter the
+                                     <timeout_flow>, NOT the BLOCKED_PUSH flow.
+                                     This is the single most important rule:
+                                     a missing `ACPX_EXIT=` line means acpx may
+                                     still be running in the background, and
+                                     marking the issue `blocked` while acpx is
+                                     alive is a known failure mode. Treat it
+                                     identically to acpx_exit=124. Do NOT
+                                     re-run acpx for the same attempt.
+    - `ACPX_EXIT=0`              → continue to Step 2.
+    - `ACPX_EXIT=124` or `=137`  → the script's `timeout` wrapper killed acpx
+                                     because it exceeded {ACPX_TIMEOUT_SECONDS}s
+                                     (124 = SIGTERM kill, 137 = SIGKILL
+                                     kill-after). The acpx process is already
+                                     gone. Enter the dedicated TIMEOUT flow
+                                     described in <timeout_flow> below — do NOT
+                                     enter the normal FAIL flow and do NOT mark
+                                     the issue blocked. The partial work in the
+                                     worktree still gets force-pushed to
+                                     {WORK_BRANCH}, but no MR / `pr` is opened.
+    - any other `ACPX_EXIT=<n>`  → a clean, script-reported acpx failure
+      (n ∉ {0, 124, 137})            (n is acpx's real exit code). Enter the
+                                     dedicated BLOCKED_PUSH flow described in
+                                     <blocked_push_flow> below with
+                                     status=blocked and
+                                     block_reason="acpx run failed (exit <n>); see {LOG_DIR}/acpx_raw.log".
+  Only a genuine `ACPX_EXIT=<n>` line with n ∉ {0,124,137} may route to
+  `blocked`. Do NOT inspect or tail acpx logs after such a failure; preserve
+  the logs and enter the BLOCKED_PUSH flow immediately.
 
   TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
@@ -167,7 +191,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - Use a command timeout that covers the whole expected Claude Code run AND gives the script's internal `timeout` wrapper enough headroom to fire first. The deployment value is {ACPX_TIMEOUT_SECONDS} seconds (configurable via the `acpx_timeout_seconds` trigger field — see [`trigger_command.md`](./trigger_command.md)). Pass `{ACPX_TIMEOUT_SECONDS} + 120` seconds (i.e. ~2 minutes of extra grace) as the Bash tool's command timeout so the script can return its exit code 124/137 before the outer tool gives up.
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits (the script's own `timeout` will eventually kill acpx and return 124/137; you read the exit code from there).
-  - If the Bash tool itself returns a tool-side timeout (no `ACPX_EXIT=` line captured) — which should not normally happen because the script's `timeout` fires first — treat the situation identically to acpx_exit=124 and enter the TIMEOUT flow below. The acpx process tree has already been killed by the Bash tool's own cleanup; do not start another acpx for the same attempt.
+  - If the Bash tool itself returns without a captured `ACPX_EXIT=` line (tool-side command timeout, disconnect, or truncated output) — which should not normally happen because the script's `timeout` fires first and the deployment sets the Bash command timeout to {ACPX_TIMEOUT_SECONDS} + 120 — treat the situation identically to acpx_exit=124 and enter the TIMEOUT flow below (NOT the blocked flow). `run_acpx_attempt.sh` runs acpx in its own process group and installs a SIGTERM/INT/HUP trap that tears the acpx subtree down on a catchable shutdown signal, but a SIGKILL of the script cannot be trapped — so acpx MAY still be running in the background. That residual-orphan risk is exactly why a missing `ACPX_EXIT=` line MUST route to `timeout`, never `blocked`. Do NOT start another acpx for the same attempt.
   - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. Continue-mode continuity comes from: the self-contained prompt (incl. prior attempt summaries + reviewer comments), the work-branch contents that continue-mode resets check out, and the restored same-IID runtime subtree. Fresh-mode runs deliberately quarantine same-IID runtime residue before the new acpx invocation.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
@@ -440,9 +464,12 @@ HARD rules for the blocked push flow:
 </blocked_push_flow>
 
 <timeout_flow>
-Entered ONLY when Step 1 saw acpx_exit ∈ {124, 137} (the script's `timeout`
-wrapper killed acpx because it exceeded {ACPX_TIMEOUT_SECONDS}s) OR when
-the Bash tool itself reported a tool-side timeout for the same call.
+Entered when Step 1 saw a clean `ACPX_EXIT=124` or `ACPX_EXIT=137` line (the
+script's `timeout` wrapper killed acpx because it exceeded
+{ACPX_TIMEOUT_SECONDS}s) OR when the Step 1 output carried NO `ACPX_EXIT=`
+line at all (tool-side command timeout, disconnect, or truncated output — acpx
+did not cleanly terminate under the script's control and may still be running).
+Both cases land here, NOT in the blocked flow.
 
 Set ATTEMPT_STATUS=timeout and
     BLOCK_REASON="acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"
