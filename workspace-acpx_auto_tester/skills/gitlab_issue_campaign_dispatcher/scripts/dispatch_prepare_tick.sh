@@ -1302,8 +1302,8 @@ PYEOF
   DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
     --argjson iid "${iid}" \
     --argjson attempt "${attempt}" \
-    --arg label "${child_label}" \
-    --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$label, payload_path:$path}]')"
+    --arg clabel "${child_label}" \
+    --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$clabel, payload_path:$path}]')"
 
   wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"
 done
