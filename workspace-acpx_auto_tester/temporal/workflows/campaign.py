@@ -41,6 +41,7 @@ with workflow.unsafe.imports_passed_through():
     from ..activities.orchestrator import (
         allocate_attempt_number,
         build_executor_prompt,
+        bump_campaign_tick_seq,
         clone_or_pull_repo,
         ensure_workflow_labels,
         load_ui_account_pool,
@@ -198,11 +199,23 @@ class CampaignWorkflow:
         labels do not encode: monotonic attempt number, retry_count, and
         blocked_at_tick.
         """
-        inp = inp.validated()
+        # A bad trigger/config must fail THIS tick loudly and terminally, the
+        # way the bash dispatcher's ``emit_chat_failure`` does — not wedge the
+        # workflow task in an infinite retry. ``validated()`` raises a bare
+        # ``ValueError``; Temporal would treat that as a (retryable) workflow
+        # task failure and replay it forever. Re-raising as a non-retryable
+        # ``ApplicationError`` (a ``FailureError``) fails the workflow execution
+        # cleanly, surfacing the dispatcher's exact abort string. The next
+        # Schedule firing starts a fresh execution that fails again until the
+        # operator fixes the input.
+        try:
+            inp = inp.validated()
+        except ValueError as exc:
+            raise ApplicationError(
+                str(exc), type="invalid_campaign_input", non_retryable=True
+            ) from exc
         self._set_scope_from_input(inp)
-        self._tick_seq += 1
         tick_started_at = workflow.now()
-        LOG.info("CampaignWorkflow tick=%d project=%s", self._tick_seq, inp.project)
 
         # Honour pause signal between Schedule firings — the operator can
         # pause the Schedule itself OR signal an in-flight CampaignWorkflow.
@@ -234,6 +247,22 @@ class CampaignWorkflow:
             heartbeat_timeout=timedelta(seconds=60),
             retry_policy=_RP_2_ATTEMPTS,
         )
+
+        # ── Monotonic tick counter ──────────────────────────────────────────
+        # blocked_cooldown_ticks counts elapsed scheduled wake-ups, so it needs
+        # a tick number that persists across Schedule firings. Each firing is a
+        # fresh workflow execution (the in-memory ``self._tick_seq`` would always
+        # read 1), so we read+increment a dispatcher-level counter on disk,
+        # mirroring the legacy ``campaign_state.json.tick_seq``. Runs after
+        # clone_or_pull so the dispatcher directory under ${REPO_PATH} exists.
+        # Single-shot (no retry) like the other non-idempotent state writes.
+        self._tick_seq = await workflow.execute_activity(
+            bump_campaign_tick_seq,
+            args=[inp],
+            start_to_close_timeout=timedelta(seconds=10),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        LOG.info("CampaignWorkflow tick=%d project=%s", self._tick_seq, inp.project)
 
         # ── Reconcile + classify ────────────────────────────────────────────
         evidence = await self._reconcile(inp)
@@ -385,11 +414,21 @@ class CampaignWorkflow:
             retry_policy=RetryPolicy(maximum_attempts=1),
         )
         pool_size = pool_info.count
-        slots = allocate_slots(
-            pool_size=pool_size,
-            max_concurrent_subagents=inp.max_concurrent_subagents,
-            max_accounts_per_issue=inp.max_accounts_per_issue,
-        )
+        # allocate_slots raises a bare ValueError on the dispatcher's
+        # "ui_account_pool_too_small" / "invalid_max_*" conditions. As with
+        # validated() above, convert it to a non-retryable ApplicationError so
+        # the misconfigured tick fails the workflow loudly (with the exact abort
+        # string) instead of wedging the workflow task in an infinite retry.
+        try:
+            slots = allocate_slots(
+                pool_size=pool_size,
+                max_concurrent_subagents=inp.max_concurrent_subagents,
+                max_accounts_per_issue=inp.max_accounts_per_issue,
+            )
+        except ValueError as exc:
+            raise ApplicationError(
+                str(exc), type="ui_account_allocation_failed", non_retryable=True
+            ) from exc
         sem = AccountSemaphore(slots)
 
         # Prepare each IID sequentially (the legacy prepare_attempt.sh holds

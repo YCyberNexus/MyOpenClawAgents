@@ -180,6 +180,22 @@ def _read_issue_disk_state(camp: CampaignInput, iid: int) -> dict[str, object]:
         return {}
 
 
+def _campaign_tick_path(camp: CampaignInput) -> Path:
+    """Dispatcher-level file holding the monotonic campaign tick counter.
+
+    Lives next to the legacy ``campaign_state.json`` location
+    (``${REPO_PATH}/${result_basename}/_dispatcher/``) so the two schedulers
+    share the same on-disk neighbourhood without colliding on a file name.
+    """
+    repo_path = f"{camp.repo_parent_path.rstrip('/')}/{camp.project}"
+    return (
+        Path(repo_path)
+        / camp.result_basename
+        / "_dispatcher"
+        / "campaign_tick.json"
+    )
+
+
 # ---------------------------------------------------------------------------
 # A2 — ensure_workflow_labels
 # ---------------------------------------------------------------------------
@@ -695,6 +711,50 @@ async def record_attempt_outcome(
     return retry_count
 
 
+@activity.defn(name="bump_campaign_tick_seq")
+async def bump_campaign_tick_seq(camp: CampaignInput) -> int:
+    """Atomically increment and return the campaign-level monotonic tick number.
+
+    ``blocked_cooldown_ticks`` measures elapsed *scheduled wake-ups*: a blocked
+    IID must sit out N ticks before it is re-dispatched. The cooldown gate in
+    :class:`CampaignWorkflow` therefore needs a tick number that survives across
+    Schedule firings. But the Temporal integration starts one fresh workflow
+    *execution* per tick (see ``CampaignInput.ticks_before_continue_as_new``),
+    so an in-memory counter always reads 1 and the cooldown would compare
+    ``1 - blocked_at_tick(=1) == 0`` forever — silently disabling blocked-retry.
+
+    This activity mirrors the legacy dispatcher's persisted
+    ``campaign_state.json.tick_seq`` (``dispatch_prepare_tick.sh``:
+    ``tick_seq: ((.tick_seq // 0) + 1)``): read the prior value from a
+    dispatcher-level JSON file, increment, write back atomically, return the new
+    value. ``ScheduleOverlapPolicy.BUFFER_ONE`` guarantees ticks never overlap,
+    so no inter-tick lock is required. Must run after ``clone_or_pull_repo`` so
+    the dispatcher directory under ``${REPO_PATH}`` exists. The caller schedules
+    this with ``maximum_attempts=1`` (no activity-level retry), so the only
+    double-increment window is a worker crash after the atomic ``tmp.replace``
+    but before the result is acked, which forces a workflow-task replay that
+    re-runs the activity. That is harmless: the counter stays monotonic, so the
+    cooldown clock merely advances slightly faster — it never stalls.
+    """
+    path = _campaign_tick_path(camp)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    prior = 0
+    try:
+        prior = int(
+            json.loads(path.read_text(encoding="utf-8")).get("tick_seq", 0) or 0
+        )
+    except (OSError, json.JSONDecodeError, ValueError, TypeError):
+        prior = 0
+    new_seq = prior + 1
+    tmp = path.with_name(f".{path.name}.tmp")
+    tmp.write_text(
+        json.dumps({"tick_seq": new_seq}, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(path)
+    return new_seq
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -712,6 +772,7 @@ async def _idle_heartbeat() -> None:
 __all__ = [
     "build_executor_prompt",
     "allocate_attempt_number",
+    "bump_campaign_tick_seq",
     "clone_or_pull_repo",
     "ensure_workflow_labels",
     "load_ui_account_pool",

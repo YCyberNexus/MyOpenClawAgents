@@ -67,6 +67,7 @@ from .activities.leaf import (
 from .activities.orchestrator import (
     allocate_attempt_number,
     build_executor_prompt,
+    bump_campaign_tick_seq,
     clone_or_pull_repo,
     ensure_workflow_labels,
     load_ui_account_pool,
@@ -183,6 +184,7 @@ async def _run(args: argparse.Namespace) -> None:
             ensure_workflow_labels,
             self_heal_safety_bin,
             clone_or_pull_repo,
+            bump_campaign_tick_seq,
             load_ui_account_pool,
             allocate_attempt_number,
             prepare_attempt_worktree,
