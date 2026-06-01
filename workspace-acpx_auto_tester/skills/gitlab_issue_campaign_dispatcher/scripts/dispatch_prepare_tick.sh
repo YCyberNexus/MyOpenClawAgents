@@ -290,6 +290,48 @@ if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
 fi
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
+# The campaign lock lives inside the repo runtime root
+# (${RESULT_ROOT}/_dispatcher/campaign.lock), but env_paths.sh only creates
+# that directory once ${REPO_PATH}/.git exists, and the routine clone_or_pull
+# (§13) runs AFTER this flock. On a brand-new deployment whose repo_path has
+# never been cloned, opening the lock fd here would fail with ENOENT.
+# Bootstrap the clone first (only when .git is missing) so the lock's parent
+# directory exists. clone_or_pull.sh is internally serialized (tmpfs +
+# repo.lock) and idempotent; §13 re-runs it under the campaign lock for the
+# routine fetch. We must NOT pre-`mkdir` the lock directory instead:
+# clone_or_pull.sh refuses (exit 12) to clone into a ${REPO_PATH} that already
+# exists without a .git/, so creating the runtime root ahead of the clone
+# would convert this into a hard clone failure.
+if [ ! -d "${REPO_PATH}/.git" ]; then
+  BOOTSTRAP_CLONE_OUT="$(mktemp)"
+  chmod 600 "${BOOTSTRAP_CLONE_OUT}" 2>/dev/null || true
+  CLEANUP_FILES+=("${BOOTSTRAP_CLONE_OUT}")
+  set +e
+  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+    BRANCH="${T[branch]}" \
+    bash "${SCRIPT_DIR}/clone_or_pull.sh" >"${BOOTSTRAP_CLONE_OUT}" 2>&1
+  BOOT_RC=$?
+  set -e
+  # Land diagnostics where an operator can find them. After a successful clone
+  # DISPATCHER_LOG_DIR exists (clone_or_pull.sh created it); after a FAILED first
+  # clone it does NOT — which is exactly when the error matters most — so fall
+  # back to a fixed out-of-repo path (chmod 600: output may carry the authed
+  # remote URL). This fallback is a deliberate persistent diagnostic, so it is
+  # NOT registered in CLEANUP_FILES. Raw output never enters chat regardless —
+  # the chat reason carries only the file path, never its contents (see the
+  # emit_chat_failure contract).
+  if [ -d "${DISPATCHER_LOG_DIR}" ]; then
+    BOOTSTRAP_LOG_HINT="${DISPATCHER_LOG_DIR}/wrapper.log"
+    cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
+  else
+    BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/acpx_auto_tester.bootstrap.${PROJECT}.log"
+    cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
+    chmod 600 "${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
+  fi
+  [ "${BOOT_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (bootstrap before flock; exit ${BOOT_RC}; full output in ${BOOTSTRAP_LOG_HINT})"
+fi
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
   jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[], cleanup_actions:[]}'
