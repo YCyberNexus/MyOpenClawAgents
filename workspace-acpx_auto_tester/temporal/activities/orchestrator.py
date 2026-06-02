@@ -56,7 +56,10 @@ LOG = logging.getLogger("acpx_temporal.activities.orchestrator")
 @activity.defn(name="reconcile_gitlab")
 async def reconcile_gitlab(
     camp: CampaignInput,
-    *,
+    # NOTE: no ``*`` keyword-only separator here — temporalio rejects activity
+    # functions with keyword-only arguments ("Activity cannot have keyword-only
+    # arguments"). ``single_iid`` stays a positional-or-keyword arg with a
+    # default; callers pass it positionally via ``execute_activity(args=[...])``.
     single_iid: int | None = None,
 ) -> ReconcileEvidence:
     """Query GitLab labels + state for the IID range and parse the resulting
