@@ -54,28 +54,24 @@ LOG = logging.getLogger("acpx_temporal.activities.orchestrator")
 
 
 @activity.defn(name="reconcile_gitlab")
-async def reconcile_gitlab(
-    camp: CampaignInput,
-    # NOTE: no ``*`` keyword-only separator here — temporalio rejects activity
-    # functions with keyword-only arguments ("Activity cannot have keyword-only
-    # arguments"). ``single_iid`` stays a positional-or-keyword arg with a
-    # default; callers pass it positionally via ``execute_activity(args=[...])``.
-    single_iid: int | None = None,
-) -> ReconcileEvidence:
+async def reconcile_gitlab(camp: CampaignInput) -> ReconcileEvidence:
     """Query GitLab labels + state for the IID range and parse the resulting
     evidence file into a :class:`ReconcileEvidence`.
 
-    ``single_iid`` narrows the range to one IID — used on the callback path
-    in the legacy dispatcher; the Temporal version uses it for spot-checks.
+    IMPORTANT — exactly ONE positional parameter. temporalio's worker drops
+    ALL argument type hints when ``len(arg_types) != len(args passed)``
+    (see ``temporalio/worker/_activity.py``: ``if len(arg_types) != len(input):
+    arg_types = None``). When that happens ``camp`` is decoded untyped and
+    arrives as a raw ``dict`` instead of a ``CampaignInput`` — the exact bug a
+    former trailing ``single_iid: int | None = None`` default caused, since the
+    sole call site passes ``args=[inp]`` (one arg) against a two-param
+    signature. Do NOT add a second/optional parameter here. A future single-IID
+    reconcile must be modeled as a field on the input dataclass, not as an extra
+    activity argument.
     """
     env = build_dispatcher_env(camp)
-    if single_iid is not None:
-        env["IID_LIST"] = str(single_iid)
-        env["MIN_IID"] = str(single_iid)
-        env["MAX_IID"] = str(single_iid)
-    else:
-        env["MIN_IID"] = str(camp.issue_min_iid)
-        env["MAX_IID"] = str(camp.issue_max_iid)
+    env["MIN_IID"] = str(camp.issue_min_iid)
+    env["MAX_IID"] = str(camp.issue_max_iid)
 
     res = await run_script("reconcile.sh", env=env)
     if res.exit_code != 0:
@@ -101,8 +97,8 @@ async def reconcile_gitlab(
     return _parse_reconcile_evidence(
         evidence_path,
         camp,
-        camp.issue_min_iid if single_iid is None else single_iid,
-        camp.issue_max_iid if single_iid is None else single_iid,
+        camp.issue_min_iid,
+        camp.issue_max_iid,
     )
 
 
