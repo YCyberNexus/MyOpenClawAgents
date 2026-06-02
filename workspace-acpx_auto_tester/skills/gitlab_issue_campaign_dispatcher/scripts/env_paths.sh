@@ -44,7 +44,7 @@
 #                                          branch to BASE_REF in place (untracked files
 #                                          Claude wrote in earlier attempts survive, so
 #                                          `acpx claude exec` can pick up where it left off).
-#                   .claude/ hulat/ ${DATA_BASENAME}/    (from base branch checkout)
+#                   .claude/ hulat/ ${DATA_BASENAME}/    (tracked config refreshed from origin/${DEV_BRANCH})
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
 #                                                        ← OUTPUT_DIR (force-added; shared
 #                                                          across attempts of this IID)
@@ -189,7 +189,18 @@ export REPO_PARENT_PATH REPO_PATH
 # projects that never ship the new fields.
 : "${RESULT_BASENAME:=ifp-result}"
 : "${DATA_BASENAME:=ifp-data}"
-export RESULT_BASENAME DATA_BASENAME
+# Relative path of the UI test-account pool file under ${REPO_PATH}
+# (the project checkout root). The relpath itself names the leading
+# directory and may point at any repo subdirectory, not only the data
+# dir. Optional trigger field `ui_accounts_relpath` overrides this with
+# carry-forward semantics (see references/trigger_command.md). There is
+# NO default value: when neither the trigger nor the persisted state
+# supplies a value, the dispatcher leaves UI_ACCOUNTS_RELPATH empty and
+# skips the entire UI-account allocation flow (no pool is read, no
+# accounts are injected into the subagent prompt). Initialize to empty
+# so downstream `set -u` reads do not trip.
+: "${UI_ACCOUNTS_RELPATH:=}"
+export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export HULAT_DIR="${REPO_PATH}/hulat"

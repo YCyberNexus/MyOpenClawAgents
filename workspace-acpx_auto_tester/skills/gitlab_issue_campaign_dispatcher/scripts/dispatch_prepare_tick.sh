@@ -19,6 +19,9 @@
 #     "run_timeout_seconds": 18120,
 #     "max_launch_retries": 3,
 #     "backoff_seconds": 2,
+#     "cleanup_actions": [
+#       {"action":"kill","target":"agent:...","reason":"scope_evicted_outside_trigger_range","iid":350}
+#     ],
 #     "chat_summary": "...",
 #     "tick_outcome_per_iid": {"15": "blocked: prep failed: ..."},
 #     "launch_retries_seed": {}
@@ -55,15 +58,36 @@ TRIGGER_FILE="$(mktemp)"
 POOL_OUT=""
 POOL_ERR=""
 RECONCILE_OUT=""
+CLEANUP_ACTIONS_JSON="[]"
 declare -a CLEANUP_FILES=()
+retire_temp_file() {
+  local path="${1:-}"
+  [ -n "${path}" ] || return 0
+  [ -e "${path}" ] || return 0
+
+  # Trigger/payload temp files can contain credentials. Blank the file before
+  # moving it out of the active temp path; keep the inode around for audit
+  # instead of deleting it.
+  : >"${path}" 2>/dev/null || true
+
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
+  mkdir -p "${retire_dir}" 2>/dev/null || return 0
+  mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
+}
 cleanup_temps() {
   # Guard CLEANUP_FILES expansion: on bash <4.4 (and zsh), expanding an
   # empty array under `set -u` raises an unbound-variable error before
-  # rm runs, leaving the temps on disk AND propagating a non-zero exit
-  # back to the orchestrator.
-  rm -f "${TRIGGER_FILE}" "${POOL_OUT}" "${POOL_ERR}" "${RECONCILE_OUT}"
+  # cleanup runs, leaving the temps on disk AND propagating a non-zero
+  # exit back to the orchestrator.
+  retire_temp_file "${TRIGGER_FILE}"
+  retire_temp_file "${POOL_OUT}"
+  retire_temp_file "${POOL_ERR}"
+  retire_temp_file "${RECONCILE_OUT}"
   if [ "${#CLEANUP_FILES[@]}" -gt 0 ]; then
-    rm -f "${CLEANUP_FILES[@]}"
+    local cleanup_file
+    for cleanup_file in "${CLEANUP_FILES[@]}"; do
+      retire_temp_file "${cleanup_file}"
+    done
   fi
 }
 trap cleanup_temps EXIT
@@ -88,10 +112,20 @@ while IFS= read -r line || [ -n "${line}" ]; do
   esac
 done <"${TRIGGER_FILE}"
 
+# emit_chat_failure: emit a tick_failed envelope and exit 0.
+# CONTRACT: ${msg} MUST be a stable, named classification string (e.g.
+# "reconcile_failed", "clone_or_pull_failed", "ui_account_pool_too_small").
+# NEVER interpolate raw stderr from a sub-script or its internal tooling
+# (jq / glab / git / python3) into ${msg}. Raw diagnostics belong in
+# wrapper.log only. Rationale: a tool name surfacing in the orchestrator's
+# chat view primes a weak orchestrator model to "diagnose and patch the
+# script" instead of classify-and-stop (SOUL.md §No-Fallback rule 1).
 emit_chat_failure() {
   local msg="$1"
+  local cleanup_actions="${CLEANUP_ACTIONS_JSON:-[]}"
   jq -nc --arg msg "${msg}" \
-    '{status:"tick_failed", chat_summary:$msg, dispatch_entries:[]}'
+    --argjson cleanup_actions "${cleanup_actions}" \
+    '{status:"tick_failed", chat_summary:$msg, dispatch_entries:[], cleanup_actions:$cleanup_actions}'
   exit 0
 }
 
@@ -172,6 +206,28 @@ done
 [ -n "${T[result_basename]:-}" ] && export RESULT_BASENAME="${T[result_basename]}"
 [ -n "${T[data_basename]:-}" ]   && export DATA_BASENAME="${T[data_basename]}"
 
+# ui_accounts_relpath: relative path of the UI account pool file under
+# ${REPO_PATH} (the project checkout root). The relpath itself names
+# the leading directory — typically ${DATA_BASENAME} but it does not
+# have to be. Same carry-forward semantics as result_basename /
+# data_basename — applied here so env_paths.sh sees the exported value
+# below. Validation matches the rules enforced in load_ui_accounts.sh.
+if [ -n "${T[ui_accounts_relpath]:-}" ]; then
+  case "${T[ui_accounts_relpath]}" in
+    /*)
+      emit_chat_failure "invalid_ui_accounts_relpath: must be a relative path" ;;
+  esac
+  case "${T[ui_accounts_relpath]}" in
+    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+      emit_chat_failure "invalid_ui_accounts_relpath: dot segments or whitespace not allowed" ;;
+  esac
+  case "${T[ui_accounts_relpath]}" in
+    *[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_ui_accounts_relpath: unsupported characters" ;;
+  esac
+  export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
+fi
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
@@ -181,7 +237,7 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
 # Discover the existing runtime root under REPO_PATH before falling back to
 # a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
    && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
   shopt -s nullglob
   for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
@@ -196,6 +252,10 @@ if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ]; } \
     if [ -z "${T[data_basename]:-}" ]; then
       PERSISTED_DB="$(jq -r '.data_basename // empty' "${candidate_state}")"
       [ -n "${PERSISTED_DB}" ] && export DATA_BASENAME="${PERSISTED_DB}"
+    fi
+    if [ -z "${T[ui_accounts_relpath]:-}" ]; then
+      PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
+      [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
     fi
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
@@ -222,16 +282,71 @@ if [ -z "${T[data_basename]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     source "${SCRIPT_DIR}/env_paths.sh"
   fi
 fi
+if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+  PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
+  if [ -n "${PERSISTED_UAR}" ] && [ "${PERSISTED_UAR}" != "${UI_ACCOUNTS_RELPATH}" ]; then
+    export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
+  fi
+fi
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
+# The campaign lock lives inside the repo runtime root
+# (${RESULT_ROOT}/_dispatcher/campaign.lock), but env_paths.sh only creates
+# that directory once ${REPO_PATH}/.git exists, and the routine clone_or_pull
+# (§13) runs AFTER this flock. On a brand-new deployment whose repo_path has
+# never been cloned, opening the lock fd here would fail with ENOENT.
+# Bootstrap the clone first (only when .git is missing) so the lock's parent
+# directory exists. clone_or_pull.sh is internally serialized (tmpfs +
+# repo.lock) and idempotent; §13 re-runs it under the campaign lock for the
+# routine fetch. We must NOT pre-`mkdir` the lock directory instead:
+# clone_or_pull.sh refuses (exit 12) to clone into a ${REPO_PATH} that already
+# exists without a .git/, so creating the runtime root ahead of the clone
+# would convert this into a hard clone failure.
+if [ ! -d "${REPO_PATH}/.git" ]; then
+  BOOTSTRAP_CLONE_OUT="$(mktemp)"
+  chmod 600 "${BOOTSTRAP_CLONE_OUT}" 2>/dev/null || true
+  CLEANUP_FILES+=("${BOOTSTRAP_CLONE_OUT}")
+  set +e
+  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+    BRANCH="${T[branch]}" \
+    bash "${SCRIPT_DIR}/clone_or_pull.sh" >"${BOOTSTRAP_CLONE_OUT}" 2>&1
+  BOOT_RC=$?
+  set -e
+  # Land diagnostics where an operator can find them. After a successful clone
+  # DISPATCHER_LOG_DIR exists (clone_or_pull.sh created it); after a FAILED first
+  # clone it does NOT — which is exactly when the error matters most — so fall
+  # back to a fixed out-of-repo path (chmod 600: output may carry the authed
+  # remote URL). This fallback is a deliberate persistent diagnostic, so it is
+  # NOT registered in CLEANUP_FILES. Raw output never enters chat regardless —
+  # the chat reason carries only the file path, never its contents (see the
+  # emit_chat_failure contract).
+  if [ -d "${DISPATCHER_LOG_DIR}" ]; then
+    BOOTSTRAP_LOG_HINT="${DISPATCHER_LOG_DIR}/wrapper.log"
+    cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
+  else
+    BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/acpx_auto_tester.bootstrap.${PROJECT}.log"
+    cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
+    chmod 600 "${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
+  fi
+  [ "${BOOT_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (bootstrap before flock; exit ${BOOT_RC}; full output in ${BOOTSTRAP_LOG_HINT})"
+fi
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
-  jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[]}'
+  jq -nc '{status:"lock_held", chat_summary:"lock_held (another dispatcher tick is running)", dispatch_entries:[], cleanup_actions:[]}'
   exit 0
 fi
 
 wrapper_log prepare_tick "tick started project=${PROJECT}"
 TICK_START_TS="$(date -u +%s)"
+
+# Self-heal: restore +x on scripts/safety_bin/* in case deployment dropped
+# the mode bit. Must run before any Phase 4 prep that ends up invoking
+# run_acpx_attempt.sh inside the subagent (which asserts the bit). Safe to
+# call here because the wrapper log is now writeable; chmod is local-only
+# (no GitLab traffic, no flock contention).
+ensure_safety_bin_executable
 
 # ─── 6. Load state + apply trigger override ──────────────────────
 STATE_JSON="$(load_state)"
@@ -256,15 +371,12 @@ OUTER_TIMEOUT_GRACE_SECONDS=120
 # Defaults when trigger omits.
 [ -z "${MAX_CONCURRENT}" ] && MAX_CONCURRENT=1
 [ -z "${MAX_ACCOUNTS}"   ] && MAX_ACCOUNTS=14
-[ -z "${STUCK_AFTER}"    ] && STUCK_AFTER=330
 [ -z "${ACPX_TIMEOUT}"   ] && ACPX_TIMEOUT=18000
 
 case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;; esac
 [ "${MAX_CONCURRENT}" -ge 1 ] || emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1"
 case "${MAX_ACCOUNTS}" in *[!0-9]*|"") emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;; esac
 [ "${MAX_ACCOUNTS}" -ge 1 ] || emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1"
-case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
-[ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
 [ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
 [ -z "${RUN_TIMEOUT}"    ] && RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
@@ -272,6 +384,12 @@ case "${RUN_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_run_timeout_sec
 [ "${RUN_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_run_timeout_seconds: must be >= 60"
 MIN_RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
 [ "${RUN_TIMEOUT}" -ge "${MIN_RUN_TIMEOUT}" ] || emit_chat_failure "run_timeout_seconds_below_acpx_timeout_seconds_plus_${OUTER_TIMEOUT_GRACE_SECONDS}"
+# stuck_after_minutes defaults to ceil(run_timeout_seconds / 60) + 30, so the
+# runtime's own timeout always fires before the dispatcher's eviction backstop.
+# Operators may still override explicitly for tighter or looser eviction.
+[ -z "${STUCK_AFTER}" ] && STUCK_AFTER=$(( (RUN_TIMEOUT + 59) / 60 + 30 ))
+case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
+[ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
 
 KILL_TERMINAL="${T[kill_subagent_on_terminal]:-}"
 if [ -n "${KILL_TERMINAL}" ]; then
@@ -324,6 +442,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg repo_path "${REPO_PARENT_PATH}" \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
+  --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -346,6 +465,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     repo_path: $repo_path,
     result_basename: $result_basename,
     data_basename: $data_basename,
+    ui_accounts_relpath: $ui_accounts_relpath,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
@@ -394,55 +514,37 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --arg project "${PROJECT}" '
   | .active_issue_iids     = $pk
   | .active_issue_sessions = ($pk | map("issue-" + $project + "-" + (.|tostring)))')"
 
-# Validate ui_account pool. load_ui_accounts.sh exit code 13 → pool too small.
-POOL_OUT="$(mktemp)"
-POOL_ERR="$(mktemp)"
-chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
-set +e
-PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-  MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
-  MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
-  bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
-POOL_RC=$?
-set -e
-case "${POOL_RC}" in
-  0) ;;
-  10) emit_chat_failure "ui_accounts.env missing (deployment incomplete)" ;;
-  11) emit_chat_failure "ui_accounts.env pool is empty" ;;
-  12) emit_chat_failure "ui_accounts.env malformed pool line" ;;
-  13)
-    POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-    emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
-  14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
-  15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
-  *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
-esac
-POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
-mapfile -t POOL_LINES <"${POOL_OUT}"
-# POOL_OUT now lives only in the bash array; scrub the on-disk copy
-# before any other step can fail and leak passwords via trap cleanup.
-: >"${POOL_OUT}"
+# ─── 7. Effective IID universe ────────────────────────────────────
+EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
+  (.issue_min_iid) as $lo | (.issue_max_iid) as $hi
+  | (.issue_iids_whitelist // []) as $wl
+  | if ($wl | length) == 0 then
+      [range($lo; $hi+1)]
+    else
+      [range($lo; $hi+1)] | map(select(. as $i | $wl | index($i) != null)) | unique | sort
+    end')"
 
-# Cache pool data on state for the chat summary.
-STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
-  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
-
-# ─── 7. Stuck-pending eviction ────────────────────────────────────
+# ─── 8. Pending eviction ──────────────────────────────────────────
 NOW_TS="$(date -u +%s)"
 EVICTED_IIDS_JSON="[]"
+SCOPE_EVICTED_IIDS_JSON="[]"
 PENDING_KEYS="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys[]?')"
 for piid in ${PENDING_KEYS}; do
   ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --arg k "${piid}" '.pending_subagents[$k]')"
   SP_AT="$(printf '%s' "${ENTRY}" | jq -r '.spawned_at // ""')"
   PA_NUM="$(printf '%s' "${ENTRY}" | jq -r '.attempt_number')"
+  CHILD_SESSION_KEY="$(printf '%s' "${ENTRY}" | jq -r '.child_session_key // ""')"
   EVICT=false
-  if [ -z "${SP_AT}" ] || [ "${SP_AT}" = "null" ]; then
+  EVICT_KIND=""
+  if ! printf '%s' "${EFF_UNIVERSE_JSON}" | jq -e --argjson iid "${piid}" 'index($iid) != null' >/dev/null; then
+    EVICT=true
+    EVICT_KIND="scope"
+    REASON="pending IID outside current trigger scope issue_iids∩[issue_min_iid,issue_max_iid]"
+  elif [ -z "${SP_AT}" ] || [ "${SP_AT}" = "null" ]; then
     # placeholder that survived a previous crash — evict on next tick
     if [ "$(printf '%s' "${ENTRY}" | jq -r '.placeholder // false')" = "true" ]; then
       EVICT=true
+      EVICT_KIND="stuck"
       REASON="placeholder pending entry survived: spawn was never observed to land"
     fi
   else
@@ -452,21 +554,32 @@ for piid in ${PENDING_KEYS}; do
       DELTA=$(( (NOW_TS - SP_EPOCH) / 60 ))
       if [ "${DELTA}" -ge "${STUCK_AFTER}" ]; then
         EVICT=true
+        EVICT_KIND="stuck"
         REASON="no callback received within stuck_after_minutes (${DELTA} min)"
       fi
     fi
   fi
   if [ "${EVICT}" = true ]; then
-    wrapper_log prepare_tick "stuck-evict iid=${piid} reason='${REASON}'"
+    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} reason='${REASON}'"
     REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     EVICTED_IIDS_JSON="$(printf '%s' "${EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
+    if [ "${EVICT_KIND}" = "scope" ]; then
+      SCOPE_EVICTED_IIDS_JSON="$(printf '%s' "${SCOPE_EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
+      if [ -n "${CHILD_SESSION_KEY}" ] && [ "${CHILD_SESSION_KEY}" != "null" ]; then
+        CLEANUP_ACTIONS_JSON="$(printf '%s' "${CLEANUP_ACTIONS_JSON}" | jq -c \
+          --arg target "${CHILD_SESSION_KEY}" \
+          --arg reason "scope_evicted_outside_trigger_range" \
+          --argjson iid "${piid}" \
+          '. + [{action:"kill", target:$target, reason:$reason, iid:$iid}]')"
+      fi
+    fi
   fi
 done
 persist_state "${STATE_JSON}"
 
-# ─── 8. If pending still non-empty → waiting_for_callbacks ───────
+# ─── 9. If pending still non-empty → waiting_for_callbacks ───────
 PENDING_COUNT="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys | length')"
 if [ "${PENDING_COUNT}" -gt 0 ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
@@ -475,25 +588,19 @@ if [ "${PENDING_COUNT}" -gt 0 ]; then
   jq -nc \
     --argjson pending "${PENDING_IIDS_JSON}" \
     --argjson evicted "${EVICTED_IIDS_JSON}" \
-    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}")" '
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}") scope_evicted=$(jq -c . <<<"${SCOPE_EVICTED_IIDS_JSON}")" '
     {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
-     evicted_iids:$evicted, chat_summary:$chat}'
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions, chat_summary:$chat}'
   exit 0
 fi
-
-# ─── 9. Effective IID universe ────────────────────────────────────
-EFF_UNIVERSE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
-  (.issue_min_iid) as $lo | (.issue_max_iid) as $hi
-  | if (.issue_iids_whitelist | length) == 0 then
-      [range($lo; $hi+1)]
-    else
-      ([range($lo; $hi+1)] | (. - (. - .issue_iids_whitelist)) | unique | sort)
-    end')"
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}")
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
@@ -510,7 +617,10 @@ RECONCILE_RC=$?
 set -e
 cat "${RECONCILE_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
 if [ "${RECONCILE_RC}" -ne 0 ]; then
-  emit_chat_failure "reconcile_failed: $(tail -n 1 "${RECONCILE_OUT}")"
+  # Stable, named reason only. The full reconcile.sh output (which may carry
+  # raw jq / glab / git stderr) was already appended to wrapper.log above; do
+  # NOT tail it into chat_summary (see emit_chat_failure contract).
+  emit_chat_failure "reconcile_failed (rc=${RECONCILE_RC}; full output in dispatcher wrapper.log)"
 fi
 EVIDENCE_PATH="$(grep -E '^/.+/reconcile-[0-9TZ]+\.json$' "${RECONCILE_OUT}" | tail -n 1 || true)"
 if [ -z "${EVIDENCE_PATH}" ] || [ ! -f "${EVIDENCE_PATH}" ]; then
@@ -520,6 +630,17 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --arg p "${EVIDENCE_PATH}" '.l
 
 # ─── 11. Disk cache correction from evidence ─────────────────────
 EVIDENCE_JSON="$(cat "${EVIDENCE_PATH}")"
+# Defensive guard: EVIDENCE_JSON is read from a file and is fed straight to
+# `jq --argjson ev`, which on an empty / non-JSON / non-array value throws the
+# generic "invalid JSON text passed to --argjson". That message surfaces far
+# from its cause (a truncated or half-written reconcile evidence file) and
+# historically invited a misdiagnosis as a "jq bug". Validate the shape up
+# front and fail with a named, terminal reason instead. Every downstream
+# consumer ($ev[], $ev | map, $ev | length) requires a JSON array.
+EV_KIND="$(printf '%s' "${EVIDENCE_JSON}" | jq -r 'type' 2>/dev/null || echo invalid)"
+if [ "${EV_KIND}" != "array" ]; then
+  emit_chat_failure "reconcile_failed: evidence file at ${EVIDENCE_PATH} is ${EV_KIND}, expected a JSON array (reconcile.sh produced an empty or malformed file)"
+fi
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}" '
   . as $s
   | reduce $ev[] as $e ($s;
@@ -574,8 +695,9 @@ if [ "${ALL_DONE}" = "true" ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "completed"')"
   persist_state "${STATE_JSON}"
   jq -nc --arg ev "${EVIDENCE_PATH}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     '{status:"completed", dispatch_entries:[], chat_summary:"all IIDs in range terminal — campaign completed",
-      last_reconcile_evidence:$ev}'
+      last_reconcile_evidence:$ev, cleanup_actions:$cleanup_actions}'
   exit 0
 fi
 
@@ -583,7 +705,7 @@ fi
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
 set -e
@@ -592,14 +714,66 @@ set -e
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   BRANCH="${T[branch]}" \
   bash "${SCRIPT_DIR}/clone_or_pull.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 CP_RC=$?
 set -e
 [ "${CP_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (exit ${CP_RC})"
 
-# ─── 14. require_labels filter ────────────────────────────────────
+# ─── 14. Validate UI account pool (only when configured) ─────────
+# Skipped entirely when UI_ACCOUNTS_RELPATH is empty (neither trigger
+# nor persisted state supplied a value). In that mode no pool is read,
+# no slots are allocated, and the subagent prompt omits the UI accounts
+# section. The max_concurrent_subagents lower-bound check has already
+# run at §6; the upper bound (≤ pool_size) only applies when a pool is
+# actually loaded.
+POOL_SIZE=0
+SLOT_SIZES_CSV=""
+POOL_LINES=()
+if [ -n "${UI_ACCOUNTS_RELPATH}" ]; then
+  # The source lives inside the cloned project, so this must run after
+  # clone_or_pull.sh.
+  POOL_OUT="$(mktemp)"
+  POOL_ERR="$(mktemp)"
+  chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
+  set +e
+  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+    MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
+    MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
+    bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
+  POOL_RC=$?
+  set -e
+  case "${POOL_RC}" in
+    0) ;;
+    10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${UI_ACCOUNTS_RELPATH}" ;;
+    11) emit_chat_failure "ui_accounts_pool_empty: ${UI_ACCOUNTS_RELPATH}" ;;
+    12) emit_chat_failure "ui_accounts_pool_malformed: ${UI_ACCOUNTS_RELPATH}" ;;
+    13)
+      POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+      emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
+    14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
+    15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
+    16) emit_chat_failure "invalid_ui_accounts_relpath: ${UI_ACCOUNTS_RELPATH}" ;;
+    *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
+  esac
+  POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
+  SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
+  mapfile -t POOL_LINES <"${POOL_OUT}"
+  # POOL_OUT now lives only in the bash array; scrub the on-disk copy
+  # before any other step can fail and leak passwords via trap cleanup.
+  : >"${POOL_OUT}"
+fi
+
+# Cache pool data on state for the chat summary. Always written so the
+# disk schema stays consistent across UI-account-enabled and disabled
+# deployments (0 == "no pool configured this tick").
+STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
+
+# ─── 15. require_labels filter ────────────────────────────────────
 LABEL_FILTERED_IN_JSON="[]"
 LABEL_FILTERED_OUT_JSON="[]"
 if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
@@ -624,11 +798,12 @@ if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]
   LABEL_FILTERED_OUT_JSON="$(printf '%s' "${LF_OUT}" | jq -c '.out')"
 fi
 
-# ─── 15. Batch formation ──────────────────────────────────────────
+# ─── 16. Batch formation ──────────────────────────────────────────
 ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
 if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
-    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
 
@@ -713,7 +888,8 @@ BATCH_JSON="$(jq -nc \
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
-    '{status:"no_eligible_iids", dispatch_entries:[], chat_summary:$chat, last_reconcile_evidence:$ev}'
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
 fi
 
@@ -727,20 +903,47 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       .next_new_issue_iid = ([.next_new_issue_iid // .issue_min_iid, (($fresh_batch | max) + 1)] | max)
     else . end')"
 
-# ─── 16. Allocate attempt numbers ─────────────────────────────────
+# ─── 17. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
 mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
+# allocate_attempt.sh prints ONLY the integer attempt number on stdout. Capture
+# its exit code and stderr explicitly: under `set -e` a non-zero exit inside the
+# `N="$(...)"` assignment aborts the whole tick with a raw, unclassified error
+# and no JSON envelope on stdout — exactly the failure shape a weak orchestrator
+# model tries to "diagnose" and self-heal. Convert it into a named, terminal
+# tick failure instead. (An rc=0-but-empty/non-numeric stdout is caught by the
+# integer guard before step 19.)
+ALLOC_ERR="$(mktemp)"
+CLEANUP_FILES+=("${ALLOC_ERR}")
 for iid in "${BATCH_IIDS[@]}"; do
+  set +e
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
        IID="${iid}" \
-       bash "${SCRIPT_DIR}/allocate_attempt.sh")"
+       bash "${SCRIPT_DIR}/allocate_attempt.sh" 2>"${ALLOC_ERR}")"
+  _rc=$?
+  set -e
+  if [ "${_rc}" -ne 0 ]; then
+    # Capture allocate_attempt.sh stderr to wrapper.log first, then emit a
+    # stable, named reason only — never tail raw sub-tool stderr into
+    # chat_summary (see emit_chat_failure contract + SOUL.md §No-Fallback).
+    wrapper_log prepare_tick "allocate_attempt_failed iid=${iid} rc=${_rc} (stderr follows)"
+    cat "${ALLOC_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
+    emit_chat_failure "allocate_attempt_failed: iid=${iid} (rc=${_rc}; stderr in dispatcher wrapper.log)"
+  fi
   ATTEMPT["${iid}"]="${N}"
 done
 
-# ─── 17. Slice UI accounts per IID using SLOT_SIZES ─────────────
-IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
+# ─── 18. Slice UI accounts per IID using SLOT_SIZES ─────────────
+# When the pool was skipped at §14 (UI_ACCOUNTS_RELPATH empty),
+# SLOT_SIZES_CSV is "" and POOL_LINES is empty; every IID gets count=0
+# and UI_ACCOUNTS_JSON="[]". build_prompt.sh treats an empty array as
+# "no UI accounts allocated" and omits the corresponding prompt section.
+declare -a SLOT_SIZES_ARR=()
+if [ -n "${SLOT_SIZES_CSV}" ]; then
+  IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
+fi
 declare -A UI_OFFSET UI_COUNT UI_ACCOUNTS_JSON
 offset=0
 for k in "${!BATCH_IIDS[@]}"; do
@@ -763,7 +966,27 @@ for k in "${!BATCH_IIDS[@]}"; do
   offset=$(( offset + size ))
 done
 
-# ─── 18. Pre-spawn persist (placeholder pending entries) ──────────
+# ─── 19. Pre-spawn persist (placeholder pending entries) ──────────
+# Defensive guard: every value below (and the same four reused in the later
+# DISPATCH_ENTRIES append, step 21) is passed to `jq --argjson`, which rejects
+# a non-JSON token with the generic "invalid JSON text passed to --argjson".
+# An empty ATTEMPT[$iid] (allocate_attempt.sh printed nothing), or a non-numeric
+# UI_OFFSET/UI_COUNT, would surface as that cryptic message at the jq call far
+# from its real cause and invite a misdiagnosis as a "jq version bug". Validate
+# all four as non-negative integers here, once, and fail with a named, terminal
+# reason that points at the IID and the field instead.
+for iid in "${BATCH_IIDS[@]}"; do
+  for _pair in "iid:${iid}" "attempt:${ATTEMPT[$iid]:-}" \
+               "ui_offset:${UI_OFFSET[$iid]:-}" "ui_count:${UI_COUNT[$iid]:-}"; do
+    _field="${_pair%%:*}"; _val="${_pair#*:}"
+    case "${_val}" in
+      ''|*[!0-9]*)
+        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a non-negative integer (allocate_attempt.sh or the UI-slot computation produced an empty/non-numeric value); refusing to build a malformed jq --argjson call"
+        ;;
+    esac
+  done
+done
+
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"
@@ -784,7 +1007,7 @@ FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $proje
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c "${PRE_PENDING_JQ_ARGS[@]}" "${FILTER}")"
 persist_state "${STATE_JSON}"
 
-# ─── 19. Per-IID prep ─────────────────────────────────────────────
+# ─── 20. Per-IID prep ─────────────────────────────────────────────
 TICK_OUTCOMES='{}'
 DISPATCH_ENTRIES='[]'
 declare -A PAYLOAD_PATH CHILD_LABEL_BY_IID
@@ -808,21 +1031,22 @@ for iid in "${BATCH_IIDS[@]}"; do
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}"
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
-  # Resolve ISSUE_MODE.
+  # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
+  # resume signal. Every other entry path (`todo`, `retry`, `new`,
+  # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
+  # baseline, even if this IID has prior attempts on disk.
   ISSUE_MODE="fresh"
   NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
-  if [ "${NEEDS_CONTINUE}" = "true" ]; then
+  RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
+    (.[] | select(.iid==$i) | .labels // []) as $labels
+    | (($labels | index("retry") != null) or ($labels | index("todo") != null))
+  ')"
+  if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
     ISSUE_MODE="continue"
-  else
-    issue_state_path="${ISSUES_ROOT}/issue-${iid}/state.json"
-    if [ -f "${issue_state_path}" ]; then
-      PERSISTED_MODE="$(jq -r '.mode // ""' "${issue_state_path}")"
-      [ "${PERSISTED_MODE}" = "continue" ] && ISSUE_MODE="continue"
-    fi
   fi
 
   prep_blocked() {
@@ -852,17 +1076,30 @@ for iid in "${BATCH_IIDS[@]}"; do
   # progress is interesting context).
   cat "${PA_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
   if [ "${PA_RC}" -ne 0 ]; then
-    prep_blocked "prepare_attempt: $(tail -n 1 "${PA_ERR}")"
-    rm -f "${PA_OUT}" "${PA_ERR}"
+    # PA_ERR (raw git fetch / worktree stderr) is already mirrored to
+    # wrapper.log on the preceding cat; emit a stable, named reason only so
+    # raw git output never reaches block_reason / tick_outcome_per_iid (see
+    # emit_chat_failure contract + SOUL.md §No-Fallback rule 1).
+    prep_blocked "prepare_attempt_failed (rc=${PA_RC}; stderr in dispatcher wrapper.log)"
+    retire_temp_file "${PA_OUT}"
+    retire_temp_file "${PA_ERR}"
     continue
   fi
   MODE_ACTUAL="$(sed -n '1p' "${PA_OUT}")"
   LOCAL_ATTEMPT_BRANCH="$(sed -n '2p' "${PA_OUT}")"
-  rm -f "${PA_OUT}" "${PA_ERR}"
+  retire_temp_file "${PA_OUT}"
+  retire_temp_file "${PA_ERR}"
   if [ -z "${MODE_ACTUAL}" ] || [ -z "${LOCAL_ATTEMPT_BRANCH}" ]; then
     prep_blocked "prepare_attempt: empty stdout (script printed no mode/branch lines)"
     continue
   fi
+  case "${MODE_ACTUAL}" in
+    fresh|continue) ;;
+    *)
+      prep_blocked "prepare_attempt: invalid mode_actual on stdout: ${MODE_ACTUAL}"
+      continue
+      ;;
+  esac
 
   # claude_settings_path
   if [ -n "${T[claude_settings_path]:-}" ]; then
@@ -897,7 +1134,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE="$(printf '%s' "${ISSUE_JSON}" | jq -r '.title // ""')"
   ISSUE_URL="$(printf '%s' "${ISSUE_JSON}" | jq -r '.web_url // ""')"
   ISSUE_LABELS="$(printf '%s' "${ISSUE_JSON}" | jq -r '.labels // [] | join(",")')"
-  ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '.description // ""' | head -c 4096)"
+  # Truncate by Unicode codepoint (jq `.[a:b]`), NOT bytes: issue bodies are
+  # almost always Chinese, and a byte-wise `head -c 4096` could split a
+  # multibyte char, leaving an invalid byte that breaks the python renderer's
+  # UTF-8 encoding and mis-classifies the IID as prep_blocked.
+  ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '(.description // "")[0:4096]')"
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
   # Transition labels: remove entry labels + add doing.
@@ -991,17 +1232,31 @@ for iid in "${BATCH_IIDS[@]}"; do
   mkdir -p "${LOG_DIR_X}"
 
   # Extract the fenced "Rendered Prompt" block from executor_prompt.md.
-  # Use the sentinel line (which is part of the prompt itself) as the
-  # opener so a future markdown edit introducing extra code fences in
-  # the surrounding documentation does not silently mis-extract.
+  # Use the paired sentinels (which are part of the prompt itself) as the
+  # opener AND closer so a future markdown edit introducing nested ```code```
+  # examples inside the fenced block does not silently truncate the template
+  # at the first inner fence. The closer sentinel is consumed by the awk
+  # extractor (exit before printing) and never appears in the rendered payload.
+  set +e
   template="$(awk '
     /^# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1$/ { found=1 }
     found {
-      if ($0 == "```") exit
+      if ($0 == "# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1_END") { closed=1; exit }
       print
     }
+    END { if (found && !closed) exit 2 }
   ' "${SKILL_DIR}/references/executor_prompt.md")"
+  template_rc=$?
+  set -e
 
+  if [ "${template_rc}" -eq 2 ]; then
+    prep_blocked "executor_prompt.md missing end-sentinel '# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1_END' — template extraction would be truncated"
+    continue
+  fi
+  if [ "${template_rc}" -ne 0 ]; then
+    prep_blocked "executor_prompt.md awk extraction failed: rc=${template_rc}"
+    continue
+  fi
   if [ -z "${template}" ]; then
     prep_blocked "executor_prompt.md fenced block missing or sentinel not found"
     continue
@@ -1089,13 +1344,13 @@ PYEOF
   DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
     --argjson iid "${iid}" \
     --argjson attempt "${attempt}" \
-    --arg label "${child_label}" \
-    --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$label, payload_path:$path}]')"
+    --arg clabel "${child_label}" \
+    --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$clabel, payload_path:$path}]')"
 
   wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"
 done
 
-# ─── 20. Emit envelope ───────────────────────────────────────────
+# ─── 21. Emit envelope ───────────────────────────────────────────
 SURVIVOR_COUNT="$(printf '%s' "${DISPATCH_ENTRIES}" | jq 'length')"
 SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s, pool=%s)' \
   "${SURVIVOR_COUNT}" "${BATCH_SIZE}" "${MAX_CONCURRENT}" "${POOL_SIZE}")"
@@ -1104,9 +1359,14 @@ if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
   jq -nc \
     --argjson run_timeout "${RUN_TIMEOUT}" \
     --argjson outcomes "${TICK_OUTCOMES}" \
+    --argjson evicted "${EVICTED_IIDS_JSON}" \
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     --arg ev "${EVIDENCE_PATH}" \
     --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
     {status:"no_eligible_iids", dispatch_entries:[], run_timeout_seconds:$run_timeout,
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions,
      max_launch_retries:3, backoff_seconds:2,
      tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev, chat_summary:$chat}'
   exit 0
@@ -1117,12 +1377,16 @@ jq -nc \
   --argjson run_timeout "${RUN_TIMEOUT}" \
   --argjson outcomes "${TICK_OUTCOMES}" \
   --argjson evicted "${EVICTED_IIDS_JSON}" \
+  --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+  --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
   --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
   --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
   --arg ev "${EVIDENCE_PATH}" \
   --arg chat "${SUMMARY}" '
   {status:"ready", dispatch_entries:$dispatch_entries,
    run_timeout_seconds:$run_timeout, max_launch_retries:3, backoff_seconds:2,
-   evicted_iids:$evicted, label_filtered_in:$label_in, label_filtered_out:$label_out,
+   evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+   cleanup_actions:$cleanup_actions,
+   label_filtered_in:$label_in, label_filtered_out:$label_out,
    tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev,
    chat_summary:$chat}'

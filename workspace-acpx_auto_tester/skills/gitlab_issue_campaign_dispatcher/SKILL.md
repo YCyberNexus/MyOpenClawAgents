@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-05-19.5] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output requests it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), per-batch UI-account allocation from a deployment-pinned pool with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-06-01.3] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry with best-effort partial-work force-push after acpx failures, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -21,7 +21,10 @@ locks, per-issue state/logs/summaries, and one shared per-issue linked
 git worktree per IID at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/`.
 The worktree is reused across every attempt of an IID (created on
 attempt 1 via `git worktree add -B`, then force-switched in place on
-attempt N>1 so untracked scratch survives between attempts).
+attempt N>1 after preserving the same-IID runtime subtree; `continue`
+restores it for resume, while all non-continue entry labels reset from
+the clean baseline and archive the preserved subtree outside the active
+worktree).
 See [`references/paths.md`](references/paths.md) for the complete layout.
 (`${RESULT_BASENAME}` / `${DATA_BASENAME}` default to `ifp-result` / `ifp-data`;
 per-project `result_basename` / `data_basename` trigger fields override
@@ -57,11 +60,33 @@ other file.
 There are **two trigger commands and two execution paths**, both
 reduced to a small fixed shape.
 
+> The legacy "Phase 1–6" numbering is **not** retired — the wrapper
+> scripts (`dispatch_prepare_tick.sh` / `dispatch_record_spawn.sh` /
+> `dispatch_followup.sh`) still perform those phases internally, and the
+> other reference docs keep the Phase numbers as stable cross-document
+> anchors. "Replaces Phases 1–6" means the orchestrator no longer runs
+> them as hand-written prose steps, not that the phases ceased to exist.
+
 ### Path A — `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 
 ```
-1. cd "${SKILL_DIR}"
-2. echo "$trigger_text" | bash scripts/dispatch_prepare_tick.sh   → envelope
+1. cd "${SKILL_DIR}" && bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'  → envelope
+   <verbatim multi-line trigger_text — every key=value line, no surrounding quotes>
+   TRIGGER_EOF
+   # The `cd` and the `bash` MUST be in the SAME Bash tool call, joined by `&&`.
+   # `cd` does NOT persist across exec calls (§Working Directory + SOUL.md
+   # §Per-Exec Env Contract); issuing them as two separate tool calls leaves
+   # the wrapper exec back in OpenClaw's default cwd and aborts with
+   # `bash: scripts/dispatch_prepare_tick.sh: No such file or directory`.
+   #
+   # The trigger text MUST come in as a heredoc, not
+   # `echo "<multi-line literal>" | bash ...`. See §Invocation pitfall in
+   # references/dispatcher_wrappers.md — putting `|` on a new line after a
+   # closing `"` aborts the tick with a bash syntax error before the wrapper
+   # even starts.
+2. for each action in envelope.cleanup_actions where action.action == "kill":
+     try: subagents kill --target action.target
+     except: pass    # best-effort; state is already persisted as blocked
 3. switch envelope.status:
      "ready"                    → enter spawn loop (step 4)
      "waiting_for_callbacks"    → print chat_summary, EXIT
@@ -88,7 +113,8 @@ reduced to a small fixed shape.
        if ack is null and attempts < envelope.max_launch_retries:
          sleep envelope.backoff_seconds   # IDENTICAL payload next try
      if ack is null:
-       IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
+       cd "${SKILL_DIR}" && \
+         IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
          STATUS=launch_failed LAUNCH_ATTEMPTS=<attempts> \
          LAUNCH_ERROR="<verbatim last error or raw response>" \
          (+ standard env: PROJECT, GROUP, GITLAB_TOKEN, REPO_PARENT_PATH,
@@ -97,11 +123,14 @@ reduced to a small fixed shape.
        # record_envelope may carry cleanup.action == "kill" if a partial
        # session is detectable — almost always action == "skip" here.
      else:
-       IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
+       cd "${SKILL_DIR}" && \
+         IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
          STATUS=spawned RUN_ID=<ack.runId> \
          CHILD_SESSION_KEY=<ack.childSessionKey> \
          (+ standard env) \
          bash scripts/dispatch_record_spawn.sh                    → record_envelope
+     # Both branches: `cd` MUST share the SAME Bash tool call as the
+     # wrapper invocation — see §Working Directory.
      print record_envelope.chat_summary
 5. print envelope.chat_summary, EXIT (still "waiting_for_callbacks" overall)
 ```
@@ -114,19 +143,60 @@ script returns, state is durable and the next IID can be spawned.
 ### Path B — `RUN_CHILD_COMPLETION_CALLBACK`
 
 ```
-1. cd "${SKILL_DIR}"
-2. echo "$worker_result_json" | \
+1. cd "${SKILL_DIR}" && \
      IID=<callback.iid> ATTEMPT_NUMBER=<callback.attempt_number> \
      (+ standard env from callback payload) \
-     bash scripts/dispatch_followup.sh                            → envelope
-3. if envelope.cleanup.action == "kill":
+     bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF'        → envelope
+   <verbatim worker_result_json — normally a single compact JSON line>
+   WORKER_JSON_EOF
+   # Same `cd`-chaining rule as Path A: the `cd` MUST share the SAME Bash
+   # tool call as the wrapper invocation (see §Working Directory).
+   #
+   # Same heredoc rule as Path A: do NOT use `echo "<literal>" | bash ...`
+   # with `|` on a separate line. The compact JSON is usually single-line,
+   # but if a future runtime delivers multi-line payloads the echo form
+   # breaks identically (bash sees a stray `|` after the closing quote).
+2. if envelope.cleanup.action == "kill":
      try: subagents kill --target envelope.cleanup.target
      except: pass    # cleanup is best-effort; failures only update chat_summary
-4. print envelope.chat_summary, EXIT
+3. print envelope.chat_summary, EXIT
 ```
 
 That's the entire callback path. No Phase 6 prose, no Bash chains, no
 state writes from the LLM side.
+
+### The envelope is the whole decision tree
+
+A wrapper call ALWAYS exits 0 and ALWAYS prints exactly one JSON envelope
+on stdout. On every wake-up your complete job is: issue the one chained
+`cd "${SKILL_DIR}" && bash scripts/<name>.sh` invocation, read the
+envelope, and act on `status` / `cleanup` / `dispatch_entries` exactly as
+the loop above prescribes. That switch IS the entire decision tree —
+there is no "investigate", "debug", or "repair" branch anywhere in it.
+
+When an envelope reports `tick_failed` (or any non-`ready` status), you
+print its `chat_summary` and stop. A failure `chat_summary` is a
+terminal classification the wrapper already produced after it read,
+logged, and classified the underlying cause for you — it is finished
+work, not a task handed to you. Concretely, on the dispatcher side:
+
+- The ONLY file you ever `Read` is a `payload_path` taken from a `ready`
+  envelope's `dispatch_entries[]`. You do not `Read`, `grep`, `sed`, or
+  `cat` any file under `scripts/` or `references/` for any reason.
+- A tool name or surprising phrase inside a `chat_summary`
+  (`reconcile_failed`, an exit code, a path, etc.) is never a bug for
+  you to fix. You do not edit a script, do not substitute one command
+  for another, and do not re-run a wrapper with a "corrected"
+  invocation. Classify-and-stop is the contract (SOUL.md §No-Fallback
+  rule 1).
+- The single legitimate script path is the chained
+  `cd "${SKILL_DIR}" && bash scripts/<name>.sh` form from the loop above
+  and §Working Directory. You never construct, guess, or explore any
+  other path to a script.
+
+If you ever feel the urge to open a wrapper, find "the real bug", or run
+a command the loop above did not prescribe, that urge itself is the
+signal to stop: print the envelope's `chat_summary` and end the turn.
 
 ### Standard env block
 
@@ -160,10 +230,10 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | ----- | ------------------ |
 | Trigger field schema + override rules + fixed-value preflight | `dispatch_prepare_tick.sh` step 1; reference: [`trigger_command.md`](references/trigger_command.md) |
 | `campaign_state.json` schema + per-issue state + compact reply | reference: [`state_schema.md`](references/state_schema.md) |
-| Stuck-pending eviction (`stuck_after_minutes`) | `dispatch_prepare_tick.sh` step 8 |
+| Pending eviction (`stuck_after_minutes` plus trigger-scope eviction) | `dispatch_prepare_tick.sh` pending-eviction block |
 | Reconcile + disk-cache correction + Source-of-Truth Policy | `dispatch_prepare_tick.sh` steps 10–11; `dispatch_followup.sh` step 2 |
 | Eligibility batch formation (backlog → blocked retry, quota cap) | `dispatch_prepare_tick.sh` step 16 |
-| UI account allocation (slot sizes, `max_accounts_per_issue` cap, pool-too-small abort) | `dispatch_prepare_tick.sh` steps 7 + 18 |
+| UI account allocation (slot sizes, `max_accounts_per_issue` cap, pool-too-small abort) | `dispatch_prepare_tick.sh` steps 14 + 18 |
 | Per-IID prep (allocate_attempt, prepare_attempt, claude_settings copy, glab issue read, label transitions to `doing`, build_prompt, state-file init) | `dispatch_prepare_tick.sh` step 20 |
 | Executor prompt rendering + sentinel check | `dispatch_prepare_tick.sh` step 20.8–20.9 |
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |
@@ -284,9 +354,18 @@ the full subagent prompt and [`references/state_schema.md`](references/state_sch
 
 ## Working Directory
 
-`cd "${SKILL_DIR}"` ONCE per orchestrator session before any `bash scripts/...`
-invocation. The skill directory for this skill is the directory
-containing this SKILL.md (e.g. `<workspace>/skills/gitlab_issue_campaign_dispatcher/`).
+OpenClaw starts a fresh shell for every Bash tool call (per SOUL.md
+§Per-Exec Env Contract), so `cd` does NOT persist across exec calls.
+`cd "${SKILL_DIR}"` issued as a standalone Bash tool call is a no-op
+for the next exec — the orchestrator MUST chain
+`cd "${SKILL_DIR}" && … && bash scripts/<name>.sh` in the SAME Bash
+tool call. The skill directory is the directory containing this SKILL.md
+(e.g. `<workspace>/skills/gitlab_issue_campaign_dispatcher/`); pin its
+absolute path and reuse the chained form on every dispatcher script
+invocation. Failing to chain produces
+`bash: scripts/dispatch_prepare_tick.sh: No such file or directory`
+because the wrapper relative path resolves against OpenClaw's default cwd.
+
 The subagent uses absolute paths via the rendered `{SCRIPTS_DIR}`
 placeholder so this rule only applies to the orchestrator session.
 

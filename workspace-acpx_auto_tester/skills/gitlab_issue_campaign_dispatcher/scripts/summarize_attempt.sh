@@ -23,7 +23,7 @@
 #   ATTEMPT_STATUS           "done" | "blocked" | "failed" | "timeout" ("no_changes" is legacy)
 #   COMMIT_SHA               last commit on the work branch (if pushed)
 #   MERGE_REQUEST_URL        MR URL (if known)
-#   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed
+#   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed|timeout
 #   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
 #                            so evidence stays local under ${LOG_DIR} / ${ISSUE_ROOT}.
 #

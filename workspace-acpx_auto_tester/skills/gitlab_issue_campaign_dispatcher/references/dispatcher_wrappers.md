@@ -38,6 +38,16 @@ The LLM contract reduces to four genuinely LLM-only operations:
    `RUN_CHILD_COMPLETION_CALLBACK`.
 4. (per `cleanup.action == "kill"`) `subagents kill --target <cleanup.target>`.
 
+Every `bash scripts/<name>.sh ...` invocation above is shorthand for the
+chained form `cd "${SKILL_DIR}" && … && bash scripts/<name>.sh ...` issued
+inside a SINGLE Bash tool call. OpenClaw starts a fresh shell for every
+Bash exec — `cd` issued as its own Bash tool call does NOT persist into
+the next call, so the relative `scripts/<name>.sh` path resolves against
+OpenClaw's default cwd and aborts with `No such file or directory`. See
+[SKILL.md §Working Directory](../SKILL.md) and the rendered orchestrator
+pseudocode in [SKILL.md §The orchestrator loop](../SKILL.md) for the
+canonical form.
+
 Everything else — trigger parsing, state writes, flock, label sync, glab
 calls, prompt rendering, classification — happens inside the wrappers.
 
@@ -53,7 +63,11 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 - **stdin**: the full trigger text (including the `RUN_SCHEDULED_ISSUE_CAMPAIGN`
   header line and every `key=value` line). The wrapper parses this in
   bash and validates every required / optional field per
-  [`trigger_command.md`](./trigger_command.md).
+  [`trigger_command.md`](./trigger_command.md). The orchestrator MUST
+  feed this with a heredoc (`bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF' … TRIGGER_EOF`),
+  never with `echo "<multi-line literal>" | bash …`. See
+  [§Invocation pitfall](#invocation-pitfall) below — the echo form
+  silently breaks once the trigger has more than one line.
 - **env (minimum)**: none — `PROJECT` / `GROUP` / `GITLAB_TOKEN` /
   `REPO_PARENT_PATH` / `RESULT_BASENAME` / `DATA_BASENAME` are all
   derived from the trigger.
@@ -71,25 +85,43 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    `run_timeout_seconds`, `acpx_timeout_seconds`, `require_labels_match`.
 6. Migrate legacy on-disk shapes (`active_issue_iid` → array,
    stale account-count fields dropped).
-7. Call `load_ui_accounts.sh`; map exit codes 10–15 to the documented
-   tick-level abort strings (`ui_account_pool_too_small`, etc.).
-8. **Stuck-pending eviction.** For each `pending_subagents` entry where
-   `(now - spawned_at) >= stuck_after_minutes` (or a placeholder with
-   `spawned_at = null`), synthesize a Phase 6 blocked reply and run it
-   through `phase6_process`. Drains the entry, classifies as blocked,
-   persists. No `subagents kill` is fired — that's the LLM's job on
-   the next callback path; evicted entries do not have an associated
-   callback so cleanup is best-effort skipped.
+7. Compute `effective_iid_universe` (`[issue_min_iid,issue_max_iid]`
+   intersected with `issue_iids` when supplied). This is the hard
+   trigger scope for new dispatch and for scope eviction of old pending
+   entries.
+8. **Pending eviction.** First, any `pending_subagents` entry whose IID
+   is outside `effective_iid_universe` is scope-evicted: synthesize a
+   Phase 6 blocked reply, drain it, persist it, and add a
+   `cleanup_actions[]` kill request for the recorded child session key
+   when present. Then apply the stuck-pending backstop to remaining
+   entries where `(now - spawned_at) >= stuck_after_minutes` (or a
+   placeholder with `spawned_at = null`). Stuck eviction is still
+   classified as blocked but does not emit a kill request unless future
+   tooling adds one.
 9. If `pending_subagents` is still non-empty after eviction → emit
    `status:"waiting_for_callbacks"` envelope and exit 0.
-10. Compute `effective_iid_universe` (range ∩ whitelist).
-11. Run `reconcile.sh` (range mode when whitelist empty, list mode
+10. Run `reconcile.sh` (range mode when whitelist empty, list mode
     otherwise). Failure → `status:"tick_failed", chat_summary:"reconcile_failed: …"`.
-12. Apply disk-cache correction from the evidence file.
-13. Early-return check: all IIDs in range terminal AND whitelist empty →
+11. Apply disk-cache correction from the evidence file.
+12. Early-return check: all IIDs in range terminal AND whitelist empty →
     `status:"completed"`.
-14. Run `ensure_labels.sh` + `clone_or_pull.sh`. Failure on either →
+13. Run `ensure_labels.sh` + `clone_or_pull.sh`. Failure on either →
     `status:"tick_failed"`.
+14. **Only when `UI_ACCOUNTS_RELPATH` is non-empty** (trigger-supplied or
+    carry-forward persisted) — call `load_ui_accounts.sh`, which reads
+    `${REPO_PATH}/${UI_ACCOUNTS_RELPATH}` (no default; configured via
+    trigger `ui_accounts_relpath`, carry-forward persisted; resolved
+    under the project checkout root, NOT under
+    `${REPO_PATH}/${DATA_BASENAME}/`); map exit codes 10–16 to the
+    documented tick-level abort strings (`ui_account_pool_too_small`,
+    `invalid_ui_accounts_relpath`, etc.). When `UI_ACCOUNTS_RELPATH` is
+    empty, skip this step entirely: record `ui_account_pool_size = 0`,
+    leave `POOL_LINES` / `SLOT_SIZES_CSV` empty, and proceed with the
+    `max_concurrent_subagents ≥ 1` check already done at §6 (no
+    pool-size upper bound applies). Subsequent per-IID slicing (§18)
+    assigns `ui_account_count = 0` to every IID, and `build_prompt.sh`
+    drops the `# UI test accounts` section from the rendered Claude
+    Code prompt.
 15. Apply `require_labels` / `require_labels_match` filter on the
     evidence file. Compute `label_filtered_in` / `label_filtered_out`.
 16. **Batch formation.** Priority order:
@@ -99,7 +131,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     `min(max_concurrent_subagents, hourly_issue_quota - quota_launched_this_tick)`.
 17. For each IID in the batch (sequential):
     1. `allocate_attempt.sh` → attempt number.
-18. `load_ui_accounts.sh` already ran in step 7; slice the captured
+18. `load_ui_accounts.sh` already ran in step 14; slice the captured
     pool into per-IID account slots via `SLOT_SIZES` from stderr.
 19. **Pre-spawn persist.** Write placeholder pending entries
     (`placeholder:true`, `spawned_at:null`) for every batch IID.
@@ -121,8 +153,14 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     8. Render `references/executor_prompt.md` fenced block via
        inline `python3 -c '…'` (handles multi-line `{ISSUE_BODY}` safely;
        does pure `str.replace` of `{NAME}` → value, no format-string
-       gymnastics). Postcondition grep for any leftover `{[A-Z_…]+}`
-       and fail-fast on unsubstituted placeholders.
+       gymnastics). The template is extracted by awk bounded by the paired
+       sentinels `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1` (opener) and
+       `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1_END` (closer), NOT by the
+       surrounding triple-backtick fence — this makes nested ```code```
+       examples inside the rendered block safe. Missing closer sentinel →
+       awk exits 2 → `prep_blocked "executor_prompt.md missing end-sentinel …"`.
+       Postcondition grep for any leftover `{[A-Z_…]+}` and fail-fast on
+       unsubstituted placeholders.
     9. Sentinel check: rendered first line MUST equal
        `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1`. Mismatch → `prep_blocked`
        with the verbatim `block_reason` from SKILL.md §Phase 5 step 0.
@@ -142,7 +180,9 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 | `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |
 | `backoff_seconds` | Always `2` today. Sleep between retries. |
-| `evicted_iids` | IIDs that were stuck-evicted at the top of this tick. |
+| `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. |
+| `scope_evicted_iids` | Subset of `evicted_iids` evicted because the IID was outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`. |
+| `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked blocked. |
 | `label_filtered_in` / `label_filtered_out` | Optional — only emitted when `require_labels` is non-empty. |
 | `tick_outcome_per_iid` | Optional map; populated when per-IID prep failures pushed an IID into blocked. |
 | `last_reconcile_evidence` | Absolute path to the `reconcile-<ts>.json` evidence file this tick produced. |
@@ -223,6 +263,12 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 - **stdin**: the subagent's terminal compact JSON (the runtime's
   `worker_result_json` payload). Empty stdin → synthesized blocked
   reply with `block_reason="callback worker_result_json was empty"`.
+  The orchestrator MUST feed this with a heredoc
+  (`… bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`),
+  never with `echo "<literal>" | … bash …`. The compact JSON is
+  normally one line, but the heredoc form is the only shape that
+  stays correct if a future runtime delivers a multi-line payload —
+  see [§Invocation pitfall](#invocation-pitfall) below.
 - **env (minimum)**: `PROJECT`, `GROUP`, `GITLAB_TOKEN`, `IID` (the
   callback IID). Optional: `ATTEMPT_NUMBER` (used only for logging when
   the JSON is unparseable), `REPO_PARENT_PATH`, `RESULT_BASENAME`,
@@ -310,5 +356,70 @@ envelope on stdout + the wrapper log:
 
 ```bash
 cd workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher
-echo "$trigger_text" | bash scripts/dispatch_prepare_tick.sh
+bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'
+RUN_SCHEDULED_ISSUE_CAMPAIGN
+group=…
+project=…
+gitlab_token=…
+…(every trigger key=value line)
+TRIGGER_EOF
 ```
+
+## Invocation pitfall
+
+`dispatch_prepare_tick.sh` and `dispatch_followup.sh` both read their
+primary input from stdin. The orchestrator MUST feed that input with a
+heredoc:
+
+```bash
+# correct — heredoc, multi-line safe
+bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'
+group=ai-infra
+project=pts_ui_testing
+…
+acpx_timeout_seconds=36000
+TRIGGER_EOF
+```
+
+The naive `echo "<multi-line literal>" | bash …` form is forbidden
+because it silently breaks once the literal spans more than one line.
+Observed failure mode in production:
+
+```bash
+# WRONG — bash aborts before the wrapper even starts
+echo "group=ai-infra
+project=pts_ui_testing
+…
+acpx_timeout_seconds=36000"
+   | bash scripts/dispatch_prepare_tick.sh 2>&1
+```
+
+```
+/bin/bash: -c:行23: 未预期的符号 `|' 附近有语法错误
+/bin/bash: -c:行23: `   | bash scripts/dispatch_prepare_tick.sh 2>&1'
+```
+
+What happens: the closing `"` on the last `key=value` line ends the
+`echo` argument and the newline terminates the `echo` command. The next
+line begins with `|`, which bash parses as a brand-new statement
+starting with a pipe operator — a syntax error.
+
+Tempting "fixes" that are still fragile and SHOULD NOT be used:
+
+- Backslash-continued echo (`echo "…" \` then `  | bash …`). Works in
+  isolation but a stray trailing space after the `\` silently re-breaks
+  it, and any embedded `$`, backtick, or `!` inside the trigger gets
+  shell-expanded before reaching the wrapper.
+- `printf '%s\n' "$trigger_text" | bash …`. Same expansion hazard, and
+  the orchestrator usually splices the literal text in place rather
+  than referencing a real `$trigger_text` variable, so the multi-line
+  problem returns.
+
+Heredocs avoid both problems: the body is read verbatim until the
+delimiter, no quoting is required, and the `bash …` command is fully
+formed on the line that opens the heredoc.
+
+The same rule applies to `dispatch_followup.sh`: even though the
+compact JSON is normally one line today, use a heredoc
+(`bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`)
+so the invocation stays correct if the payload ever grows.

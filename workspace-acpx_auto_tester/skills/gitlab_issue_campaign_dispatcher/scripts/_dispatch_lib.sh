@@ -58,6 +58,37 @@ wrapper_log() {
   printf '[%s] [%s] %s\n' "${ts}" "${phase}" "$*" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
 }
 
+# Self-heal the executable bit on every file under scripts/safety_bin/.
+# Some deployment pipelines (rsync without -p, zip/tar extraction under a
+# restrictive umask, git clones with core.fileMode=false) strip the mode
+# bit when shipping this workspace to the runner. run_acpx_attempt.sh
+# asserts `[ -x safety_bin/rm ]` before invoking acpx — when the assertion
+# fails the attempt exits 2 in FAIL flow before any business logic runs.
+# Restoring the bit here keeps the no-fallback rule intact at the business
+# layer while preventing a deployment-side regression from blocking every
+# subagent. No-op when files are already executable (steady state).
+ensure_safety_bin_executable() {
+  local lib_dir
+  lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  local safety_bin="${lib_dir}/safety_bin"
+  [ -d "${safety_bin}" ] || return 0
+  local f
+  for f in "${safety_bin}"/*; do
+    # Skip symlinks: chmod without -h follows the link and would touch a
+    # target outside safety_bin/. Today the dir holds only regular files;
+    # this is forward-defense for future contributors.
+    if [ ! -f "${f}" ] || [ -L "${f}" ]; then
+      continue
+    fi
+    [ -x "${f}" ] && continue
+    if chmod +x "${f}" 2>/dev/null; then
+      wrapper_log dispatch_bootstrap "self-heal: chmod +x ${f} (deployment dropped mode bit)"
+    else
+      wrapper_log dispatch_bootstrap "self-heal failed: chmod +x ${f} returned non-zero"
+    fi
+  done
+}
+
 load_state() {
   if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     cat "${CAMPAIGN_STATE_FILE}"
@@ -72,6 +103,7 @@ fresh_init_state() {
     --arg repo_path "${REPO_PARENT_PATH}" \
     --arg result_basename "${RESULT_BASENAME}" \
     --arg data_basename "${DATA_BASENAME}" \
+    --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
     '{
       project: $project,
       repo_path: $repo_path,
@@ -84,7 +116,7 @@ fresh_init_state() {
       blocked_cooldown_ticks: null,
       max_concurrent_subagents: 1,
       max_accounts_per_issue: 14,
-      stuck_after_minutes: 330,
+      stuck_after_minutes: 332,
       run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
       kill_subagent_on_terminal: true,
@@ -94,6 +126,7 @@ fresh_init_state() {
       require_labels_match: "or",
       result_basename: $result_basename,
       data_basename: $data_basename,
+      ui_accounts_relpath: $ui_accounts_relpath,
       next_new_issue_iid: null,
       tick_seq: 0,
       active_issue_iids: [],
@@ -162,7 +195,11 @@ phase6_normalize_reply() {
   local parsed
   if ! parsed="$(printf '%s' "${raw}" | jq -c . 2>/dev/null)"; then
     local first200
-    first200="$(printf '%s' "${raw}" | head -c 200 | tr -d '\r' | tr '\n' ' ')"
+    # Codepoint-safe truncation (jq raw-input slice): a byte-wise `head -c 200`
+    # could split a multibyte UTF-8 char and leave a dangling byte. jq -Rs reads
+    # the (possibly non-JSON) raw as one string, replacing any invalid bytes with
+    # U+FFFD, then slices by codepoint and flattens CR/LF for a one-line reason.
+    first200="$(printf '%s' "${raw}" | jq -Rsr '.[0:200] | gsub("\\r";"") | gsub("\\n";" ")' 2>/dev/null || printf '%s' "${raw}" | head -c 200 | tr -d '\r' | tr '\n' ' ')"
     phase6_synthesize_blocked "${exp_iid}" "${exp_attempt}" \
       "callback worker_result_json not valid JSON: ${first200}"
     return 0

@@ -16,7 +16,7 @@ There are three state files in this workspace:
 
 | Wrapper | Writes |
 | ------- | ------ |
-| `dispatch_prepare_tick.sh` | `campaign_state.json` (trigger overrides, stuck-eviction Phase 6 results, post-reconcile cache correction, batch placeholders); per-IID `state.json` + `attempt_state.json` initial `status=in_progress` blocks; `${LOG_DIR}/spawn_payload.txt` (the rendered executor prompt). |
+| `dispatch_prepare_tick.sh` | `campaign_state.json` (trigger overrides, scope/stuck-eviction Phase 6 results, post-reconcile cache correction, batch placeholders); per-IID `state.json` + `attempt_state.json` initial `status=in_progress` blocks; `${LOG_DIR}/spawn_payload.txt` (the rendered executor prompt). |
 | `dispatch_record_spawn.sh` | `campaign_state.json` (post-launch ack writeback of `run_id` / `child_session_key` / `spawned_at`, or — on launch failure — Phase 6 blocked synth + drain). |
 | `dispatch_followup.sh` | `campaign_state.json` (drain + classify + `campaign_status` flip back to `running` when pending hits empty); per-IID `state.json` + `attempt_state.json` terminal blocks per §Phase 6 Write Mapping below. |
 
@@ -39,7 +39,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "blocked_cooldown_ticks": 1,
   "max_concurrent_subagents": 1,
   "max_accounts_per_issue": 14,
-  "stuck_after_minutes": 330,
+  "stuck_after_minutes": 332,
   "run_timeout_seconds": 18120,
   "acpx_timeout_seconds": 18000,
   "kill_subagent_on_terminal": true,
@@ -49,6 +49,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "require_labels_match": "and",
   "result_basename": "ifp-result",
   "data_basename": "ifp-data",
+  "ui_accounts_relpath": "ifp-data/ifp-common/ifp_users.json",
   "next_new_issue_iid": 4,
   "tick_seq": 27,
   "active_issue_iids": [14],
@@ -71,6 +72,7 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "timeout_iids": [],
   "campaign_status": "waiting_for_callbacks",
   "quota_launched_this_tick": 1,
+  "quota_completed_this_tick": 0,
   "last_reconcile_evidence": "/data/<project>/<RESULT_BASENAME>/_dispatcher/log/reconcile-20260507T100501Z.json",
   "updated_at": "2026-05-07T10:05:30Z"
 }
@@ -78,14 +80,14 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
 
 ### `pending_subagents` — async-callback bookkeeping
 
-Map keyed by stringified IID. Each entry tracks one in-flight subagent from spawn (`sessions_spawn` launch ack) to drain (`RUN_CHILD_COMPLETION_CALLBACK` processed by Phase 6) or eviction (stuck-pending past `stuck_after_minutes`).
+Map keyed by stringified IID. Each entry tracks one in-flight subagent from spawn (`sessions_spawn` launch ack) to drain (`RUN_CHILD_COMPLETION_CALLBACK` processed by Phase 6) or eviction. Eviction can happen because the entry is stuck past `stuck_after_minutes`, or because a later scheduled trigger narrows the hard IID scope so this pending IID is outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`.
 
 | Field                | Type   | Notes                                                                                          |
 | -------------------- | ------ | ---------------------------------------------------------------------------------------------- |
 | `attempt_number`     | int    | The attempt number allocated for this subagent. Phase 6 validates `callback.attempt_number == this` to reject stale callbacks. |
 | `run_id`             | string \| null | The `runId` returned by `sessions_spawn`. `null` only between Phase 4 step 5 (placeholder write) and Phase 5 step 2 (post-launch update); the orchestrator MUST NOT leave a `null` run_id once Phase 5 has finished. |
 | `child_session_key`  | string \| null | The anonymous `childSessionKey` returned by `sessions_spawn` (e.g. `agent:acpx_auto_tester:subagent:<uuid>`). For runtime-side audit only; not used for matching callbacks. Same nullability rule as `run_id`. |
-| `ui_account_index_start` | int | The 0-based index of the FIRST account in `<workspace>/config/ui_accounts.env` allocated to this subagent. The subagent owns `ui_account_count` consecutive accounts starting at this index. With `max_concurrent_subagents=1` this is always `0`, and the single slot is capped by `max_accounts_per_issue` (default 14). With `N>1` the orchestrator divides the pool into exactly `max_concurrent_subagents` raw slots (`pool_size / max_concurrent_subagents` with the integer remainder front-loaded), caps each slot at `max_accounts_per_issue`, and binds the `k`-th effective slot to the `k`-th IID of the batch (k = 0..batch_size-1); `ui_account_index_start` for that IID equals the cumulative effective slot-size sum `SLOT_SIZES[0..k-1]`. Unlike `run_id` / `child_session_key` / `spawned_at`, this field is non-null even for placeholder entries — Phase 4 step 5 writes it together with the placeholder because the dispatcher already allocated the block in step 4. If the placeholder is reaped (Phase 5 launch retries exhaust) without ever reaching Phase 5 step 2, the value records the unused allocation for audit; the next batch's allocation comes from the pool head as usual. |
+| `ui_account_index_start` | int | The 0-based index of the FIRST account in `${REPO_PATH}/${UI_ACCOUNTS_RELPATH}` (no default; configured via trigger `ui_accounts_relpath`) allocated to this subagent. The subagent owns `ui_account_count` consecutive accounts starting at this index. With `max_concurrent_subagents=1` this is always `0`, and the single slot is capped by `max_accounts_per_issue` (default 14). With `N>1` the orchestrator divides the pool into exactly `max_concurrent_subagents` raw slots (`pool_size / max_concurrent_subagents` with the integer remainder front-loaded), caps each slot at `max_accounts_per_issue`, and binds the `k`-th effective slot to the `k`-th IID of the batch (k = 0..batch_size-1); `ui_account_index_start` for that IID equals the cumulative effective slot-size sum `SLOT_SIZES[0..k-1]`. When `ui_accounts_relpath` is unconfigured the pool load is skipped entirely; `ui_account_index_start` is `0` and `ui_account_count` is `0` for every IID (no slot to allocate). Unlike `run_id` / `child_session_key` / `spawned_at`, this field is non-null even for placeholder entries — Phase 4 step 5 writes it together with the placeholder because the dispatcher already allocated the block (or recorded a zero-sized slot) in step 4. If the placeholder is reaped (Phase 5 launch retries exhaust) without ever reaching Phase 5 step 2, the value records the unused allocation for audit; the next batch's allocation comes from the pool head as usual. |
 | `ui_account_count`       | int | The number of UI accounts allocated to this subagent (effective capped slot size `SLOT_SIZES[k]` for the `k`-th IID of the batch). Differs across IIDs in the same batch when `pool_size % max_concurrent_subagents != 0` or when `max_accounts_per_issue` caps a raw slot. Example: `pool=40, max_concurrent_subagents=1, max_accounts_per_issue=14` produces slot size `14`; `pool=50, max_concurrent_subagents=4, max_accounts_per_issue=14` produces `13,13,12,12`. Same nullability rule as `ui_account_index_start`: non-null even for placeholder entries because Phase 4 step 4 has already computed the slot before Phase 4 step 5 writes the placeholder. Legacy on-disk pending entries written before this field existed are loaded with `ui_account_count = null`; Phase 6 ignores the field for legacy entries. |
 | `spawned_at`         | ISO-8601 UTC \| null | The orchestrator's wall-clock timestamp when `sessions_spawn` returned its launch ack. Used for stuck-pending eviction (`now - spawned_at >= stuck_after_minutes`). `null` between placeholder write and launch ack receipt; an entry with `null` `spawned_at` past `Phase 5 → end-of-tick` is itself a stuck case and gets evicted on the next scheduled wake-up. |
 
@@ -103,11 +105,11 @@ The orchestrator MUST keep these two arrays in lockstep with `pending_subagents`
 ### Fresh-init values (when the file does not exist)
 
 ```text
-next_new_issue_iid        = issue_min_iid
+next_new_issue_iid        = null   # resolved to issue_min_iid on first read
 tick_seq                  = 0
 max_concurrent_subagents  = 1
 max_accounts_per_issue    = 14
-stuck_after_minutes       = 330
+stuck_after_minutes       = 332   # = ceil(run_timeout_seconds / 60) + 30
 run_timeout_seconds       = 18120
 acpx_timeout_seconds      = 18000
 kill_subagent_on_terminal = true
@@ -117,6 +119,7 @@ require_labels            = []
 require_labels_match      = "or"
 result_basename           = "ifp-result"
 data_basename             = "ifp-data"
+ui_accounts_relpath       = null   # unconfigured by default; trigger field opts in
 repo_path                 = "/data"
 active_issue_iids         = []
 active_issue_sessions     = []
@@ -129,6 +132,7 @@ failed_iids               = []
 timeout_iids              = []
 campaign_status           = running
 quota_launched_this_tick  = 0
+quota_completed_this_tick = 0
 ```
 
 ### Campaign-level defaulted fields
@@ -137,17 +141,21 @@ quota_launched_this_tick  = 0
 | ----------------------- | --------------- | --------------------------------------------------------------------- |
 | `max_accounts_per_issue` | int             | Post-override snapshot of the trigger's per-IID UI account cap. Defaults to `14`. Must be a positive integer. Used only when forming the next scheduled batch; callback processing reads the persisted value for audit but does not recalculate allocations. |
 | `tick_seq`               | int             | Monotonic scheduled-wake counter. `dispatch_prepare_tick.sh` increments it once after acquiring the dispatcher lock and uses it with `blocked_at_tick_by_iid` to enforce `blocked_cooldown_ticks`. Callback wake-ups do not increment it. |
+| `next_new_issue_iid`     | int \| null     | Cursor for picking the next never-attempted IID when forming a scheduled batch. Stored as `null` at fresh-init and resolved to `issue_min_iid` on first read (readers apply `// .issue_min_iid`); advanced by `dispatch_prepare_tick.sh` as fresh IIDs are consumed. Bounded by the effective IID universe (range ∩ `issue_iids_whitelist`). |
+| `unfinished_iids`        | array of int    | Working backlog of in-range IIDs not yet terminal (not in `completed_iids` / `failed_iids`, and — for `blocked` / `timeout` — still retry-eligible). Rebuilt each scheduled tick from disk state and reconcile evidence; drives which IIDs the next batch draws from. Audit/scheduling aid, not a source of truth (GitLab labels are). |
+| `quota_completed_this_tick` | int          | Per-tick counter of IIDs that reached terminal `done` during the current wake-up. Reset to `0` at the top of every scheduled wake-up (`dispatch_prepare_tick.sh`) and incremented by Phase 6 (`_dispatch_lib.sh`) on each `done` drain. Diagnostic only; pairs with `quota_launched_this_tick`. |
 | `blocked_at_tick_by_iid` | object          | Map from stringified IID to the `tick_seq` at which the IID most recently entered `blocked`. Removed when the IID becomes `done` or `failed`. Missing legacy entries are treated as immediately retryable so old state is not stranded. |
-| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Stuck-pending eviction is **not** filtered by this list. |
+| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Pending entries outside the effective universe are scope-evicted at the top of the scheduled tick, marked `blocked`, and returned with a best-effort runtime kill action when a `child_session_key` is known. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
-| `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` child sessions after state files are persisted; `blocked` / `failed` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}`. |
-| `run_timeout_seconds`   | int             | Post-override snapshot of the trigger's `run_timeout_seconds`. Defaults to `acpx_timeout_seconds + 120` (18120s when `acpx_timeout_seconds` is also omitted). Must be integer ≥ 60 and `≥ acpx_timeout_seconds + 120`, so the subagent has enough outer-runtime headroom for `run_acpx_attempt.sh` to return 124/137 and enter the timeout flow. Read by Phase 5 when constructing `sessions_spawn(..., runTimeoutSeconds=<value>, ...)`. Callback path does not re-read the trigger override; the persisted value from the most recent scheduled wake-up is authoritative for any callback-path readers (post-mortem inspection, future tooling). Not directly compared against `spawned_at` at eviction time — that comparison uses `stuck_after_minutes`, which the operator is responsible for keeping consistent with this value (see `trigger_command.md` §`stuck_after_minutes` rule of thumb). |
+| `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` / `timeout` child sessions after state files are persisted; `blocked` / `failed` / `timeout` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}` (see Phase 6 step 9). |
+| `run_timeout_seconds`   | int             | Post-override snapshot of the trigger's `run_timeout_seconds`. Defaults to `acpx_timeout_seconds + 120` (18120s when `acpx_timeout_seconds` is also omitted). Must be integer ≥ 60 and `≥ acpx_timeout_seconds + 120`, so the subagent has enough outer-runtime headroom for `run_acpx_attempt.sh` to return 124/137 and enter the timeout flow. Read by Phase 5 when constructing `sessions_spawn(..., runTimeoutSeconds=<value>, ...)`. Callback path does not re-read the trigger override; the persisted value from the most recent scheduled wake-up is authoritative for any callback-path readers (post-mortem inspection, future tooling). Not directly compared against `spawned_at` at eviction time — that comparison uses `stuck_after_minutes`, whose default tracks this value automatically (`ceil(run_timeout_seconds / 60) + 30`); explicit `stuck_after_minutes` overrides still take precedence. |
 | `acpx_timeout_seconds`  | int             | Post-override snapshot of the trigger's `acpx_timeout_seconds`. Defaults to `18000`. Must be integer ≥ 60 and `acpx_timeout_seconds + 120 ≤ run_timeout_seconds`. Rendered into the executor prompt in Phase 4 step 7 as `{ACPX_TIMEOUT_SECONDS}` and `{ACPX_TIMEOUT_MINUTES} = floor(value / 60)`. Persisted for audit; callback path reads it for diagnostic purposes only. |
 | `kill_subagent_on_done` | bool | Legacy compatibility snapshot only. New deployments should use `kill_subagent_on_terminal`; if the new field is missing and this legacy field is explicitly `false`, the loader disables terminal cleanup. |
 | `repo_path`             | string          | Post-override snapshot of the trigger's `repo_path` parent directory. Defaults to `"/data"`. `env_paths.sh` derives final `REPO_PATH=${repo_path}/${PROJECT}` as the clone target (the parent checkout; the shared per-issue linked worktree at `${WORKTREE_DIR}=${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/` is acpx's cwd, reused across attempts of the same IID). Tick aborts with `"invalid_repo_path"` when the value is not an absolute parent directory or contains `..`, whitespace, or shell-unsafe characters outside `[A-Za-z0-9_./-]`. This field is persisted for audit, but non-default deployments must still pass `repo_path` on every scheduled trigger and callback because the dispatcher needs it before reading this file. |
 | `result_basename`       | string          | Post-override snapshot of the trigger's `result_basename`. Defaults to `"ifp-result"`. Used by `env_paths.sh` to derive `RESULT_ROOT=${REPO_PATH}/${result_basename}` and forwarded to every script as `RESULT_BASENAME=...`. Tick aborts with `"invalid_result_basename"` when the value contains `/`, `..`, or whitespace. |
 | `data_basename`         | string          | Post-override snapshot of the trigger's `data_basename`. Defaults to `"ifp-data"`. Forwarded as `DATA_BASENAME=...` and rendered into the subagent prompt. Same validation as `result_basename`. |
+| `ui_accounts_relpath`   | string \| null  | Post-override snapshot of the trigger's `ui_accounts_relpath`. **No default** — `null`, `""`, or absent on a fresh deployment that never supplied the field (the on-disk representation depends on which jq writer last touched the file; all three are treated identically by the loader's `// empty` filter). When non-null and non-empty it is forwarded as `UI_ACCOUNTS_RELPATH=...` to `scripts/load_ui_accounts.sh`, which derives the absolute pool file path `${REPO_PATH}/${ui_accounts_relpath}` (the relpath is resolved under the project checkout root, NOT under `${REPO_PATH}/${DATA_BASENAME}/`). When `null` / empty / absent, the dispatcher skips the entire UI-account flow: `load_ui_accounts.sh` is not invoked, `ui_account_pool_size` is set to `0`, every IID's `ui_account_count` is `0`, and the rendered Claude Code prompt omits the `# UI test accounts` section. Tick aborts with `"invalid_ui_accounts_relpath"` when a non-null trigger or persisted value is absolute, contains `.` / `..` segments, whitespace, or characters outside `[A-Za-z0-9_./-]`. Carry-forward semantics: omitted-in-trigger keeps the persisted value (or stays unconfigured on a fresh deployment). To disable a previously-configured deployment, manually `jq` `campaign_state.json` to set `.ui_accounts_relpath = null`. **Schema migration:** before SKILL_VERSION 2026-05-27.1 this field was resolved under `${REPO_PATH}/${DATA_BASENAME}/`; a persisted carry-forward value from before the upgrade (e.g. `"ifp-common/ifp_users.json"`) MUST be re-sent on the next trigger with the data basename prepended (e.g. `ui_accounts_relpath=ifp-data/ifp-common/ifp_users.json`) so the resolved path matches reality. The loader does NOT auto-migrate — instead, `load_ui_accounts.sh` exit 10 carries an explicit hint when the legacy resolved path still exists on disk. |
 
 ### Legacy on-disk shapes the loader must tolerate
 
@@ -158,12 +166,15 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `max_concurrent_subagents`** — default to `1` and persist.
 - **Missing `max_accounts_per_issue`** — default to `14` and persist.
 - **Stale `accounts_per_issue` field** — silently dropped on the next persist. The field is no longer part of the schema; per-IID account counts are derived automatically from the pool size, `max_concurrent_subagents`, and `max_accounts_per_issue`.
-- **Missing `stuck_after_minutes`** — default to `330` and persist.
+- **Missing `stuck_after_minutes`** — default to `ceil(run_timeout_seconds / 60) + 30` (`332` when both timeout fields are omitted) and persist.
 - **Missing `run_timeout_seconds`** — default to `acpx_timeout_seconds + 120` and persist (18120s when both timeout fields are omitted). Older deployments did not carry this field; loading it from a legacy file is harmless because Phase 5 reads the post-override value, not the trigger directly.
 - **Missing `acpx_timeout_seconds`** — default to `18000` and persist. Same legacy-tolerance rule as `run_timeout_seconds`. If the persisted `run_timeout_seconds` somehow lacks the required 120-second headroom over `acpx_timeout_seconds` (only possible across a hand-edited file or an explicit trigger override), Phase 1's post-override validation aborts the tick with `"run_timeout_seconds_below_acpx_timeout_seconds_plus_120"` so the operator notices.
-- **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` outcomes; blocked/failed cleanup is additionally gated on local evidence existence.
+- **Missing `kill_subagent_on_terminal`** — default to `true` and persist. If the new field is missing but legacy `kill_subagent_on_done` is present and explicitly `false`, set and persist `kill_subagent_on_terminal=false` for compatibility. This gate controls whether Phase 6 step 9 calls the `subagents` kill tool after terminal `done` / `blocked` / `failed` / `timeout` outcomes; `blocked` / `failed` / `timeout` cleanup is additionally gated on local evidence existence.
 - **Missing `kill_subagent_on_done`** — default to the same value as `kill_subagent_on_terminal` and persist only for backward-readable audit. New logic should not use it except for the compatibility rule above.
 - **Missing `quota_launched_this_tick`** — default to `0` and persist (it is reset to `0` at the top of every scheduled wake-up anyway).
+- **Missing `quota_completed_this_tick`** — default to `0` and persist (same reset-each-tick behavior; a legacy file without it is harmless because Phase 6's `// 0` guard tolerates its absence).
+- **Missing `next_new_issue_iid`** — treat as `null` and resolve to `issue_min_iid` on first read via `// .issue_min_iid` (same as fresh-init); the next scheduled wake-up advances and persists it as fresh IIDs are consumed.
+- **Missing `unfinished_iids`** — default to `[]`; rebuilt from disk state and reconcile evidence on the next scheduled tick, so a missing-on-disk list is harmless.
 - **Missing `tick_seq`** — default to `0`; the next scheduled wake-up increments and persists it.
 - **Missing `blocked_at_tick_by_iid`** — default to `{}`. A blocked IID with no map entry is considered cooldown-eligible on the next batch decision.
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
@@ -171,6 +182,7 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **Missing `issue_iids_whitelist` / `require_labels` / `require_labels_match`** — default to `[]` / `[]` / `"or"` and persist on next write. These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
 - **Missing `repo_path`** — default to `"/data"` in memory and persist on next write. This is a bootstrap path snapshot only; if the operator configured a non-default clone parent, the trigger/callback still has to provide it so the dispatcher can locate this state file before loading it.
 - **Missing `result_basename` / `data_basename`** — default to `"ifp-result"` / `"ifp-data"` in memory and persist on next write. Each scheduled wake-up's Phase 1 may OVERRIDE them with the trigger's current values; when the trigger omits the fields, the persisted value is retained (these basenames are deployment-stable per project, unlike the per-tick filter fields above).
+- **Missing `ui_accounts_relpath`** — treat as `null` in memory and persist as `null` on next write. There is no hardcoded default. Same Phase 1 override / carry-forward rule as `result_basename` / `data_basename` (the UI account pool file location is a deployment property, not a per-tick decision), but with the additional behavior that `null` / `""` triggers **pool-load skip mode**: the dispatcher does not invoke `load_ui_accounts.sh`, every IID gets `ui_account_count=0`, and `build_prompt.sh` omits the `# UI test accounts` section of the rendered Claude Code prompt. **Schema migration:** persisted values written before SKILL_VERSION 2026-05-27.1 were `${DATA_BASENAME}/`-relative (e.g. `"ifp-common/ifp_users.json"`); after the upgrade they would resolve under `${REPO_PATH}` directly and miss the pool file. The loader does NOT auto-prepend `${DATA_BASENAME}/` — operators must re-send the trigger once with the corrected `ui_accounts_relpath` (e.g. `ifp-data/ifp-common/ifp_users.json`). `load_ui_accounts.sh` exit 10 includes a migration hint when it detects the legacy path on disk.
 
 The dispatcher MUST NOT keep both the scalar and the array fields in the persisted file — pick the array shape per write and drop the legacy scalars.
 
@@ -217,7 +229,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | `retry_count`           | int             | How many blocked/failed outcomes have consumed the cross-tick retry budget. Launch-side `sessions_spawn` failures after in-tick retry exhaustion do not increment it. `timeout` outcomes ALSO do not increment it (the IID is terminally parked in `timeout_iids` and the dispatcher does not auto-retry until a reviewer strips `timeout`, adds `retry`, or applies `continue`). |
 | `block_reason`          | string \| null  | Required when `status=blocked` or `failed`.                            |
 | `commit_sha`            | string \| null  | Latest pushed commit SHA when applicable.                              |
-| `merge_request_url`     | string \| null  | Strategy A: single MR per issue in fresh mode; rotated in continue mode. |
+| `merge_request_url`     | string \| null  | Strategy A: exactly one open MR per issue at any moment; every attempt rotates (closes the prior open MR, creates a fresh one) in BOTH fresh and continue modes. |
 | `updated_at`            | ISO-8601 UTC    | Update at every major step.                                            |
 
 ### Possible `status` values
@@ -226,7 +238,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | ------------- | ---------------------------------------------------------------------------- | --------- |
 | `pending`     | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
 | `in_progress` | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
-| `blocked`     | Retryable failure (auth, runtime mismatch, dispatcher prep failed for this IID, post-push fetch failed, etc.). | no |
+| `blocked`     | Retryable failure (auth, runtime mismatch, dispatcher prep failed for this IID, post-push fetch failed, etc.). For acpx failures after worktree prep, the subagent first tries to stage, commit, and force-push any committable partial work to `${WORK_BRANCH}`; it still opens no MR and consumes retry budget. | no |
 | `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
 | `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes |
 | `timeout`     | `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`). The subagent still commits + force-pushes the partial work to `${WORK_BRANCH}` but does NOT open an MR. Terminal until a human strips `timeout`, adds `retry`, or applies `continue` — `retry_count` is NOT consumed and the dispatcher does NOT auto-retry. | yes (until human relabel) |
@@ -316,7 +328,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `mode_actual`        | string (enum)   | `fresh` / `continue` — what `prepare_attempt.sh` actually ran (continue can downgrade to fresh inside `prepare_attempt.sh`). |
 | `work_branch`        | string          | `issue/<iid>-auto-fix` — the single force-pushed remote branch.        |
 | `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` — per-attempt local branch kept for audit.   |
-| `commit_sha`         | string          | Empty `""` if Step 3 did not run (no_changes / blocked-before-commit). |
+| `commit_sha`         | string          | Empty `""` if commit/push did not run or failed. May be non-empty for `done`, `timeout`, or `blocked` replies when partial work was successfully force-pushed. |
 | `merge_request_url`  | string          | Empty `""` if Step 7 did not run.                                      |
 | `mr_action`          | string (enum)   | `created` / `rotated` / `none`. `rotated` when one or more prior open MRs were closed before creating the new one, `created` when no prior open MR existed, `none` when Step 7 did not run. The legacy `reused` value is retired — both fresh and continue modes now always close + create. |
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |
@@ -337,7 +349,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 The compact reply arrives in two ways:
 
 - **Callback path** — the runtime delivers `RUN_CHILD_COMPLETION_CALLBACK` carrying the full compact JSON in `worker_result_json`. One callback per subagent.
-- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot. Phase 5 launch failures are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
+- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / scope or stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot. Phase 5 launch failures and pending evictions are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
 
 The validation pipeline is the same in both paths:
 

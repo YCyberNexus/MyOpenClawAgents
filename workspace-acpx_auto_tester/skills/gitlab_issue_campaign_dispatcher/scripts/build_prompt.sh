@@ -26,7 +26,7 @@
 # relative to the repo root).
 #
 # UI_ACCOUNTS is a JSON array of {"u":"<username>","p":"<password>"} objects,
-# allocated by the dispatcher from the deployment-pinned pool. Each subagent
+# allocated by the dispatcher from the test-team-owned pool. Each subagent
 # receives the slot it was assigned by load_ui_accounts.sh — slot size
 # = floor(pool_size / max_concurrent_subagents) with the integer remainder
 # front-loaded onto the first slots, then capped by max_accounts_per_issue
@@ -58,23 +58,29 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
-# UI accounts are allocated by the dispatcher per-batch from the pool pinned
-# at <workspace>/config/ui_accounts.env. Each subagent receives its assigned
-# slot (count derived automatically from pool_size / max_concurrent_subagents
-# with the integer remainder front-loaded, then capped by
-# max_accounts_per_issue). The dispatcher
-# ensures distinct accounts across concurrent batch members AND across
-# concurrent robot executions within a subagent. If UI_ACCOUNTS is missing or invalid,
-# this script exits non-zero and the dispatcher marks the IID `blocked`.
-if [ -z "${UI_ACCOUNTS:-}" ]; then
-  echo "build_prompt: UI_ACCOUNTS is required (dispatcher must pass a JSON array of {\"u\":\"<user>\",\"p\":\"<pass>\"} objects)" >&2
-  exit 3
+# UI accounts are allocated by the dispatcher per-batch from the pool at
+# ${REPO_PATH}/${UI_ACCOUNTS_RELPATH} (no default; trigger field
+# ui_accounts_relpath, carry-forward persisted). When the deployment did
+# NOT configure ui_accounts_relpath, the dispatcher skips the pool load
+# entirely and passes either an empty UI_ACCOUNTS env var or UI_ACCOUNTS='[]'
+# to this script; in that mode the `# UI test accounts` section of the
+# rendered prompt is omitted. When configured, each subagent receives
+# its assigned slot (count derived automatically from pool_size /
+# max_concurrent_subagents with the integer remainder front-loaded,
+# then capped by max_accounts_per_issue). The dispatcher ensures
+# distinct accounts across concurrent batch members AND across
+# concurrent robot executions within a subagent. UI_ACCOUNTS must be
+# either unset, "", "[]", or a non-empty JSON array of
+# {"u":"<user>","p":"<pass>"} objects — any other shape exits non-zero
+# and the dispatcher marks the IID `blocked`.
+ACCOUNT_COUNT=0
+if [ -n "${UI_ACCOUNTS:-}" ]; then
+  if ! echo "${UI_ACCOUNTS}" | jq -e '. | type == "array"' >/dev/null 2>&1; then
+    echo "build_prompt: UI_ACCOUNTS must be a JSON array (got: ${UI_ACCOUNTS})" >&2
+    exit 4
+  fi
+  ACCOUNT_COUNT="$(echo "${UI_ACCOUNTS}" | jq 'length')"
 fi
-if ! echo "${UI_ACCOUNTS}" | jq -e '. | type == "array" and length > 0' >/dev/null 2>&1; then
-  echo "build_prompt: UI_ACCOUNTS must be a non-empty JSON array" >&2
-  exit 4
-fi
-ACCOUNT_COUNT="$(echo "${UI_ACCOUNTS}" | jq 'length')"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -127,6 +133,10 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
     | if length == 0 then "" else (join("\n---\n")) end
   ')"
 
+  if [ -z "${PAST_ATTEMPTS_BLOCK}" ]; then
+    PAST_ATTEMPTS_BLOCK="(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)"
+  fi
+
   if [ -z "${REVIEWER_BLOCK}" ]; then
     REVIEWER_BLOCK="(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)"
   else
@@ -140,14 +150,14 @@ fi
     cat <<EOF
 This is a CONTINUE-MODE re-run of GitLab issue #${ISSUE_IID}.
 
-A prior run on this issue produced a merge request and was marked \`done\` + \`pr\`,
-but a human reviewer has determined the work was incomplete or incorrect.
-You are running inside the shared per-issue git worktree at ${WORKTREE_DIR}
-(reused across every attempt of this IID). Tracked files have just been
-reset to \`origin/${WORK_BRANCH}\` (the work-in-progress branch from the
-prior run); any untracked scratch the previous attempt left here is still
-on disk. Read what's already there, then continue or correct it according
-to the past-attempt summaries and reviewer guidance below.
+A prior attempt on this issue already ran, and a human reviewer requested
+resume by applying the \`continue\` label. You are running inside the shared
+per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt of
+this IID). The dispatcher has prepared the worktree from the latest available
+same-IID work branch or local prior-attempt branch, and it restores prior
+files under ${RESULT_BASENAME}/issue-${ISSUE_IID}/ so you can inspect them
+and continue. Read what's already there, then continue or correct it
+according to the past-attempt summaries and reviewer guidance below.
 
 EOF
   else
@@ -156,11 +166,12 @@ You are working on GitLab issue #${ISSUE_IID}. Implement the change
 requested in the issue description. You are running inside the shared
 per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt
 of this IID). Tracked files have just been reset to
-\`origin/${DEV_BRANCH}\` (the clean baseline); any untracked scratch a
-previous attempt of this IID left here is still on disk. The integration
-branch \`${BRANCH}\` already contains spec output from previously
-completed issues, but you should NOT see that on tracked files here
-when ${DEV_BRANCH} is kept clean.
+\`origin/${DEV_BRANCH}\` (the clean baseline). Any same-IID runtime
+output/log subtree that survived a previous attempt has been quarantined
+outside this active worktree before this prompt was written. The integration
+branch \`${BRANCH}\` already contains spec output from previously completed
+issues, but you should NOT see that on tracked files here when ${DEV_BRANCH}
+is kept clean.
 
 EOF
   fi
@@ -177,7 +188,7 @@ EOF
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
 # Past attempt summaries (auto-posted by acpx_auto_tester)
-${PAST_ATTEMPTS_BLOCK:-(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)}
+${PAST_ATTEMPTS_BLOCK}
 
 # Reviewer comments (everything else, chronological)
 ${REVIEWER_BLOCK}
@@ -193,9 +204,13 @@ EOF
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
-- Source baseline branch:     ${DEV_BRANCH}  (where this worktree was branched from in fresh mode)
+- Source baseline:            prepared by dispatcher for this mode (fresh uses ${DEV_BRANCH}; continue/resume uses ${WORK_BRANCH} or the latest local prior-attempt branch; shared config paths are refreshed from latest ${DEV_BRANCH} before every run)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
+EOF
+
+  if [ "${ACCOUNT_COUNT}" -gt 0 ]; then
+    cat <<EOF
 # UI test accounts (dispatcher-allocated — overrides any account in the issue body)
 The orchestrator has allocated the following ${ACCOUNT_COUNT} test accounts for THIS run.
 When the issue description names a UI account (for example "use F100001 to log in"),
@@ -209,14 +224,19 @@ concurrently-running robots.
 
 $(echo "${UI_ACCOUNTS}" | jq -r 'to_entries | .[] | "- Account \(.key + 1): username=\(.value.u), password=\(.value.p)"')
 
+EOF
+  fi
+
+  cat <<EOF
 # Rules
 - Work only on this issue.
 - **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside this worktree.
 - Treat \`hulat/\`, \`.claude/\`, and \`${DATA_BASENAME}/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
 - The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`${RESULT_BASENAME}/_dispatcher/\` and \`${RESULT_BASENAME}/issue-*/\`) and are not visible to you here. Keep your edits under \`${OUTPUT_DIR}\` unless the issue genuinely requires modifying the test team's shared content above.
+- Destructive deletion is forbidden. Do NOT call \`rm\`, \`/bin/rm\`, \`git rm\`, \`unlink\`, \`find -delete\`, or script file deletion through Python, Node, or another runtime. Do not delete files or directories for cleanup. If the issue seems to require deleting something, leave it in place and explain the blocker in your final summary.
 - Do not ask the user any questions. Make the best reasonable decisions.
-- When you finish, summarize briefly what you did${ISSUE_MODE:+ }$([ "${ISSUE_MODE}" = "continue" ] && echo "differently from the prior run").
+- When you finish, summarize briefly what you did$([ "${ISSUE_MODE}" = "continue" ] && echo " differently from the prior run").
 EOF
 } > "${PROMPT_FILE}"
 
