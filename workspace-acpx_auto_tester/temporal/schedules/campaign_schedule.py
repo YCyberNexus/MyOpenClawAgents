@@ -18,7 +18,6 @@ from temporalio.client import (
     SchedulePolicy,
     ScheduleSpec,
 )
-from temporalio.common import WorkflowIDReusePolicy
 from temporalio.workflow import ParentClosePolicy
 
 from ..shared.types import CampaignInput
@@ -54,7 +53,11 @@ def build_campaign_schedule(
             args=[input_payload],
             id=f"{schedule_id}:run",
             task_queue=task_queue,
-            id_reuse_policy=WorkflowIDReusePolicy.ALLOW_DUPLICATE,
+            # NOTE: no ``id_reuse_policy`` here — ``ScheduleActionStartWorkflow``
+            # does not accept that kwarg (it raises "unexpected keyword argument
+            # 'id_reuse_policy'"). It was also redundant: the Temporal default
+            # workflow-id reuse policy is already ALLOW_DUPLICATE, which is what
+            # BUFFER_ONE relies on to restart the next tick under the same id.
             execution_timeout=tick_timeout,
         ),
         spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=interval)]),
