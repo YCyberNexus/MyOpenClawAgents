@@ -1,0 +1,18 @@
+{
+  "project": "ifp_ui_testing",
+  "group": "claw_gitlab",
+  "branch": "master",
+  "dev_branch": "dev",
+  "issue_min_iid": 420,
+  "issue_max_iid": 523,
+  "hourly_issue_quota": 2,
+  "max_runtime_minutes": 55,
+  "blocked_retry_limit": 10,
+  "blocked_cooldown_ticks": 5,
+  "repo_parent_path": "/data/ifp_ui_testing_mulit",
+  "result_basename": "ifp-result",
+  "data_basename": "ifp-data",
+  "ui_accounts_relpath": "ifp-data/ifp-common/ifp_users.json",
+  "max_concurrent_subagents": 2,
+  "acpx_timeout_seconds": 3600
+}
