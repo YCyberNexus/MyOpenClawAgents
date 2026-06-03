@@ -540,11 +540,16 @@ class CampaignWorkflow:
             self._child_handles[entry.iid] = handle
             child_handles.append((handle, entry.iid, att, entry))
 
-        # Await every child via ``.result()`` (the canonical Temporal Python
-        # SDK accessor for child outcomes).
+        # Await every child handle directly. ``workflow.start_child_workflow``
+        # returns an awaitable ChildWorkflowHandle (an asyncio.Task-like
+        # object); ``await handle`` yields the child's return value and raises
+        # ChildWorkflowError if the child failed. Do NOT call ``handle.result()``
+        # — that is the synchronous ``asyncio.Future.result()`` and raises
+        # ``InvalidStateError: Result is not set`` because the child has not
+        # completed yet at the moment of the call.
         for handle, iid, att, entry in child_handles:
             try:
-                outcome: AttemptOutcome = await handle.result()
+                outcome: AttemptOutcome = await handle
             except ChildWorkflowError as cwe:
                 LOG.warning("child workflow iid=%d failed: %s", iid, cwe)
                 scope_evicted = iid in self._scope_evicted_iids
