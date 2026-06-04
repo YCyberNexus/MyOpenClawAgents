@@ -1,205 +1,189 @@
-<mxfile host="Electron" agent="claude">
+<mxfile host="Electron" agent="claude" pages="3">
   <diagram name="主状态机-issue(人)-v2" id="issue-main-v2">
-    <mxGraphModel dx="3577" dy="1137" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2400" pageHeight="1500" math="0" shadow="0">
+    <mxGraphModel dx="1132" dy="623" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2900" pageHeight="1800" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-
-        <mxCell id="m_title" parent="1" style="text;html=1;align=left;verticalAlign=top;fontSize=18;fontStyle=1;" value="Issue 主状态机 v2 —— 只画「人需要看到 / 人需要处理」的状态（自动内部步骤见第2页）" vertex="1">
-          <mxGeometry height="30" width="1400" x="40" y="20" as="geometry" />
+        <mxCell id="m_title" parent="1" style="text;html=1;align=left;verticalAlign=top;fontSize=18;fontStyle=1;" value="Issue 主状态机 v2 —— 只画「人需要看到 / 人需要处理」的状态；失败中间态按归因拆成自解释 label（看到即知怎么处理）" vertex="1">
+          <mxGeometry height="30" width="1900" x="40" y="20" as="geometry" />
         </mxCell>
-
         <mxCell id="m_start" parent="1" style="ellipse;fillColor=#000000;strokeColor=#000000;" value="" vertex="1">
-          <mxGeometry height="22" width="22" x="92" y="274" as="geometry" />
+          <mxGeometry height="24" width="24" x="70" y="353" as="geometry" />
         </mxCell>
-
         <mxCell id="m_QUEUED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;fontSize=11;" value="&lt;b&gt;QUEUED · 已登记待处理&lt;/b&gt;&#xa;(label ∈ {todo, new, retry, continue})&#xa;&#xa;entry/ 人工打入口标签 = 状态机起点&#xa;含义/ issue 已登记，等待被自动认领&#xa;人/ 无需介入&#xa;exit/ 被调度器选中 → 进入 doing" vertex="1">
-          <mxGeometry height="190" width="300" x="170" y="190" as="geometry" />
+          <mxGeometry height="210" width="320" x="200" y="260" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_AUTO" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;AUTO_RUNNING · 自动处理中&lt;/b&gt; (label = doing)&#xa;&#xa;含义/ issue 已被自动认领，agent 正在处理&#xa;人/ 无需介入，等待结果&#xa;exit/ 产出 outcome(done/blocked/timeout/failed) 写回标签 → 迁移&#xa;&#xa;&lt;i&gt;⟪「怎么处理」属于另一台状态机（调度器/执行），&#xa;见第2页；本页不展开它的内部步骤⟫&lt;/i&gt;" vertex="1">
-          <mxGeometry height="210" width="340" x="600" y="190" as="geometry" />
+        <mxCell id="m_AUTO" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;AUTO_RUNNING · 自动处理中&lt;/b&gt; (label = doing)&#xa;&#xa;含义/ issue 已被自动认领，agent 正在处理&#xa;人/ 无需介入，等待结果&#xa;exit/ outcome(done/blocked-cc/blocked-dispatcher/timeout/failed) 写回标签 → 迁移&#xa;&#xa;&lt;i&gt;⟪「怎么处理」是另一台状态机的事&#xa;（调度器/执行），见第2页⟫&lt;/i&gt;" vertex="1">
+          <mxGeometry height="220" width="380" x="800" y="260" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_REVIEW" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;AWAITING_REVIEW · 待人工评审&lt;/b&gt;&#xa;(labels = done + pr)&#xa;&#xa;entry/ agent 完成并开了 MR → 自动得到 done + pr&#xa;do/ 人工 review 这个 MR&#xa;exit/ 合并 MR → CLOSED&#xa;exit/ 或人工加 continue → 退回 QUEUED 续跑&#xa;&#xa;&lt;i&gt;⟪需要人处理：必须有人 review/合并⟫&lt;/i&gt;" vertex="1">
-          <mxGeometry height="210" width="330" x="1070" y="190" as="geometry" />
+        <mxCell id="m_REVIEW" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;AWAITING_REVIEW · 待人工评审&lt;/b&gt;&#xa;(label = pr)&#xa;&#xa;entry/ agent 完成并开了 MR → 加 pr（pr 替换 done，done 被移除）&#xa;do/ 人工 review 这个 MR&#xa;exit/ 合并 MR → CLOSED&#xa;exit/ 或人工加 continue → 退回 QUEUED 续跑&#xa;&#xa;&lt;i&gt;⟪需要人处理：必须有人 review/合并⟫&lt;/i&gt;" vertex="1">
+          <mxGeometry height="220" width="360" x="1480" y="260" as="geometry" />
         </mxCell>
-
         <mxCell id="m_CLOSED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1e1e1;strokeColor=#666666;verticalAlign=top;fontSize=11;" value="&lt;b&gt;CLOSED · 终态&lt;/b&gt;&#xa;(state=closed)&#xa;&#xa;entry/ MR 合并 → Closes #iid 自动关闭&#xa;entry/ 或人工直接关闭&#xa;do/ reconcile 永久硬跳过，不再调度" vertex="1">
-          <mxGeometry height="170" width="280" x="1540" y="210" as="geometry" />
+          <mxGeometry height="180" width="290" x="2120" y="280" as="geometry" />
         </mxCell>
-
         <mxCell id="m_end" parent="1" style="ellipse;fillColor=#FFFFFF;strokeColor=#000000;strokeWidth=2;" value="" vertex="1">
-          <mxGeometry height="22" width="22" x="1669" y="470" as="geometry" />
+          <mxGeometry height="24" width="24" x="2250" y="580" as="geometry" />
         </mxCell>
         <mxCell id="m_end_inner" parent="1" style="ellipse;fillColor=#000000;strokeColor=#000000;" value="" vertex="1">
-          <mxGeometry height="12" width="12" x="1674" y="475" as="geometry" />
+          <mxGeometry height="12" width="12" x="2256" y="586" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_BLOCKED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;align=center;fontSize=12;fontStyle=1;spacingTop=6;" value="BLOCKED · 阻塞（label = blocked）&#10;同一个标签，两类归因 —— 人工据此决定如何处理（见下两格，第7条）" vertex="1">
-          <mxGeometry height="330" width="640" x="250" y="640" as="geometry" />
+        <mxCell id="m_blocked_group" parent="1" style="rounded=1;dashed=1;fillColor=none;strokeColor=#d79b00;verticalAlign=top;align=center;fontStyle=1;fontSize=11;spacingTop=4;fontColor=#b8860b;" value="阻塞中间态 · 按归因拆成两个独立 label / 状态（看标签即知改哪边，第7条）" vertex="1">
+          <mxGeometry height="375" width="760" x="340" y="800" as="geometry" />
         </mxCell>
-        <mxCell id="m_BLOCKED_cc" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=10;" value="&lt;b&gt;① CC 侧（Claude Code 工作问题）&lt;/b&gt;&#xa;&#xa;来源: acpx 非超时失败 / NO_CHANGES /&#xa;       push 被拒 / acpx 后续步骤失败&#xa;现场: 可提交的 partial work 已 force-push&#xa;       到 WORK_BRANCH；summary 仅本地&#xa;&#xa;&lt;b&gt;人工处理:&lt;/b&gt;&#xa;• 读 partial+summary → 加 continue 带补充&#xa;  说明（原分支续跑）&#xa;• 或加 retry 干净重做" vertex="1">
-          <mxGeometry height="250" width="290" x="270" y="700" as="geometry" />
+        <mxCell id="m_BLOCKED_CC" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=10;" value="&lt;b&gt;BLOCKED · CC 侧&lt;/b&gt;&#xa;(label = blocked-cc)&#xa;&#xa;来源/ acpx 非超时失败 / NO_CHANGES /&#xa;      push 被拒 / acpx 后续步骤失败&#xa;现场/ partial work 已 push 到 WORK_BRANCH&#xa;&#xa;&lt;b&gt;看到就知道怎么办:&lt;/b&gt;&#xa;→ 去改 issue 提示词 + hulat 配置&#xa;→ 再 retry(fresh) 重做 或 continue(resume) 续跑" vertex="1">
+          <mxGeometry height="295" width="330" x="360" y="850" as="geometry" />
         </mxCell>
-        <mxCell id="m_BLOCKED_disp" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=10;" value="&lt;b&gt;② 调度器侧（编排/基础设施问题）&lt;/b&gt;&#xa;&#xa;来源: prep 失败(clone/prepare/prompt/label) /&#xa;       spawn 启动 3 次失败 / scope eviction /&#xa;       子流程未产出 outcome 即报错&#xa;现场: 无 CC 产出；block_reason 记录原因&#xa;&#xa;&lt;b&gt;人工处理:&lt;/b&gt;&#xa;• 多为环境/runner 问题，修复后加 retry&#xa;• scope eviction 不消耗 retry_count" vertex="1">
-          <mxGeometry height="250" width="290" x="580" y="700" as="geometry" />
+        <mxCell id="m_BLOCKED_DISP" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=10;" value="&lt;b&gt;BLOCKED · 调度器侧&lt;/b&gt;&#xa;(label = blocked-dispatcher)&#xa;&#xa;来源/ prep 失败 / spawn 启动失败 /&#xa;      scope eviction / 子流程错误 /&#xa;      等不到回调 (stuck)&#xa;现场/ 无 CC 产出；block_reason 记录原因&#xa;&#xa;&lt;b&gt;看到就知道怎么办:&lt;/b&gt;&#xa;→ 去改 dispatcher agent（编排/环境/runner）&#xa;→ 修好后 retry" vertex="1">
+          <mxGeometry height="295" width="330" x="750" y="850" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_TIMEOUT" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;fontSize=11;" value="&lt;b&gt;TIMEOUT · 超时停泊&lt;/b&gt; (label = timeout)&#xa;&#xa;entry/ agent 运行超时被中止&#xa;现场/ 分支上有 partial 提交，无 MR/pr&#xa;do/ 不自动重试，不消耗 retry_count&#xa;&#xa;&lt;b&gt;人工处理:&lt;/b&gt;&#xa;• 去掉 timeout / 加 retry → fresh 重做&#xa;• 加 continue → 在已推分支上续跑" vertex="1">
-          <mxGeometry height="250" width="300" x="960" y="690" as="geometry" />
+        <mxCell id="m_TIMEOUT" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;fontSize=10;" value="&lt;b&gt;TIMEOUT · 超时（CC 侧）&lt;/b&gt;&#xa;(label = timeout)&#xa;&#xa;来源/ acpx 跑超 wall-clock 上限（任务太重）&#xa;现场/ partial 提交已 push，无 MR/pr&#xa;特性/ 不自动重试，不消耗 retry_count&#xa;&#xa;&lt;b&gt;看到就知道怎么办:&lt;/b&gt;&#xa;→ 去改 issue 提示词 + hulat（缩小/澄清任务）&#xa;→ 去 timeout/加 retry 重做，或 continue 续跑" vertex="1">
+          <mxGeometry height="295" width="330" x="1150" y="850" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_FAILED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;FAILED · 失败终态&lt;/b&gt; (label = failed)&#xa;&#xa;entry/ outcome=failed&#xa;entry/ 或 retry_count &gt; blocked_retry_limit 被提升&#xa;do/ 永不自动重排&#xa;&#xa;&lt;b&gt;人工处理:&lt;/b&gt;&#xa;• 加 retry/continue 重新武装（仅人工可恢复）&#xa;• 或直接关闭" vertex="1">
-          <mxGeometry height="250" width="300" x="1320" y="690" as="geometry" />
+        <mxCell id="m_FAILED" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#cccccc;strokeColor=#666666;verticalAlign=top;fontSize=10;" value="&lt;b&gt;FAILED · 失败终态&lt;/b&gt;&#xa;(label = failed)&#xa;&#xa;entry/ outcome=failed&#xa;entry/ 或 blocked-cc / blocked-dispatcher 的&#xa;      retry_count &gt; limit 被提升&#xa;do/ 永不自动重排&#xa;&#xa;&lt;b&gt;人工处理:&lt;/b&gt;&#xa;• 先按上一个 blocked 归因修对应侧&#xa;  （提示词/hulat 或 dispatcher）&#xa;• 加 retry/continue 重新武装，或直接关闭" vertex="1">
+          <mxGeometry height="295" width="330" x="1540" y="850" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_decision" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=10;" value="&lt;b&gt;人工行为 ⇄ 自动状态 的融合：重跑该 continue 还是 retry？（第1条）&lt;/b&gt;&#xa;&#xa;&lt;b&gt;判定规则（dispatcher _attempt_mode_for_entry）&lt;/b&gt;&#xa;• 仅当 continue 是&lt;u&gt;唯一&lt;/u&gt;工作标签 → continue 模式&#xa;• 否则（retry/todo/new，或 continue 与其它工作标签并存）→ fresh 模式&#xa;&#xa;&lt;b&gt;continue（续跑 / resume）&lt;/b&gt;&#xa;• 基线 = origin/WORK_BRANCH（上轮 WIP）&#xa;• 恢复上轮 ifp-result/issue-iid 产物&#xa;• prompt 注入上轮 summary + 评审意见&#xa;&#xa;&lt;b&gt;retry（重做 / fresh）&lt;/b&gt;&#xa;• 基线 = origin/DEV_BRANCH（干净）&#xa;• 归档上轮产物，不带入；全新 prompt&#xa;&#xa;&lt;b&gt;经验法则&lt;/b&gt;&#xa;• 上轮方向对、只差细节 → continue&#xa;• 上轮跑偏 / 改了规格或共享配置 → retry" vertex="1">
-          <mxGeometry height="340" width="460" x="1700" y="640" as="geometry" />
+        <mxCell id="m_decision" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=10;" value="&lt;b&gt;人工行为 ⇄ 自动状态 的融合：重跑该 continue 还是 retry？（第1条）&lt;/b&gt;&#xa;&#xa;&lt;b&gt;先看 label 归因，决定去改哪边（第7条）&lt;/b&gt;&#xa;• blocked-cc / timeout → 改 issue 提示词 + hulat 配置&#xa;• blocked-dispatcher → 改 dispatcher agent&#xa;&#xa;&lt;b&gt;再决定重跑模式（_attempt_mode_for_entry）&lt;/b&gt;&#xa;• 仅当 continue 是&lt;u&gt;唯一&lt;/u&gt;工作标签 → continue 模式&#xa;• 否则（retry/todo/new，或 continue 与其它并存）→ fresh 模式&#xa;&#xa;&lt;b&gt;continue（续跑 / resume）&lt;/b&gt;&#xa;• 基线 origin/WORK_BRANCH（上轮 WIP）；恢复上轮产物&#xa;• prompt 注入上轮 summary + 评审意见&#xa;&lt;b&gt;retry（重做 / fresh）&lt;/b&gt;&#xa;• 基线 origin/DEV_BRANCH（干净）；归档上轮产物，全新 prompt&#xa;&#xa;&lt;b&gt;经验法则&lt;/b&gt;&#xa;• 上轮方向对、只差细节 → continue&#xa;• 上轮跑偏 / 改了规格或共享配置 → retry" vertex="1">
+          <mxGeometry height="375" width="500" x="1920" y="850" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_legend" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=11;" value="&lt;b&gt;图例&lt;/b&gt;&#xa;━━ 自动转移（B→A：执行结果写回标签）&#xa;┅┅(紫) 人工动作（A→B：打标签 / 合并 / 关闭，驱动调度）&#xa;&#xa;&lt;b&gt;本页范围（第8、9条）&lt;/b&gt;&#xa;只画「人需要看到 / 人需要处理」的状态；不需人介入的内部步骤（prep / spawn / stage / commit / wiki / mr…）下沉到第2页。&#xa;&lt;b&gt;不混画（第6条）：&lt;/b&gt;本页所有结点都是 issue 状态（GitLab 标签可观察）；dispatcher 状态全在第2页，二者只通过实时标签互相驱动。&#xa;BLOCKED 下两格是同一 blocked 标签的「归因」（第7条），属 issue 状态的标注，不是 dispatcher 状态结点。&#xa;&#xa;&lt;b&gt;起点 = 标签（第2条）&lt;/b&gt;&#xa;状态机从人工打入口标签 todo / new 开始，不再画浏览器里建 issue 的 DRAFTING / SUBMITTED 过程。&#xa;&#xa;&lt;b&gt;任意非终态均可被人工 close → CLOSED&lt;/b&gt;（为减少连线，图中只画了 FAILED→CLOSED 一条示例）。&#xa;&#xa;&lt;b&gt;source of truth&lt;/b&gt;&#xa;GitLab 实时标签是状态唯一真相；磁盘 state 只是缓存。每个 tick 先 reconcile 并写证据文件。" vertex="1">
-          <mxGeometry height="300" width="900" x="170" y="1040" as="geometry" />
+        <mxCell id="m_legend" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=11;" value="&lt;b&gt;图例&lt;/b&gt;　━━ 自动转移(B→A：执行结果写回标签)　┅┅(紫) 人工动作(A→B：打标签/合并/关闭)&#xa;&lt;b&gt;核心思想（第7条）：看到状态就知道该如何处理。&lt;/b&gt;阻塞按归因拆成两个独立 label / 状态：&#xa;　&lt;b&gt;blocked-cc&lt;/b&gt;（CC 侧：acpx 失败 / NO_CHANGES / push 拒 / 后步骤失败）→ 去改 issue 提示词 + hulat 配置&#xa;　&lt;b&gt;blocked-dispatcher&lt;/b&gt;（调度器侧：prep / spawn / scope / 子流程错 / 等不到回调 stuck）→ 去改 dispatcher agent&#xa;　&lt;b&gt;timeout&lt;/b&gt;（CC 侧：acpx 跑超 wall-clock）→ 去改提示词 / hulat 让任务可控，或 continue 续跑&#xa;&lt;b&gt;*&lt;/b&gt; 进 doing 即清除 {todo,new,retry,continue,done,pr,blocked-cc,blocked-dispatcher,timeout,failed}，只留 doing；再次完成会轮换新 MR 并重新打 pr（pr 替换 done，第4条）。&#xa;&#xa;&lt;b&gt;本页范围（第8、9条）&lt;/b&gt;只画人需要看到 / 处理的状态；内部步骤见第2页。&lt;b&gt;不混画（第6条）&lt;/b&gt;结点都是 issue 状态，dispatcher 状态在第2页。&#xa;&lt;b&gt;起点=标签（第2条）&lt;/b&gt;从 todo/new 开始。&lt;b&gt;任意非终态可被人工 close→CLOSED&lt;/b&gt;（图中只画 FAILED→CLOSED 示例）。&#xa;&lt;b&gt;source of truth&lt;/b&gt; GitLab 实时标签为准；每 tick 先 reconcile 写证据文件。" vertex="1">
+          <mxGeometry height="320" width="1340" x="200" y="1290" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_e1" edge="1" parent="1" source="m_start" target="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" value="人工加 label[todo|new] = 起点">
+        <mxCell id="m_e1" edge="1" parent="1" source="m_start" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="加 todo/new">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_e2" edge="1" parent="1" source="m_QUEUED" target="m_AUTO" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" value="被调度器选中(B驱动A) / set doing（清除其它工作标签，含 done+pr，第4条）">
+        <mxCell id="m_e2" edge="1" parent="1" source="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" target="m_AUTO" value="调度器选中 → doing（清空旧标签*）">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_e3" edge="1" parent="1" source="m_QUEUED" target="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;curved=1;exitX=0.1;exitY=0;entryX=0.3;entryY=0;labelBackgroundColor=#ffffff;" value="本轮未被选中 / 仍排队（issue 状态不变）">
+        <mxCell id="m_e3" edge="1" parent="1" source="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;curved=1;exitX=0.1;exitY=0;entryX=0.3;entryY=0;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="未选中 / 仍排队">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="200" y="160" />
-              <mxPoint x="260" y="160" />
+              <mxPoint x="232" y="225" />
+              <mxPoint x="296" y="225" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e4" edge="1" parent="1" source="m_AUTO" target="m_REVIEW" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" value="outcome=done / 加 done+pr">
+        <mxCell id="m_e4" edge="1" parent="1" source="m_AUTO" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" target="m_REVIEW" value="完成并建 MR / 加 pr（替换 done）">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_e5" edge="1" parent="1" source="m_AUTO" target="m_BLOCKED_cc" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.12;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" value="outcome=blocked（CC 侧）">
+        <mxCell id="m_e5" edge="1" parent="1" source="m_AUTO" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.04;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" target="m_BLOCKED_CC" value="blocked-cc">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="640" y="560" />
-              <mxPoint x="415" y="560" />
+              <mxPoint x="815" y="600" />
+              <mxPoint x="525" y="600" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e6" edge="1" parent="1" source="m_AUTO" target="m_BLOCKED_disp" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.4;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" value="outcome=blocked（调度器侧·无 CC 产出）">
+        <mxCell id="m_e6" edge="1" parent="1" source="m_AUTO" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.30;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" target="m_BLOCKED_DISP" value="blocked-dispatcher">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="736" y="610" />
-              <mxPoint x="725" y="610" />
+              <mxPoint x="914" y="650" />
+              <mxPoint x="915" y="650" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e7" edge="1" parent="1" source="m_AUTO" target="m_TIMEOUT" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.72;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" value="outcome=timeout">
+        <mxCell id="m_e7" edge="1" parent="1" source="m_AUTO" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.62;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" target="m_TIMEOUT" value="timeout (CC)">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="845" y="640" />
-              <mxPoint x="1110" y="640" />
+              <mxPoint x="1036" y="700" />
+              <mxPoint x="1315" y="700" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e8" edge="1" parent="1" source="m_AUTO" target="m_FAILED" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.95;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" value="outcome=failed 或 retry&gt;limit 提升">
+        <mxCell id="m_e8" edge="1" parent="1" source="m_AUTO" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.93;exitY=1;entryX=0.5;entryY=0;labelBackgroundColor=#ffffff;" target="m_FAILED" value="failed / 超限提升">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="923" y="660" />
-              <mxPoint x="1470" y="660" />
+              <mxPoint x="1153" y="750" />
+              <mxPoint x="1705" y="750" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e9" edge="1" parent="1" source="m_REVIEW" target="m_CLOSED" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" value="人工合并 MR / GitLab 自动关闭">
+        <mxCell id="m_e9" edge="1" parent="1" source="m_REVIEW" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=1;exitY=0.5;entryX=0;entryY=0.5;labelBackgroundColor=#ffffff;" target="m_CLOSED" value="合并 MR → 关闭">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="m_e10" edge="1" parent="1" source="m_REVIEW" target="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.5;exitY=0;entryX=0.85;entryY=0;labelBackgroundColor=#ffffff;" value="人工加 continue / 退回续跑(resume)">
+        <mxCell id="m_e10" edge="1" parent="1" source="m_REVIEW" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.5;exitY=0;entryX=0.65;entryY=0;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="加 continue (resume)">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="1235" y="140" />
-              <mxPoint x="425" y="140" />
+              <mxPoint x="1660" y="200" />
+              <mxPoint x="408" y="200" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e11" edge="1" parent="1" source="m_BLOCKED" target="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0;exitY=0.3;entryX=0.2;entryY=1;labelBackgroundColor=#ffffff;" value="人工加 retry(fresh) 或 continue(resume)">
+        <mxCell id="m_e11a" edge="1" parent="1" source="m_BLOCKED_CC" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0;exitY=0.3;entryX=0.15;entryY=1;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="改提示词/hulat → retry/continue">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="130" y="739" />
-              <mxPoint x="130" y="420" />
-              <mxPoint x="230" y="420" />
+              <mxPoint x="160" y="938" />
+              <mxPoint x="160" y="520" />
+              <mxPoint x="248" y="520" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e12" edge="1" parent="1" source="m_BLOCKED" target="m_FAILED" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.92;exitY=1;entryX=0.5;entryY=1;labelBackgroundColor=#ffffff;" value="retry_count &gt; blocked_retry_limit / 自动提升">
+        <mxCell id="m_e11b" edge="1" parent="1" source="m_BLOCKED_DISP" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.1;exitY=0;entryX=0.3;entryY=1;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="改 dispatcher → retry">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="839" y="1010" />
-              <mxPoint x="1470" y="1010" />
+              <mxPoint x="783" y="560" />
+              <mxPoint x="296" y="560" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e13" edge="1" parent="1" source="m_TIMEOUT" target="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.2;exitY=0;entryX=0.4;entryY=1;labelBackgroundColor=#ffffff;" value="去 timeout/加 retry(fresh) 或 加 continue(resume)">
+        <mxCell id="m_e12a" edge="1" parent="1" source="m_BLOCKED_CC" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.5;exitY=1;entryX=0.4;entryY=1;labelBackgroundColor=#ffffff;" target="m_FAILED" value="retry 超限 → 提升">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="1020" y="440" />
-              <mxPoint x="290" y="440" />
+              <mxPoint x="525" y="1210" />
+              <mxPoint x="1672" y="1210" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e14" edge="1" parent="1" source="m_FAILED" target="m_QUEUED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.15;exitY=0;entryX=0.55;entryY=1;labelBackgroundColor=#ffffff;" value="人工加 retry/continue / 重新武装">
+        <mxCell id="m_e12b" edge="1" parent="1" source="m_BLOCKED_DISP" style="endArrow=classic;html=1;rounded=0;fontSize=10;exitX=0.6;exitY=1;entryX=0.6;entryY=1;labelBackgroundColor=#ffffff;" target="m_FAILED" value="retry 超限 → 提升">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="1365" y="465" />
-              <mxPoint x="335" y="465" />
+              <mxPoint x="948" y="1245" />
+              <mxPoint x="1738" y="1245" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e17" edge="1" parent="1" source="m_FAILED" target="m_CLOSED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#bbbbbb;exitX=0.7;exitY=0;entryX=0.5;entryY=1;labelBackgroundColor=#ffffff;" value="人工关闭">
+        <mxCell id="m_e13" edge="1" parent="1" source="m_TIMEOUT" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.08;exitY=0;entryX=0.4;entryY=1;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="去 timeout / retry / continue">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
-              <mxPoint x="1530" y="430" />
-              <mxPoint x="1680" y="430" />
+              <mxPoint x="1176" y="585" />
+              <mxPoint x="328" y="585" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="m_e18" edge="1" parent="1" source="m_CLOSED" target="m_end" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" value="">
+        <mxCell id="m_e14" edge="1" parent="1" source="m_FAILED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#9673a6;exitX=0.06;exitY=0;entryX=0.55;entryY=1;labelBackgroundColor=#ffffff;" target="m_QUEUED" value="加 retry/continue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1560" y="610" />
+              <mxPoint x="376" y="610" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_e17" edge="1" parent="1" source="m_FAILED" style="endArrow=classic;html=1;rounded=0;fontSize=10;dashed=1;strokeColor=#bbbbbb;exitX=1;exitY=0.1;entryX=0.28;entryY=1;labelBackgroundColor=#ffffff;" target="m_CLOSED" value="人工关闭">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1860" y="880" />
+              <mxPoint x="1860" y="500" />
+              <mxPoint x="2201" y="500" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="m_e18" edge="1" parent="1" source="m_CLOSED" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;" target="m_end" value="">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
       </root>
     </mxGraphModel>
   </diagram>
-
   <diagram name="调度器+执行状态机(自动)-v2" id="dispatcher-exec-v2">
-    <mxGraphModel dx="3577" dy="1137" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="3600" pageHeight="1800" math="0" shadow="0">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="3600" pageHeight="1800" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-
         <mxCell id="p2_title" parent="1" style="text;html=1;align=left;verticalAlign=top;fontSize=18;fontStyle=1;" value="调度器 / 执行 状态机 v2（CampaignWorkflow + IssueAttemptWorkflow）—— 自动半区，不需人介入（第6、8条）" vertex="1">
           <mxGeometry height="30" width="1600" x="20" y="6" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_couple" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fontSize=11;" value="&lt;b&gt;与主状态机的耦合（第6条）&lt;/b&gt;　本页所有状态都是 doing 内部的自动步骤。主状态机的 AUTO_RUNNING ⇄ 本页：&#xa;　• 入口由主状态机驱动：tick 读到入口标签 → 启动子流程（START CHILD）；　• 出口驱动主状态机：本页产出的 AttemptOutcome（done / blocked / timeout / failed）写回 GitLab 标签，推动主状态机迁移。&#xa;　• 唯一接口 = GitLab 实时标签（source of truth）。详见第3页耦合图。" vertex="1">
+        <mxCell id="p2_couple" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=10;spacingTop=6;fontSize=11;" value="&lt;b&gt;与主状态机的耦合（第6条）&lt;/b&gt;　本页所有状态都是 doing 内部的自动步骤。主状态机的 AUTO_RUNNING ⇄ 本页：&#xa;　• 入口由主状态机驱动：tick 读到入口标签 → 启动子流程（START CHILD）；　• 出口驱动主状态机：本页产出的 AttemptOutcome 写回 GitLab 标签 → 推动主状态机迁移。&#xa;　• outcome → 标签映射：done→pr（pr 替换 done）｜CC 侧失败→blocked-cc｜调度器侧失败→blocked-dispatcher｜acpx 超时→timeout｜重试超限→failed。唯一接口 = GitLab 实时标签。" vertex="1">
           <mxGeometry height="80" width="3540" x="20" y="40" as="geometry" />
         </mxCell>
-
         <mxCell id="p2_band1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eaf2fd;strokeColor=#6c8ebf;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;fontSize=13;fontStyle=1;fontColor=#4a6fa5;" value="CampaignWorkflow / dispatcher 准备阶段（调度器侧）" vertex="1">
           <mxGeometry height="300" width="1760" x="20" y="150" as="geometry" />
         </mxCell>
@@ -209,7 +193,6 @@
         <mxCell id="p2_band3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#999999;verticalAlign=top;align=left;spacingLeft=12;spacingTop=8;fontSize=13;fontStyle=1;fontColor=#666666;" value="CampaignWorkflow outcome 记账（调度器侧）" vertex="1">
           <mxGeometry height="430" width="3540" x="20" y="1350" as="geometry" />
         </mxCell>
-
         <mxCell id="p2_bootstrap" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;verticalAlign=top;fontSize=11;" value="&lt;b&gt;BOOTSTRAP + RECONCILE&lt;/b&gt;&#xa;&#xa;ensure_workflow_labels&#xa;self_heal_safety_bin&#xa;clone_or_pull_repo&#xa;reconcile_gitlab + classify" vertex="1">
           <mxGeometry height="180" width="300" x="70" y="220" as="geometry" />
         </mxCell>
@@ -222,21 +205,19 @@
         <mxCell id="p2_startchild" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;verticalAlign=top;fontSize=11;" value="&lt;b&gt;START CHILD&lt;/b&gt;&#xa;&#xa;IssueAttemptWorkflow.run&#xa;id = issue:{project}:{iid}:att-NNN&#xa;WorkflowIDReusePolicy.REJECT_DUPLICATE&#xa;ParentClosePolicy.ABANDON&#xa;add iid to pending" vertex="1">
           <mxGeometry height="180" width="320" x="1300" y="220" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_e_bs_sel" edge="1" parent="1" source="p2_bootstrap" target="p2_select" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#eaf2fd;" value="reconcile evidence">
+        <mxCell id="p2_e_bs_sel" edge="1" parent="1" source="p2_bootstrap" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#eaf2fd;" target="p2_select" value="reconcile evidence">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_sel_prep" edge="1" parent="1" source="p2_select" target="p2_prepare" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#eaf2fd;" value="eligible IID">
+        <mxCell id="p2_e_sel_prep" edge="1" parent="1" source="p2_select" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#eaf2fd;" target="p2_prepare" value="eligible IID">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_prep_sc" edge="1" parent="1" source="p2_prepare" target="p2_startchild" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#eaf2fd;" value="prepared">
+        <mxCell id="p2_e_prep_sc" edge="1" parent="1" source="p2_prepare" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#eaf2fd;" target="p2_startchild" value="prepared">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
         <mxCell id="p2_claude" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;CLAUDE CODE RUN&lt;/b&gt;&#xa;&#xa;run_claude_code_attempt&#xa;acpx claude exec -f prompt.txt&#xa;one-shot, no retry&#xa;timeout = acpx_timeout_seconds + 120" vertex="1">
           <mxGeometry height="190" width="300" x="60" y="570" as="geometry" />
         </mxCell>
-        <mxCell id="p2_stage" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;STAGE&lt;/b&gt;&#xa;&#xa;stage_and_guard&#xa;NO_CHANGES now becomes blocked" vertex="1">
+        <mxCell id="p2_stage" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;STAGE&lt;/b&gt;&#xa;&#xa;stage_and_guard&#xa;NO_CHANGES now becomes blocked-cc" vertex="1">
           <mxGeometry height="190" width="230" x="400" y="570" as="geometry" />
         </mxCell>
         <mxCell id="p2_commit" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;COMMIT + PUSH&lt;/b&gt;&#xa;&#xa;commit_and_push&#xa;Strategy A force-push&#xa;capture commit_sha" vertex="1">
@@ -248,57 +229,55 @@
         <mxCell id="p2_wiki" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;WIKI&lt;/b&gt;&#xa;&#xa;upload_attempt_artifacts&#xa;must land before done" vertex="1">
           <mxGeometry height="190" width="220" x="1220" y="570" as="geometry" />
         </mxCell>
-        <mxCell id="p2_labeldone" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;LABEL DONE&lt;/b&gt;&#xa;&#xa;doing → done&#xa;labels_removed += doing&#xa;labels_added += done" vertex="1">
+        <mxCell id="p2_labeldone" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;LABEL DONE&lt;/b&gt;&#xa;&#xa;doing → done（临时，建 MR 后被 pr 替换）&#xa;labels_removed += doing&#xa;labels_added += done" vertex="1">
           <mxGeometry height="190" width="250" x="1480" y="570" as="geometry" />
         </mxCell>
         <mxCell id="p2_mrrotate" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;MR ROTATE&lt;/b&gt;&#xa;&#xa;create_or_rotate_mr&#xa;new attempt creates fresh MR&#xa;mr_action = created | rotated" vertex="1">
           <mxGeometry height="190" width="270" x="1770" y="570" as="geometry" />
         </mxCell>
-        <mxCell id="p2_addpr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;ADD PR&lt;/b&gt;&#xa;&#xa;add_pr_label&#xa;issue now has done + pr" vertex="1">
+        <mxCell id="p2_addpr" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;ADD PR（pr 替换 done）&lt;/b&gt;&#xa;&#xa;remove done + add pr&#xa;issue now has pr（done 已移除）" vertex="1">
           <mxGeometry height="190" width="220" x="2080" y="570" as="geometry" />
         </mxCell>
         <mxCell id="p2_summarize" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;verticalAlign=top;fontSize=11;" value="&lt;b&gt;SUMMARIZE DONE&lt;/b&gt;&#xa;&#xa;summarize_attempt&#xa;post issue note if successful&#xa;summary failure is non-fatal" vertex="1">
           <mxGeometry height="190" width="270" x="2340" y="570" as="geometry" />
         </mxCell>
-        <mxCell id="p2_outcome" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=11;fontStyle=1;" value="&lt;b&gt;OUTCOME: done&lt;/b&gt;&#xa;&#xa;commit_sha, MR URL, Wiki URL&#xa;labels (done, pr)&#xa;&lt;i&gt;→ 驱动主状态机 AWAITING_REVIEW&lt;/i&gt;" vertex="1">
+        <mxCell id="p2_outcome" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;verticalAlign=top;fontSize=11;fontStyle=1;" value="&lt;b&gt;OUTCOME: done&lt;/b&gt;&#xa;&#xa;commit_sha, MR URL, Wiki URL&#xa;label = pr（pr 替换 done）&#xa;&lt;i&gt;→ 驱动主状态机 AWAITING_REVIEW&lt;/i&gt;" vertex="1">
           <mxGeometry height="190" width="270" x="2650" y="570" as="geometry" />
         </mxCell>
-        <mxCell id="p2_await" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;verticalAlign=top;fontSize=11;" value="&lt;b&gt;AWAIT CHILD&lt;/b&gt;&#xa;&#xa;await handle.result()&#xa;release UI account slot&#xa;drain pending + child handle&#xa;scope eviction can synthesize blocked&#xa;     without consuming retry" vertex="1">
+        <mxCell id="p2_await" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;verticalAlign=top;fontSize=11;" value="&lt;b&gt;AWAIT CHILD&lt;/b&gt;&#xa;&#xa;await handle.result()&#xa;release UI account slot&#xa;drain pending + child handle&#xa;scope eviction can synthesize blocked-dispatcher&#xa;     without consuming retry" vertex="1">
           <mxGeometry height="220" width="330" x="2980" y="570" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_e_claude_stage" edge="1" parent="1" source="p2_claude" target="p2_stage" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="acpx_ok">
+        <mxCell id="p2_e_claude_stage" edge="1" parent="1" source="p2_claude" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_stage" value="acpx_ok">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_stage_commit" edge="1" parent="1" source="p2_stage" target="p2_commit" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="staged">
+        <mxCell id="p2_e_stage_commit" edge="1" parent="1" source="p2_stage" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_commit" value="staged">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_commit_verify" edge="1" parent="1" source="p2_commit" target="p2_verify" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="pushed">
+        <mxCell id="p2_e_commit_verify" edge="1" parent="1" source="p2_commit" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_verify" value="pushed">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_verify_wiki" edge="1" parent="1" source="p2_verify" target="p2_wiki" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="verified">
+        <mxCell id="p2_e_verify_wiki" edge="1" parent="1" source="p2_verify" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_wiki" value="verified">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_wiki_label" edge="1" parent="1" source="p2_wiki" target="p2_labeldone" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="wiki_url">
+        <mxCell id="p2_e_wiki_label" edge="1" parent="1" source="p2_wiki" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_labeldone" value="wiki_url">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_label_mr" edge="1" parent="1" source="p2_labeldone" target="p2_mrrotate" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="done label ok">
+        <mxCell id="p2_e_label_mr" edge="1" parent="1" source="p2_labeldone" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_mrrotate" value="done label ok">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_mr_addpr" edge="1" parent="1" source="p2_mrrotate" target="p2_addpr" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="MR created/rotated">
+        <mxCell id="p2_e_mr_addpr" edge="1" parent="1" source="p2_mrrotate" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_addpr" value="MR created/rotated">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_addpr_sum" edge="1" parent="1" source="p2_addpr" target="p2_summarize" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="pr label ok">
+        <mxCell id="p2_e_addpr_sum" edge="1" parent="1" source="p2_addpr" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_summarize" value="pr label ok">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_sum_outcome" edge="1" parent="1" source="p2_summarize" target="p2_outcome" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="return outcome">
+        <mxCell id="p2_e_sum_outcome" edge="1" parent="1" source="p2_summarize" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_outcome" value="return outcome">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_outcome_await" edge="1" parent="1" source="p2_outcome" target="p2_await" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" value="AttemptOutcome(done)">
+        <mxCell id="p2_e_outcome_await" edge="1" parent="1" source="p2_outcome" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_await" value="AttemptOutcome(done)">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_e_sc_claude" edge="1" parent="1" source="p2_startchild" target="p2_claude" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;strokeColor=#4a6fa5;" value="child run starts">
+        <mxCell id="p2_e_sc_claude" edge="1" parent="1" source="p2_startchild" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;labelBackgroundColor=#ffffff;strokeColor=#4a6fa5;" target="p2_claude" value="child run starts">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="1460" y="510" />
@@ -306,25 +285,22 @@
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="p2_blockedpush" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;verticalAlign=top;fontSize=11;" value="&lt;b&gt;BLOCKED_PUSH FLOW【CC 侧】&lt;/b&gt;&#xa;&#xa;entered on non-timeout acpx failure&#xa;best-effort stage → commit/push → verify partial work&#xa;sync label blocked, local-only summary&#xa;no Wiki, no MR, no pr&#xa;outcome = blocked&#xa;&lt;i&gt;→ 主状态机 BLOCKED·CC 侧&lt;/i&gt;" vertex="1">
+        <mxCell id="p2_blockedpush" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;BLOCKED_PUSH FLOW【CC 侧】&lt;/b&gt;&#xa;&#xa;entered on non-timeout acpx failure&#xa;best-effort stage → commit/push → verify partial work&#xa;sync label blocked-cc, local-only summary&#xa;no Wiki, no MR, no pr&#xa;outcome = blocked-cc&#xa;&lt;i&gt;→ 主状态机 BLOCKED-CC（去改提示词/hulat）&lt;/i&gt;" vertex="1">
           <mxGeometry height="210" width="390" x="300" y="910" as="geometry" />
         </mxCell>
-        <mxCell id="p2_timeout" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;fontSize=11;" value="&lt;b&gt;TIMEOUT FLOW【CC 侧】&lt;/b&gt;&#xa;&#xa;entered on acpx 124 / 137 or tool-side timeout&#xa;best-effort partial push&#xa;sync label timeout, local-only summary&#xa;no Wiki, no MR, no pr&#xa;outcome = timeout&#xa;&lt;i&gt;→ 主状态机 TIMEOUT&lt;/i&gt;" vertex="1">
+        <mxCell id="p2_timeout" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe6cc;strokeColor=#d79b00;verticalAlign=top;fontSize=11;" value="&lt;b&gt;TIMEOUT FLOW【CC 侧】&lt;/b&gt;&#xa;&#xa;entered on acpx 124 / 137 or tool-side timeout&#xa;best-effort partial push&#xa;sync label timeout, local-only summary&#xa;no Wiki, no MR, no pr&#xa;outcome = timeout&#xa;&lt;i&gt;→ 主状态机 TIMEOUT（CC 侧·改提示词/hulat）&lt;/i&gt;" vertex="1">
           <mxGeometry height="210" width="390" x="730" y="910" as="geometry" />
         </mxCell>
-        <mxCell id="p2_fail" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;FAIL FLOW【CC 侧】&lt;/b&gt;&#xa;&#xa;post-acpx step failure or no changes&#xa;sync terminal label blocked&#xa;do not continue to later steps&#xa;outcome = blocked&#xa;(dispatcher may promote to failed)&#xa;&lt;i&gt;→ 主状态机 BLOCKED·CC 侧&lt;/i&gt;" vertex="1">
+        <mxCell id="p2_fail" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;FAIL FLOW【CC 侧】&lt;/b&gt;&#xa;&#xa;post-acpx step failure or NO_CHANGES&#xa;sync terminal label blocked-cc&#xa;do not continue to later steps&#xa;outcome = blocked-cc&#xa;(dispatcher may promote to failed)&#xa;&lt;i&gt;→ 主状态机 BLOCKED-CC（去改提示词/hulat）&lt;/i&gt;" vertex="1">
           <mxGeometry height="210" width="390" x="1160" y="910" as="geometry" />
         </mxCell>
-        <mxCell id="p2_synthetic" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;SYNTHETIC BLOCKED / FAILED【调度器侧】&lt;/b&gt;&#xa;&#xa;prep activity failure&#xa;child workflow error before outcome&#xa;scope eviction outside trigger range&#xa;sync terminal label best-effort&#xa;record synthetic outcome&#xa;&lt;i&gt;→ 主状态机 BLOCKED·调度器侧&lt;/i&gt;" vertex="1">
+        <mxCell id="p2_synthetic" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;verticalAlign=top;fontSize=11;" value="&lt;b&gt;SYNTHETIC【调度器侧】&lt;/b&gt;&#xa;&#xa;prep activity failure&#xa;child workflow error before outcome&#xa;scope eviction outside trigger range&#xa;等不到回调 (stuck eviction)&#xa;sync terminal label blocked-dispatcher&#xa;outcome = blocked-dispatcher&#xa;&lt;i&gt;→ 主状态机 BLOCKED-DISPATCHER（去改 dispatcher）&lt;/i&gt;" vertex="1">
           <mxGeometry height="210" width="410" x="1610" y="910" as="geometry" />
         </mxCell>
-
         <mxCell id="p2_merge" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;fontSize=11;fontStyle=1;" value="AttemptOutcome merge" vertex="1">
           <mxGeometry height="44" width="1720" x="300" y="1200" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_e_claude_bp" edge="1" parent="1" source="p2_claude" target="p2_blockedpush" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.3;exitY=1;entryX=0.25;entryY=0;fontSize=10;strokeColor=#d6b656;labelBackgroundColor=#ecf6ea;" value="acpx_failed">
+        <mxCell id="p2_e_claude_bp" edge="1" parent="1" source="p2_claude" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.3;exitY=1;entryX=0.25;entryY=0;fontSize=10;strokeColor=#b85450;labelBackgroundColor=#ecf6ea;" target="p2_blockedpush" value="acpx_failed">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="150" y="860" />
@@ -332,7 +308,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="p2_e_claude_to" edge="1" parent="1" source="p2_claude" target="p2_timeout" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.6;exitY=1;entryX=0.25;entryY=0;fontSize=10;strokeColor=#d79b00;labelBackgroundColor=#ecf6ea;" value="acpx_timed_out">
+        <mxCell id="p2_e_claude_to" edge="1" parent="1" source="p2_claude" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.6;exitY=1;entryX=0.25;entryY=0;fontSize=10;strokeColor=#d79b00;labelBackgroundColor=#ecf6ea;" target="p2_timeout" value="acpx_timed_out">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="240" y="840" />
@@ -340,7 +316,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="p2_e_stage_fail" edge="1" parent="1" source="p2_stage" target="p2_fail" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;strokeColor=#b85450;labelBackgroundColor=#ecf6ea;" value="NO_CHANGES or any post-acpx ActivityError">
+        <mxCell id="p2_e_stage_fail" edge="1" parent="1" source="p2_stage" style="endArrow=classic;html=1;rounded=0;dashed=1;exitX=0.5;exitY=1;entryX=0.5;entryY=0;fontSize=10;strokeColor=#b85450;labelBackgroundColor=#ecf6ea;" target="p2_fail" value="NO_CHANGES or any post-acpx ActivityError">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="515" y="880" />
@@ -348,36 +324,32 @@
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="p2_e_bp_merge" edge="1" parent="1" source="p2_blockedpush" target="p2_merge" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.15;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" value="blocked">
+        <mxCell id="p2_e_bp_merge" edge="1" parent="1" source="p2_blockedpush" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.15;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_merge" value="blocked-cc">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_to_merge" edge="1" parent="1" source="p2_timeout" target="p2_merge" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.38;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" value="timeout">
+        <mxCell id="p2_e_to_merge" edge="1" parent="1" source="p2_timeout" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.38;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_merge" value="timeout">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_fail_merge" edge="1" parent="1" source="p2_fail" target="p2_merge" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.62;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" value="blocked">
+        <mxCell id="p2_e_fail_merge" edge="1" parent="1" source="p2_fail" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.62;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_merge" value="blocked-cc">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-        <mxCell id="p2_e_syn_merge" edge="1" parent="1" source="p2_synthetic" target="p2_merge" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.85;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" value="synthetic">
+        <mxCell id="p2_e_syn_merge" edge="1" parent="1" source="p2_synthetic" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;entryX=0.85;entryY=0;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_merge" value="blocked-dispatcher">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_e_merge_await" edge="1" parent="1" source="p2_merge" target="p2_await" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0.5;entryY=1;fontSize=10;labelBackgroundColor=#ecf6ea;" value="AttemptOutcome">
+        <mxCell id="p2_e_merge_await" edge="1" parent="1" source="p2_merge" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0.5;entryY=1;fontSize=10;labelBackgroundColor=#ecf6ea;" target="p2_await" value="AttemptOutcome">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="3145" y="1222" />
             </Array>
           </mxGeometry>
         </mxCell>
-
         <mxCell id="p2_record" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;verticalAlign=top;fontSize=11;" value="&lt;b&gt;RECORD OUTCOME&lt;/b&gt;&#xa;&#xa;record_attempt_outcome&#xa;persist attempt number + retry counters&#xa;sync label on promotion&#xa;return CampaignSummary" vertex="1">
           <mxGeometry height="210" width="330" x="2300" y="1430" as="geometry" />
         </mxCell>
-        <mxCell id="p2_final" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" value="&lt;b&gt;FINAL BUCKETS&lt;/b&gt;&#xa;&#xa;&lt;font color=&quot;#5a8a4a&quot;&gt;completed_iids&lt;/font&gt;: status=done, retry counters cleared&#xa;&lt;font color=&quot;#d79b00&quot;&gt;timeout_iids&lt;/font&gt;: status=timeout, parked&#xa;&lt;font color=&quot;#b8860b&quot;&gt;blocked_iids&lt;/font&gt;: status=blocked, retry_count++ + cooldown&#xa;&lt;font color=&quot;#b85450&quot;&gt;failed_iids&lt;/font&gt;: status=failed or retry-budget promotion" vertex="1">
-          <mxGeometry height="260" width="600" x="2720" y="1430" as="geometry" />
+        <mxCell id="p2_final" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#666666;verticalAlign=top;align=left;spacingLeft=10;fontSize=11;" value="&lt;b&gt;FINAL BUCKETS&lt;/b&gt;&#xa;&#xa;&lt;font color=&quot;#5a8a4a&quot;&gt;completed_iids&lt;/font&gt;: status=done, retry counters cleared&#xa;&lt;font color=&quot;#d79b00&quot;&gt;timeout_iids&lt;/font&gt;: status=timeout (CC 侧), parked&#xa;&lt;font color=&quot;#b85450&quot;&gt;blocked_iids&lt;/font&gt;: status=blocked-cc / blocked-dispatcher, retry_count++ + cooldown&#xa;&lt;font color=&quot;#666666&quot;&gt;failed_iids&lt;/font&gt;: status=failed or retry-budget promotion" vertex="1">
+          <mxGeometry height="260" width="640" x="2720" y="1430" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_e_await_record" edge="1" parent="1" source="p2_await" target="p2_record" style="endArrow=classic;html=1;rounded=0;exitX=0.2;exitY=1;entryX=0.7;entryY=0;fontSize=10;labelBackgroundColor=#f5f5f5;" value="drain + record">
+        <mxCell id="p2_e_await_record" edge="1" parent="1" source="p2_await" style="endArrow=classic;html=1;rounded=0;exitX=0.2;exitY=1;entryX=0.7;entryY=0;fontSize=10;labelBackgroundColor=#f5f5f5;" target="p2_record" value="drain + record">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="3046" y="1390" />
@@ -385,71 +357,58 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="p2_e_record_final" edge="1" parent="1" source="p2_record" target="p2_final" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#f5f5f5;" value="classify">
+        <mxCell id="p2_e_record_final" edge="1" parent="1" source="p2_record" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.5;entryX=0;entryY=0.5;fontSize=10;labelBackgroundColor=#f5f5f5;" target="p2_final" value="classify">
           <mxGeometry relative="1" as="geometry" />
         </mxCell>
-
-        <mxCell id="p2_notes" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=11;" value="&lt;b&gt;走线规则&lt;/b&gt;&#xa;主执行流只展示 happy path：失败 / timeout 从下方进入 AttemptOutcome merge，再垂直返回 AWAIT CHILD。&#xa;&#xa;&lt;b&gt;blocked 归因（第7条）&lt;/b&gt;&#xa;【CC 侧】BLOCKED_PUSH / FAIL FLOW / TIMEOUT —— Claude Code 工作问题，多带 partial work。&#xa;【调度器侧】SYNTHETIC —— prep failure / child error / scope eviction，环境/编排问题，无 CC 产出。&#xa;两者都写 GitLab blocked / timeout 标签；block_reason 区分归因，回到主状态机供人工决策。&#xa;&#xa;&lt;b&gt;Agent 语义&lt;/b&gt;&#xa;Timeout 是独立 outcome：label timeout，不消耗 blocked retry budget。&#xa;CampaignWorkflow 只在 retry budget exhausted 时把 blocked 提升为 failed。&#xa;&#xa;本页依据 workspace-acpx_auto_tester/temporal/workflows/campaign.py 与 issue_attempt.py 的已实现流程。" vertex="1">
+        <mxCell id="p2_notes" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;align=left;verticalAlign=top;spacingLeft=10;spacingTop=8;fontSize=11;" value="&lt;b&gt;走线规则&lt;/b&gt;　主执行流只展示 happy path：失败 / timeout 从下方进入 AttemptOutcome merge，再返回 AWAIT CHILD。&#xa;&#xa;&lt;b&gt;blocked 归因 → 两个独立 label（第7条，看到即知改哪边）&lt;/b&gt;&#xa;【CC 侧 → blocked-cc】BLOCKED_PUSH / FAIL FLOW —— Claude Code 工作问题，多带 partial work。人去改 issue 提示词 + hulat。&#xa;【调度器侧 → blocked-dispatcher】SYNTHETIC —— prep failure / child error / scope eviction / 等不到回调(stuck)，无 CC 产出。人去改 dispatcher agent。&#xa;【CC 侧 → timeout】acpx 跑超 wall-clock，单独 label；不消耗 retry budget；人去改提示词/hulat 缩小任务，或 continue。&#xa;&#xa;&lt;b&gt;Agent 语义&lt;/b&gt;　CampaignWorkflow 只在 retry budget exhausted 时把 blocked-cc / blocked-dispatcher 提升为 failed。&#xa;本页依据 workspace-acpx_auto_tester/temporal/workflows/campaign.py 与 issue_attempt.py 的已实现流程（label 拆分 + pr 替换 done 均为本次设计提案，落地需改 ensure_labels / set_issue_label / reconcile(has_done_pr→has_pr) / campaign 分类 / executor 的 add_pr）。" vertex="1">
           <mxGeometry height="320" width="1180" x="70" y="1420" as="geometry" />
         </mxCell>
-
       </root>
     </mxGraphModel>
   </diagram>
-
   <diagram name="耦合与决策参考-v2" id="coupling-ref-v2">
-    <mxGraphModel dx="3577" dy="1137" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2300" pageHeight="1500" math="0" shadow="0">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="2300" pageHeight="1500" math="0" shadow="0">
       <root>
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
-
         <mxCell id="p3_title" parent="1" style="text;html=1;align=left;verticalAlign=top;fontSize=18;fontStyle=1;" value="两个状态机如何互相驱动 + label 模型 / 重跑差异 / blocked 归因（评审第3、5、6、7条）" vertex="1">
           <mxGeometry height="30" width="1700" x="40" y="20" as="geometry" />
         </mxCell>
-
-        <mxCell id="p3_machineA" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=center;fontSize=13;spacingTop=10;" value="&lt;b&gt;Issue 主状态机（人）&lt;/b&gt;&#xa;&#xa;QUEUED → AUTO_RUNNING → AWAITING_REVIEW&#xa;　　↘ BLOCKED / TIMEOUT / FAILED → CLOSED&#xa;&#xa;只含人需要看到 / 处理的状态&#xa;（第1页）" vertex="1">
-          <mxGeometry height="200" width="420" x="120" y="120" as="geometry" />
+        <mxCell id="p3_machineA" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;verticalAlign=top;align=center;fontSize=13;spacingTop=10;" value="&lt;b&gt;Issue 主状态机（人）&lt;/b&gt;&#xa;&#xa;QUEUED → AUTO_RUNNING → AWAITING_REVIEW&#xa;　↘ blocked-cc / blocked-dispatcher / timeout / failed → CLOSED&#xa;&#xa;只含人需要看到 / 处理的状态&#xa;（第1页）" vertex="1">
+          <mxGeometry height="200" width="440" x="110" y="120" as="geometry" />
         </mxCell>
-
         <mxCell id="p3_machineB" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ecf6ea;strokeColor=#82b366;verticalAlign=top;align=center;fontSize=13;spacingTop=10;" value="&lt;b&gt;调度器 / 执行状态机（自动）&lt;/b&gt;&#xa;&#xa;BOOTSTRAP→SELECT→PREPARE→START CHILD&#xa;→ CLAUDE RUN→…→ OUTCOME → AWAIT/RECORD&#xa;&#xa;doing 内部自动步骤，不需人介入&#xa;（第2页）" vertex="1">
           <mxGeometry height="200" width="460" x="980" y="120" as="geometry" />
         </mxCell>
-
         <mxCell id="p3_iface" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;align=center;verticalAlign=middle;fontSize=11;fontStyle=1;" value="唯一接口&#xa;GitLab 实时标签&#xa;(source of truth)" vertex="1">
-          <mxGeometry height="90" width="180" x="620" y="175" as="geometry" />
+          <mxGeometry height="90" width="160" x="630" y="175" as="geometry" />
         </mxCell>
-
-        <mxCell id="p3_e_ab" edge="1" parent="1" source="p3_machineA" target="p3_machineB" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.3;entryX=0;entryY=0.3;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#9673a6;" value="A→B 标签事件 = 调度输入&#xa;todo / new / retry / continue / close&#xa;（tick 读到标签 → 启动子流程）">
+        <mxCell id="p3_e_ab" edge="1" parent="1" source="p3_machineA" style="endArrow=classic;html=1;rounded=0;exitX=1;exitY=0.3;entryX=0;entryY=0.3;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#9673a6;" target="p3_machineB" value="A→B 标签事件 = 调度输入&#xa;todo / new / retry / continue / close&#xa;（tick 读到标签 → 启动子流程）">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="710" y="150" />
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="p3_e_ba" edge="1" parent="1" source="p3_machineB" target="p3_machineA" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.75;entryX=1;entryY=0.75;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#82b366;" value="B→A 执行结果 = 标签写回&#xa;done+pr / blocked(归因) / timeout / failed&#xa;（outcome 写回 → 推动主状态机迁移）">
+        <mxCell id="p3_e_ba" edge="1" parent="1" source="p3_machineB" style="endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.75;entryX=1;entryY=0.75;fontSize=11;labelBackgroundColor=#ffffff;strokeColor=#82b366;" target="p3_machineA" value="B→A 执行结果 = 标签写回&#xa;pr(替换 done) / blocked-cc / blocked-dispatcher / timeout / failed&#xa;（outcome 写回 → 推动主状态机迁移）">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="710" y="290" />
             </Array>
           </mxGeometry>
         </mxCell>
-
-        <mxCell id="p3_t1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;① 标签模型：label 要不要独立？（第3条）&lt;/b&gt;&#xa;&#xa;结论：拆成两个正交维度。&#xa;&#xa;&lt;b&gt;维度① 生命周期状态（互斥，任意时刻恰好一个）&lt;/b&gt;&#xa;　入口: todo / new / retry / continue&#xa;　进行: doing&#xa;　产出: done&#xa;　异常: blocked / timeout / failed&#xa;&#xa;&lt;b&gt;维度② PR 标志（独立附加，仅在 done 上有意义）&lt;/b&gt;&#xa;　pr —— 表示「MR 已存在」，叠加在 done 之上&#xa;&#xa;&lt;b&gt;互斥规则（set_issue_label.sh）&lt;/b&gt;&#xa;　加任一工作标签都会移除其它工作标签；&#xa;　仅允许两个并存对: {done+pr}、{done+blocked}(失败窗口瞬态)。&#xa;　→ 所以 pr 是独立标志；其余生命周期标签互斥。" vertex="1">
-          <mxGeometry height="370" width="640" x="120" y="400" as="geometry" />
+        <mxCell id="p3_t1" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;① 标签模型：label 要不要独立？（第3条）&lt;/b&gt;&#xa;&#xa;结论（v2 更新）：pr 改为&lt;u&gt;替换&lt;/u&gt; done 后，工作标签收敛成&#xa;&lt;b&gt;单一互斥维度&lt;/b&gt;，不再有独立附加标志。&#xa;&#xa;&lt;b&gt;生命周期状态（互斥，任意时刻恰好一个）&lt;/b&gt;&#xa;　入口: todo / new / retry / continue&#xa;　进行: doing&#xa;　产出(临时): done —— 写完 Wiki、建 MR 前的过渡&#xa;　待评审: pr —— 建 MR 后由 pr 替换 done（done 被移除）&#xa;　异常: blocked-cc / blocked-dispatcher / timeout / failed&#xa;　（blocked 已按归因拆成两个独立 label —— 第7条）&#xa;&#xa;&lt;b&gt;互斥规则（set_issue_label.sh）&lt;/b&gt;&#xa;　加任一工作标签都会移除其它工作标签；&#xa;　{done+pr} 不再并存（pr 替换 done）；&#xa;　仅 {done+blocked-cc 或 done+blocked-dispatcher} 是建 MR 前失败的瞬态。&#xa;　→ 不再分两维：pr 是「待评审」生命周期状态，整套互斥。" vertex="1">
+          <mxGeometry height="380" width="650" x="110" y="400" as="geometry" />
         </mxCell>
-
-        <mxCell id="p3_t2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;② retry vs continue 的结果差异（第5条）&lt;/b&gt;&#xa;&#xa;&lt;b&gt;　　　　　　retry / fresh　　│　continue / resume&lt;/b&gt;&#xa;worktree 基线  origin/DEV_BRANCH │ origin/WORK_BRANCH&#xa;上轮产物　　　 归档不带入　　　　│ 恢复 ifp-result/issue-iid&#xa;prompt　　　　 全新　　　　　　　│ 注入上轮 summary+评审意见&#xa;触发标签　　　 retry/todo/new　　│ continue(且为唯一工作标签)&#xa;MR　　　　　　 轮换出新 MR　　　 │ 轮换出新 MR(Supersedes 旧)&#xa;pr　　　　　　 进 doing 即清除　　│ 进 doing 即清除&#xa;适用　　　　　 上轮跑偏/改了规格　│ 上轮方向对、续做&#xa;&#xa;&lt;b&gt;重跑后 pr 是否删？（第4条）&lt;/b&gt;&#xa;　删。进入 doing 的那一步 set_issue_label.sh 会移除&#xa;　{todo,new,retry,continue,done,pr,blocked,timeout,failed}，&#xa;　只留 doing；若再次达成 done，会轮换出新 MR 并重新加 pr。" vertex="1">
-          <mxGeometry height="370" width="700" x="820" y="400" as="geometry" />
+        <mxCell id="p3_t2" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#82b366;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;② retry vs continue 的结果差异（第5条）&lt;/b&gt;&#xa;&#xa;&lt;b&gt;　　　　　　retry / fresh　　│　continue / resume&lt;/b&gt;&#xa;worktree 基线  origin/DEV_BRANCH │ origin/WORK_BRANCH&#xa;上轮产物　　　 归档不带入　　　　│ 恢复 ifp-result/issue-iid&#xa;prompt　　　　 全新　　　　　　　│ 注入上轮 summary+评审意见&#xa;触发标签　　　 retry/todo/new　　│ continue(且为唯一工作标签)&#xa;MR　　　　　　 轮换出新 MR　　　 │ 轮换出新 MR(Supersedes 旧)&#xa;pr　　　　　　 进 doing 即清除　　│ 进 doing 即清除&#xa;适用　　　　　 上轮跑偏/改了规格　│ 上轮方向对、续做&#xa;&#xa;&lt;b&gt;重跑后 pr 是否删？（第4条）&lt;/b&gt;&#xa;　删。进入 doing 的那一步 set_issue_label.sh 会移除&#xa;　{todo,new,retry,continue,done,pr,blocked-cc,blocked-dispatcher,&#xa;　timeout,failed}，只留 doing；若本轮再次完成会轮换新 MR 并重新打 pr（pr 替换 done）。" vertex="1">
+          <mxGeometry height="380" width="720" x="820" y="400" as="geometry" />
         </mxCell>
-
-        <mxCell id="p3_t3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#b85450;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;③ blocked 归因：调度器问题 vs CC 问题（第7条）&lt;/b&gt;&#xa;&#xa;&lt;b&gt;CC 侧（Claude Code 工作问题）&lt;/b&gt;&#xa;　来源: acpx 非超时失败 / NO_CHANGES / push 被拒 / acpx 后步骤失败&#xa;　现场: 有 partial work 在 WORK_BRANCH&#xa;　人工: 读 partial+summary → continue 带说明，或 retry 重做&#xa;&#xa;&lt;b&gt;调度器侧（编排 / 基础设施问题）&lt;/b&gt;&#xa;　来源: prep 失败 / spawn 3 次失败 / scope eviction / 子流程未产出即报错&#xa;　现场: 无 CC 产出，看 block_reason&#xa;　人工: 多为环境/runner 问题 → 修复后 retry（scope eviction 不消耗 retry_count）&#xa;&#xa;两者 GitLab 标签都是 blocked；靠 block_reason / summary 区分，用户据此选 continue / retry / 修环境。" vertex="1">
-          <mxGeometry height="290" width="1000" x="120" y="820" as="geometry" />
+        <mxCell id="p3_t3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#b85450;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;③ blocked 归因 → 两个独立 label / 状态（第7条 · 核心：看到即知怎么处理）&lt;/b&gt;&#xa;&#xa;&lt;b&gt;blocked-cc（CC 侧：Claude Code 工作问题）&lt;/b&gt;&#xa;　来源: acpx 非超时失败 / NO_CHANGES / push 被拒 / acpx 后步骤失败&#xa;　现场: 有 partial work 在 WORK_BRANCH&#xa;　&lt;b&gt;看到就去：改 issue 提示词 + hulat 配置&lt;/b&gt; → 再 retry 或 continue&#xa;&#xa;&lt;b&gt;blocked-dispatcher（调度器侧：编排 / 基础设施问题）&lt;/b&gt;&#xa;　来源: prep 失败 / spawn 3 次失败 / scope eviction / 子流程错误 / 等不到回调(stuck)&#xa;　现场: 无 CC 产出，看 block_reason&#xa;　&lt;b&gt;看到就去：改 dispatcher agent（环境/runner/编排）&lt;/b&gt; → 修好后 retry&#xa;&#xa;&lt;b&gt;timeout（CC 侧：acpx 跑超 wall-clock）&lt;/b&gt; 单独 label，不消耗 retry_count&#xa;　&lt;b&gt;看到就去：改提示词/hulat 缩小任务&lt;/b&gt; → 去 timeout/retry，或 continue&#xa;&#xa;两类 blocked 现在是两个不同 label，用户在 GitLab 上一眼看出该改哪边，不必再翻 block_reason。" vertex="1">
+          <mxGeometry height="320" width="1050" x="110" y="820" as="geometry" />
         </mxCell>
-
-        <mxCell id="p3_t4" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;④ 人工行为 ⇄ 自动状态 的融合（第1条）&lt;/b&gt;&#xa;&#xa;人修改后在自动状态下该 continue 还是 retry，由「人打的标签」决定，&#xa;dispatcher 用 _attempt_mode_for_entry 解释：&#xa;&#xa;• 加 continue（且 continue 是唯一工作标签）→ continue 模式：&#xa;　在 origin/WORK_BRANCH 上续跑，恢复上轮产物 + 注入上轮 summary/评审意见。&#xa;• 加 retry / todo / new（或 continue 与其它工作标签并存）→ fresh 模式：&#xa;　重置到 origin/DEV_BRANCH 干净基线，归档上轮产物。&#xa;&#xa;经验法则:&#xa;• 上轮方向对、只差细节 / 只在 issue 留补充说明 → continue&#xa;• 上轮跑偏，或改了规格 / 共享配置 / 要从头来 → retry&#xa;&#xa;注意: 人改的是「标签 + issue 评论」，agent 永不自己打 continue；&#xa;continue 永远是人工评审动作。" vertex="1">
-          <mxGeometry height="290" width="1000" x="1160" y="820" as="geometry" />
+        <mxCell id="p3_t4" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;align=left;verticalAlign=top;spacingLeft=12;spacingTop=10;fontSize=11;" value="&lt;b&gt;④ 人工行为 ⇄ 自动状态 的融合（第1条）&lt;/b&gt;&#xa;&#xa;第一步 看 label 归因，决定去改哪边：&#xa;• blocked-cc / timeout → 改 issue 提示词 + hulat 配置&#xa;• blocked-dispatcher → 改 dispatcher agent&#xa;&#xa;第二步 决定重跑模式（_attempt_mode_for_entry）：&#xa;• 加 continue（且 continue 是唯一工作标签）→ continue 模式：&#xa;　在 origin/WORK_BRANCH 上续跑，恢复上轮产物 + 注入上轮 summary/评审意见。&#xa;• 加 retry / todo / new（或 continue 与其它工作标签并存）→ fresh 模式：&#xa;　重置到 origin/DEV_BRANCH 干净基线，归档上轮产物。&#xa;&#xa;经验法则:&#xa;• 上轮方向对、只差细节 / 只在 issue 留补充说明 → continue&#xa;• 上轮跑偏，或改了规格 / 共享配置 / 要从头来 → retry&#xa;&#xa;注意: agent 永不自己打 continue；continue 永远是人工评审动作。" vertex="1">
+          <mxGeometry height="320" width="980" x="1180" y="820" as="geometry" />
         </mxCell>
-
       </root>
     </mxGraphModel>
   </diagram>
