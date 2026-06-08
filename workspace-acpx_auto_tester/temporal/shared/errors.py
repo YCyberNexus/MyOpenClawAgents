@@ -51,7 +51,7 @@ class AcpxErrorType(StrEnum):
 
     # ── acpx (Claude Code) ──────────────────────────────────────────────────
     ACPX_TIMED_OUT = "acpx_timed_out"     # exit 124/137 → TIMEOUT flow (non-retryable)
-    ACPX_FAILED = "acpx_failed"           # any other non-zero exit (non-retryable)
+    ACPX_FAILED = "acpx_failed"           # any other non-zero exit → BLOCKED_PUSH flow (status blocked_cc; non-retryable)
 
     # ── stage / push ────────────────────────────────────────────────────────
     NO_CHANGES = "no_changes"             # stage produced empty diff (non-retryable)

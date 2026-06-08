@@ -20,10 +20,13 @@
 #   SUMMARY_FILE             ${ISSUE_ROOT}/summary.md
 #
 # Optional env vars:
-#   ATTEMPT_STATUS           "done" | "blocked" | "failed" | "timeout" ("no_changes" is legacy)
+#   ATTEMPT_STATUS           v2 per-side: "done" | "blocked-cc" | "blocked-dispatcher"
+#                            | "failed-cc" | "failed-dispatcher" | "timeout"
+#                            ("blocked"/"failed"/"no_changes" are legacy; the value is
+#                            only echoed into the summary markdown, never branched on)
 #   COMMIT_SHA               last commit on the work branch (if pushed)
 #   MERGE_REQUEST_URL        MR URL (if known)
-#   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed|timeout
+#   BLOCK_REASON             when ATTEMPT_STATUS is any blocked-*/failed-*/timeout
 #   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
 #                            so evidence stays local under ${LOG_DIR} / ${ISSUE_ROOT}.
 #

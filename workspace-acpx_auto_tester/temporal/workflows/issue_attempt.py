@@ -62,6 +62,7 @@ with workflow.unsafe.imports_passed_through():
     )
     from ..shared.errors import AcpxErrorType
     from ..shared.types import (
+        STATUS_TO_LABEL,
         AttemptInput,
         AttemptOutcome,
         CampaignInput,
@@ -183,7 +184,7 @@ class IssueAttemptWorkflow:
             return await self._fail_flow(
                 camp,
                 att,
-                "blocked",
+                "blocked_cc",
                 _msg(cause, default="stage_and_guard failed"),
             )
 
@@ -200,7 +201,7 @@ class IssueAttemptWorkflow:
         except ActivityError as ae:
             cause = _root_application_error(ae)
             return await self._fail_flow(
-                camp, att, "blocked", _msg(cause, default="commit_and_push failed")
+                camp, att, "blocked_cc", _msg(cause, default="commit_and_push failed")
             )
 
         # ── Step 4: post_push_verify ────────────────────────────────────────
@@ -215,7 +216,7 @@ class IssueAttemptWorkflow:
         except ActivityError as ae:
             cause = _root_application_error(ae)
             return await self._fail_flow(
-                camp, att, "blocked", _msg(cause, default="post_push_verify failed")
+                camp, att, "blocked_cc", _msg(cause, default="post_push_verify failed")
             )
 
         # ── Step 5: Wiki ────────────────────────────────────────────────────
@@ -230,7 +231,7 @@ class IssueAttemptWorkflow:
         except ActivityError as ae:
             cause = _root_application_error(ae)
             return await self._fail_flow(
-                camp, att, "blocked", _msg(cause, default="upload_wiki_artifacts failed")
+                camp, att, "blocked_cc", _msg(cause, default="upload_wiki_artifacts failed")
             )
 
         # ── Step 6: doing → done ────────────────────────────────────────────
@@ -247,7 +248,7 @@ class IssueAttemptWorkflow:
         except ActivityError as ae:
             cause = _root_application_error(ae)
             return await self._fail_flow(
-                camp, att, "blocked", _msg(cause, default="label doing→done failed")
+                camp, att, "blocked_cc", _msg(cause, default="label doing→done failed")
             )
 
         # ── Step 7: MR rotate ───────────────────────────────────────────────
@@ -266,10 +267,10 @@ class IssueAttemptWorkflow:
             # MR rotate failure leaves the issue with `done` (already labeled
             # in Step 6) + `blocked`. Don't strip `done`; just append blocked.
             return await self._fail_flow(
-                camp, att, "blocked", _msg(cause, default="create_or_rotate_mr failed")
+                camp, att, "blocked_cc", _msg(cause, default="create_or_rotate_mr failed")
             )
 
-        # ── Step 8: add pr ──────────────────────────────────────────────────
+        # ── Step 8: add pr (REPLACES done) ──────────────────────────────────
         self._step = "pr"
         try:
             await workflow.execute_activity(
@@ -278,11 +279,16 @@ class IssueAttemptWorkflow:
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=_RP_1_ATTEMPT,
             )
+            # v2: pr replaces done — set_issue_label.sh removed done when it
+            # added pr, so reflect that swap in the audit fields.
             self._labels_added.append("pr")
+            if "done" in self._labels_added:
+                self._labels_added.remove("done")
+            self._labels_removed.append("done")
         except ActivityError as ae:
             cause = _root_application_error(ae)
             return await self._fail_flow(
-                camp, att, "blocked", _msg(cause, default="add_pr_label failed")
+                camp, att, "blocked_cc", _msg(cause, default="add_pr_label failed")
             )
 
         # ── Step 9: summarize (post to issue for `done`) ────────────────────
@@ -337,9 +343,16 @@ class IssueAttemptWorkflow:
     ) -> AttemptOutcome:
         """Mirror executor_prompt.md §fail_flow.
 
-        Sets blocked label (additive — does NOT strip a prior `done`),
-        summarizes locally (SUMMARY_POST_TO_ISSUE=false), returns the outcome.
+        Sets the per-side blocked label (v2 — for a post-acpx step failure the
+        attribution is always CC-side `blocked_cc`). The add is additive: it
+        does NOT strip a prior `done`, so a failure after Step 6 leaves the
+        allowed transient `done` + `blocked-cc` pair. Summarizes locally
+        (SUMMARY_POST_TO_ISSUE=false), returns the outcome.
         """
+        # The work label is hyphenated (blocked-cc); the status enum value is
+        # underscored (blocked_cc). Fall back to the raw status for done-like
+        # values that have no per-side label mapping.
+        terminal_label = STATUS_TO_LABEL.get(terminal_status, terminal_status)
         self._step = f"fail:{terminal_status}"
         LOG.warning(
             "IssueAttemptWorkflow iid=%d attempt=%d FAIL status=%s reason=%s",
@@ -358,12 +371,12 @@ class IssueAttemptWorkflow:
                 retry_policy=_RP_1_ATTEMPT,
             )
             self._labels_removed.append("doing")
-            self._labels_added.append(terminal_status)
+            self._labels_added.append(terminal_label)
         except ActivityError as ae:
             cause = _root_application_error(ae)
             block_reason = (
                 block_reason
-                + f"; {terminal_status} label sync failed: {_msg(cause, default=str(ae))}"
+                + f"; {terminal_label} label sync failed: {_msg(cause, default=str(ae))}"
             )
 
         # Local-only summary.
@@ -472,27 +485,27 @@ class IssueAttemptWorkflow:
         # B1–B3 best-effort partial push (shared with the TIMEOUT flow).
         block_reason = await self._best_effort_partial_push(camp, att, primary_reason)
 
-        # B4 label doing → blocked
+        # B4 label doing → blocked-cc (the subagent IS the CC side)
         try:
             await workflow.execute_activity(
                 sync_terminal_labels,
-                args=[camp, att, "blocked"],
+                args=[camp, att, "blocked_cc"],
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=_RP_1_ATTEMPT,
             )
             self._labels_removed.append("doing")
-            self._labels_added.append("blocked")
+            self._labels_added.append("blocked-cc")
         except ActivityError as ae:
             cause = _root_application_error(ae)
             block_reason += (
-                f"; blocked label sync failed: {_msg(cause, default=str(ae))}"
+                f"; blocked-cc label sync failed: {_msg(cause, default=str(ae))}"
             )
 
         # B5 summarize (local-only, SUMMARY_POST_TO_ISSUE=false)
         try:
             await workflow.execute_activity(
                 summarize_attempt,
-                args=[camp, att, "blocked", self._commit_sha, "", block_reason, False],
+                args=[camp, att, "blocked_cc", self._commit_sha, "", block_reason, False],
                 start_to_close_timeout=timedelta(seconds=10),
                 retry_policy=_RP_1_ATTEMPT,
             )
@@ -503,7 +516,7 @@ class IssueAttemptWorkflow:
         return AttemptOutcome(
             iid=att.iid,
             attempt_number=att.attempt_number,
-            status="blocked",
+            status="blocked_cc",
             mode_actual=att.mode,
             work_branch=att.work_branch,
             local_branch=_attempt_local_branch(att.iid, att.attempt_number),

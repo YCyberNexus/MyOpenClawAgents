@@ -25,6 +25,7 @@ from temporalio import activity
 from ..shared.env import build_attempt_env, merge_env
 from ..shared.errors import AcpxErrorType, raise_app_error
 from ..shared.types import (
+    STATUS_TO_LABEL,
     AcpxResult,
     AttemptInput,
     CampaignInput,
@@ -390,7 +391,8 @@ async def create_or_rotate_mr(camp: CampaignInput, att: AttemptInput) -> MrResul
 
 @activity.defn(name="add_pr_label")
 async def add_pr_label(camp: CampaignInput, att: AttemptInput) -> LabelsState:
-    """Add ``pr`` to the issue (coexists with ``done``)."""
+    """Add ``pr`` to the issue. v2: ``pr`` REPLACES ``done`` —
+    ``set_issue_label.sh`` removes ``done`` when it adds ``pr``."""
     res = await run_script(
         "set_issue_label.sh",
         env=_full_env(camp, att),
@@ -444,38 +446,41 @@ async def summarize_attempt(
 async def sync_terminal_labels(
     camp: CampaignInput, att: AttemptInput, terminal_status: str
 ) -> LabelsState:
-    """Apply terminal-state labels for non-done outcomes:
+    """Apply terminal-state labels for non-done outcomes (v2 per-side).
 
-    * ``blocked`` → remove ``doing``, add ``blocked``
-    * ``failed``  → remove ``doing``/``blocked``, add ``failed``
-    * ``timeout`` → remove ``doing``/``blocked``/``failed``, add ``timeout``
+    Accepts the Python status enum value (underscored) and maps it to the
+    matching hyphenated GitLab work label:
 
-    Each transition is one ``set_issue_label.sh`` call per mutation (the
-    underlying glab API is single-label-at-a-time per call).
+    * ``blocked_cc``          → remove ``doing``,            add ``blocked-cc``
+    * ``blocked_dispatcher``  → remove ``doing``,            add ``blocked-dispatcher``
+    * ``failed_cc``           → remove ``doing``,            add ``failed-cc``
+    * ``failed_dispatcher``   → remove ``doing``,            add ``failed-dispatcher``
+    * ``timeout``             → remove ``doing``,            add ``timeout``
+
+    ``set_issue_label.sh`` enforces v2 work-label exclusivity, so the single
+    ``add`` of the target label already removes every other work label (and
+    ``pr`` replaces ``done``), while leaving ``model:{tier}`` / ``quality:low``
+    untouched. We still issue an explicit ``remove doing`` first so the
+    transition is obvious in the audit log. Each call is one ``set_issue_label.sh``
+    invocation (the underlying glab API is single-label-at-a-time per call).
     """
     env = _full_env(camp, att)
 
-    plan = {
-        "blocked": (("doing",), ("blocked",)),
-        "failed": (("doing", "blocked"), ("failed",)),
-        "timeout": (("doing", "blocked", "failed"), ("timeout",)),
-    }
-    if terminal_status not in plan:
+    target_label = STATUS_TO_LABEL.get(terminal_status)
+    if target_label is None:
         raise_app_error(
             AcpxErrorType.INVARIANT_VIOLATION,
             f"sync_terminal_labels got unsupported status {terminal_status!r}",
         )
-    to_remove, to_add = plan[terminal_status]
 
     last_stdout = ""
-    for label in to_remove:
-        res = await run_script("set_issue_label.sh", env=env, args=("remove", label))
-        _raise_on_glab_error(f"set_issue_label.sh remove {label}", res)
-        last_stdout = res.stdout
-    for label in to_add:
-        res = await run_script("set_issue_label.sh", env=env, args=("add", label))
-        _raise_on_glab_error(f"set_issue_label.sh add {label}", res)
-        last_stdout = res.stdout
+    res = await run_script("set_issue_label.sh", env=env, args=("remove", "doing"))
+    _raise_on_glab_error("set_issue_label.sh remove doing", res)
+    last_stdout = res.stdout
+
+    res = await run_script("set_issue_label.sh", env=env, args=("add", target_label))
+    _raise_on_glab_error(f"set_issue_label.sh add {target_label}", res)
+    last_stdout = res.stdout
 
     return LabelsState(labels=_parse_labels_state(last_stdout))
 

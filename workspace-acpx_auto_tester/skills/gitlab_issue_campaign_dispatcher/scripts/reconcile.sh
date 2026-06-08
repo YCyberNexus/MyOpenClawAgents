@@ -28,19 +28,24 @@
 #       "state":             "opened" | "closed" | null,
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
-#       "has_done_pr":       bool,   # labels include both "done" and "pr"
+#       "has_pr":            bool,   # labels include "pr" (v2: pr REPLACES done, so the completion signal is the pr label)
 #       "is_closed_on_gitlab": bool,  # state is "closed"
-#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR done+pr
+#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR has pr
 #       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry/continue)
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
-#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue/contiune label; timeout is allowed only with retry
+#       "has_blocked_cc":         bool,  # labels include "blocked-cc" (CC-side retryable failure)
+#       "has_blocked_dispatcher": bool,  # labels include "blocked-dispatcher" (dispatcher-side retryable failure)
+#       "has_failed_cc":          bool,  # labels include "failed-cc" (CC-side retry exhausted)
+#       "has_failed_dispatcher":  bool,  # labels include "failed-dispatcher" (dispatcher-side retry exhausted)
+#       "model_tier":        <integer>,  # current model:{tier} mapped to its 0-based index in MODEL_TIERS (default flash/pro/max → 0/1/2); no model label → 0 (TIER_0)
+#       "user_reopened":     bool,   # opened, no pr, and no failed-*/blocked-*/continue/contiune label; timeout is allowed only with retry
 #       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
 #
 # Semantics for the dispatcher (consumed in Source-of-Truth Policy):
 #   - `is_closed_on_gitlab == true`                       → finished, skip
-#   - `is_done_on_gitlab == true` AND no `needs_continue` → finished, skip
+#   - `is_done_on_gitlab == true` (has `pr` or closed) AND no `needs_continue` → finished, skip
 #   - `needs_continue == true`                            → re-enqueue; the
 #         executor will re-run the resolution flow against the existing
 #         work branch (or build one from master if none exists)
@@ -96,6 +101,22 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_FILE="${DISPATCHER_LOG_DIR}/reconcile-${TS}.json"
 PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
 
+# Model-dimension tiers (single source of truth shared with ensure_labels.sh /
+# set_issue_label.sh): an ordered, comma-separated list low→high (default
+# "flash,pro,max"). model_tier is the 0-based index of the highest-ranked
+# model:<name> label present whose <name> is in this list; no model label → 0.
+# Deriving the mapping from MODEL_TIERS (instead of a hard-coded flash/pro/max
+# triple) keeps reconcile consistent when an operator overrides model_tiers.
+MODEL_TIERS="${MODEL_TIERS:-flash,pro,max}"
+MODEL_TIERS_JSON="$(printf %s "${MODEL_TIERS}" \
+  | tr ',' '\n' \
+  | awk '{gsub(/^[[:space:]]+|[[:space:]]+$/,""); if(length>0) print}' \
+  | jq -Rsc 'split("\n") | map(select(length>0))')"
+if [ "$(printf %s "${MODEL_TIERS_JSON}" | jq 'length')" -lt 1 ]; then
+  echo "reconcile.sh: MODEL_TIERS resolved to an empty tier list" >&2
+  exit 15
+fi
+
 # Empty IID set → write a degenerate but well-formed empty array so the
 # evidence-file-must-exist invariant still holds. The dispatcher treats this
 # as "filter narrowed to zero IIDs", which is distinct from "reconcile failed".
@@ -109,29 +130,48 @@ echo "[" > "${OUT_FILE}"
 first=1
 for iid in "${IIDS[@]}"; do
   if body="$(glab api "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null)"; then
-    digest="$(echo "${body}" | jq -c --argjson iid "${iid}" '
+    digest="$(echo "${body}" | jq -c --argjson iid "${iid}" --argjson tiers "${MODEL_TIERS_JSON}" '
       . as $issue |
       ($issue.labels // []) as $labels |
-      (($labels | index("done") != null) and ($labels | index("pr") != null)) as $done_with_pr |
+      # v2: pr REPLACES done, so the completion signal is the pr label.
+      (($labels | index("pr") != null)) as $has_pr |
       ($issue.state == "closed") as $closed |
       (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
       (($labels | index("retry") != null)) as $has_retry |
       (($labels | index("timeout") != null)) as $has_timeout |
+      # v2: blocked / failed split by attribution side (CC vs dispatcher).
+      (($labels | index("blocked-cc") != null)) as $has_blocked_cc |
+      (($labels | index("blocked-dispatcher") != null)) as $has_blocked_dispatcher |
+      (($labels | index("failed-cc") != null)) as $has_failed_cc |
+      (($labels | index("failed-dispatcher") != null)) as $has_failed_dispatcher |
+      ($has_blocked_cc or $has_blocked_dispatcher) as $has_blocked_any |
+      ($has_failed_cc or $has_failed_dispatcher) as $has_failed_any |
+      # model:{tier} → 0-based tier index over the configured $tiers list
+      # (default flash/pro/max → 0/1/2). Take the HIGHEST-ranked present tier;
+      # no model:<name> in $tiers present → TIER_0 (0).
+      ([ $tiers | to_entries[]
+         | select(("model:" + .value) as $l | ($labels | index($l)) != null)
+         | .key ] | max // 0) as $model_tier |
       {
         iid: $iid,
         state: $issue.state,
         labels: $labels,
         title: $issue.title,
-        has_done_pr: $done_with_pr,
+        has_pr: $has_pr,
         is_closed_on_gitlab: $closed,
-        is_done_on_gitlab: ($closed or $done_with_pr),
+        is_done_on_gitlab: ($closed or $has_pr),
         has_timeout: $has_timeout,
         has_retry: $has_retry,
+        has_blocked_cc: $has_blocked_cc,
+        has_blocked_dispatcher: $has_blocked_dispatcher,
+        has_failed_cc: $has_failed_cc,
+        has_failed_dispatcher: $has_failed_dispatcher,
+        model_tier: $model_tier,
         user_reopened: (
           ($closed | not) and
-          ($done_with_pr | not) and
-          ($labels | index("failed") == null) and
-          ($labels | index("blocked") == null) and
+          ($has_pr | not) and
+          ($has_failed_any | not) and
+          ($has_blocked_any | not) and
           (($has_timeout | not) or $has_retry) and
           ($needs_continue | not)
         ),
@@ -139,7 +179,7 @@ for iid in "${IIDS[@]}"; do
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, user_reopened:false, needs_continue:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, has_blocked_cc:false, has_blocked_dispatcher:false, has_failed_cc:false, has_failed_dispatcher:false, model_tier:0, user_reopened:false, needs_continue:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

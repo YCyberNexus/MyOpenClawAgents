@@ -34,6 +34,11 @@ from typing import Literal
 # the same effect).
 _UI_ACCOUNTS_RELPATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 
+# Each model tier name becomes the GitLab label ``model:<name>``; restrict it
+# to label-safe characters (mirrors dispatch_prepare_tick.sh's model_tiers
+# validation). Anchored at both ends so a bad character anywhere rejects it.
+_MODEL_TIER_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
 
 def _validate_ui_accounts_relpath(value: str) -> None:
     """Reject paths that would let UI_ACCOUNTS_RELPATH escape ${REPO_PATH}.
@@ -79,13 +84,27 @@ def _validate_ui_accounts_relpath(value: str) -> None:
 # while ``mypy --strict`` still catches typos. Mirrors the dispatch SKILL's
 # ``state_schema.md`` §Possible status values table.
 AttemptStatus = Literal[
-    "in_progress",  # mid-flight; only used inside the IssueAttemptWorkflow body
-    "done",         # MR created, both `done` and `pr` labels added
-    "blocked",      # retryable failure; consumes one of `blocked_retry_limit`
-    "failed",       # non-recoverable, or `retry_count > blocked_retry_limit`
-    "timeout",      # acpx wall-clock cap exceeded; partial work pushed, no MR
-    "no_changes",   # legacy compact-reply value; normalized to `blocked` by validator
+    "in_progress",         # mid-flight; only used inside the IssueAttemptWorkflow body
+    "done",                # MR created; `pr` label REPLACES `done`
+    "blocked_cc",          # CC-side retryable failure; consumes one of `blocked_retry_limit`
+    "blocked_dispatcher",  # dispatcher-side retryable failure (prep / spawn / stuck)
+    "failed_cc",           # CC-side terminal; or `retry_count > blocked_retry_limit` from blocked_cc
+    "failed_dispatcher",   # dispatcher-side terminal; `retry_count > blocked_retry_limit` from blocked_dispatcher
+    "timeout",             # acpx wall-clock cap exceeded; partial work pushed, no MR
+    "no_changes",          # legacy compact-reply value; normalized to `blocked_cc` by validator
 ]
+
+# Wire-format mapping between the Python status enum (underscored, mypy-friendly)
+# and the GitLab work label (hyphenated). The label is the source of truth; the
+# Python enum is the in-process representation. ``timeout`` / ``done`` /
+# ``in_progress`` / ``no_changes`` have no per-side hyphen and map 1:1.
+STATUS_TO_LABEL: dict[str, str] = {
+    "blocked_cc": "blocked-cc",
+    "blocked_dispatcher": "blocked-dispatcher",
+    "failed_cc": "failed-cc",
+    "failed_dispatcher": "failed-dispatcher",
+    "timeout": "timeout",
+}
 
 CampaignStatus = Literal["running", "waiting_for_callbacks", "completed"]
 
@@ -156,6 +175,15 @@ class CampaignInput:
     require_labels: tuple[str, ...] = ()
     require_labels_match: LabelMatch = "or"
 
+    # ── v2 model-tier dimension (§6) ────────────────────────────────────────
+    # model_tiers: ordered model identifiers from lowest (TIER_0, the default
+    # for a new issue) to the capped highest. Each name N maps to the GitLab
+    # label ``model:N``. Defaults to the 3-tier example flash → pro → max.
+    # model_upgrade_continue_threshold: the soft-trigger ``continue``
+    # accumulation count N at/above which resolve_model_tier raises the tier.
+    model_tiers: tuple[str, ...] = ("flash", "pro", "max")
+    model_upgrade_continue_threshold: int = 2
+
     # ── Workflow-internal tunables (not in the legacy trigger) ──────────────
     ticks_before_continue_as_new: int = 200
     """Reserved for a future long-lived entity workflow mode.
@@ -224,6 +252,16 @@ class CampaignInput:
             raise ValueError("run_timeout_seconds_below_acpx_timeout_seconds_plus_120")
         if self.require_labels_match not in ("or", "and"):
             raise ValueError("invalid_require_labels_match")
+        if len(self.model_tiers) < 1:
+            raise ValueError("invalid_model_tiers: must list at least one model")
+        if any(not _MODEL_TIER_NAME_RE.fullmatch(name) for name in self.model_tiers):
+            raise ValueError(
+                "invalid_model_tiers: tier names limited to [A-Za-z0-9_.-]"
+            )
+        if self.model_upgrade_continue_threshold < 0:
+            raise ValueError(
+                "invalid_model_upgrade_continue_threshold: must be a non-negative integer"
+            )
         # UI account pool is opt-in: an empty ``ui_accounts_relpath`` means the
         # deployment does not use UI test accounts, so the whole pool flow is
         # skipped downstream and there is nothing to validate. Only enforce the
@@ -269,6 +307,15 @@ class AttemptInput:
     issue_url: str = ""
     issue_labels: tuple[str, ...] = ()
 
+    # v2 model tier resolved by ``resolve_model_tier`` in PREPARE, before the
+    # attempt starts (§6). ``model_name`` is the element of the trigger's
+    # ordered model list this attempt runs under; ``model_tier`` is its 0-based
+    # index. Injected into build_prompt.sh as MODEL_NAME / MODEL_TIER so acpx
+    # runs under the resolved model. Empty ``model_name`` (the default) means
+    # the model dimension is not in use and build_prompt omits its section.
+    model_name: str = ""
+    model_tier: int = 0
+
 
 # ---------------------------------------------------------------------------
 # Per-attempt outcome (returned by IssueAttemptWorkflow.run)
@@ -313,14 +360,17 @@ class IssueLiveState:
 
     iid: int
     title: str
-    is_closed_on_gitlab: bool   # hard terminal — never schedule
-    has_done_pr: bool           # both `done` and `pr` present → completed
-    needs_continue: bool        # opened + has `continue`/`contiune` → reviewer resume
-    user_reopened: bool         # opened + missing `done`+`pr` + no `failed/blocked/continue`
-    has_timeout: bool           # opened + has `timeout` label → parked, no auto-retry
-    has_blocked: bool
-    has_failed: bool
+    is_closed_on_gitlab: bool       # hard terminal — never schedule
+    has_pr: bool                    # `pr` present → completed (v2: pr REPLACES done)
+    needs_continue: bool            # opened + has `continue`/`contiune` → reviewer resume
+    user_reopened: bool             # opened + missing `pr` + no `failed-*/blocked-*/continue`
+    has_timeout: bool               # opened + has `timeout` label → parked, no auto-retry
+    has_blocked_cc: bool            # `blocked-cc` present (CC-side retryable failure)
+    has_blocked_dispatcher: bool    # `blocked-dispatcher` present (dispatcher-side retryable failure)
+    has_failed_cc: bool             # `failed-cc` present (CC-side terminal)
+    has_failed_dispatcher: bool     # `failed-dispatcher` present (dispatcher-side terminal)
     has_retry: bool
+    model_tier: int                 # current model:{tier} mapped to 0/1/2 (flash/pro/max); no label → 0
     labels: tuple[str, ...]
     retry_count: int = 0
     blocked_at_tick: int = -1
@@ -450,7 +500,10 @@ class CampaignSummary:
 
     final_tick_seq: int
     completed_iids: tuple[int, ...]
-    failed_iids: tuple[int, ...]
+    # v2: failed split by attribution side. blocked stays a single bucket
+    # (cc + dispatcher) — the per-side distinction lives on the live label.
+    failed_cc_iids: tuple[int, ...]
+    failed_dispatcher_iids: tuple[int, ...]
     timeout_iids: tuple[int, ...]
     blocked_iids: tuple[int, ...]
     pending_iids: tuple[int, ...] = ()
@@ -472,7 +525,8 @@ class CampaignSnapshot:
     pending_iids: tuple[int, ...]
     active_ui_accounts_in_use: int
     completed_iids: tuple[int, ...]
-    failed_iids: tuple[int, ...]
+    failed_cc_iids: tuple[int, ...]
+    failed_dispatcher_iids: tuple[int, ...]
     timeout_iids: tuple[int, ...]
     blocked_iids: tuple[int, ...]
     last_reconcile_at_ms: int = 0
@@ -521,6 +575,7 @@ __all__ = [
     "PreparedAttempt",
     "ReconcileEvidence",
     "StagedDiff",
+    "STATUS_TO_LABEL",
     "UiAccount",
     "UiAccountPoolInfo",
     "UiAccountSlot",

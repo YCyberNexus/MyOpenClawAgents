@@ -124,6 +124,8 @@ fresh_init_state() {
       issue_iids_whitelist: [],
       require_labels: [],
       require_labels_match: "or",
+      model_tiers: ["flash", "pro", "max"],
+      model_upgrade_continue_threshold: 2,
       result_basename: $result_basename,
       data_basename: $data_basename,
       ui_accounts_relpath: $ui_accounts_relpath,
@@ -156,6 +158,12 @@ persist_state() {
 
 # ─── Phase 6 helpers ───────────────────────────────────────────────
 
+# Synthesize a dispatcher-side blocked reply (v2 status `blocked-dispatcher`).
+# Every caller of this helper is a dispatcher-side failure — spawn launch
+# failure, per-IID prep failure, stuck-pending eviction, or a callback that
+# arrived without a parseable subagent reply. None of them produced CC-side
+# work, so per §4 the attribution is the dispatcher side and the model tier is
+# NOT raised on the next retry (§6 excludes blocked-dispatcher).
 phase6_synthesize_blocked() {
   local iid="$1" attempt_number="$2" block_reason="$3"
   jq -n \
@@ -165,7 +173,7 @@ phase6_synthesize_blocked() {
     '{
       iid: $iid,
       attempt_number: $attempt_number,
-      status: "blocked",
+      status: "blocked-dispatcher",
       mode_actual: "",
       work_branch: "",
       local_branch: "",
@@ -204,8 +212,16 @@ phase6_normalize_reply() {
       "callback worker_result_json not valid JSON: ${first200}"
     return 0
   fi
-  # Normalize: tolerate null/empty fields, normalize legacy no_changes,
-  # require non-empty block_reason for blocked/failed/timeout.
+  # Normalize: tolerate null/empty fields, map legacy + CC-side statuses to the
+  # v2 per-side vocabulary, require non-empty block_reason for every non-done
+  # exception status.
+  #
+  # The subagent IS the CC side, so any failure it reports is CC-side: legacy
+  # `blocked`/`no_changes` → `blocked-cc`, legacy `failed` → `failed-cc`,
+  # `timeout` stays `timeout`. Replies already carrying a v2 per-side status
+  # (`blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`) pass
+  # through unchanged. A missing status defaults to `blocked-cc` (a reply from
+  # the CC subagent with no status is treated as a CC-side block).
   printf '%s' "${parsed}" | jq -c \
     --argjson exp_iid "${exp_iid}" \
     --argjson exp_attempt "${exp_attempt}" '
@@ -214,7 +230,7 @@ phase6_normalize_reply() {
     {
       iid: (.iid // $exp_iid),
       attempt_number: (.attempt_number // $exp_attempt),
-      status: (.status // "blocked"),
+      status: (.status // "blocked-cc"),
       mode_actual: (.mode_actual | s),
       work_branch: (.work_branch | s),
       local_branch: (.local_branch | s),
@@ -229,45 +245,59 @@ phase6_normalize_reply() {
       log_dir: (.log_dir | s)
     }
     | if .status == "no_changes" then
-        .status = "blocked"
+        .status = "blocked-cc"
         | (if (.block_reason | length) == 0 then .block_reason = "subagent produced no staged changes" else . end)
+      elif .status == "blocked" then .status = "blocked-cc"
+      elif .status == "failed"  then .status = "failed-cc"
       else . end
-    | if ((.status == "blocked" or .status == "failed" or .status == "timeout") and (.block_reason | length) == 0) then
+    | if ((.status | startswith("blocked-")) or (.status | startswith("failed-")) or .status == "timeout") and (.block_reason | length) == 0 then
         .block_reason = ("subagent reply status=" + .status + " with empty block_reason")
       else . end
   '
 }
 
 # Synchronize live workflow labels via set_issue_label.sh.
-# Inputs: $1=iid, $2=final_status (done|blocked|failed|timeout)
+# Inputs: $1=iid
+#         $2=final_status — v2 per-side values:
+#            done | blocked-cc | blocked-dispatcher | timeout
+#            | failed-cc | failed-dispatcher
 # Returns: 0 on success, non-zero with stderr if any required op fails.
+#
+# set_issue_label.sh already enforces v2 work-label exclusivity (adding one
+# work label removes the rest, pr replaces done, model:{tier}/quality:low are
+# never touched), so a single `add <label>` would be enough. We still issue an
+# explicit `remove doing` first so the transition is obvious in the audit log,
+# and rely on the add to clear every other stale work label idempotently.
 phase6_sync_labels() {
   local iid="$1" final_status="$2"
   local rc=0
   case "${final_status}" in
     done)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove blocked || rc=$?
-      _label_op "${iid}" remove failed  || rc=$?
-      _label_op "${iid}" remove timeout || rc=$?
-      _label_op "${iid}" add done       || rc=$?
-      _label_op "${iid}" add pr         || rc=$?
+      _label_op "${iid}" remove doing  || rc=$?
+      # `add pr` removes done + every blocked-*/failed-*/timeout via the v2
+      # exclusivity group (pr replaces done). We never `add done` here because
+      # the done→pr swap already happened in the subagent's Step 6/8; on the
+      # dispatcher safety-net path the issue ends terminal with `pr`.
+      _label_op "${iid}" add pr        || rc=$?
       ;;
-    blocked)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove timeout || rc=$?
-      _label_op "${iid}" add blocked    || rc=$?
+    blocked-cc)
+      _label_op "${iid}" remove doing       || rc=$?
+      _label_op "${iid}" add blocked-cc     || rc=$?
       ;;
-    failed)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove blocked || rc=$?
-      _label_op "${iid}" remove timeout || rc=$?
-      _label_op "${iid}" add failed     || rc=$?
+    blocked-dispatcher)
+      _label_op "${iid}" remove doing             || rc=$?
+      _label_op "${iid}" add blocked-dispatcher   || rc=$?
+      ;;
+    failed-cc)
+      _label_op "${iid}" remove doing       || rc=$?
+      _label_op "${iid}" add failed-cc      || rc=$?
+      ;;
+    failed-dispatcher)
+      _label_op "${iid}" remove doing            || rc=$?
+      _label_op "${iid}" add failed-dispatcher   || rc=$?
       ;;
     timeout)
       _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove blocked || rc=$?
-      _label_op "${iid}" remove failed  || rc=$?
       _label_op "${iid}" add timeout    || rc=$?
       ;;
     *)
@@ -332,13 +362,17 @@ phase6_write_state_files() {
   local now
   now="$(utc_now)"
 
-  # Compute retry_count. `timeout` is terminal-but-not-failed and DOES NOT
-  # consume retry budget — it stays parked until a human strips the label.
+  # Compute retry_count. v2 statuses are per-side (`blocked-cc`/`blocked-dispatcher`
+  # /`failed-cc`/`failed-dispatcher`); both `blocked-*` and `failed-*` consume one
+  # retry budget unit. `timeout` is terminal-but-not-failed and DOES NOT consume
+  # retry budget — it stays parked (§5) until a human strips the label.
   local prior_retry_count
   prior_retry_count="$(printf '%s' "${prior_issue_state}" | jq -r '.retry_count // 0')"
   local new_retry_count="${prior_retry_count}"
-  if [ "${is_launch_synth}" != "true" ] && { [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ]; }; then
-    new_retry_count=$((prior_retry_count + 1))
+  if [ "${is_launch_synth}" != "true" ]; then
+    case "${final_status}" in
+      blocked-*|failed-*) new_retry_count=$((prior_retry_count + 1)) ;;
+    esac
   fi
 
   # ─── ATTEMPT_STATE_FILE ───
@@ -409,8 +443,15 @@ phase6_write_state_files() {
 # Inputs:
 #   $1 = current state JSON
 #   $2 = iid
-#   $3 = final_status (done|blocked|failed|timeout)
+#   $3 = final_status — v2 per-side: done | blocked-cc | blocked-dispatcher
+#        | timeout | failed-cc | failed-dispatcher
 # Output: the updated state JSON on stdout.
+#
+# blocked_iids / failed_iids remain single combined buckets (CC + dispatcher
+# variants share the bucket); the per-side distinction lives on the live GitLab
+# label and in each issue's state.json `status`. unfinished_iids /
+# blocked_at_tick_by_iid only track the retryable blocked side, so any
+# `blocked-*` status feeds the cooldown clock identically.
 # Caller persists.
 #
 # active_issue_sessions is rebuilt from the post-drain active_issue_iids
@@ -439,7 +480,7 @@ phase6_apply_state_classify() {
          | .failed_iids     = ((.failed_iids     // []) | map(select(. != $iid)))
          | .timeout_iids    = ((.timeout_iids    // []) | map(select(. != $iid)))
          | .quota_completed_this_tick = (((.quota_completed_this_tick // 0)) + 1)
-       elif $final_status == "blocked" then
+       elif ($final_status | startswith("blocked-")) then
          .blocked_iids      = (((.blocked_iids   // []) + [$iid]) | unique)
          | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) + {($iid|tostring): (.tick_seq // 0)})
          | .unfinished_iids = (((.unfinished_iids // []) + [$iid]) | unique)
@@ -454,6 +495,7 @@ phase6_apply_state_classify() {
          | .blocked_iids    = ((.blocked_iids   // []) | map(select(. != $iid)))
          | .failed_iids     = ((.failed_iids    // []) | map(select(. != $iid)))
        else
+         # failed-cc / failed-dispatcher (and any other terminal failure).
          .failed_iids       = (((.failed_iids    // []) + [$iid]) | unique)
          | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
@@ -495,8 +537,8 @@ phase6_decide_cleanup() {
     return 0
   fi
 
-  # Local-evidence gate for non-done outcomes.
-  if [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ] || [ "${final_status}" = "timeout" ]; then
+  # Local-evidence gate for non-done outcomes (v2 per-side blocked-*/failed-*).
+  if [[ "${final_status}" == blocked-* ]] || [[ "${final_status}" == failed-* ]] || [ "${final_status}" = "timeout" ]; then
     if [ ! -f "${issue_state_file}" ] || [ ! -f "${attempt_state_file}" ] || [ ! -f "${summary_file}" ]; then
       jq -n --arg target "${child_session_key}" \
         '{action:"skip", target:$target, reason:"local_evidence_missing"}'
@@ -530,36 +572,45 @@ phase6_process() {
   child_session_key="$(printf '%s' "${state_json}" \
     | jq -r --argjson iid "${iid}" '.pending_subagents[($iid|tostring)].child_session_key // ""')"
 
-  # Sync labels for the preliminary status. On sync failure:
-  #   - `failed`  → keep `failed` (retry-budget exhaustion is sticky).
-  #   - `timeout` → keep `timeout` (terminal, no retry; only append diagnostic
-  #                 to block_reason and retry the sync best-effort once).
-  #   - else      → demote to `blocked` (the historical safety net for
-  #                 transient GitLab API failures on done/blocked outcomes).
+  # Sync labels for the preliminary status. On sync failure (v2 per-side):
+  #   - `failed-*` → keep it (retry-budget exhaustion is sticky).
+  #   - `timeout`  → keep `timeout` (terminal, no retry; only append diagnostic
+  #                  to block_reason and retry the sync best-effort once).
+  #   - `blocked-*`→ keep the same per-side status; only append the diagnostic
+  #                  and retry the sync best-effort once.
+  #   - `done`     → demote to `blocked-cc` (done is a CC-side outcome; the
+  #                  historical safety net for transient GitLab API failures
+  #                  that prevented the done→pr swap from landing).
   local label_err=""
   local final_status="${reply_status}"
   local _err=""
   if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" 2>&1 >/dev/null)"; then
     label_err="${_err}"
-    if [ "${final_status}" = "timeout" ]; then
+    if [ "${final_status}" = "timeout" ] || [[ "${final_status}" == failed-* ]]; then
       reply_json="$(printf '%s' "${reply_json}" | jq -c \
         --arg le "phase6 label sync failed: ${label_err}" '
         (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
       ')"
-      # best-effort timeout sync — leaves issue without `doing` removal in worst case,
-      # but the dispatcher refuses to spawn for an IID in timeout_iids on the next tick,
-      # so no parallel acpx can start regardless.
-      phase6_sync_labels "${iid}" timeout >/dev/null 2>&1 || true
-    elif [ "${final_status}" != "failed" ]; then
-      final_status="blocked"
-      # append to block_reason
+      # best-effort re-sync of the same terminal status.
+      phase6_sync_labels "${iid}" "${final_status}" >/dev/null 2>&1 || true
+    elif [[ "${final_status}" == blocked-* ]]; then
       reply_json="$(printf '%s' "${reply_json}" | jq -c \
         --arg le "phase6 label sync failed: ${label_err}" '
-        .status = "blocked"
+        (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
+      ')"
+      # best-effort re-sync of the same per-side blocked status.
+      phase6_sync_labels "${iid}" "${final_status}" >/dev/null 2>&1 || true
+    else
+      # done (or any non-terminal status) failed to sync → demote to CC-side
+      # blocked so the IID is retried rather than silently lost.
+      final_status="blocked-cc"
+      reply_json="$(printf '%s' "${reply_json}" | jq -c \
+        --arg le "phase6 label sync failed: ${label_err}" '
+        .status = "blocked-cc"
         | (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
       ')"
-      # best-effort blocked sync
-      phase6_sync_labels "${iid}" blocked >/dev/null 2>&1 || true
+      # best-effort blocked-cc sync
+      phase6_sync_labels "${iid}" blocked-cc >/dev/null 2>&1 || true
     fi
   fi
 
@@ -570,13 +621,19 @@ phase6_process() {
   new_retry_count="$(phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
     "${final_status}" "${prior_issue_state}" "${is_launch_synth}")"
 
-  # Promote blocked → failed if retry_count > blocked_retry_limit.
+  # Promote blocked → failed if retry_count > blocked_retry_limit (§5, by side):
+  #   blocked-cc         → failed-cc
+  #   blocked-dispatcher → failed-dispatcher
+  # timeout never participates in promotion (it does not consume retry budget).
   blocked_retry_limit="$(printf '%s' "${state_json}" | jq -r '.blocked_retry_limit // 0')"
-  if [ "${final_status}" = "blocked" ] && [ "${is_launch_synth}" != "true" ] \
+  if [[ "${final_status}" == blocked-* ]] && [ "${is_launch_synth}" != "true" ] \
      && [ "${new_retry_count}" -gt "${blocked_retry_limit}" ]; then
-    final_status="failed"
-    phase6_sync_labels "${iid}" failed >/dev/null 2>&1 || true
-    # rewrite issue state with final_status=failed (retry_count already incremented)
+    case "${final_status}" in
+      blocked-cc)         final_status="failed-cc" ;;
+      blocked-dispatcher) final_status="failed-dispatcher" ;;
+    esac
+    phase6_sync_labels "${iid}" "${final_status}" >/dev/null 2>&1 || true
+    # rewrite issue state with the promoted final_status (retry_count already incremented)
     phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
       "${final_status}" "${prior_issue_state}" "${is_launch_synth}" >/dev/null
   fi
@@ -603,4 +660,113 @@ phase6_process() {
       remaining_pending_count: $remaining_pending_count,
       updated_state: $updated_state
     }'
+}
+
+# ─── v2 model-tier resolution (§6) ─────────────────────────────────
+#
+# Pure decision function evaluated in the PREPARE phase, BEFORE the attempt
+# starts. It reads the issue's current model:{tier} label and the prior-attempt
+# history, decides whether to raise the tier (UPGRADE?), and returns a decision
+# JSON. The caller performs the actual label mutations (add model:{name},
+# remove quality:low) and injects the resolved model name into build_prompt.
+#
+# Inputs (positional):
+#   $1 = current issue labels (comma-separated, as read from glab)
+#   $2 = prior-attempt status (the issue state.json `status` that caused this
+#        re-schedule: done | blocked-cc | blocked-dispatcher | timeout |
+#        failed-cc | failed-dispatcher, or "" for a brand-new issue)
+#   $3 = continue accumulation count (issue state.json `continue_count`)
+#   $4 = model_tiers JSON array (ordered low→high; element 0 = TIER_0/default)
+#   $5 = model_upgrade_continue_threshold (integer N for the soft trigger)
+#
+# Output (stdout): one-line JSON:
+#   {
+#     "current_tier":   <int>,        # 0-based; 0 when no model label present
+#     "has_model_label": <bool>,      # issue already carries a model:{tier}
+#     "target_tier":    <int>,        # post-decision tier (== current unless upgraded)
+#     "model_name":     "<name>",     # model_tiers[target_tier]
+#     "model_label":    "model:<name>",
+#     "upgrade":        <bool>,       # UPGRADE? fired AND not capped
+#     "hard_trigger":   <bool>,
+#     "soft_trigger":   <bool>,
+#     "consume_quality_low": <bool>   # remove quality:low after the upgrade lands
+#   }
+#
+# UPGRADE? = hard ∪ soft (§6):
+#   hard: prior status ∈ { blocked-cc, timeout, failed-cc }  (CC side only —
+#         the dispatcher-side blocked-dispatcher / failed-dispatcher are
+#         excluded because raising the model never helps an infrastructure
+#         failure).
+#   soft: quality:low present ∨ continue_count ≥ threshold ∨ auto-score below
+#         threshold (auto-score is a black box — NOT implemented here; the hook
+#         is left as a documented placeholder, see below).
+# A capped tier (already at the highest model) stays at max even when UPGRADE?
+# fires; when capped and quality:low is present it is still consumed (it can do
+# no further work, so it must not linger as permanent noise). A brand-new issue
+# (no model label) resolves to TIER_0 and the caller stamps the lowest
+# model:{tier} on first PREPARE — soft/hard triggers do NOT raise the tier on
+# that first stamp; they only act once the issue already carries a model label.
+resolve_model_tier() {
+  local labels_csv="$1" prior_status="$2" continue_count="$3" \
+        model_tiers_json="$4" upgrade_continue_threshold="$5"
+
+  # NOTE (auto-score placeholder, §6): a future soft trigger reads an automated
+  # quality score for the prior attempt and fires when it is below a configured
+  # threshold. That scorer is a black box and is deliberately NOT implemented in
+  # this version — wire it in here (OR it into $soft_trigger) once available.
+
+  printf '%s' "${model_tiers_json}" | jq -c \
+    --arg labels_csv "${labels_csv}" \
+    --arg prior_status "${prior_status}" \
+    --argjson continue_count "${continue_count:-0}" \
+    --argjson threshold "${upgrade_continue_threshold:-0}" '
+    . as $tiers
+    | ($tiers | length) as $n
+    | ($labels_csv | split(",") | map(select(length > 0))) as $labels
+    # Current tier = HIGHEST-ranked model:{name} label present whose name is in
+    # $tiers (defensive against config drift that leaves >1 model label). A
+    # label naming a tier outside $tiers (e.g. model_tiers shortened) yields a
+    # null index and is ignored, so $found_tier is always in [0, $n-1].
+    | ([ $labels[]
+         | select(startswith("model:"))
+         | ltrimstr("model:")
+         | . as $name
+         | ($tiers | index($name)) ]
+       | map(select(. != null)) | max) as $found_tier
+    | ($found_tier != null) as $has_model_label
+    # Clamp current_tier into [0, $n-1] before the upgrade decision so a stale /
+    # out-of-range label can never produce model:null on $tiers[$target_tier].
+    | (if $has_model_label then ([[$found_tier, 0] | max, ($n - 1)] | min) else 0 end) as $current_tier
+    | (["blocked-cc", "timeout", "failed-cc"] | index($prior_status) != null) as $hard
+    | (($labels | index("quality:low") != null)
+       or ($continue_count >= $threshold and $threshold > 0)) as $soft
+    | ($hard or $soft) as $want_upgrade
+    # §6: a brand-new issue (no model label yet) MUST be stamped at the lowest
+    # tier on first PREPARE — soft/hard triggers only act from the second round
+    # on. So an upgrade can only raise the tier when the issue already carries a
+    # model label.
+    | (if ($has_model_label and $want_upgrade and ($current_tier < ($n - 1)))
+       then ($current_tier + 1) else $current_tier end) as $raw_target
+    # Final clamp into [0, $n-1] (belt-and-suspenders against drift).
+    | ([[$raw_target, 0] | max, ($n - 1)] | min) as $target_tier
+    | ($target_tier > $current_tier) as $upgraded
+    | ($tiers[$target_tier]) as $model_name
+    | ($labels | index("quality:low") != null) as $has_quality_low
+    | ($current_tier >= ($n - 1)) as $at_cap
+    | {
+        current_tier:        $current_tier,
+        has_model_label:     $has_model_label,
+        target_tier:         $target_tier,
+        model_name:          $model_name,
+        model_label:         ("model:" + $model_name),
+        upgrade:             $upgraded,
+        hard_trigger:        $hard,
+        soft_trigger:        $soft,
+        # quality:low is a one-shot soft signal — consume it whenever it was
+        # present this round AND it can no longer do any further work: either an
+        # upgrade actually landed, or the tier is already capped (so quality:low
+        # would otherwise linger forever as noise). It is NOT consumed when the
+        # issue still has headroom but no upgrade fired this round.
+        consume_quality_low: ($has_quality_low and ($upgraded or $at_cap))
+      }'
 }

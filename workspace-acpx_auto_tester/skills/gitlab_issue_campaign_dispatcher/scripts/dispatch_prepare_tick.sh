@@ -409,6 +409,28 @@ ISSUE_IIDS_RAW="${T[issue_iids]:-}"
 REQ_LABELS_RAW="${T[require_labels]:-}"
 REQ_LABELS_MATCH="${T[require_labels_match]:-or}"
 
+# ─── v2 model-tier dimension (per-tick reset override, same as the scalars) ──
+# model_tiers: ordered, comma-separated model identifiers from lowest to the
+# capped highest. Each name N maps to the GitLab label `model:N`; TIER_0 is the
+# first element (the default for a new issue). Defaults to the 3-tier example
+# flash → pro → max. model_upgrade_continue_threshold: the soft-trigger
+# `continue` accumulation count N at/above which resolve_model_tier raises the
+# tier (§6); defaults to 2.
+MODEL_TIERS_RAW="${T[model_tiers]:-flash,pro,max}"
+MODEL_TIERS_JSON="$(printf '%s' "${MODEL_TIERS_RAW}" | tr ',' '\n' | awk '{gsub(/^[[:space:]]+|[[:space:]]+$/,""); if(length>0) print}' | jq -Rsc 'split("\n") | map(select(length>0))')"
+if [ "$(printf '%s' "${MODEL_TIERS_JSON}" | jq 'length')" -lt 1 ]; then
+  emit_chat_failure "invalid_model_tiers: must list at least one model"
+fi
+# Each tier name must be a bare label-safe token (it becomes the `model:<name>`
+# label, which ensure_labels.sh creates for the default flash/pro/max set).
+if printf '%s' "${MODEL_TIERS_JSON}" | jq -e 'map(test("^[A-Za-z0-9_.-]+$") | not) | any' >/dev/null; then
+  emit_chat_failure "invalid_model_tiers: tier names limited to [A-Za-z0-9_.-]"
+fi
+MODEL_UPGRADE_CONTINUE_THRESHOLD="${T[model_upgrade_continue_threshold]:-2}"
+case "${MODEL_UPGRADE_CONTINUE_THRESHOLD}" in
+  ''|*[!0-9]*) emit_chat_failure "invalid_model_upgrade_continue_threshold: must be a non-negative integer" ;;
+esac
+
 ISSUE_IIDS_JSON="[]"
 if [ -n "${ISSUE_IIDS_RAW}" ]; then
   ISSUE_IIDS_JSON="$(printf '%s' "${ISSUE_IIDS_RAW}" | tr ',' '\n' | awk 'NF{gsub(/[[:space:]]/,""); print}' | jq -Rsc 'split("\n") | map(select(length>0))')"
@@ -457,7 +479,9 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson kill_subagent_on_terminal "${KILL_TERMINAL}" \
   --argjson issue_iids_whitelist "${ISSUE_IIDS_JSON}" \
   --argjson require_labels "${REQ_LABELS_JSON}" \
-  --arg require_labels_match "${REQ_LABELS_MATCH}" '
+  --arg require_labels_match "${REQ_LABELS_MATCH}" \
+  --argjson model_tiers "${MODEL_TIERS_JSON}" \
+  --argjson model_upgrade_continue_threshold "${MODEL_UPGRADE_CONTINUE_THRESHOLD}" '
   . + {
     project: $project,
     branch: $branch,
@@ -481,6 +505,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     issue_iids_whitelist: $issue_iids_whitelist,
     require_labels: $require_labels,
     require_labels_match: $require_labels_match,
+    model_tiers: $model_tiers,
+    model_upgrade_continue_threshold: $model_upgrade_continue_threshold,
     tick_seq: ((.tick_seq // 0) + 1),
     blocked_at_tick_by_iid: (.blocked_at_tick_by_iid // {}),
     quota_launched_this_tick: 0,
@@ -600,6 +626,7 @@ fi
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
+  MODEL_TIERS="${MODEL_TIERS_RAW}"
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
@@ -655,7 +682,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
           | .blocked_iids    = (.blocked_iids    - [$e.iid])
           | .failed_iids     = (.failed_iids     - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
-        elif $e.has_done_pr == true and $e.needs_continue != true then
+        elif $e.has_pr == true and $e.needs_continue != true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
           | .unfinished_iids = (.unfinished_iids - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
@@ -705,6 +732,7 @@ fi
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+  MODEL_TIERS="${MODEL_TIERS_RAW}" \
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
@@ -835,7 +863,7 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
         | ($byiid[($i|tostring)] // null) as $e
         | $e != null
         and ($e.is_closed_on_gitlab // false) != true
-        and (($e.has_done_pr // false) != true or ($e.needs_continue // false) == true)
+        and (($e.has_pr // false) != true or ($e.needs_continue // false) == true)
       ))) as $eligible
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
@@ -1031,6 +1059,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
+    MODEL_TIERS="${MODEL_TIERS_RAW}"
     RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
@@ -1142,10 +1171,17 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
   # Transition labels: remove entry labels + add doing.
+  # The v2 "entering doing" clear set is the entire work-label mutual-exclusion
+  # group (todo/new/retry/continue, done/pr, and every per-side blocked-*/
+  # failed-*/timeout). It does NOT include model:{tier} or quality:low — those
+  # are orthogonal/persistent and handled by resolve_model_tier below.
   # `timeout` is included so that a reviewer who re-enqueued the IID (e.g. by
   # adding `retry` on top of `timeout`) doesn't end up with a `timeout +
   # doing` mix between this prep and `set_issue_label.sh add doing`.
-  REMOVE_LBLS=(todo retry new continue contiune blocked done pr timeout)
+  REMOVE_LBLS=(
+    todo retry new continue contiune done pr timeout
+    blocked-cc blocked-dispatcher failed-cc failed-dispatcher
+  )
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \
@@ -1170,11 +1206,57 @@ for iid in "${BATCH_IIDS[@]}"; do
     continue
   fi
 
-  # build_prompt.sh
+  # ─── resolve_model_tier (§6): evaluated AFTER `add doing` (which never clears
+  # the orthogonal model dimension) and BEFORE build_prompt + spawn. Reads the
+  # issue's current model:{tier} label and the prior-attempt history, decides
+  # UPGRADE?, stamps the resolved model:{tier} label (+ removes quality:low when
+  # an upgrade lands), and injects the resolved model name into build_prompt. ──
+  PRIOR_STATUS_FOR_MODEL=""
+  PRIOR_CONTINUE_COUNT=0
+  ISSUE_ROOT_X_PRE="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$ISSUE_ROOT"' "${SCRIPT_DIR}/env_paths.sh")"
+  if [ -f "${ISSUE_ROOT_X_PRE}/state.json" ]; then
+    PRIOR_STATUS_FOR_MODEL="$(jq -r '.status // ""' "${ISSUE_ROOT_X_PRE}/state.json" 2>/dev/null || echo "")"
+    PRIOR_CONTINUE_COUNT="$(jq -r '.continue_count // 0' "${ISSUE_ROOT_X_PRE}/state.json" 2>/dev/null || echo 0)"
+  fi
+  # in_progress is a mid-flight marker, never a "prior outcome" — ignore it.
+  [ "${PRIOR_STATUS_FOR_MODEL}" = "in_progress" ] && PRIOR_STATUS_FOR_MODEL=""
+  # This attempt's continue accumulation includes the current run when it is a
+  # continue-mode re-arm (the soft trigger counts continue re-schedules).
+  CONTINUE_COUNT_NOW="${PRIOR_CONTINUE_COUNT}"
+  if [ "${ISSUE_MODE}" = "continue" ]; then
+    CONTINUE_COUNT_NOW=$((PRIOR_CONTINUE_COUNT + 1))
+  fi
+  MODEL_TIERS_STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // ["flash","pro","max"]')"
+  MODEL_UPGRADE_THRESHOLD_STATE="$(printf '%s' "${STATE_JSON}" | jq -r '.model_upgrade_continue_threshold // 2')"
+  MODEL_DECISION="$(resolve_model_tier "${ISSUE_LABELS}" "${PRIOR_STATUS_FOR_MODEL}" \
+    "${CONTINUE_COUNT_NOW}" "${MODEL_TIERS_STATE_JSON}" "${MODEL_UPGRADE_THRESHOLD_STATE}")"
+  MODEL_NAME_X="$(printf '%s' "${MODEL_DECISION}" | jq -r '.model_name')"
+  MODEL_TIER_X="$(printf '%s' "${MODEL_DECISION}" | jq -r '.target_tier')"
+  MODEL_LABEL_X="$(printf '%s' "${MODEL_DECISION}" | jq -r '.model_label')"
+  MODEL_UPGRADED_X="$(printf '%s' "${MODEL_DECISION}" | jq -r '.upgrade')"
+  MODEL_HAS_LABEL_X="$(printf '%s' "${MODEL_DECISION}" | jq -r '.has_model_label')"
+  MODEL_CONSUME_QLOW_X="$(printf '%s' "${MODEL_DECISION}" | jq -r '.consume_quality_low')"
+  # Stamp the resolved model:{tier} when it changed (upgrade) or when the issue
+  # has no model label yet (first PREPARE → lowest tier). set_issue_label.sh
+  # removes the other model:{tier} labels but leaves every work label intact.
+  if [ "${MODEL_UPGRADED_X}" = "true" ] || [ "${MODEL_HAS_LABEL_X}" != "true" ]; then
+    env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" add "${MODEL_LABEL_X}" \
+      >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || \
+      wrapper_log prepare_tick "iid=${iid} model label add ${MODEL_LABEL_X} failed (non-fatal)"
+  fi
+  # quality:low is one-shot — drop it once an upgrade it triggered has landed.
+  if [ "${MODEL_CONSUME_QLOW_X}" = "true" ]; then
+    env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "quality:low" \
+      >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || \
+      wrapper_log prepare_tick "iid=${iid} quality:low removal failed (non-fatal)"
+  fi
+
+  # build_prompt.sh — inject the resolved model so acpx runs under it.
   set +e
   env "${iid_env[@]}" BRANCH="${T[branch]}" DEV_BRANCH="${T[dev_branch]}" \
     ISSUE_MODE="${MODE_ACTUAL}" \
     UI_ACCOUNTS="${UI_ACCOUNTS_JSON[$iid]}" \
+    MODEL_NAME="${MODEL_NAME_X}" MODEL_TIER="${MODEL_TIER_X}" \
     bash "${SCRIPT_DIR}/build_prompt.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
   BP_RC=$?
   set -e
@@ -1218,12 +1300,16 @@ for iid in "${BATCH_IIDS[@]}"; do
     --argjson latest_attempt_number "${attempt}" \
     --arg latest_attempt_dir "${ISSUE_ROOT_X}" \
     --argjson retry_count "${PRIOR_RETRY}" \
+    --argjson continue_count "${CONTINUE_COUNT_NOW}" \
+    --argjson model_tier "${MODEL_TIER_X}" \
+    --arg model_name "${MODEL_NAME_X}" \
     --arg session "issue-${PROJECT}-${iid}" \
     --arg mode "${MODE_ACTUAL}" \
     --arg updated_at "${NOW}" \
     '{iid:$iid, session:$session, status:"in_progress", mode:$mode,
       attempts_total:$attempts_total, latest_attempt_number:$latest_attempt_number,
       latest_attempt_dir:$latest_attempt_dir, retry_count:$retry_count,
+      continue_count:$continue_count, model_tier:$model_tier, model_name:$model_name,
       block_reason:null, commit_sha:null, merge_request_url:null,
       updated_at:$updated_at}' | atomic_write_json "${ISSUE_STATE_X}"
 

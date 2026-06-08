@@ -77,6 +77,12 @@ def build_dispatcher_env(inp: CampaignInput) -> dict[str, str]:
         "DEV_BRANCH": inp.dev_branch,
         "MAX_CONCURRENT_SUBAGENTS": str(inp.max_concurrent_subagents),
         "MAX_ACCOUNTS_PER_ISSUE": str(inp.max_accounts_per_issue),
+        # Single source of truth for the model dimension across ensure_labels.sh
+        # / reconcile.sh / set_issue_label.sh. Forwarding the validated
+        # model_tiers (default flash,pro,max) keeps label pre-creation, the
+        # model-dimension mutual exclusion, and the reconcile tier mapping
+        # consistent when an operator overrides model_tiers via trigger.
+        "MODEL_TIERS": ",".join(inp.model_tiers),
     }
     return env
 

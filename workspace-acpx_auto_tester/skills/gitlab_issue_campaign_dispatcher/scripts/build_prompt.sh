@@ -18,6 +18,17 @@
 #   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH,
 #   DEV_BRANCH, UI_ACCOUNTS
 #
+# Optional model-tier env (v2 — the dispatcher's resolve_model_tier injects the
+# resolved model for THIS run, computed BEFORE the attempt starts):
+#   MODEL_NAME — the resolved model identifier this attempt should use (an
+#                element of the trigger's ordered model list, e.g. "flash" /
+#                "pro" / "max"). When set, build_prompt.sh renders a
+#                `# Model tier` section instructing Claude Code which model to
+#                run under. When unset/empty the section is omitted (deployments
+#                that do not use the model dimension behave exactly as before).
+#   MODEL_TIER — the 0-based tier index (0=flash/lowest, capped) backing
+#                MODEL_NAME, for audit / logging only.
+#
 # `HULAT_DIR` is NOT a trigger input. The test team commits `hulat/` to
 # master+dev, so the repo checkout already contains it at
 # `${REPO_PATH}/hulat`. env_paths.sh exports `HULAT_DIR=${REPO_PATH}/hulat`
@@ -209,6 +220,24 @@ EOF
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
 EOF
+
+  # v2 model-tier injection. The dispatcher's resolve_model_tier (evaluated in
+  # the PREPARE phase, before this attempt starts) resolves which model this run
+  # should use from the issue's persistent model:{tier} label and the upgrade
+  # rules, then passes the resolved name in MODEL_NAME. acpx's one-shot
+  # `claude exec` exposes no model flag, so the resolved model is injected here
+  # as a prompt instruction rather than a CLI argument.
+  if [ -n "${MODEL_NAME:-}" ]; then
+    cat <<EOF
+# Model tier (dispatcher-resolved for this run — tier index ${MODEL_TIER:-0})
+This attempt has been allocated the **${MODEL_NAME}** model. If your runtime
+lets you choose a model, select \`${MODEL_NAME}\` for this run. The dispatcher
+raises this tier automatically when a prior CC-side attempt was blocked, timed
+out, or failed (or a reviewer flagged the work \`quality:low\`), so a higher
+tier here means earlier attempts on this issue needed more capability.
+
+EOF
+  fi
 
   if [ "${ACCOUNT_COUNT}" -gt 0 ]; then
     cat <<EOF

@@ -75,6 +75,7 @@ from .activities.orchestrator import (
     prepare_attempt_worktree,
     record_attempt_outcome,
     reconcile_gitlab,
+    resolve_and_stamp_model_tier,
     self_heal_safety_bin,
 )
 
@@ -190,6 +191,7 @@ async def _run(args: argparse.Namespace) -> None:
             prepare_attempt_worktree,
             build_executor_prompt,
             mark_issue_doing,
+            resolve_and_stamp_model_tier,
             record_attempt_outcome,
             # Leaf (A7–A16)
             run_claude_code_attempt,

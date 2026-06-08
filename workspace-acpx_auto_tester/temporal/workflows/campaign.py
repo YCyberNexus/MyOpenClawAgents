@@ -49,6 +49,7 @@ with workflow.unsafe.imports_passed_through():
         prepare_attempt_worktree,
         record_attempt_outcome,
         reconcile_gitlab,
+        resolve_and_stamp_model_tier,
         self_heal_safety_bin,
     )
     from ..activities.leaf import sync_terminal_labels
@@ -92,8 +93,11 @@ class CampaignWorkflow:
         self._paused: bool = False
         self._last_reconcile_ms: int = 0
         # IID classification — re-derived from reconcile each tick.
+        # v2: failed split by attribution side. blocked stays a single bucket
+        # (cc + dispatcher) — the per-side distinction lives on the live label.
         self._completed: set[int] = set()
-        self._failed: set[int] = set()
+        self._failed_cc: set[int] = set()
+        self._failed_dispatcher: set[int] = set()
         self._timeout: set[int] = set()
         self._blocked: set[int] = set()
         self._open: set[int] = set()
@@ -175,7 +179,8 @@ class CampaignWorkflow:
             pending_iids=tuple(sorted(self._pending)),
             active_ui_accounts_in_use=self._active_ui_accounts_in_use,
             completed_iids=tuple(sorted(self._completed)),
-            failed_iids=tuple(sorted(self._failed)),
+            failed_cc_iids=tuple(sorted(self._failed_cc)),
+            failed_dispatcher_iids=tuple(sorted(self._failed_dispatcher)),
             timeout_iids=tuple(sorted(self._timeout)),
             blocked_iids=tuple(sorted(self._blocked)),
             last_reconcile_at_ms=self._last_reconcile_ms,
@@ -307,30 +312,45 @@ class CampaignWorkflow:
         counters that GitLab labels do not encode.
 
         Ordering note (per reviewer I2): ``needs_continue`` wins over
-        ``has_failed`` / ``has_blocked`` / ``has_timeout`` — a reviewer who
+        ``has_failed_*`` / ``has_blocked_*`` / ``has_timeout`` — a reviewer who
         relabels a closed-failed issue with ``continue`` is explicitly asking
         the agent to resume that IID. Same precedence rule lives in the
         legacy reconcile.sh / dispatch_prepare_tick.sh.
         """
         self._completed.clear()
-        self._failed.clear()
+        self._failed_cc.clear()
+        self._failed_dispatcher.clear()
         self._timeout.clear()
         self._blocked.clear()
         self._open.clear()
 
         for entry in ev.per_iid:
+            has_failed_any = entry.has_failed_cc or entry.has_failed_dispatcher
+            has_blocked_any = entry.has_blocked_cc or entry.has_blocked_dispatcher
             if entry.is_closed_on_gitlab:
                 self._completed.add(entry.iid)
             elif entry.needs_continue:
                 # Reviewer asked to resume — wins over every other label state.
                 self._open.add(entry.iid)
-            elif entry.has_done_pr:
+            elif entry.has_pr:
+                # v2: pr REPLACES done — the completion signal is the pr label.
                 self._completed.add(entry.iid)
             elif entry.has_timeout and not entry.has_retry:
                 self._timeout.add(entry.iid)
-            elif entry.has_failed or entry.retry_count > inp.blocked_retry_limit:
-                self._failed.add(entry.iid)
-            elif entry.has_blocked and not entry.has_retry:
+            elif has_failed_any or entry.retry_count > inp.blocked_retry_limit:
+                # Route to the matching per-side failed bucket. The promotion
+                # (blocked-* → failed-*) may not have landed on the live label
+                # yet when retry_count just crossed the limit, so attribute by
+                # ANY in-scope per-side signal: an explicit failed-dispatcher OR
+                # a still-present blocked-dispatcher means the dispatcher side;
+                # otherwise CC side (the common case). This keeps a
+                # dispatcher-side exhaustion from being miscounted as a CC-side
+                # failure, which would otherwise feed the model-upgrade signal.
+                if entry.has_failed_dispatcher or entry.has_blocked_dispatcher:
+                    self._failed_dispatcher.add(entry.iid)
+                else:
+                    self._failed_cc.add(entry.iid)
+            elif has_blocked_any and not entry.has_retry:
                 self._blocked.add(entry.iid)
             else:
                 self._open.add(entry.iid)
@@ -497,6 +517,19 @@ class CampaignWorkflow:
                     retry_policy=RetryPolicy(maximum_attempts=1),
                 )
 
+                # v2 resolve_model_tier (§6): runs AFTER mark_issue_doing (which
+                # never clears the orthogonal model dimension) and BEFORE
+                # build_executor_prompt. It stamps the resolved model:{tier}
+                # label, consumes quality:low on an upgrade, and returns the
+                # model name to inject into the executor prompt.
+                model_name, model_tier = await workflow.execute_activity(
+                    resolve_and_stamp_model_tier,
+                    args=[inp, att],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=_RP_2_ATTEMPTS,
+                )
+                att = replace(att, model_name=model_name, model_tier=model_tier)
+
                 # SECURITY: pass slot indices only — the build_executor_prompt
                 # activity de-references passwords from the env-mounted pool on
                 # the worker side, so plaintext credentials never enter
@@ -563,10 +596,14 @@ class CampaignWorkflow:
                 self._blocked_at_tick[iid] = self._tick_seq
                 sem.release(iid)
                 self._active_ui_accounts_in_use = sem.in_use_count
+                # A child workflow failing before it returns an outcome — and a
+                # scope eviction — are both dispatcher-side conditions (§4), so
+                # they map to blocked_dispatcher (promoting to failed_dispatcher
+                # when the retry budget is exhausted).
                 final_status = (
-                    "failed"
+                    "failed_dispatcher"
                     if (not scope_evicted and self._retry_count[iid] > inp.blocked_retry_limit)
-                    else "blocked"
+                    else "blocked_dispatcher"
                 )
                 block_reason = (
                     "pending IID outside current trigger scope "
@@ -583,8 +620,8 @@ class CampaignWorkflow:
                     local_branch=f"{att.work_branch}-att{att.attempt_number:03d}",
                     block_reason=block_reason,
                 )
-                if final_status == "failed":
-                    self._failed.add(iid)
+                if final_status == "failed_dispatcher":
+                    self._failed_dispatcher.add(iid)
                     self._blocked_at_tick.pop(iid, None)
                 else:
                     self._blocked.add(iid)
@@ -628,6 +665,7 @@ class CampaignWorkflow:
             sem.release(iid)
             self._active_ui_accounts_in_use = sem.in_use_count
             if scope_evicted:
+                # Scope eviction is a dispatcher-side decision → blocked_dispatcher.
                 self._retry_count[iid] = entry.retry_count
                 self._blocked_at_tick[iid] = self._tick_seq
                 self._blocked.add(iid)
@@ -638,26 +676,26 @@ class CampaignWorkflow:
                 try:
                     await workflow.execute_activity(
                         sync_terminal_labels,
-                        args=[inp, att, "blocked"],
+                        args=[inp, att, "blocked_dispatcher"],
                         start_to_close_timeout=timedelta(seconds=10),
                         retry_policy=RetryPolicy(maximum_attempts=1),
                     )
                 except ActivityError as ae:
                     block_reason = (
                         block_reason
-                        + "; blocked label sync failed: "
+                        + "; blocked-dispatcher label sync failed: "
                         f"{_activity_error_message(ae, default=str(ae))}"
                     )
                 synthetic = replace(
                     outcome,
-                    status="blocked",
+                    status="blocked_dispatcher",
                     block_reason=block_reason,
                 )
                 await self._record_outcome(
                     inp,
                     att,
                     synthetic,
-                    "blocked",
+                    "blocked_dispatcher",
                     consume_retry=False,
                 )
                 self._scope_evicted_iids.discard(iid)
@@ -671,33 +709,55 @@ class CampaignWorkflow:
             elif outcome.status == "timeout":
                 self._timeout.add(iid)
                 await self._record_outcome(inp, att, outcome, "timeout")
-            elif outcome.status == "failed":
-                self._failed.add(iid)
-                await self._record_outcome(inp, att, outcome, "failed")
-            else:  # blocked / no_changes (normalized to blocked)
+            elif outcome.status == "failed_cc":
+                self._failed_cc.add(iid)
+                await self._record_outcome(inp, att, outcome, "failed_cc")
+            elif outcome.status == "failed_dispatcher":
+                self._failed_dispatcher.add(iid)
+                await self._record_outcome(inp, att, outcome, "failed_dispatcher")
+            else:
+                # blocked_cc / blocked_dispatcher (and legacy no_changes which
+                # the bash normalizer maps to blocked_cc). Promote to the
+                # matching per-side failed status when the retry budget is
+                # exhausted: blocked_cc → failed_cc, blocked_dispatcher →
+                # failed_dispatcher (§5).
+                blocked_status = (
+                    "blocked_dispatcher"
+                    if outcome.status == "blocked_dispatcher"
+                    else "blocked_cc"
+                )
                 self._blocked.add(iid)
                 self._retry_count[iid] = entry.retry_count + 1
                 self._blocked_at_tick[iid] = self._tick_seq
-                # Promote to failed when the persisted retry budget is exhausted.
                 if self._retry_count[iid] > inp.blocked_retry_limit:
+                    promoted_status = (
+                        "failed_dispatcher"
+                        if blocked_status == "blocked_dispatcher"
+                        else "failed_cc"
+                    )
                     LOG.info(
-                        "iid=%d promoted blocked → failed (retry=%d > limit=%d)",
+                        "iid=%d promoted %s → %s (retry=%d > limit=%d)",
                         iid,
+                        blocked_status,
+                        promoted_status,
                         self._retry_count[iid],
                         inp.blocked_retry_limit,
                     )
                     self._blocked.discard(iid)
-                    self._failed.add(iid)
+                    if promoted_status == "failed_dispatcher":
+                        self._failed_dispatcher.add(iid)
+                    else:
+                        self._failed_cc.add(iid)
                     self._blocked_at_tick.pop(iid, None)
                     await workflow.execute_activity(
                         sync_terminal_labels,
-                        args=[inp, att, "failed"],
+                        args=[inp, att, promoted_status],
                         start_to_close_timeout=timedelta(seconds=10),
                         retry_policy=RetryPolicy(maximum_attempts=1),
                     )
-                    await self._record_outcome(inp, att, outcome, "failed")
+                    await self._record_outcome(inp, att, outcome, promoted_status)
                 else:
-                    await self._record_outcome(inp, att, outcome, "blocked")
+                    await self._record_outcome(inp, att, outcome, blocked_status)
 
     async def _record_outcome(
         self,
@@ -722,17 +782,23 @@ class CampaignWorkflow:
         entry: IssueLiveState,
         block_reason: str,
     ) -> None:
-        """Mirror legacy prep_blocked for prepare/label/prompt failures."""
+        """Mirror legacy prep_blocked for prepare/label/prompt failures.
+
+        Per-IID prep failures are dispatcher-side (§4) → blocked_dispatcher,
+        promoting to failed_dispatcher once the retry budget is exhausted.
+        """
         iid = att.iid
         self._open.discard(iid)
         self._retry_count[iid] = entry.retry_count + 1
         self._blocked_at_tick[iid] = self._tick_seq
         final_status = (
-            "failed" if self._retry_count[iid] > inp.blocked_retry_limit else "blocked"
+            "failed_dispatcher"
+            if self._retry_count[iid] > inp.blocked_retry_limit
+            else "blocked_dispatcher"
         )
 
-        if final_status == "failed":
-            self._failed.add(iid)
+        if final_status == "failed_dispatcher":
+            self._failed_dispatcher.add(iid)
             self._blocked.discard(iid)
             self._blocked_at_tick.pop(iid, None)
         else:
@@ -767,7 +833,8 @@ class CampaignWorkflow:
         return CampaignSummary(
             final_tick_seq=self._tick_seq,
             completed_iids=tuple(sorted(self._completed)),
-            failed_iids=tuple(sorted(self._failed)),
+            failed_cc_iids=tuple(sorted(self._failed_cc)),
+            failed_dispatcher_iids=tuple(sorted(self._failed_dispatcher)),
             timeout_iids=tuple(sorted(self._timeout)),
             blocked_iids=tuple(sorted(self._blocked)),
             pending_iids=tuple(sorted(self._open | self._pending)),
@@ -808,14 +875,20 @@ def _required_labels_ok(labels: tuple[str, ...], inp: CampaignInput) -> bool:
     return any(req in label_set for req in inp.require_labels)
 
 
+# Work labels that, if present alongside `continue`, force fresh mode instead
+# of continue mode (a reviewer accidentally left another work-state signal). v2
+# per-side blocked-*/failed-* replace the single blocked/failed. model:{tier}
+# and quality:low are orthogonal and intentionally NOT in this set.
 _CONTINUE_RESET_LABELS = frozenset(
     {
         "todo",
         "retry",
         "new",
         "doing",
-        "blocked",
-        "failed",
+        "blocked-cc",
+        "blocked-dispatcher",
+        "failed-cc",
+        "failed-dispatcher",
         "timeout",
         "done",
         "pr",

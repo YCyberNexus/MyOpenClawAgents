@@ -139,13 +139,28 @@ def _parse_reconcile_evidence(
                 iid=int(entry["iid"]),
                 title=str(entry.get("title") or ""),
                 is_closed_on_gitlab=bool(entry.get("is_closed_on_gitlab", False)),
-                has_done_pr=bool(entry.get("has_done_pr", False)),
+                # v2: pr REPLACES done — the completion signal is the pr label.
+                has_pr=bool(entry.get("has_pr", False)),
                 needs_continue=bool(entry.get("needs_continue", False)),
                 user_reopened=bool(entry.get("user_reopened", False)),
                 has_timeout=bool(entry.get("has_timeout", False)),
-                has_blocked="blocked" in labels,
-                has_failed="failed" in labels,
+                # v2: blocked / failed split by attribution side. Prefer the
+                # explicit reconcile.sh fields; fall back to label membership
+                # for robustness against an older evidence file.
+                has_blocked_cc=bool(
+                    entry.get("has_blocked_cc", "blocked-cc" in labels)
+                ),
+                has_blocked_dispatcher=bool(
+                    entry.get("has_blocked_dispatcher", "blocked-dispatcher" in labels)
+                ),
+                has_failed_cc=bool(
+                    entry.get("has_failed_cc", "failed-cc" in labels)
+                ),
+                has_failed_dispatcher=bool(
+                    entry.get("has_failed_dispatcher", "failed-dispatcher" in labels)
+                ),
                 has_retry="retry" in labels,
+                model_tier=int(entry.get("model_tier", 0) or 0),
                 labels=labels,
                 retry_count=int(state.get("retry_count", 0) or 0),
                 blocked_at_tick=int(state.get("blocked_at_tick", -1) or -1),
@@ -579,6 +594,13 @@ async def build_executor_prompt(
     paths = _derive_paths(camp, att)
     env.update(paths)
 
+    # v2: inject the model resolved by resolve_model_tier in PREPARE so acpx
+    # runs under it. An empty model_name means the model dimension is not in
+    # use, and build_prompt.sh omits its `# Model tier` section.
+    if att.model_name:
+        env["MODEL_NAME"] = att.model_name
+        env["MODEL_TIER"] = str(att.model_tier)
+
     res = await run_script("build_prompt.sh", env=env)
     if res.exit_code != 0:
         msg = res.stderr.lower()
@@ -666,13 +688,18 @@ async def record_attempt_outcome(
     state = _read_issue_disk_state(camp, att.iid)
     retry_count = int(state.get("retry_count", 0) or 0)
 
+    # v2 statuses are per-side: blocked_cc / blocked_dispatcher / failed_cc /
+    # failed_dispatcher. Both blocked_* and failed_* consume retry budget;
+    # blocked_* additionally parks the IID at this tick for the cooldown clock.
+    is_blocked = final_status.startswith("blocked")
+    is_failed = final_status.startswith("failed")
     if final_status == "done":
         retry_count = 0
         blocked_at_tick: int | None = None
-    elif final_status in ("blocked", "failed") and consume_retry:
+    elif (is_blocked or is_failed) and consume_retry:
         retry_count += 1
-        blocked_at_tick = tick_seq if final_status == "blocked" else None
-    elif final_status == "blocked":
+        blocked_at_tick = tick_seq if is_blocked else None
+    elif is_blocked:
         blocked_at_tick = tick_seq
     else:
         # timeout parks the IID and does not consume retry budget.
@@ -708,6 +735,184 @@ async def record_attempt_outcome(
     )
     tmp.replace(state_path)
     return retry_count
+
+
+# ---------------------------------------------------------------------------
+# A6c — resolve_and_stamp_model_tier (§6 model upgrade, in PREPARE)
+# ---------------------------------------------------------------------------
+
+# Hard-trigger statuses (§6): a CC-side re-arm raises the model tier. The
+# dispatcher-side blocked_dispatcher / failed_dispatcher are deliberately
+# excluded — raising the model never helps an infrastructure failure. Stored as
+# the Python enum values (underscored); the prior status read from state.json
+# uses the same values (record_attempt_outcome writes them).
+_MODEL_HARD_TRIGGER_STATUSES: Final[frozenset[str]] = frozenset(
+    {"blocked_cc", "timeout", "failed_cc"}
+)
+
+
+def _resolve_model_decision(
+    labels: tuple[str, ...],
+    prior_status: str,
+    continue_count: int,
+    model_tiers: tuple[str, ...],
+    upgrade_continue_threshold: int,
+) -> dict[str, object]:
+    """Pure model-tier decision (§6) — the Python twin of
+    ``_dispatch_lib.sh::resolve_model_tier``.
+
+    UPGRADE? = hard ∪ soft:
+        hard: ``prior_status`` ∈ { blocked_cc, timeout, failed_cc }.
+        soft: ``quality:low`` present ∨ ``continue_count >= threshold``
+              (threshold > 0) ∨ an automated quality score below threshold
+              (a black box — NOT implemented here; the hook is left as a
+              documented placeholder so a future scorer can OR into ``soft``).
+    A capped tier (already the highest model) stays at max even when UPGRADE?
+    fires; when capped and ``quality:low`` is present it is still consumed (it
+    can do no further work, so it must not linger as noise). A brand-new issue
+    with no model label resolves to TIER_0 and the caller stamps the lowest
+    ``model:{tier}`` on first PREPARE — soft/hard triggers do NOT raise the tier
+    on that first stamp; they act only once a model label already exists.
+
+    Returns a dict with the same keys the bash helper emits.
+    """
+    n = len(model_tiers)
+    # Current tier = HIGHEST-ranked model:{name} label present whose name is in
+    # model_tiers (defensive against config drift that leaves >1 model label).
+    # A label naming a tier outside model_tiers (e.g. model_tiers shortened) is
+    # ignored, so found_tier is always in [0, n-1].
+    found_indices = [
+        model_tiers.index(label[len("model:"):])
+        for label in labels
+        if label.startswith("model:") and label[len("model:"):] in model_tiers
+    ]
+    found_tier: int | None = max(found_indices) if found_indices else None
+    has_model_label = found_tier is not None
+    # Clamp current_tier into [0, n-1] so a stale/out-of-range label can never
+    # index model_tiers out of bounds at model_name resolution.
+    current_tier = min(max(found_tier, 0), n - 1) if found_tier is not None else 0
+
+    hard = prior_status in _MODEL_HARD_TRIGGER_STATUSES
+    soft = ("quality:low" in labels) or (
+        upgrade_continue_threshold > 0 and continue_count >= upgrade_continue_threshold
+    )
+    want_upgrade = hard or soft
+
+    # §6: a brand-new issue (no model label yet) MUST be stamped at the lowest
+    # tier on first PREPARE — soft/hard triggers only raise the tier once the
+    # issue already carries a model label. So an upgrade requires has_model_label.
+    raw_target = (
+        current_tier + 1
+        if (has_model_label and want_upgrade and current_tier < n - 1)
+        else current_tier
+    )
+    target_tier = min(max(raw_target, 0), n - 1)
+    upgraded = target_tier > current_tier
+    model_name = model_tiers[target_tier]
+    has_quality_low = "quality:low" in labels
+    at_cap = current_tier >= n - 1
+    return {
+        "current_tier": current_tier,
+        "has_model_label": has_model_label,
+        "target_tier": target_tier,
+        "model_name": model_name,
+        "model_label": f"model:{model_name}",
+        "upgrade": upgraded,
+        "hard_trigger": hard,
+        "soft_trigger": soft,
+        # quality:low is one-shot — consume it when an upgrade landed OR when the
+        # tier is already capped (it can do no further work, so it must not
+        # linger as permanent noise). NOT consumed when there is still headroom
+        # but no upgrade fired this round.
+        "consume_quality_low": has_quality_low and (upgraded or at_cap),
+    }
+
+
+@activity.defn(name="resolve_and_stamp_model_tier")
+async def resolve_and_stamp_model_tier(
+    camp: CampaignInput, att: AttemptInput
+) -> tuple[str, int]:
+    """Resolve this attempt's model tier (§6), stamp the resolved
+    ``model:{tier}`` label (and consume ``quality:low`` on an upgrade), persist
+    the resolved tier + ``continue_count`` into the per-issue state cache, and
+    return ``(model_name, model_tier)`` for injection into build_prompt.
+
+    Called by the CampaignWorkflow in PREPARE, AFTER ``mark_issue_doing`` (which
+    never clears the orthogonal model dimension) and BEFORE
+    ``build_executor_prompt`` + the child spawn. The label is the source of
+    truth; the state.json mirror only feeds the next tick's soft-trigger read.
+    """
+    env = build_attempt_env(camp, att)
+    env.update(_derive_paths(camp, att))
+
+    state = _read_issue_disk_state(camp, att.iid)
+    prior_status = str(state.get("status", "") or "")
+    # in_progress is a mid-flight marker, never a prior outcome.
+    if prior_status == "in_progress":
+        prior_status = ""
+    prior_continue_count = int(state.get("continue_count", 0) or 0)
+    # A continue-mode re-arm counts toward the soft trigger's accumulation.
+    continue_count_now = prior_continue_count + (1 if att.mode == "continue" else 0)
+
+    decision = _resolve_model_decision(
+        labels=att.issue_labels,
+        prior_status=prior_status,
+        continue_count=continue_count_now,
+        model_tiers=camp.model_tiers,
+        upgrade_continue_threshold=camp.model_upgrade_continue_threshold,
+    )
+    model_name = str(decision["model_name"])
+    target_tier = int(decision["target_tier"])  # type: ignore[arg-type]
+    model_label = str(decision["model_label"])
+
+    # Stamp the resolved model:{tier} when it changed (upgrade) or when the
+    # issue has no model label yet (first PREPARE → lowest tier). The single
+    # `add` removes the other model:{tier} labels via the model-dimension
+    # exclusivity in set_issue_label.sh, leaving every work label untouched.
+    if decision["upgrade"] or not decision["has_model_label"]:
+        res = await run_script(
+            "set_issue_label.sh", env=env, args=("add", model_label)
+        )
+        if res.exit_code != 0:
+            LOG.warning(
+                "iid=%d model label add %s failed (non-fatal): %s",
+                att.iid,
+                model_label,
+                res.stderr[-300:],
+            )
+
+    # quality:low is one-shot — drop it once an upgrade it triggered has landed.
+    if decision["consume_quality_low"]:
+        res = await run_script(
+            "set_issue_label.sh", env=env, args=("remove", "quality:low")
+        )
+        if res.exit_code != 0:
+            LOG.warning(
+                "iid=%d quality:low removal failed (non-fatal): %s",
+                att.iid,
+                res.stderr[-300:],
+            )
+
+    # Persist the resolved tier + continue accumulation into the state cache so
+    # the NEXT tick's soft-trigger read sees them. The label remains the source
+    # of truth; this is only the dispatcher progress mirror.
+    state_path = _issue_state_path(camp, att.iid)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state.update(
+        {
+            "model_tier": target_tier,
+            "model_name": model_name,
+            "continue_count": continue_count_now,
+        }
+    )
+    tmp = state_path.with_name(f".{state_path.name}.tmp")
+    tmp.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    tmp.replace(state_path)
+
+    return (model_name, target_tier)
 
 
 @activity.defn(name="bump_campaign_tick_seq")
@@ -779,5 +984,6 @@ __all__ = [
     "prepare_attempt_worktree",
     "record_attempt_outcome",
     "reconcile_gitlab",
+    "resolve_and_stamp_model_tier",
     "self_heal_safety_bin",
 ]

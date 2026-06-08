@@ -12,9 +12,20 @@
 #   ISSUE_IID      from env_paths.sh
 #
 # Use this script (not a full labels overwrite) for every label transition,
-# so manually-added labels on the issue are preserved. Adding a workflow label
-# also removes conflicting workflow labels to keep the issue in a single
-# workflow state, except for the allowed done+pr and done+blocked pairs.
+# so manually-added labels on the issue are preserved. Adding a work label
+# also removes conflicting work labels to keep the issue in a single workflow
+# state. v2 exceptions:
+#   - `pr` REPLACES `done` (done is removed, not kept) — they never coexist.
+#   - the only allowed transient coexistence pair is `done` + `blocked-cc` or
+#     `done` + `blocked-dispatcher` (a failure after `done` but before `pr`).
+#
+# The `model:{tier}` dimension (model:<tier> for each entry in MODEL_TIERS;
+# default flash / pro / max) and the one-shot `quality:low` soft signal are NOT
+# work labels: they are orthogonal and persistent, so adding a work label
+# (including `doing`) never removes them. The model dimension is internally
+# mutually exclusive — adding one `model:{tier}` removes the other tiers, but
+# leaves every work label and `quality:low` untouched. The tier set is derived
+# from MODEL_TIERS so an operator override of model_tiers stays consistent.
 
 set -euo pipefail
 
@@ -32,12 +43,47 @@ fi
 OP="$1"
 LABEL="$2"
 
-WORKFLOW_LABELS=(todo retry new doing pr done blocked failed timeout continue contiune)
+# v2 work-label mutual-exclusion group. `contiune` is tolerated as a legacy
+# misspelling of `continue` so a stray legacy label is cleared on the next
+# transition; the agent never creates it.
+WORKFLOW_LABELS=(
+  todo retry new doing done pr
+  blocked-cc blocked-dispatcher timeout failed-cc failed-dispatcher
+  continue contiune
+)
+
+# Model-dimension labels (orthogonal, persistent, internally mutually
+# exclusive). Adding one removes the others, but NOT any work label or
+# quality:low. quality:low itself is a standalone one-shot signal with no
+# exclusivity. The label set is DERIVED from MODEL_TIERS (ordered,
+# comma-separated, default "flash,pro,max") so an operator who overrides
+# model_tiers via trigger gets the model dimension's internal mutual exclusion
+# computed over the configured tiers, not a hard-coded flash/pro/max triple.
+MODEL_TIERS="${MODEL_TIERS:-flash,pro,max}"
+MODEL_LABELS=()
+IFS=',' read -r -a __model_tier_tokens <<< "${MODEL_TIERS}"
+for __tier in ${__model_tier_tokens[@]+"${__model_tier_tokens[@]}"}; do
+  __tier="${__tier#"${__tier%%[![:space:]]*}"}"   # ltrim
+  __tier="${__tier%"${__tier##*[![:space:]]}"}"   # rtrim
+  [ -z "${__tier}" ] && continue
+  MODEL_LABELS+=("model:${__tier}")
+done
 
 is_workflow_label() {
   local label="$1"
   local candidate
   for candidate in "${WORKFLOW_LABELS[@]}"; do
+    if [ "${label}" = "${candidate}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+is_model_label() {
+  local label="$1"
+  local candidate
+  for candidate in ${MODEL_LABELS[@]+"${MODEL_LABELS[@]}"}; do
     if [ "${label}" = "${candidate}" ]; then
       return 0
     fi
@@ -62,16 +108,32 @@ workflow_conflicts_for_add() {
   local keep=("${label}")
   local candidate
 
+  # Model-dimension add: internally mutually exclusive — drop the other tiers,
+  # leave every work label (and quality:low) untouched.
+  if is_model_label "${label}"; then
+    for candidate in ${MODEL_LABELS[@]+"${MODEL_LABELS[@]}"}; do
+      if ! is_kept_label "${candidate}" "${keep[@]}"; then
+        printf '%s\n' "${candidate}"
+      fi
+    done
+    return 0
+  fi
+
   if ! is_workflow_label "${label}"; then
     return 0
   fi
 
   case "${label}" in
     pr)
-      keep=(done pr)
+      # pr REPLACES done: keep only pr, so done is removed in this update.
+      keep=(pr)
       ;;
-    blocked)
-      keep=(done blocked)
+    blocked-cc)
+      # Allowed transient coexistence: a failure after done, before pr.
+      keep=(done blocked-cc)
+      ;;
+    blocked-dispatcher)
+      keep=(done blocked-dispatcher)
       ;;
   esac
 

@@ -91,13 +91,14 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    entries.
 8. **Pending eviction.** First, any `pending_subagents` entry whose IID
    is outside `effective_iid_universe` is scope-evicted: synthesize a
-   Phase 6 blocked reply, drain it, persist it, and add a
-   `cleanup_actions[]` kill request for the recorded child session key
-   when present. Then apply the stuck-pending backstop to remaining
-   entries where `(now - spawned_at) >= stuck_after_minutes` (or a
-   placeholder with `spawned_at = null`). Stuck eviction is still
-   classified as blocked but does not emit a kill request unless future
-   tooling adds one.
+   Phase 6 `blocked-dispatcher` reply (scope eviction is a dispatcher-side
+   condition), drain it, persist it, and add a `cleanup_actions[]` kill
+   request for the recorded child session key when present. Then apply the
+   stuck-pending backstop to remaining entries where
+   `(now - spawned_at) >= stuck_after_minutes` (or a placeholder with
+   `spawned_at = null`). Stuck eviction is still classified as
+   `blocked-dispatcher` (no callback arrived — a dispatcher-side condition)
+   but does not emit a kill request unless future tooling adds one.
 9. If `pending_subagents` is still non-empty after eviction → emit
    `status:"waiting_for_callbacks"` envelope and exit 0.
 10. Run `reconcile.sh` (range mode when whitelist empty, list mode
@@ -141,7 +142,8 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     1. Resolve `ISSUE_MODE` (`continue` if `needs_continue` from
        reconcile OR persisted state mode == continue; else `fresh`).
     2. `prepare_attempt.sh` → `mode_actual`, `LOCAL_ATTEMPT_BRANCH`.
-       Failure → `prep_blocked` (drains pending, classifies as blocked,
+       Failure → `prep_blocked` (drains pending, classifies as
+       `blocked-dispatcher` — a per-IID prep failure is dispatcher-side,
        skips IID).
     3. Optional `claude_settings_path` copy + `update-index --skip-worktree`.
     4. `glab api projects/${PROJECT_URI}/issues/${iid}` → title, URL,
@@ -175,16 +177,16 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 
 | Field | Meaning |
 | ----- | ------- |
-| `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs blocked during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
+| `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs ended `blocked-dispatcher` during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
 | `dispatch_entries` | Array of `{iid, attempt_number, child_label, payload_path}` objects; empty unless `status == "ready"`. The LLM `Read`s each `payload_path` and feeds the file contents to `sessions_spawn(payload=...)`. **Token-sensitive:** the file holds the GitLab token in cleartext (substituted from `{GITLAB_TOKEN}`); the wrapper writes it with mode 0600 and `dispatch_record_spawn.sh STATUS=spawned` truncates it once the runtime has it. The wrapper.log MUST NEVER include the rendered prompt contents. |
 | `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |
 | `backoff_seconds` | Always `2` today. Sleep between retries. |
 | `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. |
 | `scope_evicted_iids` | Subset of `evicted_iids` evicted because the IID was outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`. |
-| `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked blocked. |
+| `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked `blocked-dispatcher`. |
 | `label_filtered_in` / `label_filtered_out` | Optional — only emitted when `require_labels` is non-empty. |
-| `tick_outcome_per_iid` | Optional map; populated when per-IID prep failures pushed an IID into blocked. |
+| `tick_outcome_per_iid` | Optional map; populated when per-IID prep failures pushed an IID into `blocked-dispatcher`. |
 | `last_reconcile_evidence` | Absolute path to the `reconcile-<ts>.json` evidence file this tick produced. |
 | `chat_summary` | One-line human-readable string for the chat. |
 
@@ -223,7 +225,8 @@ Called: once per IID per scheduled wake-up, immediately after each
   `placeholder:true`, bumps `quota_launched_this_tick`, sets
   `campaign_status = "waiting_for_callbacks"`, persists, then truncates
   `${LOG_DIR}/spawn_payload.txt` to scrub the GitLab token.
-- `STATUS=launch_failed`: synthesizes a blocked Phase 6 reply with
+- `STATUS=launch_failed`: synthesizes a `blocked-dispatcher` Phase 6 reply
+  (a `sessions_spawn` launch failure is a dispatcher-side condition) with
   `block_reason="sessions_spawn failed after ${LAUNCH_ATTEMPTS} attempts (2s backoff): ${LAUNCH_ERROR}"`,
   runs `phase6_process` with `is_launch_synth=true` (so retry_count is
   NOT incremented — launch-side failures get their cross-tick
@@ -239,7 +242,7 @@ Called: once per IID per scheduled wake-up, immediately after each
 | ----- | ----- |
 | `status` | `"spawned"` or `"launch_failed_recorded"` |
 | `iid`, `attempt_number` | echo of input |
-| `final_status` | only on `launch_failed_recorded` — always `"blocked"` (never `failed`; the cross-tick promotion rule excludes launch-side replies) |
+| `final_status` | only on `launch_failed_recorded` — taken from the Phase 6 internal status mapping; for a launch failure this is `"blocked-dispatcher"` (a launch failure is dispatcher-side, never `failed-dispatcher`; the cross-tick promotion rule excludes launch-side replies, so it is never promoted on this tick) |
 | `cleanup` | only on `launch_failed_recorded` — pass `cleanup.target` to `subagents kill` only when `cleanup.action == "kill"` |
 | `remaining_pending_count` | how many pending entries remain in `pending_subagents` after this update |
 | `chat_summary` | one-line human-readable string |
@@ -261,8 +264,10 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 ### Inputs
 
 - **stdin**: the subagent's terminal compact JSON (the runtime's
-  `worker_result_json` payload). Empty stdin → synthesized blocked
-  reply with `block_reason="callback worker_result_json was empty"`.
+  `worker_result_json` payload). Empty stdin → synthesized
+  `blocked-dispatcher` reply (a missing/unparseable callback is a
+  dispatcher-side condition) with
+  `block_reason="callback worker_result_json was empty"`.
   The orchestrator MUST feed this with a heredoc
   (`… bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`),
   never with `echo "<literal>" | … bash …`. The compact JSON is
@@ -282,7 +287,8 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 3. Load campaign_state.json; look up `pending_subagents[IID]`. Missing
    → emit `callback_status:"stale_or_already_drained"`, exit 0.
 4. Parse compact reply via `phase6_normalize_reply` (parse errors and
-   missing fields normalized to a synthesized blocked reply).
+   missing fields normalized to a synthesized `blocked-dispatcher` reply —
+   an unparseable callback is a dispatcher-side condition).
 5. Cross-check `reply.attempt_number == pending.attempt_number`; mismatch
    → stale, exit 0.
 6. Run `phase6_process` with `is_launch_synth=false`:
