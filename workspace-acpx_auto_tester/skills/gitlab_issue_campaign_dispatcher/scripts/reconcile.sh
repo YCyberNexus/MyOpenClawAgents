@@ -157,8 +157,9 @@ for iid in "${IIDS[@]}"; do
       # label whose <name> is not in the configured list is ignored, so a tier
       # list shrunk by config drift never yields an out-of-range index.
       ([ $tiers | to_entries[]
-          | select(($labels | index("model:" + .value)) != null)
-          | .key ]
+          | . as $e
+          | select(($labels | index("model:" + $e.value)) != null)
+          | $e.key ]
         | if length == 0 then 0 else max end) as $model_tier |
       {
         iid: $iid,

@@ -1148,7 +1148,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # (both report 0), so test the raw labels for any model:<configured-tier>.
   HAS_ANY_MODEL="$(printf '%s' "${IID_EVID}" | jq -r --argjson tiers "${MODEL_TIERS_ARR_JSON}" '
     (.labels // []) as $labels
-    | [ $tiers[] | select(($labels | index("model:" + .)) != null) ] | length > 0')"
+    | [ $tiers[] | . as $t | select(($labels | index("model:" + $t)) != null) ] | length > 0')"
   HARD_UPGRADE="$(printf '%s' "${IID_EVID}" | jq -r '
     if (.has_blocked_cc // false) or (.has_timeout // false) or (.has_failed_cc // false)
     then "true" else "false" end')"
