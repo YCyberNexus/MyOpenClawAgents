@@ -69,9 +69,9 @@ glab api --method POST \
 
 ### G4 — Add a target label (dispatcher prep + subagent)
 
-Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing` and to re-apply final callback labels (`done` + `pr`, `blocked`, or `failed`). The subagent also uses it for immediate `done` / `pr` / `blocked` updates during the post-acpx flow.
+Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing`, to stamp the persistent `model:{tier}` label, and to re-apply final callback labels (`pr`, `blocked-cc` / `blocked-dispatcher`, or `failed-cc` / `failed-dispatcher`). The subagent also uses it for immediate `done` / `pr` / `blocked-cc` updates during the post-acpx flow.
 
-For workflow labels, the wrapper also passes `remove_labels=<conflicting workflow labels>` in the same issue update, preserving unrelated non-workflow labels while enforcing the allowed workflow states (`done` + `pr`, `done` + `blocked`, or one workflow label).
+For workflow labels, the wrapper also passes `remove_labels=<conflicting workflow labels>` in the same issue update, preserving unrelated non-workflow labels (incl. the orthogonal `model:{tier}` / `quality:low` dimensions) while enforcing the allowed workflow states (`pr` — which replaces `done`, the transient `done` + `blocked-cc` / `done` + `blocked-dispatcher` pair, or one workflow label). Adding a `model:{tier}` label removes the other model tiers in the same update but touches no workflow label.
 
 ```bash
 glab api --method PUT \
@@ -196,5 +196,5 @@ The subagent constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}
 - `curl`, `wget`, `httpie`, any HTTP library, any non-glab GitLab SDK.
 - `glab issue list` / `glab issue view` for dispatcher-side reconciliation — use the raw `glab api` form (G1) so the output is stable JSON.
 - Inventing flags or alternative subcommands. If the operation isn't in this list:
-  - dispatcher prep failure → mark IID `blocked` with `block_reason="dispatcher needs unsupported glab op: <description>"` and continue with other batch members.
-  - subagent failure → mark issue `blocked` with `block_reason="subagent needs unsupported glab op: <description>"` and stop.
+  - dispatcher prep failure → mark IID `blocked-dispatcher` with `block_reason="dispatcher needs unsupported glab op: <description>"` and continue with other batch members.
+  - subagent failure → mark issue `blocked-cc` with `block_reason="subagent needs unsupported glab op: <description>"` and stop.

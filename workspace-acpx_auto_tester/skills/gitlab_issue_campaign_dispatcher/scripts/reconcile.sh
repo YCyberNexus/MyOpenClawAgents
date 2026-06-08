@@ -28,19 +28,34 @@
 #       "state":             "opened" | "closed" | null,
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
-#       "has_done_pr":       bool,   # labels include both "done" and "pr"
+#       "has_pr":            bool,   # labels include "pr" (v2 completion signal: pr REPLACES done)
 #       "is_closed_on_gitlab": bool,  # state is "closed"
-#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR done+pr
+#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR has_pr
+#       "has_blocked_cc":    bool,   # labels include "blocked-cc" (Claude Code-side retryable failure)
+#       "has_blocked_dispatcher": bool, # labels include "blocked-dispatcher" (dispatcher-side retryable failure)
+#       "has_failed_cc":     bool,   # labels include "failed-cc" (CC-side retry budget exhausted, terminal)
+#       "has_failed_dispatcher": bool,  # labels include "failed-dispatcher" (dispatcher-side terminal)
+#       "model_tier":        <integer 0-based>, # index of the highest present model:<tier> in the configured MODEL_TIERS list (0 when none present); default flash,pro,max → flash=0/pro=1/max=2
 #       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry/continue)
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
-#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue/contiune label; timeout is allowed only with retry
+#       "user_reopened":     bool,   # opened, no completed signal, and no failed-*/blocked-*/continue/contiune label; timeout is allowed only with retry
 #       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
 #
+# v2 model tier: the persistent `model:{tier}` dimension is reported as a
+# 0-based integer (model:flash / no label => 0, model:pro => 1, model:max
+# => 2). Side-split blocked/failed signals (has_blocked_cc /
+# has_blocked_dispatcher / has_failed_cc / has_failed_dispatcher) replace the
+# v1 single has_blocked / has_failed signals. The CC-side variants are the
+# ones that drive model-upgrade decisions in PREPARE; dispatcher-side
+# variants never upgrade the model.
+#
 # Semantics for the dispatcher (consumed in Source-of-Truth Policy):
 #   - `is_closed_on_gitlab == true`                       → finished, skip
 #   - `is_done_on_gitlab == true` AND no `needs_continue` → finished, skip
+#         (v2: `is_done_on_gitlab` is closed OR `has_pr`; `done` alone is the
+#         pre-MR transient state and is NOT terminal completion)
 #   - `needs_continue == true`                            → re-enqueue; the
 #         executor will re-run the resolution flow against the existing
 #         work branch (or build one from master if none exists)
@@ -96,6 +111,19 @@ TS="$(date -u +%Y%m%dT%H%M%SZ)"
 OUT_FILE="${DISPATCHER_LOG_DIR}/reconcile-${TS}.json"
 PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
 
+# Configuration-driven model tier order. MODEL_TIERS is an ordered,
+# comma-separated list (the dispatcher passes the trigger-configured
+# model_tiers through). It defaults to "flash,pro,max" so the reported
+# model_tier integers are unchanged for the default deployment
+# (model:flash => 0, model:pro => 1, model:max => 2). The reported tier is
+# the highest 0-based index whose model:<tier> label is present (0 when none
+# is present, including the lowest tier).
+MODEL_TIERS="${MODEL_TIERS:-flash,pro,max}"
+MODEL_TIERS_JSON="$(printf '%s' "${MODEL_TIERS}" \
+  | tr ',' '\n' \
+  | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//' \
+  | jq -Rsc 'split("\n") | map(select(length>0))')"
+
 # Empty IID set → write a degenerate but well-formed empty array so the
 # evidence-file-must-exist invariant still holds. The dispatcher treats this
 # as "filter narrowed to zero IIDs", which is distinct from "reconcile failed".
@@ -109,29 +137,51 @@ echo "[" > "${OUT_FILE}"
 first=1
 for iid in "${IIDS[@]}"; do
   if body="$(glab api "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null)"; then
-    digest="$(echo "${body}" | jq -c --argjson iid "${iid}" '
+    digest="$(echo "${body}" | jq -c --argjson iid "${iid}" --argjson tiers "${MODEL_TIERS_JSON}" '
       . as $issue |
       ($issue.labels // []) as $labels |
-      (($labels | index("done") != null) and ($labels | index("pr") != null)) as $done_with_pr |
+      # v2: pr REPLACES done; the completion signal is just the `pr` label.
+      ($labels | index("pr") != null) as $has_pr |
       ($issue.state == "closed") as $closed |
       (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
       (($labels | index("retry") != null)) as $has_retry |
       (($labels | index("timeout") != null)) as $has_timeout |
+      ($labels | index("blocked-cc") != null) as $has_blocked_cc |
+      ($labels | index("blocked-dispatcher") != null) as $has_blocked_dispatcher |
+      ($labels | index("failed-cc") != null) as $has_failed_cc |
+      ($labels | index("failed-dispatcher") != null) as $has_failed_dispatcher |
+      # Persistent model tier as a 0-based integer, indexed against the
+      # configured ordered tier list ($tiers). Highest present tier wins
+      # (defensive: the model dimension is internally exclusive, so at most
+      # one is ever set, but max() tolerates a stale duplicate). A model:<name>
+      # label whose <name> is not in the configured list is ignored, so a tier
+      # list shrunk by config drift never yields an out-of-range index.
+      ([ $tiers | to_entries[]
+          | select(($labels | index("model:" + .value)) != null)
+          | .key ]
+        | if length == 0 then 0 else max end) as $model_tier |
       {
         iid: $iid,
         state: $issue.state,
         labels: $labels,
         title: $issue.title,
-        has_done_pr: $done_with_pr,
+        has_pr: $has_pr,
         is_closed_on_gitlab: $closed,
-        is_done_on_gitlab: ($closed or $done_with_pr),
+        is_done_on_gitlab: ($closed or $has_pr),
+        has_blocked_cc: $has_blocked_cc,
+        has_blocked_dispatcher: $has_blocked_dispatcher,
+        has_failed_cc: $has_failed_cc,
+        has_failed_dispatcher: $has_failed_dispatcher,
+        model_tier: $model_tier,
         has_timeout: $has_timeout,
         has_retry: $has_retry,
         user_reopened: (
           ($closed | not) and
-          ($done_with_pr | not) and
-          ($labels | index("failed") == null) and
-          ($labels | index("blocked") == null) and
+          ($has_pr | not) and
+          ($has_failed_cc | not) and
+          ($has_failed_dispatcher | not) and
+          ($has_blocked_cc | not) and
+          ($has_blocked_dispatcher | not) and
           (($has_timeout | not) or $has_retry) and
           ($needs_continue | not)
         ),
@@ -139,7 +189,7 @@ for iid in "${IIDS[@]}"; do
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, user_reopened:false, needs_continue:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_blocked_cc:false, has_blocked_dispatcher:false, has_failed_cc:false, has_failed_dispatcher:false, model_tier:0, has_timeout:false, has_retry:false, user_reopened:false, needs_continue:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

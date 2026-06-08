@@ -18,6 +18,14 @@
 #   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH,
 #   DEV_BRANCH, UI_ACCOUNTS
 #
+# Optional env var (v2 model tier injection):
+#   MODEL  — the model name the dispatcher resolved for THIS attempt in
+#            PREPARE (resolve_model_tier; see SKILL.md §Dispatcher Algorithm
+#            and label_lifecycle.md §model tier). When set and non-empty it
+#            is surfaced in the prompt's "# Working environment" section so
+#            the Claude Code run knows which tier it is operating at. When
+#            unset / empty the model line is omitted (legacy behavior).
+#
 # `HULAT_DIR` is NOT a trigger input. The test team commits `hulat/` to
 # master+dev, so the repo checkout already contains it at
 # `${REPO_PATH}/hulat`. env_paths.sh exports `HULAT_DIR=${REPO_PATH}/hulat`
@@ -206,6 +214,7 @@ EOF
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline:            prepared by dispatcher for this mode (fresh uses ${DEV_BRANCH}; continue/resume uses ${WORK_BRANCH} or the latest local prior-attempt branch; shared config paths are refreshed from latest ${DEV_BRANCH} before every run)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
+$([ -n "${MODEL:-}" ] && printf -- '- Model tier (this attempt):  %s  (resolved by the dispatcher in PREPARE; higher tiers are used on re-runs after CC-side failures / low-quality rounds)\n' "${MODEL}")
 
 EOF
 

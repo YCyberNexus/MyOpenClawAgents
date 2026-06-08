@@ -14,7 +14,22 @@
 # Use this script (not a full labels overwrite) for every label transition,
 # so manually-added labels on the issue are preserved. Adding a workflow label
 # also removes conflicting workflow labels to keep the issue in a single
-# workflow state, except for the allowed done+pr and done+blocked pairs.
+# workflow state, except for the allowed transient pairs (see below).
+#
+# v2 label model:
+#   - Workflow labels are a mutually-exclusive group (todo / new / retry /
+#     continue / doing / done / pr / blocked-cc / blocked-dispatcher /
+#     timeout / failed-cc / failed-dispatcher). Adding any one removes the
+#     others. `pr` REPLACES `done` (its keep-set is just `pr`); the only
+#     allowed transient pair is `done` + `blocked-cc` or `done` +
+#     `blocked-dispatcher` (a failure after `done` but before the MR / `pr`).
+#   - `model:{tier}` is a separate persistent dimension that is internally
+#     mutually exclusive: adding `model:pro` removes `model:flash` /
+#     `model:max` but does NOT touch any workflow label or `quality:low`.
+#     This is what keeps the model tier alive across the transition into
+#     `doing`.
+#   - `quality:low` is a one-shot soft signal: adding or removing it touches
+#     nothing else.
 
 set -euo pipefail
 
@@ -32,46 +47,78 @@ fi
 OP="$1"
 LABEL="$2"
 
-WORKFLOW_LABELS=(todo retry new doing pr done blocked failed timeout continue contiune)
+# Workflow mutual-exclusion group (v2). `contiune` is the legacy misspelling
+# of `continue`, tolerated on removal so stale issues get cleaned up.
+WORKFLOW_LABELS=(todo retry new doing done pr blocked-cc blocked-dispatcher timeout failed-cc failed-dispatcher continue contiune)
+# Model tier dimension — internally mutually exclusive, orthogonal to the
+# workflow group (NOT cleared when a workflow label is added). The tier set
+# is configuration-driven: MODEL_TIERS is an ordered, comma-separated list
+# (the dispatcher passes the trigger-configured model_tiers through). It
+# defaults to "flash,pro,max" so the model mutual-exclusion is unchanged for
+# the default deployment.
+MODEL_TIERS="${MODEL_TIERS:-flash,pro,max}"
+MODEL_LABELS=()
+while IFS= read -r __tier; do
+  [ -n "${__tier}" ] && MODEL_LABELS+=("model:${__tier}")
+done < <(printf '%s' "${MODEL_TIERS}" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
 
-is_workflow_label() {
-  local label="$1"
+is_in_set() {
+  local needle="$1"
+  shift
   local candidate
-  for candidate in "${WORKFLOW_LABELS[@]}"; do
-    if [ "${label}" = "${candidate}" ]; then
+  for candidate in "$@"; do
+    if [ "${needle}" = "${candidate}" ]; then
       return 0
     fi
   done
   return 1
 }
+
+is_workflow_label() { is_in_set "$1" "${WORKFLOW_LABELS[@]}"; }
+is_model_label()    { is_in_set "$1" "${MODEL_LABELS[@]}"; }
 
 is_kept_label() {
   local candidate="$1"
   shift
-  local kept
-  for kept in "$@"; do
-    if [ "${candidate}" = "${kept}" ]; then
-      return 0
-    fi
-  done
-  return 1
+  is_in_set "${candidate}" "$@"
 }
 
-workflow_conflicts_for_add() {
+# conflicts_for_add <label> — print, one per line, the labels that must be
+# removed in the SAME GitLab update when <label> is added. Returns nothing
+# (no conflicts) for `quality:low` and any unknown non-workflow / non-model
+# label, so those are added without disturbing other labels.
+conflicts_for_add() {
   local label="$1"
-  local keep=("${label}")
   local candidate
 
-  if ! is_workflow_label "${label}"; then
+  if is_model_label "${label}"; then
+    # Model dimension is internally exclusive: drop the other tiers, keep
+    # every workflow label and quality:low untouched.
+    for candidate in "${MODEL_LABELS[@]}"; do
+      if [ "${candidate}" != "${label}" ]; then
+        printf '%s\n' "${candidate}"
+      fi
+    done
     return 0
   fi
 
+  if ! is_workflow_label "${label}"; then
+    # quality:low and any other non-workflow / non-model label: no conflicts.
+    return 0
+  fi
+
+  local keep=("${label}")
   case "${label}" in
     pr)
-      keep=(done pr)
+      # pr REPLACES done — keep ONLY pr (done is removed in the same update).
+      keep=(pr)
       ;;
-    blocked)
-      keep=(done blocked)
+    blocked-cc)
+      # Allowed transient pair: a failure after `done` but before `pr`.
+      keep=(done blocked-cc)
+      ;;
+    blocked-dispatcher)
+      keep=(done blocked-dispatcher)
       ;;
   esac
 
@@ -100,7 +147,7 @@ if [ "${OP}" = "add" ]; then
   CONFLICTS=()
   while IFS= read -r conflict_label; do
     CONFLICTS+=("${conflict_label}")
-  done < <(workflow_conflicts_for_add "${LABEL}")
+  done < <(conflicts_for_add "${LABEL}")
   if [ "${#CONFLICTS[@]}" -gt 0 ]; then
     CONFLICT_LABELS="$(join_by_comma "${CONFLICTS[@]}")"
     glab api --method PUT \

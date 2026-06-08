@@ -1,95 +1,156 @@
-# Label Lifecycle
+# Label Lifecycle (v2)
 
 This document is the workspace-wide reference for issue workflow labels. Both halves of the agent (the dispatcher's prep, and the subagent's post-acpx flow) follow these transitions.
 
-## Required project labels
+## Label dimensions
+
+v2 splits the issue's labels into three independent dimensions.
+
+### 1. Workflow state (mutually exclusive — exactly one at a time)
 
 `scripts/ensure_labels.sh` (called once per tick by the dispatcher) ensures these workflow labels exist:
 
-- `todo`
-- `retry`
-- `new`
-- `doing`
-- `pr`
-- `done`
-- `blocked`
-- `failed`
-- `timeout` — **subagent-applied terminal label.** Set when `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`, default 18000s). Whatever Claude Code produced before the kill is still committed and force-pushed to `${WORK_BRANCH}`, but no MR / `pr` is opened. The dispatcher treats `timeout` as terminal: the IID is parked in `timeout_iids`, `retry_count` is NOT consumed, and the IID is NOT auto-retried on later ticks. Reviewers re-run the issue by stripping the `timeout` label, by adding `retry` on top of `timeout` for a fresh reset, or by applying `continue` for a continue-mode resume on the existing branch.
-- `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `done` + `pr` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and prepares the next attempt's repo checkout from the existing work branch (continue mode). **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
+- entry: `todo` / `new` / `retry` / `continue`
+- in progress: `doing`
+- produced (transient, pre-MR): `done`
+- awaiting review: `pr` — created after the MR exists; **replaces** `done`
+- exception (Claude-Code side): `blocked-cc` / `failed-cc`
+- exception (dispatcher side): `blocked-dispatcher` / `failed-dispatcher`
+- exception (acpx wall-clock cap): `timeout`
 
-`contiune` is tolerated as a legacy/misspelled alias for `continue` during reconciliation and removal, but the agent does not create that label.
+The single v1 `blocked` and `failed` labels are **removed** from the vocabulary and replaced by the per-side variants. `ensure_labels.sh` only creates missing labels and never deletes existing ones, so historical `blocked` / `failed` labels left over from a v1 deployment are not cleaned up automatically — that is acceptable and no historical migration is performed.
+
+`pr` REPLACES `done` (it is no longer additive): after MR creation the issue carries `pr` and not `done`. The only allowed transient pair is `done` + `blocked-cc` or `done` + `blocked-dispatcher` (a failure after `done` but before the MR / `pr`).
+
+`continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and labeled `pr` by the agent, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and prepares the next attempt's repo checkout from the existing work branch (continue mode). **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`. `contiune` is tolerated as a legacy/misspelled alias during reconciliation and removal, but the agent does not create that label.
+
+`timeout` — **subagent-applied terminal label.** Set when `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`, default 18000s). Whatever Claude Code produced before the kill is still committed and force-pushed to `${WORK_BRANCH}`, but no MR / `pr` is opened. The dispatcher treats `timeout` as terminal: the IID is parked in `timeout_iids`, `retry_count` is NOT consumed, the IID is NOT auto-retried on later ticks, and `timeout` is **never** promoted to a `failed-*` variant. Reviewers re-run the issue by stripping `timeout`, by adding `retry` on top of `timeout` for a fresh reset, or by applying `continue` for a continue-mode resume on the existing branch.
 
 When the scheduled trigger supplies `require_labels`, those labels are also treated as one-shot entry labels for the matched issue on that tick: if a required label is present on the issue selected for execution, the dispatcher removes it while transitioning the issue to `doing`.
+
+### 2. Model tier (persistent, orthogonal — at most one at a time)
+
+`model:flash` (TIER_0, lowest / default) → `model:pro` (TIER_1) → `model:max` (TIER_2, cap). The number of tiers equals the length of the trigger-configurable ordered `model_tiers` list (3 tiers is the example here). This dimension is **not** part of the workflow mutual-exclusion group: it survives the transition into `doing` and follows the issue monotonically (never downgraded) for its whole life until the issue is CLOSED. `ensure_labels.sh` creates the three default tiers with a distinct color so they stand out from the workflow state.
+
+The model dimension is internally mutually exclusive: `set_issue_label.sh add model:pro` removes `model:flash` / `model:max` in the same GitLab update but touches no workflow label and no `quality:low`.
+
+### 3. Quality signal (one-shot)
+
+`quality:low` — a human-applied soft signal added in AWAITING_REVIEW to mark a mediocre round. It triggers a single model upgrade and is then removed (consumed) by the dispatcher in PREPARE. Adding or removing it touches nothing else.
+
+## Workflow mutual-exclusion group and the "进 doing 清除集"
+
+The workflow mutual-exclusion group is:
+
+```
+{ todo, new, retry, continue, doing, done, pr,
+  blocked-cc, blocked-dispatcher, timeout, failed-cc, failed-dispatcher }
+```
+
+Adding any one workflow label removes the others in the same GitLab issue update, except the allowed transient pair `done` + `blocked-cc` / `done` + `blocked-dispatcher`. `pr` keeps only itself (it replaces `done`).
+
+The **"进 doing 清除集"** (the labels the dispatcher strips when transitioning an issue into `doing`) is the entire workflow group above. It **excludes** `model:{tier}` and `quality:low` — the model tier must persist into `doing` (it is part of the issue's identity for life), and `quality:low` is consumed separately by `resolve_model_tier` only when it actually drives an upgrade.
 
 ## Transition diagram
 
 ```
-                     ┌──────────────────────────────────────┐
-                     │                                      │
-                     ▼                                      │
-   todo/retry/new/continue/blocked/trigger-label
-             ──► doing ──► done ──► done+pr                 │
-                │                                           │
-                ▼                                           │
-              blocked ──► doing  (after cooldown, and only after non-blocked candidates) ──┘
+   todo/new/retry/continue/blocked-*/timeout/failed-*(reviewer-relabel)/trigger-label
+             ──► doing ──► done ──► pr            (pr replaces done)
                 │
-                ▼
-              failed   (retry exhausted, terminal)
+                ├──► blocked-cc          (CC-side retryable failure; acpx failures still
+                │                          force-push committable partial work, no MR / pr)
+                ├──► blocked-dispatcher  (dispatcher-side retryable failure: prep / spawn /
+                │                          eviction; no CC output)
+                └──► timeout             (acpx wall-clock cap; partial work force-pushed;
+                                          NO MR; terminal until human relabel)
 
-  doing ──► blocked  (retryable failure; acpx failures still force-push
-                      committable partial work to ${WORK_BRANCH} when possible,
-                      but do not open an MR / add pr)
+  blocked-cc          ──► doing  (after cooldown, lowest priority) ──► …
+  blocked-dispatcher  ──► doing  (same retry path)
+        │
+        ▼  (retry_count > blocked_retry_limit)
+  failed-cc / failed-dispatcher   (terminal — same side as the blocked variant)
 
-  doing ──► timeout   (acpx exceeded wall-clock cap; partial work force-pushed to ${WORK_BRANCH};
-                       NO MR; terminal until a human strips timeout or applies retry/continue)
-
-   done+pr ──► continue  (HUMAN review action; agent never does this)
-              │
-              ▼
-            doing      (executor in continue mode, on next tick)
-              │
-              ▼
-            done ──► done+pr   (or blocked / failed / timeout as usual)
+   pr ──► continue  (HUMAN review action; agent never does this)
+        │
+        ▼
+      doing  (executor in continue mode, on next tick) ──► done ──► pr (or blocked-*/timeout)
 ```
+
+## outcome → label mapping (Phase 6, after AUTO_RUNNING)
+
+The subagent's compact reply still uses the side-agnostic `status` vocabulary (`done` / `no_changes` / `blocked` / `failed` / `timeout`). The dispatcher's Phase 6 maps reply-status + side onto an internal terminal state and the live label:
+
+| outcome (source)                                                                 | reply.status | side | internal final_status | live label              |
+| -------------------------------------------------------------------------------- | ------------ | ---- | --------------------- | ----------------------- |
+| solved, MR created                                                               | `done`       | cc   | `done`                | `pr` (replaces `done`)  |
+| acpx non-timeout failure / NO_CHANGES / push rejected / acpx post-step failure    | `blocked`    | cc   | `blocked_cc`          | `blocked-cc`            |
+| prep failure / spawn launch failure / scope or stuck eviction                     | `blocked`    | disp | `blocked_dispatcher`  | `blocked-dispatcher`    |
+| acpx exceeded wall-clock cap                                                      | `timeout`    | cc   | `timeout`             | `timeout`               |
+| direct failed (rare; subagent prefers `blocked`)                                  | `failed`     | cc   | `failed_cc`           | `failed-cc`             |
+
+The side is determined by who produced the reply: a real subagent callback is always CC-side (`block_side: "cc"`); a dispatcher-synthesized blocked reply (`phase6_synthesize_blocked`) is always dispatcher-side (`block_side: "dispatcher"`).
+
+## retry over-limit promotion (per side)
+
+- `blocked-cc` and `retry_count > blocked_retry_limit` → `failed-cc`
+- `blocked-dispatcher` and `retry_count > blocked_retry_limit` → `failed-dispatcher`
+- `timeout` does NOT participate: it never consumes `retry_count` (parked) and is never auto-promoted.
+
+Launch-side synthesized blocked replies (`dispatch_record_spawn.sh STATUS=launch_failed`) do NOT increment `retry_count` and are not promoted on that tick.
+
+## model upgrade (resolve_model_tier, evaluated in PREPARE before START CHILD)
+
+`UPGRADE? = hard ∪ soft`:
+
+- **hard**: the prior outcome that caused this re-schedule ∈ { `blocked-cc`, `timeout`, `failed-cc` }
+- **soft** (any hit): `quality:low` present ∨ cumulative continue count ≥ N (trigger `model_upgrade_continue_threshold`, N=0 disables) ∨ auto-score < threshold (black-box; **NOT implemented** in this version — only a commented hook position)
+- **excluded**: `blocked-dispatcher` / `failed-dispatcher` (infrastructure side; a higher model would not help)
+
+Decision: hit and not capped → upgrade one tier (add the higher `model:{tier}`, remove the old one — model dimension is internally exclusive); hit but already at the cap → keep the cap; no hit → keep the current tier. A new issue with no `model:{tier}` label is treated as TIER_0; the first PREPARE explicitly stamps the lowest tier (`model:flash`). `quality:low` is removed (consumed) once an upgrade evaluation used it.
+
+One-liner: CC-side outcomes { `blocked-cc`, `timeout`, `failed-cc` } upgrade one tier on the next run; dispatcher-side { `blocked-dispatcher`, `failed-dispatcher` } never upgrade.
 
 ## Concrete transitions and how to perform them
 
-All transitions use targeted add/remove calls through `scripts/set_issue_label.sh` so that unrelated non-workflow labels on the issue are preserved. The script also enforces workflow-label exclusivity when adding a workflow label: it removes conflicting workflow labels in the same GitLab issue update, leaving only the target label except for the allowed `done` + `pr` and `done` + `blocked` pairs.
+All transitions use targeted add/remove calls through `scripts/set_issue_label.sh` so that unrelated non-workflow labels on the issue are preserved. The script enforces both the workflow exclusivity and the model-dimension exclusivity automatically.
 
 | From       | To         | Performer  | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `todo` / `retry` / `new` / `blocked` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove `todo`, `retry`, `new`, `continue`, `contiune`, `blocked`, `done`, `pr`, and every matched trigger `require_labels` label; add `doing` |
-| `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `todo`, `continue`, `contiune`, `retry`, `new`, `blocked`, `done`, `pr`, and every matched trigger `require_labels` label; add `doing` |
-| `doing`    | `done`     | subagent   | branch pushed, post-push verification passed, attempt artifacts published to the project Wiki and linked from the issue | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
-| `done`     | `done+pr`  | subagent   | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr`                                           |
-| `doing`    | `blocked`  | subagent   | retryable failure during this run; for acpx failures, committable partial work is first staged, committed, and force-pushed to `${WORK_BRANCH}` when possible, but no MR / `pr` is opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked`  |
-| `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work was committed and force-pushed to `${WORK_BRANCH}` but NO MR / `pr` was opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
-| `done`     | `done+blocked` | subagent | retryable failure after Wiki evidence and `done`, before `pr` can be added | `set_issue_label.sh add blocked`; do NOT add `pr`                     |
-| `blocked`  | `doing`    | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add doing`  |
-| `blocked`  | `failed`   | dispatcher | `retry_count > blocked_retry_limit` during Phase 6; launch-side `sessions_spawn` failures do not increment `retry_count` | `set_issue_label.sh remove blocked` ; `set_issue_label.sh add failed` |
-| `timeout`  | `doing`    | dispatcher | a human reviewer stripped the `timeout` label, added `retry` on top of `timeout`, or applied `continue` — the dispatcher then treats it like any other unfinished entry | normal `*` → `doing` transition above |
-| `done+pr`  | `continue` | **human reviewer** | reviewer notices the prior run was incomplete and wants the agent to re-run on the existing branch | manual on the GitLab UI; the agent does NOT make this transition itself |
+| `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / `timeout` / `failed-*` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove the entire workflow group (entry labels + done/pr + blocked-*/timeout/failed-* + matched trigger `require_labels`); add `doing`; preserve `model:{tier}` and `quality:low` |
+| `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove the workflow group (incl. continue/contiune); add `doing`; preserve `model:{tier}` |
+| (any)      | `model:{tier}` | dispatcher | resolve_model_tier in PREPARE, after the `doing` transition | `set_issue_label.sh add model:<tier>` (removes the old model:* in the same update); on a soft-trigger upgrade also `remove quality:low` |
+| `doing`    | `done`     | subagent   | branch pushed, post-push verified, Wiki artifacts published | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
+| `done`     | `pr`       | subagent   | immediately after MR creation / rotation succeeds    | `set_issue_label.sh add pr` (removes `done` — pr replaces it)         |
+| `doing`    | `blocked-cc` | subagent | CC-side retryable failure; committable partial work first force-pushed to `${WORK_BRANCH}` when possible, no MR / `pr` | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-cc` |
+| `doing`    | `blocked-dispatcher` | dispatcher | prep / spawn / eviction failure (no CC output) | Phase 6 synthesizes the reply and syncs `blocked-dispatcher` |
+| `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work force-pushed, NO MR / `pr` | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
+| `done`     | `done` + `blocked-cc` | subagent | CC-side failure after Wiki + `done`, before `pr` | `set_issue_label.sh add blocked-cc`; do NOT add `pr`                  |
+| `blocked-cc` / `blocked-dispatcher` | `doing` | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | normal `*` → `doing` transition above |
+| `blocked-cc` | `failed-cc` | dispatcher | `retry_count > blocked_retry_limit` in Phase 6 (launch-side synths do not increment) | `set_issue_label.sh add failed-cc` |
+| `blocked-dispatcher` | `failed-dispatcher` | dispatcher | same over-limit rule, dispatcher side | `set_issue_label.sh add failed-dispatcher` |
+| `timeout`  | `doing`    | dispatcher | a human stripped `timeout`, added `retry`, or applied `continue` | normal `*` → `doing` transition above |
+| `pr`       | `continue` | **human reviewer** | reviewer wants the agent to re-run on the existing branch | manual on the GitLab UI; the agent never makes this transition itself |
 
 ## Important rules
 
-1. **`pr` is additive, not a replacement for `done`.** `done` means the agent has solved the issue and published Wiki evidence. `pr` means the corresponding MR exists. After successful MR creation / rotation, both labels MUST be present.
+1. **`pr` REPLACES `done`.** `done` is the pre-MR transient state ("solved and published Wiki evidence"); `pr` means the MR exists. After successful MR creation / rotation the issue carries ONLY `pr`. `{done, pr}` never coexist.
 2. **Attempt evidence comes first.** Before `create_mr.sh` runs and before the issue can be labeled `done`, `scripts/upload_attempt_artifacts.sh` MUST publish attempt-scoped Wiki pages for `prompt.txt`, `claude_result.txt`, and optional `report.html`, then link them from the issue.
-3. **Dispatcher completion requires `done+pr`.** Because `done` is applied before MR creation, the dispatcher must not treat `done` alone as terminal completion. Reconciliation only considers an issue complete when both labels are present, unless `continue` is also present.
+3. **Dispatcher completion requires `pr`.** Reconciliation treats an issue as complete when the live label set contains `pr` (or the issue is closed), unless `continue` is also present. `done` alone (pre-MR) is NOT terminal completion.
 4. **Never call `glab mr merge`.** The merge request stays open for human review.
-5. **No full-set label overwrite.** Always use targeted add/remove operations through `set_issue_label.sh` (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, etc.) the user may have added.
-6. **Workflow-label exclusivity.** Aside from `done` + `pr` and `done` + `blocked`, an issue should carry at most one workflow label at a time. `set_issue_label.sh add <workflow-label>` removes conflicting workflow labels automatically, so a missed explicit `remove blocked` cannot leave `doing` + `blocked` behind.
+5. **No full-set label overwrite.** Always use targeted add/remove operations through `set_issue_label.sh` (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, model:{tier}, etc.).
+6. **Workflow-label exclusivity.** Aside from the `done` + `blocked-*` transient pair, an issue carries at most one workflow label at a time. `set_issue_label.sh add <workflow-label>` removes conflicting workflow labels automatically, so a missed explicit `remove` cannot leave a stale workflow label behind. The model:{tier} and quality:low dimensions are orthogonal and not affected.
 7. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
-8. **Dispatcher final synchronization.** Phase 6 re-applies the terminal workflow labels from the compact reply as an idempotent safety net: `done` replies must end with `done` + `pr`, `blocked` replies must end with `blocked` and no `doing`, promoted `failed` replies must end with `failed` and no `blocked` / `doing`, and `timeout` replies must end with `timeout` and no `doing` / `blocked` / `failed`.
-9. **`timeout` is never auto-retried.** Unlike `blocked`, a `timeout` IID stays in `timeout_iids` until a human reviewer strips the label, adds `retry`, or applies `continue`. Stripping `timeout` or adding `retry` re-enqueues via the regular `user_reopened` path and runs a fresh reset; `continue` resumes from the existing `${WORK_BRANCH}` (the partial work is already pushed there) while refreshing shared config paths from latest `origin/${DEV_BRANCH}`. The agent does NOT promote `timeout` to `failed`; `retry_count` is NOT consumed.
+8. **Dispatcher final synchronization.** Phase 6 re-applies the terminal workflow labels from the compact reply as an idempotent safety net: `done` replies end as `pr` (no `done`); `blocked-cc` / `blocked-dispatcher` replies end with that one variant and no `doing`; promoted `failed-cc` / `failed-dispatcher` replies end with that variant and no `blocked-*` / `doing`; `timeout` replies end with `timeout` and no `doing` / `blocked-*` / `failed-*`.
+9. **`timeout` is never auto-retried.** Unlike `blocked-*`, a `timeout` IID stays in `timeout_iids` until a human strips the label, adds `retry`, or applies `continue`. Stripping `timeout` or adding `retry` re-enqueues via the regular `user_reopened` path and runs a fresh reset; `continue` resumes from the existing `${WORK_BRANCH}`. The agent does NOT promote `timeout` to `failed-*`; `retry_count` is NOT consumed.
+10. **Model tier is monotone for life.** `resolve_model_tier` only ever raises the tier (or holds at the cap) and never lowers it. It is not cleared by any workflow transition. It is consulted from the live `model:{tier}` label (source of truth) plus the cached `model_tier` in `issue-<iid>/state.json`.
 
-## Issue closure vs `done` label
+## Issue closure vs `pr` label
 
 These are two SEPARATE signals. The agent only controls the first; the second is GitLab's job.
 
 | Signal              | Who sets it                         | When                                              | Means                                  |
 | ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
-| `done` label        | the subagent                        | immediately after attempt evidence Wiki publication, before MR creation / rotation | "the agent finished solving and published evidence" |
-| `pr` label          | the subagent                        | immediately after `create_mr.sh` returns successfully | "the MR exists for human review" |
+| `pr` label          | the subagent                        | immediately after `create_mr.sh` returns successfully (replacing the transient `done`) | "the MR exists for human review" |
 | issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "a human reviewed, approved, and merged" |
 
 GitLab's native auto-close is triggered by the **closing keyword in the MR description**. `scripts/create_mr.sh` writes the description starting with:
@@ -105,6 +166,6 @@ When the MR merges, GitLab parses that line and closes the linked issue automati
 - Project → Settings → Merge requests → "Automatically close referenced merge requests" is enabled.
 - The MR's target branch is the project's default branch (`master` in this workspace), which is the only case GitLab auto-closes for. Auto-close does NOT fire on MRs into non-default branches.
 
-**The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the subagent's job ends when `done` and `pr` are both present.
+**The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the subagent's job ends when `pr` is present.
 
 **Approve vs merge.** GitLab's auto-close fires on **merge**, not approve. If your team uses "approve must precede merge", the practical effect is "issue closes after approve+merge", which is what you want. There is no agent-side support for "close on approve only" — that would require webhook plumbing outside this skill.

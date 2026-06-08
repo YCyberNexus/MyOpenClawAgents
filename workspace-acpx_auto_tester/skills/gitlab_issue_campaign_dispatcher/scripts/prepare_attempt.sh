@@ -66,7 +66,8 @@
 #   snapshots the current `${RESULT_BASENAME}/issue-<iid>/` subtree. Continue
 #   mode restores that snapshot after checkout so prior attempt output/log
 #   files are visible for resume. Fresh reset mode (all non-continue entry
-#   labels, including `todo`, `retry`, `new`, `blocked`, and trigger
+#   labels, including `todo`, `retry`, `new`, `blocked-cc`,
+#   `blocked-dispatcher`, and trigger
 #   require_labels) archives the snapshot and then quarantines any active
 #   same-IID runtime subtree that survived checkout, so old files are not
 #   physically deleted but also do not contaminate the reset run.

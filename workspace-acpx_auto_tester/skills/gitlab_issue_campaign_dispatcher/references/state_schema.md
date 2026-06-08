@@ -47,6 +47,8 @@ Path: `${CAMPAIGN_STATE_FILE}` (i.e. `${WORK_ROOT}/campaign_state.json` = `${RES
   "issue_iids_whitelist": [14, 17, 20],
   "require_labels": ["acpx-auto", "priority::high"],
   "require_labels_match": "and",
+  "model_tiers": ["flash", "pro", "max"],
+  "model_upgrade_continue_threshold": 0,
   "result_basename": "ifp-result",
   "data_basename": "ifp-data",
   "ui_accounts_relpath": "ifp-data/ifp-common/ifp_users.json",
@@ -91,7 +93,7 @@ Map keyed by stringified IID. Each entry tracks one in-flight subagent from spaw
 | `ui_account_count`       | int | The number of UI accounts allocated to this subagent (effective capped slot size `SLOT_SIZES[k]` for the `k`-th IID of the batch). Differs across IIDs in the same batch when `pool_size % max_concurrent_subagents != 0` or when `max_accounts_per_issue` caps a raw slot. Example: `pool=40, max_concurrent_subagents=1, max_accounts_per_issue=14` produces slot size `14`; `pool=50, max_concurrent_subagents=4, max_accounts_per_issue=14` produces `13,13,12,12`. Same nullability rule as `ui_account_index_start`: non-null even for placeholder entries because Phase 4 step 4 has already computed the slot before Phase 4 step 5 writes the placeholder. Legacy on-disk pending entries written before this field existed are loaded with `ui_account_count = null`; Phase 6 ignores the field for legacy entries. |
 | `spawned_at`         | ISO-8601 UTC \| null | The orchestrator's wall-clock timestamp when `sessions_spawn` returned its launch ack. Used for stuck-pending eviction (`now - spawned_at >= stuck_after_minutes`). `null` between placeholder write and launch ack receipt; an entry with `null` `spawned_at` past `Phase 5 → end-of-tick` is itself a stuck case and gets evicted on the next scheduled wake-up. |
 
-A `pending_subagents` entry with `placeholder: true` is a transient state during Phase 4 step 5 / Phase 5; it MUST NOT survive the end of the scheduled wake-up. If a crash leaves a placeholder behind, the next scheduled wake-up's stuck-pending eviction (which inspects `spawned_at`) treats it as stuck and synthesizes a blocked Phase 6 reply (`block_reason="placeholder pending entry survived: spawn was never observed to land"`).
+A `pending_subagents` entry with `placeholder: true` is a transient state during Phase 4 step 5 / Phase 5; it MUST NOT survive the end of the scheduled wake-up. If a crash leaves a placeholder behind, the next scheduled wake-up's stuck-pending eviction (which inspects `spawned_at`) treats it as stuck and synthesizes a blocked-dispatcher Phase 6 reply (`block_reason="placeholder pending entry survived: spawn was never observed to land"`).
 
 ### `active_issue_iids` / `active_issue_sessions` semantics under async-callback
 
@@ -117,6 +119,8 @@ kill_subagent_on_done     = true
 issue_iids_whitelist      = []
 require_labels            = []
 require_labels_match      = "or"
+model_tiers               = ["flash", "pro", "max"]
+model_upgrade_continue_threshold = 0
 result_basename           = "ifp-result"
 data_basename             = "ifp-data"
 ui_accounts_relpath       = null   # unconfigured by default; trigger field opts in
@@ -145,9 +149,11 @@ quota_completed_this_tick = 0
 | `unfinished_iids`        | array of int    | Working backlog of in-range IIDs not yet terminal (not in `completed_iids` / `failed_iids`, and — for `blocked` / `timeout` — still retry-eligible). Rebuilt each scheduled tick from disk state and reconcile evidence; drives which IIDs the next batch draws from. Audit/scheduling aid, not a source of truth (GitLab labels are). |
 | `quota_completed_this_tick` | int          | Per-tick counter of IIDs that reached terminal `done` during the current wake-up. Reset to `0` at the top of every scheduled wake-up (`dispatch_prepare_tick.sh`) and incremented by Phase 6 (`_dispatch_lib.sh`) on each `done` drain. Diagnostic only; pairs with `quota_launched_this_tick`. |
 | `blocked_at_tick_by_iid` | object          | Map from stringified IID to the `tick_seq` at which the IID most recently entered `blocked`. Removed when the IID becomes `done` or `failed`. Missing legacy entries are treated as immediately retryable so old state is not stranded. |
-| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Pending entries outside the effective universe are scope-evicted at the top of the scheduled tick, marked `blocked`, and returned with a best-effort runtime kill action when a `child_session_key` is known. |
+| `issue_iids_whitelist`  | array of int    | Post-override snapshot of the trigger's `issue_iids` field. Empty `[]` = no whitelist (full `[issue_min_iid, issue_max_iid]` range). When non-empty, the effective IID universe = range ∩ this list (IIDs outside range are silently dropped at Phase 1). Pending entries outside the effective universe are scope-evicted at the top of the scheduled tick, marked `blocked-dispatcher`, and returned with a best-effort runtime kill action when a `child_session_key` is known. |
 | `require_labels`        | array of string | Post-override snapshot of the trigger's `require_labels` field. Empty `[]` = no label filter. When non-empty, applied at Phase 3 against live GitLab labels from the reconcile evidence file. Case-sensitive. |
 | `require_labels_match`  | `"or"` / `"and"` | Combinator for `require_labels`. Defaults to `"or"`. Ignored when `require_labels` is empty. Any other value = tick-level abort with `"invalid_require_labels_match"`. |
+| `model_tiers`           | array of string | Ordered model list backing the persistent `model:{tier}` dimension (lowest first; element 0 = TIER_0 = default). The label for tier `k` is `model:<element-k>`. Defaults to `["flash","pro","max"]`. Trigger field `model_tiers` (comma-separated) overrides per tick; otherwise the persisted value carries forward (deployment-stable, like the basenames). Each element must match `[A-Za-z0-9_.-]+`. Tick aborts with `"invalid_model_tiers: ..."` on an empty list or a bad tier name. |
+| `model_upgrade_continue_threshold` | int  | Soft-trigger threshold N for the model upgrade: a cumulative `continue_count ≥ N` requests one upgrade. `0` (default) disables the continue soft trigger. Trigger field `model_upgrade_continue_threshold` overrides per tick; otherwise carries forward. Must be a non-negative integer (`"invalid_model_upgrade_continue_threshold: must be >= 0"`). |
 | `kill_subagent_on_terminal` | bool | Post-override snapshot of the trigger's terminal cleanup gate. Defaults to `true`. When true, Phase 6 may best-effort kill terminal `done` / `blocked` / `failed` / `timeout` child sessions after state files are persisted; `blocked` / `failed` / `timeout` cleanup additionally requires local evidence under `${LOG_DIR}` / `${ISSUE_ROOT}` (see Phase 6 step 9). |
 | `run_timeout_seconds`   | int             | Post-override snapshot of the trigger's `run_timeout_seconds`. Defaults to `acpx_timeout_seconds + 120` (18120s when `acpx_timeout_seconds` is also omitted). Must be integer ≥ 60 and `≥ acpx_timeout_seconds + 120`, so the subagent has enough outer-runtime headroom for `run_acpx_attempt.sh` to return 124/137 and enter the timeout flow. Read by Phase 5 when constructing `sessions_spawn(..., runTimeoutSeconds=<value>, ...)`. Callback path does not re-read the trigger override; the persisted value from the most recent scheduled wake-up is authoritative for any callback-path readers (post-mortem inspection, future tooling). Not directly compared against `spawned_at` at eviction time — that comparison uses `stuck_after_minutes`, whose default tracks this value automatically (`ceil(run_timeout_seconds / 60) + 30`); explicit `stuck_after_minutes` overrides still take precedence. |
 | `acpx_timeout_seconds`  | int             | Post-override snapshot of the trigger's `acpx_timeout_seconds`. Defaults to `18000`. Must be integer ≥ 60 and `acpx_timeout_seconds + 120 ≤ run_timeout_seconds`. Rendered into the executor prompt in Phase 4 step 7 as `{ACPX_TIMEOUT_SECONDS}` and `{ACPX_TIMEOUT_MINUTES} = floor(value / 60)`. Persisted for audit; callback path reads it for diagnostic purposes only. |
@@ -180,6 +186,9 @@ Some on-disk files written by older deployments may be missing fields or use the
 - **`active_issue_iids` entries with no matching `pending_subagents` key** — stale (the orchestrator was synchronous before async-callback; nothing was actually in-flight if the prior tick exited cleanly). Drop them on read: clear `active_issue_iids` / `active_issue_sessions` and persist. The next scheduled wake-up re-schedules those IIDs from disk state.
 - **Missing `timeout_iids`** — default to `[]` and persist on next write. Older deployments did not carry this list; missing-on-disk is harmless because the dispatcher fully rebuilds it from the reconcile evidence file's `has_timeout` signal each tick.
 - **Missing `issue_iids_whitelist` / `require_labels` / `require_labels_match`** — default to `[]` / `[]` / `"or"` and persist on next write. These fields are NOT carried forward across ticks beyond the trigger's say-so: each scheduled wake-up's Phase 1 OVERRIDES them with the trigger's current values (or with defaults when the trigger omits them). The on-disk copy is for audit and crash-recovery only.
+- **Missing `model_tiers`** — default to `["flash","pro","max"]` and persist on next write. Same carry-forward rule as `result_basename` / `data_basename` (the model list is a deployment property, not a per-tick decision): when the trigger omits `model_tiers`, the persisted value is retained.
+- **Missing `model_upgrade_continue_threshold`** — default to `0` (continue soft trigger disabled) and persist on next write. Same carry-forward rule.
+- **Missing per-issue `model_tier` / `model` / `continue_count`** — treated as `0` / `""` / `0` in memory; PREPARE re-derives `model_tier` from the live `model:{tier}` label (source of truth) and re-stamps all three. A pre-v2 `state.json` without these fields is harmless.
 - **Missing `repo_path`** — default to `"/data"` in memory and persist on next write. This is a bootstrap path snapshot only; if the operator configured a non-default clone parent, the trigger/callback still has to provide it so the dispatcher can locate this state file before loading it.
 - **Missing `result_basename` / `data_basename`** — default to `"ifp-result"` / `"ifp-data"` in memory and persist on next write. Each scheduled wake-up's Phase 1 may OVERRIDE them with the trigger's current values; when the trigger omits the fields, the persisted value is retained (these basenames are deployment-stable per project, unlike the per-tick filter fields above).
 - **Missing `ui_accounts_relpath`** — treat as `null` in memory and persist as `null` on next write. There is no hardcoded default. Same Phase 1 override / carry-forward rule as `result_basename` / `data_basename` (the UI account pool file location is a deployment property, not a per-tick decision), but with the additional behavior that `null` / `""` triggers **pool-load skip mode**: the dispatcher does not invoke `load_ui_accounts.sh`, every IID gets `ui_account_count=0`, and `build_prompt.sh` omits the `# UI test accounts` section of the rendered Claude Code prompt. **Schema migration:** persisted values written before SKILL_VERSION 2026-05-27.1 were `${DATA_BASENAME}/`-relative (e.g. `"ifp-common/ifp_users.json"`); after the upgrade they would resolve under `${REPO_PATH}` directly and miss the pool file. The loader does NOT auto-prepend `${DATA_BASENAME}/` — operators must re-send the trigger once with the corrected `ui_accounts_relpath` (e.g. `ifp-data/ifp-common/ifp_users.json`). `load_ui_accounts.sh` exit 10 includes a migration hint when it detects the legacy path on disk.
@@ -192,7 +201,7 @@ The dispatcher MUST NOT keep both the scalar and the array fields in the persist
 - `waiting_for_callbacks` — set by Phase 5 after spawning a batch; cleared back to `running` once the last pending entry drains (or all evicted)
 - `completed` — every IID in range terminal AND `pending_subagents` empty
 
-`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live state is `closed` OR live labels contain both `done` and `pr`) AND `needs_continue == false` in the evidence file AND `pending_subagents == {}`.
+`completed` may only be set when reconciliation has just run AND every IID in range has `is_done_on_gitlab == true` (live state is `closed` OR live labels contain `pr` — v2: `pr` replaced `done`, so the completion signal is the `pr` label alone) AND `needs_continue == false` in the evidence file AND `pending_subagents == {}`.
 
 ## issue-<iid>/state.json — cross-attempt issue state
 
@@ -206,6 +215,9 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
   "session": "issue-px_ifp_hulat_test-14",
   "status": "in_progress",
   "mode": "continue",
+  "model_tier": 1,
+  "model": "pro",
+  "continue_count": 1,
   "attempts_total": 2,
   "latest_attempt_number": 2,
   "latest_attempt_dir": "/data/<project>/<RESULT_BASENAME>/issues/issue-14",
@@ -223,6 +235,9 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 | `session`               | string          | Logical issue label `issue-<project>-<iid>` (used for `active_issue_sessions` bookkeeping and human-readable logging). The runtime subagent key is anonymous; this field stores the logical label only. |
 | `status`                | string (enum)   | See "Possible status values" below. This is the latest attempt's terminal status (or `in_progress` mid-flight). |
 | `mode`                  | string (enum)   | `"fresh"` or `"continue"` for the latest attempt.                      |
+| `model_tier`            | int             | The 0-based persistent model tier resolved in PREPARE (0 = lowest / `model:flash`). Monotonically non-decreasing across attempts; mirrors the live `model:{tier}` label, which is the source of truth. |
+| `model`                 | string          | The resolved model name for the latest attempt — element `model_tier` of the trigger's ordered `model_tiers` list (default `flash` / `pro` / `max`). Injected into `build_prompt.sh` via `MODEL`. |
+| `continue_count`        | int             | Cumulative number of continue-mode attempts for this IID. Incremented in PREPARE when `mode=continue`. Drives the model-upgrade soft trigger when `model_upgrade_continue_threshold > 0`. |
 | `attempts_total`        | int             | Number of attempts ever launched for this IID.                         |
 | `latest_attempt_number` | int             | Same number as `${ATTEMPT_NUMBER}` of the most recent attempt.         |
 | `latest_attempt_dir`    | string          | Convenience absolute path; matches `${ATTEMPT_DIR}`. In the current layout this is `${ISSUE_ROOT}`. |
@@ -234,15 +249,21 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 
 ### Possible `status` values
 
-| Status        | When written                                                                 | Terminal? |
-| ------------- | ---------------------------------------------------------------------------- | --------- |
-| `pending`     | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
-| `in_progress` | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
-| `blocked`     | Retryable failure (auth, runtime mismatch, dispatcher prep failed for this IID, post-push fetch failed, etc.). For acpx failures after worktree prep, the subagent first tries to stage, commit, and force-push any committable partial work to `${WORK_BRANCH}`; it still opens no MR and consumes retry budget. | no |
-| `failed`      | Non-recoverable, or `retry_count > blocked_retry_limit`.                     | yes       |
-| `done`        | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. | yes |
-| `timeout`     | `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`). The subagent still commits + force-pushes the partial work to `${WORK_BRANCH}` but does NOT open an MR. Terminal until a human strips `timeout`, adds `retry`, or applies `continue` — `retry_count` is NOT consumed and the dispatcher does NOT auto-retry. | yes (until human relabel) |
-| `no_changes`  | Legacy compact-reply value for `stage_and_guard.sh` `NO_CHANGES`; new prompts normalize this to `blocked` because no MR / `pr` label can be produced. | no |
+v2 splits the single `blocked` / `failed` disk statuses into per-side variants
+matching the live label. The campaign-level `blocked_iids` / `failed_iids`
+lists remain side-agnostic unions (both sides land in the same list).
+
+| Status               | When written                                                                 | Terminal? |
+| -------------------- | ---------------------------------------------------------------------------- | --------- |
+| `pending`            | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
+| `in_progress`        | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
+| `blocked_cc`         | CC-side retryable failure (acpx non-timeout failure, NO_CHANGES, push rejected, post-acpx step failed). For acpx failures after worktree prep, the subagent first tries to stage, commit, and force-push any committable partial work to `${WORK_BRANCH}`; it still opens no MR and consumes retry budget. Live label: `blocked-cc`. | no |
+| `blocked_dispatcher` | Dispatcher-side retryable failure (prep failed for this IID, spawn launch failed, scope/stuck eviction). No CC output. Live label: `blocked-dispatcher`. | no |
+| `failed_cc`          | CC-side non-recoverable, or `blocked_cc` with `retry_count > blocked_retry_limit`. Live label: `failed-cc`. | yes |
+| `failed_dispatcher`  | Dispatcher-side non-recoverable, or `blocked_dispatcher` with `retry_count > blocked_retry_limit`. Live label: `failed-dispatcher`. | yes |
+| `done`               | After post-push verification, Wiki evidence publication, `doing → done`, MR creation / rotation, and `pr` label addition succeeded. v2: the live terminal label is `pr` (it replaced the transient `done`). | yes |
+| `timeout`            | `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`). The subagent still commits + force-pushes the partial work to `${WORK_BRANCH}` but does NOT open an MR. Terminal until a human strips `timeout`, adds `retry`, or applies `continue` — `retry_count` is NOT consumed and the dispatcher does NOT auto-retry. Never promoted to a `failed-*` variant. | yes (until human relabel) |
+| `no_changes`         | Legacy compact-reply value for `stage_and_guard.sh` `NO_CHANGES`; new prompts normalize this to `blocked` (→ `blocked_cc`) because no MR / `pr` label can be produced. | no |
 
 ## issue-<iid>/attempt_state.json — current-attempt state
 
@@ -324,7 +345,8 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | -------------------- | --------------- | ---------------------------------------------------------------------- |
 | `iid`                | int             | Must match the dispatched IID. The dispatcher rejects mismatches.      |
 | `attempt_number`     | int             | Must match `${ATTEMPT_NUMBER}` from the rendered prompt.               |
-| `status`             | string (enum)   | `done` / `no_changes` / `blocked` / `failed` / `timeout`. See §Possible status values above. New subagent prompts convert no-diff outcomes to `blocked`; `no_changes` is accepted only for legacy replies and normalized by the dispatcher. The subagent prefers `blocked` — the dispatcher promotes `blocked → failed` in Phase 6 when retry budget exhausted. The subagent emits `timeout` only from the dedicated timeout flow (see `executor_prompt.md` §timeout_flow); the dispatcher does NOT promote `timeout → failed`. |
+| `status`             | string (enum)   | `done` / `no_changes` / `blocked` / `failed` / `timeout` — side-AGNOSTIC. New subagent prompts convert no-diff outcomes to `blocked`; `no_changes` is accepted only for legacy replies and normalized by the dispatcher. The subagent prefers `blocked`. v2: the dispatcher attributes a real subagent reply's `blocked` / `failed` to the **CC side** (live labels `blocked-cc` / `failed-cc`) and promotes `blocked-cc → failed-cc` in Phase 6 when the retry budget is exhausted; dispatcher-synthesized blocked replies carry `block_side: "dispatcher"` and map to `blocked-dispatcher` / `failed-dispatcher`. The subagent emits `timeout` only from the dedicated timeout flow (see `executor_prompt.md` §timeout_flow); the dispatcher does NOT promote `timeout`. |
+| `block_side`         | string (enum)   | Optional. `"cc"` (default) or `"dispatcher"`. Real subagent replies omit it (treated as `cc`); only the dispatcher's `phase6_synthesize_blocked` sets `"dispatcher"`. Determines whether a blocked/failed outcome syncs the `-cc` or `-dispatcher` label variant. |
 | `mode_actual`        | string (enum)   | `fresh` / `continue` — what `prepare_attempt.sh` actually ran (continue can downgrade to fresh inside `prepare_attempt.sh`). |
 | `work_branch`        | string          | `issue/<iid>-auto-fix` — the single force-pushed remote branch.        |
 | `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` — per-attempt local branch kept for audit.   |
@@ -349,7 +371,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 The compact reply arrives in two ways:
 
 - **Callback path** — the runtime delivers `RUN_CHILD_COMPLETION_CALLBACK` carrying the full compact JSON in `worker_result_json`. One callback per subagent.
-- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / scope or stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked reply on the spot. Phase 5 launch failures and pending evictions are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
+- **Inline-synthesized path** — Phase 5 launch failure after in-tick retry exhaustion / scope or stuck-pending eviction at the top of a scheduled wake-up; the orchestrator constructs a minimal blocked-dispatcher reply on the spot. Phase 5 launch failures and pending evictions are tracked as launch-side internally for retry accounting; this is not a compact-reply field.
 
 The validation pipeline is the same in both paths:
 
@@ -360,8 +382,8 @@ The validation pipeline is the same in both paths:
    - Optionally cross-check `pending_subagents[reply.iid].run_id` against `callback.run_id` (when present). Mismatch is logged but does not reject — the canonical identity is `iid + attempt_number`.
 3. Normalize legacy `reply.status="no_changes"` to `status="blocked"` and set `block_reason="subagent produced no staged changes"` when the reply did not provide a reason.
 4. If `reply.status in {blocked, failed, timeout}`, require non-empty `reply.block_reason`. Empty → mark `blocked` with `block_reason="subagent reply status=<status> with empty block_reason"`.
-5. Synchronize live GitLab workflow labels from the final status with `scripts/set_issue_label.sh`: `done` ends as `done` + `pr`, `blocked` ends as no `doing` + `blocked`, `failed` ends as no `doing` / `blocked` + `failed`, and `timeout` ends as no `doing` / `blocked` / `failed` + `timeout`. Any required live-label sync failure converts a non-failed / non-timeout result to `blocked` with `block_reason` appended.
-6. If `status=blocked` AND `retry_count > blocked_retry_limit` (after incrementing), promote to `status=failed`, add to `failed_iids`, and run failed-label sync. For Phase 5 launch-side synthesized blocked replies only, do not increment `retry_count` and do not promote to `failed` on this tick. `timeout` is NEVER promoted to `failed` regardless of `retry_count` — it stays parked in `timeout_iids` until a human strips `timeout`, adds `retry`, or applies `continue`.
+5. Determine the side and synchronize live GitLab workflow labels from the final status with `scripts/set_issue_label.sh`. The side comes from the reply's `block_side`: a real subagent callback is CC-side (`cc`), a dispatcher-synthesized blocked reply is `dispatcher`. The internal final_status is one of `done` / `blocked_cc` / `blocked_dispatcher` / `failed_cc` / `failed_dispatcher` / `timeout`. Label sync: `done` ends as `pr` (pr replaced done), `blocked_cc` ends as no `doing` + `blocked-cc`, `blocked_dispatcher` ends as no `doing` + `blocked-dispatcher`, `failed_cc` ends as no `doing` / `blocked-*` + `failed-cc`, `failed_dispatcher` ends as `failed-dispatcher`, and `timeout` ends as no `doing` / `blocked-*` / `failed-*` + `timeout`. Any required live-label sync failure converts a non-failed / non-timeout result to the same-side `blocked_*` variant with `block_reason` appended.
+6. If `final_status ∈ {blocked_cc, blocked_dispatcher}` AND `retry_count > blocked_retry_limit` (after incrementing), promote to the same-side failed variant (`blocked_cc → failed_cc`, `blocked_dispatcher → failed_dispatcher`), add to `failed_iids`, and run the failed-label sync. For Phase 5 launch-side synthesized blocked replies only, do not increment `retry_count` and do not promote on this tick. `timeout` is NEVER promoted regardless of `retry_count` — it stays parked in `timeout_iids` until a human strips `timeout`, adds `retry`, or applies `continue`.
 7. Use the validated reply to write `${ISSUE_STATE_FILE}` and `${ATTEMPT_STATE_FILE}` (see §Phase 6 Write Mapping below). The callback path processes exactly one IID — there is no per-batch "fill in missing replies" pass.
 8. **Drain the pending entry.** Remove `pending_subagents[reply.iid]` and the corresponding `iid` from `active_issue_iids` / `active_issue_sessions`. Persist `campaign_state.json`.
 9. **Best-effort terminal cleanup.** If `kill_subagent_on_terminal=true` and a `child_session_key` was captured before drain, Phase 6 may request `subagents kill` for terminal `done` / `blocked` / `failed` / `timeout` by returning `cleanup.action="kill"`. For `blocked` / `failed` / `timeout`, cleanup first verifies local evidence exists under `${LOG_DIR}` / `${ISSUE_ROOT}`; missing evidence yields `cleanup.action="skip", cleanup.reason="local_evidence_missing"` and preserves the runtime transcript.
@@ -388,7 +410,7 @@ The dispatcher takes the validated compact reply and writes:
 - `latest_attempt_dir` ← `${ISSUE_ROOT}` (canonical)
 - `commit_sha` ← reply.commit_sha (empty → null)
 - `merge_request_url` ← reply.merge_request_url (empty → null)
-- `retry_count` ← prior + 1 if final status in {blocked, failed} and the reply is NOT a Phase 5 launch-side synthesized blocked reply; else prior unchanged. `timeout` does NOT consume retry budget.
+- `retry_count` ← prior + 1 if final status in {blocked_cc, blocked_dispatcher, failed_cc, failed_dispatcher} and the reply is NOT a Phase 5 launch-side synthesized blocked reply; else prior unchanged. `timeout` does NOT consume retry budget.
 - `block_reason` ← final block_reason after validation / label-sync errors (empty → null)
 - `updated_at` ← ISO-8601 UTC now
 - preserve `iid`, `session`, `attempts_total` (already monotonically tracked in Phase 4)

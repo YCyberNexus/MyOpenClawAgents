@@ -52,6 +52,17 @@ fi
 
 wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
 
+# Resolved, configuration-driven model tier list (ordered, comma-separated)
+# read straight from the persisted campaign state so the narrow reconcile maps
+# model:{tier} labels against the SAME list the prepare tick used. Defaults to
+# "flash,pro,max" when the state file is absent or has no override.
+MODEL_TIERS_CSV="$(
+  if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+    jq -r '(.model_tiers // ["flash","pro","max"]) | join(",")' "${CAMPAIGN_STATE_FILE}" 2>/dev/null
+  fi
+)"
+[ -z "${MODEL_TIERS_CSV}" ] && MODEL_TIERS_CSV="flash,pro,max"
+
 # Phase 6 step 0 — narrow reconcile (best-effort; failure does NOT abort).
 # The GitLab live state is consulted again so any reviewer relabel between
 # spawn and callback (e.g. continue → reviewer-rejected → blocked) gets
@@ -59,6 +70,7 @@ wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
 if ! PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
         RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+        MODEL_TIERS="${MODEL_TIERS_CSV}" \
         MIN_IID="${IID}" MAX_IID="${IID}" \
         bash "${SCRIPT_DIR}/reconcile.sh" >/dev/null 2>&1; then
   wrapper_log followup "narrow reconcile failed for iid=${IID}; proceeding with cached labels"
@@ -79,6 +91,11 @@ fi
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 
 # Read the compact reply from stdin. Empty stdin → synthesize blocked.
+# A callback arrived but carried no usable compact reply. Per the v2 decision
+# this is attributed to the DISPATCHER side (an empty payload is an
+# orchestration/transport anomaly, not a Claude-Code work outcome), so it
+# defaults to block_side "dispatcher" → blocked-dispatcher and does NOT feed
+# the model-upgrade path.
 RAW_REPLY="$(cat)"
 if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
   REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_ATTEMPT}" \
