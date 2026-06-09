@@ -200,7 +200,17 @@ export REPO_PARENT_PATH REPO_PATH
 # accounts are injected into the subagent prompt). Initialize to empty
 # so downstream `set -u` reads do not trip.
 : "${UI_ACCOUNTS_RELPATH:=}"
-export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH
+# Absolute path of the directory holding the per-tier Claude Code settings
+# files (`<tier>-settings.json`, e.g. flash-settings.json / pro-settings.json /
+# max-settings.json). Optional trigger field `model_settings_dir` overrides
+# this with carry-forward semantics (see references/trigger_command.md). It is
+# an ABSOLUTE path (typically outside ${REPO_PATH}), so unlike the basenames it
+# does NOT feed any path derivation below — it is only initialized here to empty
+# so downstream `set -u` reads do not trip. When empty, the dispatcher skips the
+# per-tier settings copy entirely and acpx uses the worktree's committed
+# .claude/settings.json as-is.
+: "${MODEL_SETTINGS_DIR:=}"
+export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH MODEL_SETTINGS_DIR
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export HULAT_DIR="${REPO_PATH}/hulat"

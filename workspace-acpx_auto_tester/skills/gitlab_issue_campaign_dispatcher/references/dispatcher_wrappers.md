@@ -152,7 +152,13 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     2. `prepare_attempt.sh` → `mode_actual`, `LOCAL_ATTEMPT_BRANCH`.
        Failure → `prep_blocked` (drains pending, classifies as blocked,
        skips IID).
-    3. Optional `claude_settings_path` copy + `update-index --skip-worktree`.
+    3. Optional per-tier model-settings copy: when `model_settings_dir` is
+       configured, copy `${model_settings_dir}/${MODEL}-settings.json` →
+       `${WORKTREE_DIR}/.claude/settings.json` (renamed on copy) +
+       `update-index --skip-worktree` so the resolved `model:{tier}` actually
+       drives acpx's model. A configured dir whose `${MODEL}-settings.json` is
+       missing/unreadable → `prep_blocked` (blocked-dispatcher). Replaces the
+       retired `claude_settings_path` single-file override.
     4. `glab api projects/${PROJECT_URI}/issues/${iid}` → title, URL,
        labels, description (truncated to 4 KB).
     5. `set_issue_label.sh remove <entry-label>` × N then `add doing` (the

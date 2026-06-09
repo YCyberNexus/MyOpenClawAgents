@@ -228,6 +228,29 @@ if [ -n "${T[ui_accounts_relpath]:-}" ]; then
   export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
 fi
 
+# model_settings_dir: absolute path to the directory holding the per-tier
+# Claude Code settings files (`<tier>-settings.json`). The resolved MODEL
+# (flash/pro/max, from resolve_model_tier) selects `${MODEL}-settings.json`,
+# which Phase 4 per-IID prep copies to ${WORKTREE_DIR}/.claude/settings.json so
+# acpx claude exec actually runs on the tier's model. Same carry-forward
+# persistence semantics as ui_accounts_relpath. Validated here (absolute-path
+# rules identical to the retired claude_settings_path) at trigger-parse time so
+# a malformed value aborts the whole tick rather than per-IID. Because it is
+# absolute it does NOT feed env_paths.sh path derivation, so no re-source is
+# needed below.
+if [ -n "${T[model_settings_dir]:-}" ]; then
+  case "${T[model_settings_dir]}" in
+    /) emit_chat_failure "invalid_model_settings_dir: must not be /" ;;
+    /*) ;;
+    *) emit_chat_failure "invalid_model_settings_dir: must be an absolute path" ;;
+  esac
+  case "${T[model_settings_dir]}" in
+    *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_model_settings_dir: dot segments, whitespace, or unsupported characters" ;;
+  esac
+  export MODEL_SETTINGS_DIR="${T[model_settings_dir]}"
+fi
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
@@ -286,6 +309,15 @@ if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
   PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
   if [ -n "${PERSISTED_UAR}" ] && [ "${PERSISTED_UAR}" != "${UI_ACCOUNTS_RELPATH}" ]; then
     export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
+  fi
+fi
+# Carry-forward for model_settings_dir (absolute path → no env_paths re-source,
+# and it never affects the campaign_state.json location, so unlike the basenames
+# it does not participate in the discover-candidate block above).
+if [ -z "${T[model_settings_dir]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+  PERSISTED_MSD="$(jq -r '.model_settings_dir // empty' "${CAMPAIGN_STATE_FILE}")"
+  if [ -n "${PERSISTED_MSD}" ] && [ "${PERSISTED_MSD}" != "${MODEL_SETTINGS_DIR:-}" ]; then
+    export MODEL_SETTINGS_DIR="${PERSISTED_MSD}"
   fi
 fi
 
@@ -472,6 +504,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
   --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
+  --arg model_settings_dir "${MODEL_SETTINGS_DIR}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -497,6 +530,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     result_basename: $result_basename,
     data_basename: $data_basename,
     ui_accounts_relpath: $ui_accounts_relpath,
+    model_settings_dir: $model_settings_dir,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
@@ -1248,26 +1282,26 @@ for iid in "${BATCH_IIDS[@]}"; do
       ;;
   esac
 
-  # claude_settings_path
-  if [ -n "${T[claude_settings_path]:-}" ]; then
-    csp="${T[claude_settings_path]}"
-    case "${csp}" in
-      /) prep_blocked "claude_settings_path must not be /"; continue ;;
-      /*) ;;
-      *) prep_blocked "claude_settings_path must be absolute: ${csp}"; continue ;;
-    esac
-    case "${csp}" in
-      *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
-        prep_blocked "invalid_claude_settings_path: ${csp}"; continue ;;
-    esac
-    if [ ! -r "${csp}" ]; then
-      prep_blocked "claude_settings_path file not found or not readable: ${csp}"; continue
+  # model settings (per-tier): copy ${MODEL}-settings.json → .claude/settings.json
+  # so acpx claude exec actually runs on the tier's model. MODEL was resolved
+  # above by resolve_model_tier and clamped into range (never null). The `cp`
+  # target is a file path, so the source `<tier>-settings.json` lands renamed as
+  # the `settings.json` Claude Code reads by default. This replaces the retired
+  # claude_settings_path single-file override. When MODEL_SETTINGS_DIR is unset
+  # (trigger never configured it and none is persisted) the whole step is skipped
+  # and the worktree's committed .claude/settings.json is used as-is. A configured
+  # dir with a missing/unreadable tier file FAILS the IID (blocked-dispatcher) per
+  # the strict no-fallback policy — no downgrade to a default tier file.
+  if [ -n "${MODEL_SETTINGS_DIR:-}" ]; then
+    msf="${MODEL_SETTINGS_DIR}/${MODEL}-settings.json"
+    if [ ! -r "${msf}" ]; then
+      prep_blocked "model settings file not found or not readable: ${msf}"; continue
     fi
     # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
     # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
     WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
-    if ! cp "${csp}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
-      prep_blocked "claude_settings copy failed"; continue
+    if ! cp "${msf}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
+      prep_blocked "model settings copy failed"; continue
     fi
     git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
   fi

@@ -397,9 +397,10 @@ refresh_shared_config_from_dev() {
     fi
   done
 
-  # A prior claude_settings_path override may have marked .claude/settings.json
-  # skip-worktree. Clear that bit for tracked config paths before overlaying
-  # origin/${DEV_BRANCH}, otherwise explicit config updates can be ignored.
+  # A prior model-settings override (the dispatcher's per-tier copy of
+  # ${MODEL}-settings.json) may have marked .claude/settings.json skip-worktree.
+  # Clear that bit for tracked config paths before overlaying origin/${DEV_BRANCH},
+  # otherwise explicit config updates can be ignored.
   local tracked_config_paths
   if tracked_config_paths="$(git -C "${WORKTREE_DIR}" ls-files -- "${config_paths[@]}")" \
      && [ -n "${tracked_config_paths}" ]; then

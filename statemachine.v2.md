@@ -59,6 +59,7 @@
 - 与工作标签**正交并存**；互斥只在本维度内部（恰好一个 `model:{tier}`）。
 - **per-issue 单调不降**：只换成更高档，跟随 issue 终身到 `CLOSED`。新 issue 无 `model:{tier}` → 视为 TIER_0；首次 PREPARE 显式打最低档。
 - source of truth = GitLab 标签；`state.json` 的 `model_tier` 仅缓存，`reconcile` 让缓存向标签看齐。
+- **档位如何真正生效**：解析出的 `MODEL`（如 `flash`/`pro`/`max`）在 PREPARE 阶段驱动一次"按档复制 settings"——当 trigger 配了 `model_settings_dir`（一个存放 `<tier>-settings.json` 的绝对目录）时，dispatcher 把 `${model_settings_dir}/${MODEL}-settings.json` 复制（并重命名）为 worktree 的 `.claude/settings.json` 并标 `skip-worktree`，acpx claude exec 随后读取它，从而真正切换底层模型。未配 `model_settings_dir` 时跳过复制（沿用 worktree 自带的 `.claude/settings.json`），此时 `model:{tier}` 仅作为 prompt 文本提示而不改变实际模型。
 
 ### 2.3 `quality:low`（一次性软信号）
 
