@@ -2,7 +2,8 @@
 
 - 日期：2026-06-08
 - 分支：`statemachine`
-- 状态：已通过设计澄清，待用户 review
+- 状态：已实现并提交（commit 09d6662）
+- **后续变更（2026-06-09）**：本文档当时把 `model_settings_dir` 设计为 carry-forward 字段（trigger 省略则沿用持久值）。后改为 **per-tick，不再 carry-forward**——trigger 不传即视为该 tick 未配置、退回原先逻辑（不复制、effective=full、tier 仅文本提示）；持久态仍快照本 tick 值，仅供同批 callback 的窄 reconcile 同源，不再用于 carry-forward 恢复。下文 §4/§8 中关于 `model_settings_dir` carry-forward 的描述以此变更为准（trigger 契约见 `references/trigger_command.md`）。
 
 ## 1. 背景与现状
 
@@ -55,10 +56,10 @@ GitLab model:<tier> 标签
 ## 4. 配置：`model_settings_dir` trigger 字段
 
 - 类型：可选，**绝对目录路径**。例：`/data/models/ifp-models`。该目录在被测项目 repo 之外（不强制在 `${REPO_PATH}` 内），故用绝对路径而非 `ui_accounts_relpath` 式相对路径。
-- carry-forward 语义（照搬 `ui_accounts_relpath`）：
-  - trigger 提供 → 写入 `campaign_state.json` 并用于本 tick。
-  - trigger 省略 → 读取持久值（仅 §285-290 旁的 carry-forward 段；**不**进 §240-264 discover 段，理由见本节末条）。
-  - fresh 部署且无持久值 → 未配置（`null`），跳过整个分档复制流程。
+- ~~carry-forward 语义（照搬 `ui_accounts_relpath`）~~ → **已于 2026-06-09 改为 per-tick（见头部批注）**：trigger 提供则用于本 tick 并快照进 `campaign_state.json`（仅供同批 callback 同源）；trigger 省略即该 tick 未配置、退回原先逻辑，**不**从持久值恢复。下列原设计三条已作废，仅留作历史：
+  - ~~trigger 提供 → 写入 `campaign_state.json` 并用于本 tick。~~
+  - ~~trigger 省略 → 读取持久值（仅 §285-290 旁的 carry-forward 段；**不**进 §240-264 discover 段，理由见本节末条）。~~
+  - ~~fresh 部署且无持久值 → 未配置（`null`），跳过整个分档复制流程。~~
 - 格式校验（照搬 `claude_settings_path` 的绝对路径校验，行 1254-1262），违规一律 `emit_chat_failure "invalid_model_settings_dir"`（tick 级配置错误，整 tick fail）：
   - 必须以 `/` 开头；不得恰为 `/`。
   - 拒绝含 `.` / `..` 路径段（`/.`、`/./`、`/..`、`/../`）、`\n`/`\r`/`\t`/空格、`[A-Za-z0-9_./-]` 之外的字符。

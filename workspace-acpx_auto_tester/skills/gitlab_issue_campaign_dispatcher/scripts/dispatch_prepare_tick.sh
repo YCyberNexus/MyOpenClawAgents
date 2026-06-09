@@ -311,15 +311,16 @@ if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
   fi
 fi
-# Carry-forward for model_settings_dir (absolute path → no env_paths re-source,
-# and it never affects the campaign_state.json location, so unlike the basenames
-# it does not participate in the discover-candidate block above).
-if [ -z "${T[model_settings_dir]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-  PERSISTED_MSD="$(jq -r '.model_settings_dir // empty' "${CAMPAIGN_STATE_FILE}")"
-  if [ -n "${PERSISTED_MSD}" ] && [ "${PERSISTED_MSD}" != "${MODEL_SETTINGS_DIR:-}" ]; then
-    export MODEL_SETTINGS_DIR="${PERSISTED_MSD}"
-  fi
-fi
+# model_settings_dir is intentionally NOT carry-forward (unlike ui_accounts_relpath
+# / model_tiers / the basenames). Omitting it on a trigger means "unconfigured this
+# tick": MODEL_SETTINGS_DIR stays at its env_paths.sh empty default, so the
+# per-tier settings copy + tier auto-discovery fall back to legacy behavior
+# (effective = full model_tiers, no settings copy, the tier is a prompt-text hint
+# only). The current tick's value (the trigger's, or empty) is still snapshotted
+# into campaign_state.json by the state jq below — NOT for carry-forward, but so
+# the same-batch callback (dispatch_followup.sh) derives the identical effective
+# tier list for its narrow reconcile. The single-batch invariant guarantees that
+# callback is processed before the next prepare tick can overwrite the snapshot.
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
 # The campaign lock lives inside the repo runtime root
