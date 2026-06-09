@@ -38,6 +38,10 @@ The model dimension is internally mutually exclusive: `set_issue_label.sh add mo
 
 `quality:low` — a human-applied soft signal added in AWAITING_REVIEW to mark a mediocre round. It triggers a single model upgrade and is then removed (consumed) by the dispatcher in PREPARE. Adding or removing it touches nothing else.
 
+### 4. Dispatcher precheck gate (tick-level, non-workflow)
+
+`precheck-failed` — applied by the **dispatcher** (`dispatch_prepare_tick.sh` §16b) to a tick's batch IIDs when the environment precheck fails a `required` check, or the manifest is malformed; the whole tick then aborts. It is NOT a workflow state and NOT part of the mutual-exclusion group: `set_issue_label.sh add precheck-failed` produces no conflicts, so it coexists with whatever workflow label the issue already carries. It does **not** consume `retry_count` and does **not** upgrade the model tier (it is neither in `resolve_model_tier`'s hard set `{ blocked-cc, timeout, failed-cc }` nor a soft trigger). `ensure_labels.sh` creates it with a distinct red color. It is cleared when the issue next enters `doing` (it is in the dispatcher's into-`doing` `REMOVE_LBLS` set) — reaching `doing` means that tick's precheck passed, so the marker is stale. Only the dispatcher sets/clears it; the subagent never touches it. Manifest contract: [`precheck_manifest.md`](precheck_manifest.md).
+
 ## Workflow mutual-exclusion group and the "进 doing 清除集"
 
 The workflow mutual-exclusion group is:
@@ -49,7 +53,7 @@ The workflow mutual-exclusion group is:
 
 Adding any one workflow label removes the others in the same GitLab issue update, except the allowed transient pair `done` + `blocked-cc` / `done` + `blocked-dispatcher`. `pr` keeps only itself (it replaces `done`).
 
-The **"进 doing 清除集"** (the labels the dispatcher strips when transitioning an issue into `doing`) is the entire workflow group above. It **excludes** `model:{tier}` and `quality:low` — the model tier must persist into `doing` (it is part of the issue's identity for life), and `quality:low` is consumed separately by `resolve_model_tier` only when it actually drives an upgrade.
+The **"进 doing 清除集"** (the labels the dispatcher strips when transitioning an issue into `doing`) is the entire workflow group above. It **excludes** `model:{tier}` and `quality:low` — the model tier must persist into `doing` (it is part of the issue's identity for life), and `quality:low` is consumed separately by `resolve_model_tier` only when it actually drives an upgrade. Additionally, the non-workflow `precheck-failed` marker (dimension 4 above) is removed in this same into-`doing` step, even though it is not part of the mutual-exclusion group.
 
 ## Transition diagram
 
@@ -104,7 +108,7 @@ Launch-side synthesized blocked replies (`dispatch_record_spawn.sh STATUS=launch
 
 - **hard**: the prior outcome that caused this re-schedule ∈ { `blocked-cc`, `timeout`, `failed-cc` }
 - **soft** (any hit): `quality:low` present ∨ cumulative continue count ≥ N (trigger `model_upgrade_continue_threshold`, N=0 disables) ∨ auto-score < threshold (black-box; **NOT implemented** in this version — only a commented hook position)
-- **excluded**: `blocked-dispatcher` / `failed-dispatcher` (infrastructure side; a higher model would not help)
+- **excluded**: `blocked-dispatcher` / `failed-dispatcher` / `precheck-failed` (infrastructure / environment side; a higher model would not help — `precheck-failed` is in neither the hard set nor a soft trigger, so it already never upgrades)
 
 Decision: hit and not capped → upgrade one tier (add the higher `model:{tier}`, remove the old one — model dimension is internally exclusive); hit but already at the cap → keep the cap; no hit → keep the current tier. A new issue with no `model:{tier}` label is treated as TIER_0; the first PREPARE explicitly stamps the lowest tier (`model:flash`). `quality:low` is removed (consumed) once an upgrade evaluation used it.
 
@@ -116,7 +120,7 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 
 | From       | To         | Performer  | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / `timeout` / `failed-*` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove the entire workflow group (entry labels + done/pr + blocked-*/timeout/failed-* + matched trigger `require_labels`); add `doing`; preserve `model:{tier}` and `quality:low` |
+| `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / `timeout` / `failed-*` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove the entire workflow group (entry labels + done/pr + blocked-*/timeout/failed-* + matched trigger `require_labels`) plus the non-workflow `precheck-failed` marker; add `doing`; preserve `model:{tier}` and `quality:low` |
 | `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove the workflow group (incl. continue/contiune); add `doing`; preserve `model:{tier}` |
 | (any)      | `model:{tier}` | dispatcher | resolve_model_tier in PREPARE, after the `doing` transition | `set_issue_label.sh add model:<tier>` (removes the old model:* in the same update); on a soft-trigger upgrade also `remove quality:low` |
 | `doing`    | `done`     | subagent   | branch pushed, post-push verified, Wiki artifacts published | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
@@ -128,6 +132,8 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 | `blocked-cc` / `blocked-dispatcher` | `doing` | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | normal `*` → `doing` transition above |
 | `blocked-cc` | `failed-cc` | dispatcher | `retry_count > blocked_retry_limit` in Phase 6 (launch-side synths do not increment) | `set_issue_label.sh add failed-cc` |
 | `blocked-dispatcher` | `failed-dispatcher` | dispatcher | same over-limit rule, dispatcher side | `set_issue_label.sh add failed-dispatcher` |
+| (batch IID, any workflow state) | + `precheck-failed` | dispatcher | §16b environment precheck `required` failure or malformed manifest; whole tick aborts | best-effort `set_issue_label.sh add precheck-failed` on each batch IID (non-workflow add, coexists with the current label); no `retry_count` change, no tier upgrade |
+| `precheck-failed` | (removed) | dispatcher | issue next enters `doing` (that tick's precheck passed) | included in the into-`doing` `REMOVE_LBLS` set |
 | `timeout`  | `doing`    | dispatcher | a human stripped `timeout`, added `retry`, or applied `continue` | normal `*` → `doing` transition above |
 | `pr`       | `continue` | **human reviewer** | reviewer wants the agent to re-run on the existing branch | manual on the GitLab UI; the agent never makes this transition itself |
 

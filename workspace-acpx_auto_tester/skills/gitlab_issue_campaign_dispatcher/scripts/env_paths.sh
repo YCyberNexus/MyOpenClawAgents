@@ -200,6 +200,14 @@ export REPO_PARENT_PATH REPO_PATH
 # accounts are injected into the subagent prompt). Initialize to empty
 # so downstream `set -u` reads do not trip.
 : "${UI_ACCOUNTS_RELPATH:=}"
+# Relative path of the environment-precheck manifest under ${REPO_PATH} (the
+# project checkout root). Optional trigger field `precheck_relpath` overrides
+# this with carry-forward semantics (see references/precheck_manifest.md). There
+# is NO default value: when neither the trigger nor the persisted state supplies
+# a value, PRECHECK_RELPATH stays empty and the dispatcher skips the entire
+# precheck flow (§16b). Initialize to empty so downstream `set -u` reads do not
+# trip.
+: "${PRECHECK_RELPATH:=}"
 # Absolute path of the directory holding the per-tier Claude Code settings
 # files (`<tier>-settings.json`, e.g. flash-settings.json / pro-settings.json /
 # max-settings.json). Optional trigger field `model_settings_dir` overrides
@@ -211,7 +219,7 @@ export REPO_PARENT_PATH REPO_PATH
 # not trip. When empty, the dispatcher skips the per-tier settings copy entirely
 # and acpx uses the worktree's committed .claude/settings.json as-is.
 : "${MODEL_SETTINGS_DIR:=}"
-export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH MODEL_SETTINGS_DIR
+export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH MODEL_SETTINGS_DIR PRECHECK_RELPATH
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export HULAT_DIR="${REPO_PATH}/hulat"
@@ -222,6 +230,13 @@ export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
 export LOG_ROOT="${WORK_ROOT}/log"
 export DISPATCHER_LOG_DIR="${LOG_ROOT}"
+
+# Environment-precheck manifest absolute path (only when configured). When
+# PRECHECK_RELPATH is empty, PRECHECK_FILE stays unset; precheck.sh / §16b are
+# gated on PRECHECK_RELPATH being non-empty, so it is consumed only when set.
+if [ -n "${PRECHECK_RELPATH}" ]; then
+  export PRECHECK_FILE="${REPO_PATH}/${PRECHECK_RELPATH}"
+fi
 export ISSUES_ROOT="${RESULT_ROOT}/issues"
 export LOCK_FILE="${STATE_DIR}/campaign.lock"
 

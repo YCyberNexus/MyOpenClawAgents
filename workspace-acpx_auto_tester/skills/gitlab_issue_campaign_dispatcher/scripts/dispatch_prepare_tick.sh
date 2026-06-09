@@ -228,6 +228,27 @@ if [ -n "${T[ui_accounts_relpath]:-}" ]; then
   export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
 fi
 
+# precheck_relpath: relative path of the environment-precheck manifest under
+# ${REPO_PATH} (the project checkout root). Same carry-forward semantics and the
+# same relpath validation rules as ui_accounts_relpath. See
+# references/precheck_manifest.md. When unset (trigger + persisted state both
+# empty) the dispatcher skips the §16b precheck entirely.
+if [ -n "${T[precheck_relpath]:-}" ]; then
+  case "${T[precheck_relpath]}" in
+    /*)
+      emit_chat_failure "invalid_precheck_relpath: must be a relative path" ;;
+  esac
+  case "${T[precheck_relpath]}" in
+    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+      emit_chat_failure "invalid_precheck_relpath: dot segments or whitespace not allowed" ;;
+  esac
+  case "${T[precheck_relpath]}" in
+    *[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_precheck_relpath: unsupported characters" ;;
+  esac
+  export PRECHECK_RELPATH="${T[precheck_relpath]}"
+fi
+
 # model_settings_dir: absolute path to the directory holding the per-tier
 # Claude Code settings files (`<tier>-settings.json`). The resolved MODEL
 # (flash/pro/max, from resolve_model_tier) selects `${MODEL}-settings.json`,
@@ -260,7 +281,7 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
 # Discover the existing runtime root under REPO_PATH before falling back to
 # a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ] || [ -z "${T[precheck_relpath]:-}" ]; } \
    && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
   shopt -s nullglob
   for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
@@ -279,6 +300,10 @@ if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z 
     if [ -z "${T[ui_accounts_relpath]:-}" ]; then
       PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
       [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
+    fi
+    if [ -z "${T[precheck_relpath]:-}" ]; then
+      PERSISTED_PCR="$(jq -r '.precheck_relpath // empty' "${candidate_state}")"
+      [ -n "${PERSISTED_PCR}" ] && export PRECHECK_RELPATH="${PERSISTED_PCR}"
     fi
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
@@ -309,6 +334,16 @@ if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
   PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
   if [ -n "${PERSISTED_UAR}" ] && [ "${PERSISTED_UAR}" != "${UI_ACCOUNTS_RELPATH}" ]; then
     export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
+  fi
+fi
+# precheck_relpath carry-forward. Like ui_accounts_relpath, the relpath itself
+# does not feed dispatcher path derivation (the §16b precheck call passes
+# PRECHECK_RELPATH to precheck.sh, which re-derives PRECHECK_FILE on its own),
+# so no env_paths re-source is needed here.
+if [ -z "${T[precheck_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+  PERSISTED_PCR="$(jq -r '.precheck_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
+  if [ -n "${PERSISTED_PCR}" ] && [ "${PERSISTED_PCR}" != "${PRECHECK_RELPATH}" ]; then
+    export PRECHECK_RELPATH="${PERSISTED_PCR}"
   fi
 fi
 # model_settings_dir is intentionally NOT carry-forward (unlike ui_accounts_relpath
@@ -505,6 +540,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
   --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
+  --arg precheck_relpath "${PRECHECK_RELPATH}" \
   --arg model_settings_dir "${MODEL_SETTINGS_DIR}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
@@ -531,6 +567,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     result_basename: $result_basename,
     data_basename: $data_basename,
     ui_accounts_relpath: $ui_accounts_relpath,
+    precheck_relpath: $precheck_relpath,
     model_settings_dir: $model_settings_dir,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
@@ -995,6 +1032,51 @@ if [ "${BATCH_SIZE}" = "0" ]; then
   exit 0
 fi
 
+# ─── 16b. Environment precheck (only when configured) ─────────────
+# Runs after the batch is known (so a required failure can tag exactly the batch
+# IIDs) and BEFORE §17 per-IID prep (the heavy work). The manifest lives in the
+# cloned repo — clone_or_pull.sh (§13) has already populated it. A required
+# failure (or a malformed manifest) tags this tick's batch IIDs with
+# `precheck-failed` (best-effort) and aborts the whole tick; the tag is cleared
+# when the issue next enters `doing` (§20 REMOVE_LBLS). Skipped entirely when
+# PRECHECK_RELPATH is empty (neither trigger nor persisted state configured it).
+# Placed before the fresh-issue cursor advance below so an abort here does not
+# move the cursor (the advance is not persisted until §19 anyway).
+if [ -n "${PRECHECK_RELPATH}" ]; then
+  PRECHECK_OUT="$(mktemp)"
+  set +e
+  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+    UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+    PRECHECK_RELPATH="${PRECHECK_RELPATH}" \
+    bash "${SCRIPT_DIR}/precheck.sh" >"${PRECHECK_OUT}" 2>&1
+  PRECHECK_RC=$?
+  set -e
+  cat "${PRECHECK_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
+  rm -f "${PRECHECK_OUT}"
+  if [ "${PRECHECK_RC}" -ne 0 ]; then
+    # Tag the batch IIDs (best-effort) then abort. precheck-failed is a
+    # non-workflow marker (set_issue_label.sh adds it without disturbing the
+    # workflow label) and does NOT consume retry or upgrade the model tier.
+    mapfile -t PRECHECK_BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
+    for piid in "${PRECHECK_BATCH_IIDS[@]}"; do
+      PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+        UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+        ISSUE_IID="${piid}" \
+        bash "${SCRIPT_DIR}/set_issue_label.sh" add precheck-failed \
+        >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    done
+    case "${PRECHECK_RC}" in
+      2) PRECHECK_REASON="precheck_manifest_error" ;;
+      *) PRECHECK_REASON="precheck_failed" ;;
+    esac
+    emit_chat_failure "${PRECHECK_REASON} (exit ${PRECHECK_RC}; batch=[${PRECHECK_BATCH_IIDS[*]}]; see ${DISPATCHER_LOG_DIR}/precheck-*.json)"
+  fi
+fi
+
 # Move the fresh-issue cursor past any fresh IID selected for this batch. The
 # backlog/blocked paths do not affect it.
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
@@ -1169,8 +1251,10 @@ for iid in "${BATCH_IIDS[@]}"; do
   #             ∨ continue_count ≥ model_upgrade_continue_threshold (when > 0)
   #             ∨ auto-score < threshold   (NOT IMPLEMENTED — placeholder; see
   #                                          AUTO_SCORE_UPGRADE hook below)
-  #     never : blocked-dispatcher / failed-dispatcher (infrastructure side —
-  #             a higher model would not help)
+  #     never : blocked-dispatcher / failed-dispatcher / precheck-failed
+  #             (infrastructure / environment side — a higher model would not
+  #             help; precheck-failed is neither in the hard set above nor a
+  #             soft trigger, so it already never upgrades — no special-casing)
   # A new issue with no model:{tier} label is TIER_0; the first PREPARE
   # explicitly stamps the lowest tier. A hit at the cap keeps the cap.
   # Upgrade ladder + MODEL selection run on the EFFECTIVE tier list (only tiers
@@ -1361,7 +1445,9 @@ for iid in "${BATCH_IIDS[@]}"; do
   # `doing` (it follows the issue for life), and `quality:low` is consumed
   # separately by resolve_model_tier below, only when it actually drives an
   # upgrade.
-  REMOVE_LBLS=(todo retry new continue contiune blocked-cc blocked-dispatcher done pr timeout failed-cc failed-dispatcher)
+  # precheck-failed (the dispatcher-side §16b tick gate) is cleared here too:
+  # reaching `doing` means this tick's precheck passed, so the marker is stale.
+  REMOVE_LBLS=(todo retry new continue contiune blocked-cc blocked-dispatcher done pr timeout failed-cc failed-dispatcher precheck-failed)
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \

@@ -23,6 +23,7 @@ ${REPO_PATH}/                                            ← parent checkout (de
             campaign.lock                                ← flock target for the orchestrator
             log/
                 reconcile-<ts>.json                      ← reconciliation evidence files
+                precheck-<ts>.json                       ← environment-precheck evidence files (when precheck_relpath configured)
             locks/
                 repo.lock                                ← flock target for clone_or_pull / prepare_attempt
         issues/                                          ← ${ISSUES_ROOT}; parent of per-issue persistent subtrees

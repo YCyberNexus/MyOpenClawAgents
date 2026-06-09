@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "urls": [
+    { "name": "backend-api",    "url": "https://api.example.com",        "severity": "required" },
+    { "name": "artifact-repo",  "url": "https://nexus.example.com:8081", "severity": "required" },
+    { "name": "local-postgres", "url": "tcp://localhost:5432",           "severity": "optional" }
+  ],
+  "commands": [
+    { "name": "node", "bin": "node", "severity": "required" },
+    { "name": "java", "bin": "java", "severity": "required" },
+    { "name": "mvn",  "bin": "mvn",  "severity": "optional" }
+  ],
+  "env_vars": [
+    { "name": "java-home", "var": "JAVA_HOME",       "severity": "required" },
+    { "name": "api-key",   "var": "EXAMPLE_API_KEY", "severity": "optional" }
+  ],
+  "files": [
+    { "name": "knowledge-base", "path": "ifp-data",         "kind": "dir",  "severity": "required" },
+    { "name": "tls-cert",       "path": "/etc/ssl/app.pem", "kind": "file", "severity": "optional" }
+  ]
+}

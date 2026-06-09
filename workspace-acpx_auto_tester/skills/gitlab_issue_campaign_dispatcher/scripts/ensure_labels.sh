@@ -69,6 +69,11 @@ while IFS= read -r __tier; do
   [ -n "${__tier}" ] && MODEL_LABELS+=("model:${__tier}")
 done < <(printf '%s' "${MODEL_TIERS}" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
 QUALITY_LABELS=(quality:low)
+# Dispatcher-side tick-level marker (NOT a mutually-exclusive workflow state):
+# precheck-failed is applied to a tick's batch IIDs when environment precheck
+# fails (dispatch_prepare_tick.sh §16b), and cleared when the issue next enters
+# `doing`. See references/precheck_manifest.md / references/label_lifecycle.md.
+DISPATCHER_LABELS=(precheck-failed)
 
 existing="$(
   glab api --paginate \
@@ -79,13 +84,14 @@ existing="$(
 # label_color <label> — pick a color for a label that needs creating.
 label_color() {
   case "$1" in
-    model:*)   printf '%s' "#1f78d1" ;;  # blue — persistent model tier
-    quality:*) printf '%s' "#ed9121" ;;  # amber — one-shot soft signal
-    *)         printf '%s' "#808080" ;;  # gray  — workflow state
+    model:*)         printf '%s' "#1f78d1" ;;  # blue  — persistent model tier
+    quality:*)       printf '%s' "#ed9121" ;;  # amber — one-shot soft signal
+    precheck-failed) printf '%s' "#d9534f" ;;  # red   — dispatcher precheck gate
+    *)               printf '%s' "#808080" ;;  # gray  — workflow state
   esac
 }
 
-for label in "${WORKFLOW_LABELS[@]}" "${MODEL_LABELS[@]}" "${QUALITY_LABELS[@]}"; do
+for label in "${WORKFLOW_LABELS[@]}" "${MODEL_LABELS[@]}" "${QUALITY_LABELS[@]}" "${DISPATCHER_LABELS[@]}"; do
   if ! printf '%s\n' "${existing}" | grep -qx "${label}"; then
     glab api --method POST \
       "projects/${PROJECT_URI}/labels" \
