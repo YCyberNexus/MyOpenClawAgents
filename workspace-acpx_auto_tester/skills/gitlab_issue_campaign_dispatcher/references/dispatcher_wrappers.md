@@ -148,7 +148,15 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
        / `failed-dispatcher` never upgrade) plus the cached `model_tier`,
        decide the new tier (raise one tier, or hold at the cap, or hold). A
        new issue with no `model:{tier}` label is TIER_0. Captures `MODEL`
-       (the resolved model name) and `MODEL_TIER_LABEL` for steps 5b / 6.
+       (the resolved model name) and `MODEL_TIER_LABEL` for steps 5b / 6. The
+       upgrade ladder is the EFFECTIVE tier list — `model_tiers` intersected
+       with the `<tier>-settings.json` actually present in `model_settings_dir`
+       (auto-discovered each tick via `derive_effective_model_tiers`);
+       `reconcile.sh` maps `model:<tier>` labels to integer indices against the
+       same effective list, while `ensure_labels.sh` / `set_issue_label.sh` use
+       the full `model_tiers`. A configured `model_settings_dir` with none of
+       the tiers' `<tier>-settings.json` present aborts the tick
+       (`no_model_settings_files`).
     2. `prepare_attempt.sh` → `mode_actual`, `LOCAL_ATTEMPT_BRANCH`.
        Failure → `prep_blocked` (drains pending, classifies as blocked,
        skips IID).

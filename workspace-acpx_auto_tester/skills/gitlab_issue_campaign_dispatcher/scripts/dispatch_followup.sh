@@ -63,6 +63,25 @@ MODEL_TIERS_CSV="$(
 )"
 [ -z "${MODEL_TIERS_CSV}" ] && MODEL_TIERS_CSV="flash,pro,max"
 
+# Narrow reconcile must map model:{tier} labels against the EFFECTIVE ladder
+# (tiers whose <tier>-settings.json exist), identical to what the prepare tick
+# used — otherwise the cached integer model_tier would drift between paths.
+# model_settings_dir is read from the same persisted state (already path-validated
+# at the prepare entry before it was persisted; here it only feeds the read-only
+# `[ -r <tier>-settings.json ]` probe inside derive_effective_model_tiers — never
+# a cp / exec — so it is intentionally not re-validated. Anyone later reusing
+# this value for a cp/exec-class op MUST re-validate). empty → effective equals
+# full. On the callback path an empty effective (should not happen for an IID
+# that was actually spawned) falls back to full rather than aborting, since this
+# narrow reconcile is best-effort.
+MODEL_SETTINGS_DIR_FU="$(
+  if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+    jq -r '.model_settings_dir // empty' "${CAMPAIGN_STATE_FILE}" 2>/dev/null
+  fi
+)"
+EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_CSV}" "${MODEL_SETTINGS_DIR_FU}")"
+[ -z "${EFFECTIVE_TIERS_CSV}" ] && EFFECTIVE_TIERS_CSV="${MODEL_TIERS_CSV}"
+
 # Phase 6 step 0 — narrow reconcile (best-effort; failure does NOT abort).
 # The GitLab live state is consulted again so any reviewer relabel between
 # spawn and callback (e.g. continue → reviewer-rejected → blocked) gets
@@ -70,7 +89,7 @@ MODEL_TIERS_CSV="$(
 if ! PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
         RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-        MODEL_TIERS="${MODEL_TIERS_CSV}" \
+        MODEL_TIERS="${EFFECTIVE_TIERS_CSV}" \
         MIN_IID="${IID}" MAX_IID="${IID}" \
         bash "${SCRIPT_DIR}/reconcile.sh" >/dev/null 2>&1; then
   wrapper_log followup "narrow reconcile failed for iid=${IID}; proceeding with cached labels"

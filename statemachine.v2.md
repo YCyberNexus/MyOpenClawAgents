@@ -60,6 +60,7 @@
 - **per-issue 单调不降**：只换成更高档，跟随 issue 终身到 `CLOSED`。新 issue 无 `model:{tier}` → 视为 TIER_0；首次 PREPARE 显式打最低档。
 - source of truth = GitLab 标签；`state.json` 的 `model_tier` 仅缓存，`reconcile` 让缓存向标签看齐。
 - **档位如何真正生效**：解析出的 `MODEL`（如 `flash`/`pro`/`max`）在 PREPARE 阶段驱动一次"按档复制 settings"——当 trigger 配了 `model_settings_dir`（一个存放 `<tier>-settings.json` 的绝对目录）时，dispatcher 把 `${model_settings_dir}/${MODEL}-settings.json` 复制（并重命名）为 worktree 的 `.claude/settings.json` 并标 `skip-worktree`，acpx claude exec 随后读取它，从而真正切换底层模型。未配 `model_settings_dir` 时跳过复制（沿用 worktree 自带的 `.claude/settings.json`），此时 `model:{tier}` 仅作为 prompt 文本提示而不改变实际模型。
+- **档位自动发现 + 智慧序**：flash/pro/max 不必都有。配了 `model_settings_dir` 时，`model_tiers`（默认 `flash,pro,max`）退为"智慧序全集"，本部署实际升级阶梯 = 全集 ∩ 目录里实际有 `${tier}-settings.json` 的档（保智慧序，每 tick 重新发现，由 `derive_effective_model_tiers` 计算）。例：目录只放 `pro-settings.json`+`max-settings.json` → 阶梯 pro→max（首档 pro，失败升 max）；只放 flash+max → flash→max；只放一个 → 单档不升。`reconcile`/`resolve_model_tier` 用这个 effective 子集算 `model_tier` 索引与升档阶梯；`ensure_labels`/`set_issue_label` 仍用全集（建全部 `model:*` 标签 / 互斥清除，保证迁移时旧档标签可清）。配了但目录无任何匹配文件 → 整 tick fail（`no_model_settings_files`）。
 
 ### 2.3 `quality:low`（一次性软信号）
 

@@ -671,17 +671,36 @@ if [ "${PENDING_COUNT}" -gt 0 ]; then
   exit 0
 fi
 
-# Resolved, configuration-driven model tier list (ordered, comma-separated).
-# The single source of truth for the model dimension across ensure_labels.sh,
-# reconcile.sh and the model-tier set_issue_label.sh call below. Defaults to
-# "flash,pro,max" so the default deployment behaves exactly as before.
+# Configuration-driven model tier list (ordered, comma-separated). Two values:
+#   MODEL_TIERS_CSV     — the FULL configured list (model_tiers, default
+#                         "flash,pro,max" = the wisdom order flash<pro<max).
+#                         Drives ensure_labels.sh (creates every model:<tier>
+#                         label) and the model-tier set_issue_label.sh call's
+#                         model:* mutual-exclusion clear-set.
+#   EFFECTIVE_TIERS_CSV — the subset whose ${MODEL_SETTINGS_DIR}/<tier>-settings.json
+#                         exists (order preserved); empty MODEL_SETTINGS_DIR →
+#                         equals the full list. Drives reconcile.sh's integer
+#                         model_tier index and resolve_model_tier's upgrade
+#                         ladder + MODEL selection, so the ladder matches the
+#                         settings files actually present (tier auto-discovery:
+#                         e.g. only pro+max on disk → start pro, upgrade to max).
 MODEL_TIERS_CSV="$(printf '%s' "${STATE_JSON}" | jq -r '(.model_tiers // ["flash","pro","max"]) | join(",")')"
+EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_CSV}" "${MODEL_SETTINGS_DIR:-}")"
+if [ -n "${MODEL_SETTINGS_DIR:-}" ] && [ -z "${EFFECTIVE_TIERS_CSV}" ]; then
+  # Stable classification prefix + the configured tier list (no absolute path —
+  # the path would leak internal layout into the orchestrator chat and is not
+  # needed to classify; same spirit as ui_account_pool_too_small carrying sizes
+  # but not paths). The full path is left out of chat by design.
+  emit_chat_failure "no_model_settings_files: model_settings_dir is configured but contains none of the model_tiers (${MODEL_TIERS_CSV}) <tier>-settings.json files"
+fi
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
+# reconcile maps model:{tier} labels to integer indices against the EFFECTIVE
+# ladder (must match resolve_model_tier below).
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
-  MODEL_TIERS="${MODEL_TIERS_CSV}")
+  MODEL_TIERS="${EFFECTIVE_TIERS_CSV}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
@@ -1153,7 +1172,15 @@ for iid in "${BATCH_IIDS[@]}"; do
   #             a higher model would not help)
   # A new issue with no model:{tier} label is TIER_0; the first PREPARE
   # explicitly stamps the lowest tier. A hit at the cap keeps the cap.
-  MODEL_TIERS_ARR_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // ["flash","pro","max"]')"
+  # Upgrade ladder + MODEL selection run on the EFFECTIVE tier list (only tiers
+  # whose <tier>-settings.json exist on disk), so a deployment shipping e.g.
+  # only pro+max starts at pro and upgrades to max. EFFECTIVE_TIERS_CSV is
+  # guaranteed non-empty here (configured-but-empty aborted the tick at the
+  # reconcile section above; unconfigured dir → equals the full list), so the
+  # split input is never empty. Were that invariant broken, an empty input
+  # would make the downstream `jq 'length'` fail outright (set -e) rather than
+  # silently yield an empty array — a loud failure, not a wrong default.
+  MODEL_TIERS_ARR_JSON="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | jq -Rc 'split(",")')"
   MODEL_MAX_TIER=$(( $(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq 'length') - 1 ))
   MODEL_CONTINUE_N="$(printf '%s' "${STATE_JSON}" | jq -r '.model_upgrade_continue_threshold // 0')"
 

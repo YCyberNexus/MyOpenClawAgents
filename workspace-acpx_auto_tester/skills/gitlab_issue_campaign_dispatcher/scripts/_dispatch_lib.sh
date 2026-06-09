@@ -45,6 +45,44 @@ set -euo pipefail
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# derive_effective_model_tiers <full_csv> <model_settings_dir>
+#   Echoes the EFFECTIVE ordered model-tier CSV: the subset of <full_csv> for
+#   which `${model_settings_dir}/<tier>-settings.json` exists and is readable,
+#   preserving <full_csv> order. This is the per-deployment upgrade ladder that
+#   auto-discovers which tiers are actually available from the settings files
+#   on disk, while the WISDOM order (flash<pro<max …) is carried by <full_csv>
+#   (the configured model_tiers).
+#     - <model_settings_dir> empty → echoes <full_csv> unchanged (auto-discovery
+#       disabled; legacy behavior — the tier is then only a prompt-text hint).
+#     - configured but no <tier>-settings.json matches → echoes the empty
+#       string; the caller decides (prepare aborts the tick, followup falls
+#       back to the full list because its narrow reconcile is best-effort).
+#   Consumers: reconcile.sh (integer model_tier index) and resolve_model_tier
+#   (upgrade ladder + MODEL selection) MUST use this. ensure_labels.sh (creates
+#   every model:<tier> label) and set_issue_label.sh (model:* mutual-exclusion
+#   clear-set) keep receiving the FULL list so migration / future tier switches
+#   can still create and clear labels outside the current effective subset.
+derive_effective_model_tiers() {
+  local full_csv="$1" msd="$2"
+  if [ -z "${msd}" ]; then
+    printf '%s' "${full_csv}"
+    return 0
+  fi
+  # String accumulation (not a bash array) so an empty result stays `set -u`
+  # safe. The read guard `|| [ -n "${t}" ]` is essential: `tr` emits no trailing
+  # newline after the LAST tier, and a bare `while read` would silently drop it
+  # — and the last tier is the highest/cap tier, so dropping it would quietly
+  # truncate the upgrade ladder.
+  local out="" t
+  while IFS= read -r t || [ -n "${t}" ]; do
+    [ -n "${t}" ] || continue
+    if [ -r "${msd}/${t}-settings.json" ]; then
+      if [ -z "${out}" ]; then out="${t}"; else out="${out},${t}"; fi
+    fi
+  done < <(printf '%s' "${full_csv}" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+  printf '%s' "${out}"
+}
+
 atomic_write_json() {
   local target="$1"
   local tmp
