@@ -531,6 +531,21 @@ if [ -n "${MODEL_CONTINUE_THRESHOLD}" ]; then
   esac
 fi
 
+# pin_model_tier (eval branch): the operator-pinned model tier for THIS tick.
+# REQUIRED on benchmark-test — without it there is nothing to benchmark and we
+# refuse to fall back to the failure-escalation ladder. Per-tick, NOT
+# carry-forward. Membership in the EFFECTIVE tier list is checked later in the
+# per-IID resolve block (where EFFECTIVE_TIERS_CSV is known); here we only
+# enforce presence + a safe label-segment charset.
+PIN_MODEL_TIER="${T[pin_model_tier]:-}"
+if [ -z "${PIN_MODEL_TIER}" ]; then
+  emit_chat_failure "pin_model_tier_required: benchmark-test requires an explicit pin_model_tier on every tick"
+fi
+case "${PIN_MODEL_TIER}" in
+  *[!A-Za-z0-9_.-]*) emit_chat_failure "invalid_pin_model_tier: must match [A-Za-z0-9_.-]+" ;;
+esac
+export PIN_MODEL_TIER
+
 # Apply trigger overrides into the state JSON.
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg project "${PROJECT}" \
@@ -558,6 +573,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson require_labels "${REQ_LABELS_JSON}" \
   --arg require_labels_match "${REQ_LABELS_MATCH}" \
   --argjson model_tiers_override "${MODEL_TIERS_JSON:-null}" \
+  --arg pin_model_tier "${PIN_MODEL_TIER}" \
   --arg model_continue_threshold_override "${MODEL_CONTINUE_THRESHOLD}" '
   . + {
     project: $project,
@@ -569,6 +585,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     ui_accounts_relpath: $ui_accounts_relpath,
     precheck_relpath: $precheck_relpath,
     model_settings_dir: $model_settings_dir,
+    pin_model_tier: $pin_model_tier,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
