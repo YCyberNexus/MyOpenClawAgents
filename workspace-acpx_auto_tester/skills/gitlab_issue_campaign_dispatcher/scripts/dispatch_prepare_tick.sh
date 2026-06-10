@@ -1227,6 +1227,13 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_LABELS=""
   ISSUE_BODY=""
   ISSUE_TITLE_QUOTED="''"
+  # NEW_CONTINUE_COUNT is assigned only in the escalation (else) branch of the
+  # resolve_model_tier block, but the issue-state initializer below reads it
+  # unconditionally (`--argjson continue_count "${NEW_CONTINUE_COUNT}"`). The
+  # pin branch never enters the else, so default it here (set -u safety). Pin
+  # runs are forced fresh, so 0 is the correct cached continue count; the else
+  # branch overwrites this with the prior-count-based value when it runs.
+  NEW_CONTINUE_COUNT=0
 
   # Per-IID env for env_paths-derived paths. MODEL_TIERS is carried so the
   # model:{tier} set_issue_label.sh call below resolves its internal model
