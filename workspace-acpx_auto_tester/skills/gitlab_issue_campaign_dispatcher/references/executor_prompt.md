@@ -4,7 +4,7 @@ The dispatcher extracts the fenced "Rendered Prompt" block below, renders it int
 
 The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
 
-> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–10, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent execute `hulat/agents/*` directly and skip `run_acpx_attempt.sh`, breaking the whole stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
+> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–10, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent execute `hulat/agents/*` directly and skip `run_acpx_attempt.sh`, breaking the whole stage/push pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
 
 ---
 
@@ -442,9 +442,8 @@ B6 — REPLY
     block_reason      = <BLOCK_REASON, non-empty>
 
 HARD rules for the blocked push flow:
-- Do NOT run Step 5 (Wiki upload), Step 6 (doing → done), Step 7
-  (create_mr.sh), or Step 8 (add `pr`). The issue gets `blocked-cc`, NOT
-  `pr`, and no MR is opened for a known-failing attempt.
+- Do NOT run Step 5 (Wiki upload) or Step 6 (doing → done). (Steps 7/8
+  are removed on benchmark-test.) The issue gets `blocked-cc`.
 - Do NOT call `acpx` again. The failed run already produced the only
   worktree contents eligible for this attempt's push.
 - Do NOT use any push command except {SCRIPTS_DIR}/commit_and_push.sh.
@@ -544,13 +543,12 @@ T6 — REPLY
     block_reason      = <BLOCK_REASON, non-empty>
 
 HARD rules for the timeout flow:
-- Do NOT run Step 5 (Wiki upload), Step 6 (doing → done), Step 7
-  (create_mr.sh), or Step 8 (add `pr`). The issue gets `timeout`, NOT
-  `pr`.
+- Do NOT run Step 5 (Wiki upload) or Step 6 (doing → done). (Steps 7/8
+  are removed on benchmark-test.) The issue gets `timeout`.
 - Do NOT prefer `blocked` over `timeout` here — `timeout` is its own
   terminal status and is what the dispatcher's bookkeeping expects for
   this signal. The dispatcher does NOT auto-retry timeouts; reviewers
-  must strip `timeout`, add `retry`, or apply `continue` to re-run.
+  must strip `timeout` or add `retry` to re-run (continue is disabled on benchmark-test).
 - Do NOT call `acpx` again. The script already killed acpx; restarting
   it would burn another full timeout window for the same attempt.
 </timeout_flow>

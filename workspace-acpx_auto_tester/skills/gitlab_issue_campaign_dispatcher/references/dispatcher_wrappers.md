@@ -155,24 +155,23 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     Persist. This is the structural guarantee against same-IID double
     spawn across crashes.
 20. **Per-IID prep loop** (sequential). For each IID:
-    1. Resolve `ISSUE_MODE` (`continue` if `needs_continue` from
-       reconcile OR persisted state mode == continue; else `fresh`).
-    1b. **resolve_model_tier** (v2 §6). From the issue's PRIOR live labels in
-       the reconcile evidence (`has_blocked_cc` / `has_timeout` /
-       `has_failed_cc` = hard trigger; `quality:low` / `continue_count ≥
-       model_upgrade_continue_threshold` = soft trigger; `blocked-dispatcher`
-       / `failed-dispatcher` never upgrade) plus the cached `model_tier`,
-       decide the new tier (raise one tier, or hold at the cap, or hold). A
-       new issue with no `model:{tier}` label is TIER_0. Captures `MODEL`
-       (the resolved model name) and `MODEL_TIER_LABEL` for steps 5b / 6. The
-       upgrade ladder is the EFFECTIVE tier list — `model_tiers` intersected
-       with the `<tier>-settings.json` actually present in `model_settings_dir`
-       (auto-discovered each tick via `derive_effective_model_tiers`);
-       `reconcile.sh` maps `model:<tier>` labels to integer indices against the
-       same effective list, while `ensure_labels.sh` / `set_issue_label.sh` use
-       the full `model_tiers`. A configured `model_settings_dir` with none of
-       the tiers' `<tier>-settings.json` present aborts the tick
-       (`no_model_settings_files`).
+    1. `ISSUE_MODE` is always `fresh` (continue / resume is disabled on the
+       benchmark-test branch; every attempt resets from `origin/${dev_branch}`).
+    1b. **Pin model tier** (benchmark-test). The model tier is PINNED for the
+       whole tick from the REQUIRED `pin_model_tier` trigger field — there is
+       NO failure-escalation ladder (no hard/soft upgrade) and NO `model:{tier}`
+       monotonic-raise invariant (the pin may down-shift from a higher prior
+       tier). The issue is stamped exactly `model:<pin_model_tier>`. Captures
+       `MODEL` (the resolved model name) and `MODEL_TIER_LABEL` for steps 5b / 6.
+       The effective tier list — `model_tiers` intersected with the
+       `<tier>-settings.json` actually present in `model_settings_dir`
+       (auto-discovered each tick via `derive_effective_model_tiers`) — still
+       gates which pins are valid; `reconcile.sh` maps `model:<tier>` labels to
+       integer indices against the same effective list, while `ensure_labels.sh`
+       / `set_issue_label.sh` use the full `model_tiers`. A `pin_model_tier` not
+       in the effective set marks that IID `blocked-dispatcher`. A configured
+       `model_settings_dir` with none of the tiers' `<tier>-settings.json`
+       present aborts the tick (`no_model_settings_files`).
     2. `prepare_attempt.sh` → `mode_actual`, `LOCAL_ATTEMPT_BRANCH`.
        Failure → `prep_blocked` (drains pending, classifies as blocked,
        skips IID).
@@ -186,12 +185,11 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     4. `glab api projects/${PROJECT_URI}/issues/${iid}` → title, URL,
        labels, description (truncated to 4 KB).
     5. `set_issue_label.sh remove <entry-label>` × N then `add doing` (the
-       "进 doing 清除集" = the whole workflow group; model:{tier} and
-       quality:low are deliberately NOT removed).
-    5b. `set_issue_label.sh add ${MODEL_TIER_LABEL}` (stamps the resolved
-       model tier; the model dimension is internally exclusive). On a
-       soft-trigger upgrade that used `quality:low`, also
-       `set_issue_label.sh remove quality:low` (one-shot consumption).
+       "进 doing 清除集" = the whole workflow group; `model:{tier}` is
+       deliberately NOT removed).
+    5b. `set_issue_label.sh add ${MODEL_TIER_LABEL}` (stamps the pinned
+       model tier; the model dimension is internally exclusive, so the pin
+       may down-shift a higher prior tier).
     6. `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`, with `MODEL`
        injected into the prompt's Working environment section).
     7. Initialize `${ATTEMPT_STATE_FILE}` + `${ISSUE_STATE_FILE}` with
@@ -342,7 +340,8 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
    - map reply.status + `block_side` to the v2 internal final_status
      (`done` / `blocked_cc` / `blocked_dispatcher` / `failed_cc` /
      `failed_dispatcher` / `timeout`); a real callback is CC-side
-   - sync labels (`done` → `pr` (replaces done); `blocked_cc` → `blocked-cc`;
+   - sync labels (`done` → `done` (terminal success — there is no `pr`);
+     `blocked_cc` → `blocked-cc`;
      `blocked_dispatcher` → `blocked-dispatcher`; `failed_cc` → `failed-cc`;
      `failed_dispatcher` → `failed-dispatcher`; `timeout` → `timeout`; label
      sync failure on a non-failed / non-timeout outcome → append to
@@ -366,7 +365,7 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 | `callback_status` | `"handled"` or `"stale_or_already_drained"` |
 | `iid`, `attempt_number` | echo |
 | `terminal_status` | final status after label sync + retry promotion (`done` / `blocked_cc` / `blocked_dispatcher` / `failed_cc` / `failed_dispatcher` / `timeout`) |
-| `merge_request_url` | from the compact reply |
+| `merge_request_url` | from the compact reply; always empty `""` on benchmark-test (MR creation is removed) |
 | `block_reason` | from the compact reply (with any label-sync error appended) |
 | `cleanup` | `{action, target, reason}`. LLM should call `subagents kill --target <target>` iff `action == "kill"` |
 | `remaining_pending_iids` | the post-drain `pending_subagents` keys |

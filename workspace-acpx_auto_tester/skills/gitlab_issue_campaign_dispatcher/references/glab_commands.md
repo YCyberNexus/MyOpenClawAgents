@@ -69,9 +69,9 @@ glab api --method POST \
 
 ### G4 — Add a target label (dispatcher prep + subagent)
 
-Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing`, to stamp the persistent `model:{tier}` label, and to re-apply final callback labels (`pr`, `blocked-cc` / `blocked-dispatcher`, or `failed-cc` / `failed-dispatcher`). The subagent also uses it for immediate `done` / `pr` / `blocked-cc` updates during the post-acpx flow.
+Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing`, to stamp the persistent `model:{tier}` label, and to re-apply final callback labels (`blocked-cc` / `blocked-dispatcher`, or `failed-cc` / `failed-dispatcher`). The subagent also uses it for immediate `done` / `blocked-cc` updates during the post-acpx flow.
 
-For workflow labels, the wrapper also passes `remove_labels=<conflicting workflow labels>` in the same issue update, preserving unrelated non-workflow labels (incl. the orthogonal `model:{tier}` / `quality:low` dimensions) while enforcing the allowed workflow states (`pr` — which replaces `done`, the transient `done` + `blocked-cc` / `done` + `blocked-dispatcher` pair, or one workflow label). Adding a `model:{tier}` label removes the other model tiers in the same update but touches no workflow label.
+For workflow labels, the wrapper also passes `remove_labels=<conflicting workflow labels>` in the same issue update, preserving unrelated non-workflow labels (incl. the orthogonal `model:{tier}` dimension) while enforcing the allowed workflow states (`done` terminal success, the transient `done` + `blocked-cc` / `done` + `blocked-dispatcher` pair, or one workflow label). Adding a `model:{tier}` label removes the other model tiers in the same update but touches no workflow label.
 
 ```bash
 glab api --method PUT \
@@ -91,6 +91,8 @@ glab api --method PUT \
 
 ### G6 — Look up open MRs for the work branch (subagent)
 
+**RETIRED on benchmark-test** — this command existed only for the deleted `scripts/create_mr.sh`. There is no MR creation on this branch; the section is retained for reference only.
+
 Used by `scripts/create_mr.sh` to list any open MRs pointing at the work branch before rotation. **Both** `fresh` and `continue` modes close every prior open MR and then create a fresh one each attempt (Strategy A — one open MR per issue at any moment, rotated per attempt). The returned JSON drives both the close loop (G10) and the final MR-URL extraction (`.[0].web_url`).
 
 ```bash
@@ -103,6 +105,8 @@ glab mr list \
 Returns a JSON array. Do not add `--state opened`: runner-installed `glab 1.93.0` does not recognize that flag, and `glab mr list` already defaults to open MRs. `scripts/create_mr.sh` also filters the JSON with `jq '[.[] | select((.state // "opened") == "opened")]'` as a guard. Use `jq -r 'if length > 0 then .[0].web_url else "" end'` to extract the URL.
 
 ### G7 — Create a merge request (subagent)
+
+**RETIRED on benchmark-test** — this command existed only for the deleted `scripts/create_mr.sh`. There is no MR creation on this branch; the section is retained for reference only.
 
 Wrapped by `scripts/create_mr.sh`. Called once per attempt in **both** modes, after G10 has closed every prior open MR (if any). There is no fresh-mode reuse path — every attempt produces a new MR object.
 
@@ -119,6 +123,8 @@ glab mr create \
 The inline `--description "$(cat ...)"` form is intentional. Some runner-installed `glab` versions don't recognize `--description-file`; the inline `--description` flag has been in glab since the beginning. See the "Flag compatibility" rule below.
 
 ### G8 — Look up the MR URL after creation (subagent, reserved)
+
+**RETIRED on benchmark-test** — this command existed only for the deleted `scripts/create_mr.sh`. There is no MR creation on this branch; the section is retained for reference only.
 
 Permitted command, but `scripts/create_mr.sh` does **not** currently call it: after creating the MR it re-runs the G6 list and extracts `.[0].web_url` from the guaranteed single open MR. G8 is retained as an allowed fallback for looking up a single MR by branch.
 
@@ -139,6 +145,8 @@ glab api --method POST \
 The `-F body=@<file>` form uploads the file contents as the form field, which avoids quoting issues for large multiline summaries.
 
 ### G10 — Close (without merging) an existing MR (subagent)
+
+**RETIRED on benchmark-test** — this command existed only for the deleted `scripts/create_mr.sh`. There is no MR creation on this branch; the section is retained for reference only.
 
 Used by `scripts/create_mr.sh` in **both** modes to close every prior open MR for the work branch before creating a fresh one. Closing is NOT merging — the integration branch is unaffected; the closed MR remains in GitLab as historical record.
 
