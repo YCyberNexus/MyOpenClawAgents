@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # commit_and_push.sh — commit the staged changes inside the repo root and
-# force-push the per-attempt local branch to the SINGLE fixed remote
-# branch ${WORK_BRANCH} (Strategy A).
+# push to the remote. On the benchmark-test (model-eval) branch this is a
+# DUAL write: (1) force-push the per-attempt local branch to the single fixed
+# ${WORK_BRANCH} (legacy Strategy A "latest pointer"; retired in phase 2), AND
+# (2) push an IMMUTABLE per-attempt branch ${LOCAL_ATTEMPT_BRANCH} that is
+# never overwritten — that is the durable artifact each pinned model run leaves
+# behind for benchmarking.
 #
 # Required env vars:
 #   WORKTREE_DIR             repo root cwd for git commands
@@ -37,5 +41,11 @@ if git ls-remote --exit-code --heads origin "${WORK_BRANCH}" >/dev/null 2>&1; th
 else
   git push origin "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}"
 fi
+
+# eval mode: also push an IMMUTABLE per-attempt remote branch so every attempt
+# (= every pinned model run) is preserved and never overwritten. LOCAL_ATTEMPT_BRANCH
+# is "issue/<iid>-auto-fix-att<NNN>" (unique per attempt); push it to the same
+# name on the remote (NOT force — it must never already exist for a fresh attempt).
+git push origin "${LOCAL_ATTEMPT_BRANCH}:${LOCAL_ATTEMPT_BRANCH}"
 
 git rev-parse HEAD
