@@ -123,3 +123,16 @@ UPGRADE? = 硬触发 ∪ 软触发
 ## 5. 不变量（贯穿全程）
 
 **GitLab 实时标签 = 状态唯一真相；磁盘 `campaign_state.json` / `state.json`（含 `model_tier`）/ `attempt_state.json` 只是 dispatcher 进度缓存。** 冲突时永远以 GitLab 为准；每 tick 强制 `reconcile.sh` 并写 `reconcile-<ts>.json` 证据文件兜底——**没有证据文件 = 该 tick 判失败**。
+
+---
+
+## 6. benchmark-test 分支偏离（model-eval 特化，阶段一）
+
+`benchmark-test` 分支把 agent 特化为专门评测 model 的工具，从**效率 + 准确率**两维对比候选模型（cost 不采，交专门部门）。它**有意偏离**上述生产语义，阶段一通过行为变更实现（旧子系统的死代码清理留待阶段二）：
+
+- **模型由 `pin_model_tier` 决定，不再失败升档。** 新增的 per-tick 必填触发字段 `pin_model_tier` 短路 `resolve_model_tier` 的 hard/soft 升档与 `model:{tier}` 单调上升不变式：issue 被精确打成 `model:<pin>`（允许从高档下调，靠 `set_issue_label` 的 `model:*` 互斥清旧档）。缺失则 tick abort `pin_model_tier_required`。sweep = 对同一 issue 每个候选模型触发一轮。
+- **`done` 为终态成功标签，无 `pr`。** 移除 MR/pr 流程（executor Step 7/8 删除、`phase6_sync_labels` 的 done 分支改为 `add done`）。`pr REPLACES done` 不再适用。
+- **强制 fresh。** 每个 attempt 从 `origin/${dev_branch}` 干净基线起跑（`continue` 续作禁用），保证不同模型在相同输入上可比。
+- **全量留档 + 每 attempt 不可变分支。** `stage_and_guard` force-add 整个 `${LOG_DIR}`；`commit_and_push` 额外 push 不可变 `issue/<iid>-auto-fix-att<NNN>`，永不覆盖。
+- **指标采集与汇总。** subagent Step 1.5 调 `collect_metrics.sh` 写 `metrics.json`（wall_clock + robot 通过率，best-effort），随 compact 回执回传；Phase 6 append 到 `${RESULT_BASENAME}/_dispatcher/benchmark/metrics.jsonl`（model 由 issue state 权威补齐）；`aggregate_benchmark.sh` 出 `issue × model` 矩阵。
+- **保留不变的可靠性核心：** `reconcile` + 证据文件、`flock`、`precheck`、`timeout`/孤儿防护、UI 账号池、并发 per-issue worktree、anonymous spawn + async callback、per-side 失败标签拆分（`blocked-cc` / `blocked-dispatcher` / `failed-cc` / `failed-dispatcher`）。
