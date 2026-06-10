@@ -10,10 +10,10 @@
 # project via the `result_basename` trigger field, and repository-wide
 # so it applies to every linked worktree):
 #   - the current issue's ${OUTPUT_DIR} (the committable spec output);
-#   - ${LOG_DIR}/prompt.txt and ${LOG_DIR}/claude_result.txt (the two
-#     human-reviewable evidence files; intentionally NOT the bulky
-#     acpx_raw.log / git_diff.patch / wiki_* / mr_description.md, which
-#     stay locally ignored and disappear with the worktree).
+#   - the ENTIRE ${LOG_DIR} (eval branch full archival: acpx_raw.log,
+#     git_diff.patch, acpx_command.txt, timing.txt, metrics.json,
+#     prompt.txt, claude_result.txt) so every attempt's full evidence
+#     lands in its immutable per-attempt branch for benchmarking.
 # The script still distinguishes STAGED_OK from NO_CHANGES so the caller
 # can short-circuit empty diffs.
 #
@@ -55,16 +55,6 @@ fi
 
 git add -A
 
-# In continue mode the worktree is checked out from origin/${WORK_BRANCH}
-# which already has prior attempts' `log/attempt-NNN/prompt.txt` +
-# `claude_result.txt` committed. `.git/info/exclude` only blocks untracked
-# files, so any modification a Claude Code run accidentally makes under
-# `<RESULT_BASENAME>/issue-<iid>/log/` would be picked up by `git add -A`
-# above and silently rewrite prior attempts' reviewer evidence. Unstage
-# anything under that subtree before the explicit force-add for the
-# current attempt's two files.
-git reset -q -- "${RESULT_BASENAME}/issue-${ISSUE_IID}/log/" 2>/dev/null || true
-
 staged_deleted_paths="$(git diff --cached --name-only --diff-filter=D)"
 if [ -n "${staged_deleted_paths}" ]; then
   {
@@ -80,16 +70,14 @@ elif [ -d "${OUTPUT_DIR}" ] && [ -n "$(find "${OUTPUT_DIR}" -type f -print -quit
   git add -f "${OUTPUT_DIR}"
 fi
 
-# Force-add the two reviewer-facing log files so they land in the MR
-# diff. acpx_raw.log / git_status.txt / git_diff.patch / wiki_* /
-# mr_description.md are intentionally NOT force-added; they remain
-# locally ignored under `.git/info/exclude` and are discarded with the
-# worktree on housekeeping.
-for log_file in "${LOG_DIR}/prompt.txt" "${LOG_DIR}/claude_result.txt"; do
-  if [ -f "${log_file}" ]; then
-    git add -f "${log_file}"
-  fi
-done
+# eval mode: force-add the ENTIRE attempt log dir so every artifact
+# (acpx_raw.log, git_diff.patch, acpx_command.txt, timing.txt, metrics.json,
+# prompt.txt, claude_result.txt) lands in the per-attempt branch for
+# benchmarking. The ${RESULT_BASENAME}/ line in .git/info/exclude would
+# otherwise hide all of it; -f bypasses that.
+if [ -d "${LOG_DIR}" ] && [ -n "$(find "${LOG_DIR}" -type f -print -quit)" ]; then
+  git add -f "${LOG_DIR}"
+fi
 
 if [ -z "$(git diff --cached --name-only)" ]; then
   echo "NO_CHANGES"
