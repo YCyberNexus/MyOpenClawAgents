@@ -16,20 +16,17 @@
 # also removes conflicting workflow labels to keep the issue in a single
 # workflow state, except for the allowed transient pairs (see below).
 #
-# v2 label model:
+# label model (benchmark-test):
 #   - Workflow labels are a mutually-exclusive group (todo / new / retry /
-#     continue / doing / done / pr / blocked-cc / blocked-dispatcher /
-#     timeout / failed-cc / failed-dispatcher). Adding any one removes the
-#     others. `pr` REPLACES `done` (its keep-set is just `pr`); the only
+#     doing / done / blocked-cc / blocked-dispatcher / timeout / failed-cc /
+#     failed-dispatcher). Adding any one removes the others. `done` is the
+#     terminal success label (there is no MR / `pr` on this branch); the only
 #     allowed transient pair is `done` + `blocked-cc` or `done` +
-#     `blocked-dispatcher` (a failure after `done` but before the MR / `pr`).
+#     `blocked-dispatcher` (a failure after `done`).
 #   - `model:{tier}` is a separate persistent dimension that is internally
 #     mutually exclusive: adding `model:pro` removes `model:flash` /
-#     `model:max` but does NOT touch any workflow label or `quality:low`.
-#     This is what keeps the model tier alive across the transition into
-#     `doing`.
-#   - `quality:low` is a one-shot soft signal: adding or removing it touches
-#     nothing else.
+#     `model:max` but does NOT touch any workflow label. This is what keeps the
+#     model tier alive across the transition into `doing`.
 #   - `precheck-failed` is a dispatcher-side, tick-level marker (NOT a workflow
 #     state). It is an unknown non-workflow / non-model label here, so adding it
 #     produces no conflicts and it coexists with any workflow label. The
@@ -55,9 +52,8 @@ fi
 OP="$1"
 LABEL="$2"
 
-# Workflow mutual-exclusion group (v2). `contiune` is the legacy misspelling
-# of `continue`, tolerated on removal so stale issues get cleaned up.
-WORKFLOW_LABELS=(todo retry new doing done pr blocked-cc blocked-dispatcher timeout failed-cc failed-dispatcher continue contiune)
+# Workflow mutual-exclusion group (benchmark-test: no `pr`, no `continue`).
+WORKFLOW_LABELS=(todo retry new doing done blocked-cc blocked-dispatcher timeout failed-cc failed-dispatcher)
 # Model tier dimension — internally mutually exclusive, orthogonal to the
 # workflow group (NOT cleared when a workflow label is added). The tier set
 # is configuration-driven: MODEL_TIERS is an ordered, comma-separated list
@@ -117,10 +113,6 @@ conflicts_for_add() {
 
   local keep=("${label}")
   case "${label}" in
-    pr)
-      # pr REPLACES done — keep ONLY pr (done is removed in the same update).
-      keep=(pr)
-      ;;
     blocked-cc)
       # Allowed transient pair: a failure after `done` but before `pr`.
       keep=(done blocked-cc)
