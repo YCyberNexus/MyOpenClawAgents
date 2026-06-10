@@ -97,6 +97,10 @@ fi
 
 cd "${WORKTREE_DIR}"
 
+# Benchmark efficiency stamp: record wall-clock start before acpx launches.
+# collect_metrics.sh reads timing.txt to compute wall_clock_seconds.
+printf 'start_epoch=%s\n' "$(date +%s)" > "${LOG_DIR}/timing.txt"
+
 # Run acpx (under `timeout`) as a backgrounded job in its OWN process group
 # so the entire acpx subtree can be torn down if THIS script is signalled to
 # stop. Two reasons this matters:
@@ -131,6 +135,7 @@ cleanup() {
   # timeout flow (executor_prompt.md "NO `ACPX_EXIT=<n>` line → timeout").
   # We still exit 124 (rather than the inherited signal code) so that on the
   # off chance the code IS read it maps to timeout, never blocked.
+  printf 'end_epoch=%s\n' "$(date +%s)" >> "${LOG_DIR}/timing.txt" 2>/dev/null || true
   exit 124
 }
 
@@ -152,6 +157,7 @@ trap cleanup TERM INT HUP
 set +m
 wait "${acpx_pgid}"
 acpx_exit=$?
+printf 'end_epoch=%s\n' "$(date +%s)" >> "${LOG_DIR}/timing.txt"
 set -e
 trap - TERM INT HUP
 
