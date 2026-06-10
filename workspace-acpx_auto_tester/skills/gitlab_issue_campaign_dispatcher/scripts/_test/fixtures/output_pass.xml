@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<robot>
+  <statistics>
+    <total>
+      <stat pass="18" fail="2" skip="0">All Tests</stat>
+    </total>
+  </statistics>
+</robot>
