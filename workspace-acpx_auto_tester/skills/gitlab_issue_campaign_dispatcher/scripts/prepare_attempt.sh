@@ -20,17 +20,11 @@
 # at ${REPO_PATH} is never mutated by an attempt (only `git fetch` touches
 # it under ${WORK_ROOT}/locks/repo.lock).
 #
-# Modes (env var ISSUE_MODE):
-#   fresh     — first attempt for this IID; base on origin/${DEV_BRANCH}
-#               (clean baseline, no past spec accumulation from other issues).
-#   continue  — base attempt on origin/${WORK_BRANCH} if it exists, else
-#               the latest local prior attempt branch if one exists, else
-#               downgrade to fresh (and use origin/${DEV_BRANCH}). This mode
-#               is used only when the live issue label requests continue.
-#               After the base checkout, shared test-team configuration paths
-#               (`.claude/`, `hulat/`, and `${DATA_BASENAME}/`) are refreshed
-#               from the latest origin/${DEV_BRANCH} so resume attempts do not
-#               run with stale runner config.
+# Mode (env var ISSUE_MODE): always `fresh` on benchmark-test — every attempt
+#   bases on origin/${DEV_BRANCH} (clean baseline, no past spec accumulation
+#   from other issues). continue / resume is disabled on this branch. After the
+#   base checkout, shared test-team configuration paths (`.claude/`, `hulat/`,
+#   and `${DATA_BASENAME}/`) are refreshed from the latest origin/${DEV_BRANCH}.
 #
 # Why DEV_BRANCH and not BRANCH for fresh mode:
 #   BRANCH is the integration target (e.g. master) and accumulates every
@@ -63,14 +57,11 @@
 #   checkout -B ... --force` can remove files that are tracked on the prior
 #   attempt branch but absent from the next BASE_REF, while leaving untracked
 #   files alone. Before an in-place branch switch on attempt N>1, this script
-#   snapshots the current `${RESULT_BASENAME}/issue-<iid>/` subtree. Continue
-#   mode restores that snapshot after checkout so prior attempt output/log
-#   files are visible for resume. Fresh reset mode (all non-continue entry
-#   labels, including `todo`, `retry`, `new`, `blocked-cc`,
-#   `blocked-dispatcher`, and trigger
-#   require_labels) archives the snapshot and then quarantines any active
-#   same-IID runtime subtree that survived checkout, so old files are not
-#   physically deleted but also do not contaminate the reset run.
+#   snapshots the current `${RESULT_BASENAME}/issue-<iid>/` subtree, archives
+#   it, and then quarantines any active same-IID runtime subtree that survived
+#   checkout, so old files are not physically deleted but also do not
+#   contaminate the fresh run. (benchmark-test is fresh-only; there is no
+#   continue-mode restore of that snapshot.)
 #
 # Shared config freshness:
 #   Test-team-owned `.claude/`, `hulat/`, and `${DATA_BASENAME}/` may change on
@@ -116,9 +107,9 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}"
 
 case "${ISSUE_MODE}" in
-  fresh|continue) ;;
+  fresh) ;;
   *)
-    echo "prepare_attempt: ISSUE_MODE must be fresh or continue, got '${ISSUE_MODE}'" >&2
+    echo "prepare_attempt: ISSUE_MODE must be fresh (continue is disabled on benchmark-test), got '${ISSUE_MODE}'" >&2
     exit 2
     ;;
 esac
@@ -133,35 +124,11 @@ flock 8
 cd "${REPO_PATH}"
 git fetch --prune origin >&2
 
-# Resolve the actual base ref.
-# Fresh mode bases on DEV_BRANCH (clean baseline). Continue mode tries
-# WORK_BRANCH first; if missing, fall back to the latest local prior
-# attempt branch; if that is missing too, downgrade to fresh on DEV_BRANCH.
+# Resolve the base ref. benchmark-test runs every attempt FRESH from the clean
+# DEV_BRANCH baseline (no past spec accumulation from other issues); continue /
+# resume is disabled, so there is no WORK_BRANCH / prior-attempt-branch base.
 BASE_REF="origin/${DEV_BRANCH}"
 ACTUAL_MODE="${ISSUE_MODE}"
-if [ "${ACTUAL_MODE}" = "continue" ]; then
-  if git ls-remote --exit-code --heads origin "${WORK_BRANCH}" >/dev/null 2>&1; then
-    BASE_REF="origin/${WORK_BRANCH}"
-  else
-    PREVIOUS_LOCAL_BRANCH=""
-    prev=$((ATTEMPT_NUMBER - 1))
-    while [ "${prev}" -ge 1 ]; do
-      prev_padded="$(printf '%03d' "${prev}")"
-      candidate="${WORK_BRANCH}-att${prev_padded}"
-      if git rev-parse --verify --quiet "refs/heads/${candidate}" >/dev/null; then
-        PREVIOUS_LOCAL_BRANCH="${candidate}"
-        break
-      fi
-      prev=$((prev - 1))
-    done
-    if [ -n "${PREVIOUS_LOCAL_BRANCH}" ]; then
-      BASE_REF="${PREVIOUS_LOCAL_BRANCH}"
-    else
-      ACTUAL_MODE=fresh
-      BASE_REF="origin/${DEV_BRANCH}"
-    fi
-  fi
-fi
 
 # Sanity check the resolved BASE_REF actually exists. If DEV_BRANCH is
 # missing on the remote, fail loudly — there is no further fallback.
@@ -332,20 +299,6 @@ snapshot_issue_runtime_tree() {
   rsync -rltD "${ISSUE_WORKTREE_RUNTIME_DIR}/" "${dst}/${ISSUE_WORKTREE_REL}/"
 }
 
-restore_issue_runtime_tree() {
-  local src="$1"
-  if [ -z "${src}" ] || [ ! -d "${src}/${ISSUE_WORKTREE_REL}" ]; then
-    return 0
-  fi
-  if ! command -v rsync >/dev/null 2>&1; then
-    echo "prepare_attempt: rsync is required to restore prior attempt files from ${src} but is missing on PATH" >&2
-    exit 6
-  fi
-  echo "prepare_attempt: restoring prior attempt files from ${src}/${ISSUE_WORKTREE_REL} into ${ISSUE_WORKTREE_RUNTIME_DIR}" >&2
-  mkdir -p "${ISSUE_WORKTREE_RUNTIME_DIR}"
-  rsync -rltD "${src}/${ISSUE_WORKTREE_REL}/" "${ISSUE_WORKTREE_RUNTIME_DIR}/"
-}
-
 PRESERVED_ATTEMPT_ROOT="${WORKTREES_ROOT}/.preserved-attempts/issue-${ISSUE_IID}"
 archive_switch_backup() {
   local src="$1"
@@ -442,76 +395,16 @@ else
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
 refresh_shared_config_from_dev
-if [ "${ACTUAL_MODE}" = "continue" ]; then
-  restore_issue_runtime_tree "${STALE_SWITCH_BACKUP}"
-  restore_issue_runtime_tree "${WORKTREE_SWITCH_BACKUP}"
-else
-  archive_switch_backup "${STALE_SWITCH_BACKUP}" "stale-switch-before-attempt-${ATTEMPT_NUMBER_PADDED}"
-  archive_switch_backup "${WORKTREE_SWITCH_BACKUP}" "before-attempt-${ATTEMPT_NUMBER_PADDED}"
-  archive_fresh_active_runtime_tree
-fi
+# benchmark-test is fresh-only: archive any pre-switch snapshot and quarantine
+# the active same-IID runtime subtree (continue-mode restore is removed).
+archive_switch_backup "${STALE_SWITCH_BACKUP}" "stale-switch-before-attempt-${ATTEMPT_NUMBER_PADDED}"
+archive_switch_backup "${WORKTREE_SWITCH_BACKUP}" "before-attempt-${ATTEMPT_NUMBER_PADDED}"
+archive_fresh_active_runtime_tree
 mkdir -p "${OUTPUT_DIR}"
 
-# ─── Continue-mode salvage from backup sources into the worktree ─────
-#
-# Priority chain (first existing source wins; only one is chosen):
-#   1. WORKTREE_RECREATE_BACKUP — fresh mv-aside a few lines above.
-#   2. STALE_RECREATE_BACKUP   — orphan backup left by a prior crashed
-#      run of this script after the mv-aside step.
-#   3. SALVAGE_SRC             — legacy `-att-<NNN>` or very-old
-#      single-worktree path, picked above before deregistration.
-#
-# This block runs only in continue mode. Fresh reset mode (all non-continue
-# entry labels) deliberately leaves these sources out of the active worktree
-# and archives them below. Sources 2 and 3 only fire when this is a genuine
-# recreate (not the shared-worktree REUSE path). When REUSE=true the existing
-# untracked scratch already on disk is authoritative; rsyncing from a stale
-# backup or legacy path would resurrect files Claude Code deliberately
-# deleted in a prior successful attempt.
-#
-# `rsync -rltD --ignore-existing` (no -pgo ownership flags) because:
-#   - `--ignore-existing` prevents clobbering BASE_REF tracked files
-#     and the new worktree's `.git` gitfile.
-#   - `-rltD` excludes ownership (–pgo) to avoid non-root code-23
-#     partial-transfer warnings when the backup was written by a
-#     different uid.
-#   - `--exclude='/.git'` blocks the source-root gitfile; the new
-#     worktree already has its own correct `.git` from `git worktree
-#     add`.
-#   - Shared config paths are excluded from salvage because they are refreshed
-#     from origin/${DEV_BRANCH} for every attempt.
-salvage_into_worktree() {
-  local src="$1"
-  if [ -z "${src}" ] || [ ! -d "${src}" ]; then
-    return 0
-  fi
-  if ! command -v rsync >/dev/null 2>&1; then
-    echo "prepare_attempt: rsync is required to salvage untracked scratch from ${src} but is missing on PATH" >&2
-    exit 6
-  fi
-  echo "prepare_attempt: salvaging untracked scratch from ${src} into ${WORKTREE_DIR}" >&2
-  rsync -rltD --ignore-existing \
-    --exclude='/.git' \
-    --exclude='/.claude' \
-    --exclude='/hulat' \
-    --exclude="/${DATA_BASENAME}" \
-    "${src}/" "${WORKTREE_DIR}/"
-}
-
-if [ "${ACTUAL_MODE}" = "continue" ]; then
-  salvage_into_worktree "${WORKTREE_RECREATE_BACKUP}"
-  if [ "${WORKTREE_REUSE}" = false ]; then
-    if [ -z "${WORKTREE_RECREATE_BACKUP}" ] || [ ! -d "${WORKTREE_RECREATE_BACKUP}" ]; then
-      salvage_into_worktree "${STALE_RECREATE_BACKUP}"
-      if [ -z "${STALE_RECREATE_BACKUP}" ] || [ ! -d "${STALE_RECREATE_BACKUP}" ]; then
-        salvage_into_worktree "${SALVAGE_SRC}"
-      fi
-    fi
-  fi
-fi
-
-# Now that any meaningful scratch has been salvaged, drop the
-# pre-recreate backups and archive every leftover switch backup / legacy
+# benchmark-test is fresh-only: there is no continue-mode salvage of prior
+# scratch back into the worktree. Drop the pre-recreate backups and archive
+# every leftover switch backup / legacy
 # worktree path.
 # From here on out the shared per-issue worktree at ${WORKTREE_DIR} is
 # the only place this IID's current resume state lives, while old physical
