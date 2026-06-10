@@ -1240,6 +1240,23 @@ for iid in "${BATCH_IIDS[@]}"; do
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
+  # prep_blocked: mark THIS iid blocked-dispatcher (synthesize a Phase 6 blocked
+  # reply, persist state, record the tick outcome); the caller then `continue`s
+  # to the next iid. Defined HERE at the top of the per-iid body — before the
+  # model-tier resolve block that may call it on a pin-membership failure — so
+  # the very first iteration has it available (bash defines functions at runtime;
+  # a definition placed later in the loop body would be undefined on the first
+  # iteration's earlier lines).
+  prep_blocked() {
+    local reason="$1"
+    wrapper_log prepare_tick "iid=${iid} blocked during prep: ${reason}"
+    REPLY_JSON="$(phase6_synthesize_blocked "${iid}" "${attempt}" "dispatcher prep failed: ${reason}")"
+    PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "false")"
+    STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
+    persist_state "${STATE_JSON}"
+    TICK_OUTCOMES="$(printf '%s' "${TICK_OUTCOMES}" | jq -c --arg k "${iid}" --arg v "blocked: ${reason}" '. + {($k):$v}')"
+  }
+
   # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
   # resume signal. Every other entry path (`todo`, `retry`, `new`,
   # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
@@ -1253,6 +1270,10 @@ for iid in "${BATCH_IIDS[@]}"; do
   if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
     ISSUE_MODE="continue"
   fi
+  # eval branch: every attempt runs FRESH from the clean DEV_BRANCH baseline so
+  # different pinned models are compared on identical inputs. continue/resume is
+  # disabled here (the `continue` label is ignored for mode selection).
+  ISSUE_MODE="fresh"
 
   # ─── resolve_model_tier (v2 §6) ─────────────────────────────────
   # Evaluate UPGRADE? from the issue's PRIOR live labels (read from the
@@ -1282,6 +1303,25 @@ for iid in "${BATCH_IIDS[@]}"; do
   # split input is never empty. Were that invariant broken, an empty input
   # would make the downstream `jq 'length'` fail outright (set -e) rather than
   # silently yield an empty array — a loud failure, not a wrong default.
+  if [ -n "${PIN_MODEL_TIER:-}" ]; then
+    # PINNED (eval branch): model chosen by the operator. Bypass the entire
+    # hard/soft upgrade ladder AND the monotonic-raise invariant. set_issue_label.sh's
+    # model:* mutual exclusion clears any other model:<tier> in the same update, so
+    # pinning a LOWER tier than the issue's current label works (no monotonic
+    # constraint). EFFECTIVE_TIERS_CSV was derived at the top of the tick.
+    case ",${EFFECTIVE_TIERS_CSV}," in
+      *",${PIN_MODEL_TIER},"*) ;;
+      *) prep_blocked "pin_model_tier '${PIN_MODEL_TIER}' not in effective tiers (${EFFECTIVE_TIERS_CSV})"; continue ;;
+    esac
+    MODEL="${PIN_MODEL_TIER}"
+    MODEL_TIER_LABEL="model:${PIN_MODEL_TIER}"
+    CONSUME_QUALITY_LOW=false
+    # Set NEW_TIER to the pinned tier's 0-based index so the cached integer
+    # model_tier written into issue state.json stays consistent with the pin
+    # (membership was just confirmed above, so grep always matches).
+    NEW_TIER="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | tr ',' '\n' | grep -nxF "${PIN_MODEL_TIER}" | head -n1 | cut -d: -f1)"
+    NEW_TIER=$(( NEW_TIER - 1 ))
+  else
   MODEL_TIERS_ARR_JSON="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | jq -Rc 'split(",")')"
   MODEL_MAX_TIER=$(( $(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq 'length') - 1 ))
   MODEL_CONTINUE_N="$(printf '%s' "${STATE_JSON}" | jq -r '.model_upgrade_continue_threshold // 0')"
@@ -1358,16 +1398,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   [ "${NEW_TIER}" -gt "${MODEL_MAX_TIER}" ] && NEW_TIER="${MODEL_MAX_TIER}"
   MODEL_TIER_LABEL="model:$(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq -r --argjson k "${NEW_TIER}" '.[$k]')"
   MODEL="$(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq -r --argjson k "${NEW_TIER}" '.[$k]')"
-
-  prep_blocked() {
-    local reason="$1"
-    wrapper_log prepare_tick "iid=${iid} blocked during prep: ${reason}"
-    REPLY_JSON="$(phase6_synthesize_blocked "${iid}" "${attempt}" "dispatcher prep failed: ${reason}")"
-    PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "false")"
-    STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
-    persist_state "${STATE_JSON}"
-    TICK_OUTCOMES="$(printf '%s' "${TICK_OUTCOMES}" | jq -c --arg k "${iid}" --arg v "blocked: ${reason}" '. + {($k):$v}')"
-  }
+  fi
 
   # prepare_attempt.sh — keep stdout clean (the script's contract is two
   # lines on stdout: mode_actual, LOCAL_ATTEMPT_BRANCH). `git fetch` /
