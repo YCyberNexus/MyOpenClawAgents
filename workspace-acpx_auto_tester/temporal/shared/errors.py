@@ -63,6 +63,14 @@ class AcpxErrorType(StrEnum):
     # ── MR rotate (close-then-create is non-atomic) ─────────────────────────
     MR_ROTATE_FAILED = "mr_rotate_failed"  # always non-retryable
 
+    # ── v2 model-settings (per-tier settings copy + tier auto-discovery) ────
+    MODEL_SETTINGS_MISSING = "model_settings_missing"      # ${MODEL}-settings.json absent/unreadable → that IID blocked_dispatcher
+    NO_MODEL_SETTINGS_FILES = "no_model_settings_files"    # dir configured but NO tier file matches → whole tick aborts
+
+    # ── Environment precheck (tick-level gate, §16b twin) ───────────────────
+    PRECHECK_FAILED = "precheck_failed"                    # precheck.sh exit 1 (or any non-2 non-zero) → whole tick aborts
+    PRECHECK_MANIFEST_ERROR = "precheck_manifest_error"    # precheck.sh exit 2 (malformed manifest) → whole tick aborts
+
     # ── Generic ─────────────────────────────────────────────────────────────
     SUBPROCESS_FAILED = "subprocess_failed"  # unexpected non-zero from a leaf script
     INVARIANT_VIOLATION = "invariant_violation"
@@ -81,6 +89,10 @@ NON_RETRYABLE_ERROR_TYPES: frozenset[str] = frozenset(
         AcpxErrorType.PROTECTED_BRANCH,
         AcpxErrorType.REF_NOT_FOUND,
         AcpxErrorType.MR_ROTATE_FAILED,
+        AcpxErrorType.MODEL_SETTINGS_MISSING,
+        AcpxErrorType.NO_MODEL_SETTINGS_FILES,
+        AcpxErrorType.PRECHECK_FAILED,
+        AcpxErrorType.PRECHECK_MANIFEST_ERROR,
         AcpxErrorType.GLAB_AUTH_FAILED,
         AcpxErrorType.GLAB_ISSUE_NOT_FOUND,
         AcpxErrorType.GLAB_WIKI_FORBIDDEN,

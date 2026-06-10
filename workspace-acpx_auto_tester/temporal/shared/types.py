@@ -28,11 +28,12 @@ from dataclasses import dataclass
 from typing import Literal
 
 
-# Mirrors load_ui_accounts.sh's defense-in-depth check on UI_ACCOUNTS_RELPATH.
-# Keep the regex anchored at both ends so a single bad character anywhere in
-# the path rejects the whole value (the bash version uses case patterns to
-# the same effect).
-_UI_ACCOUNTS_RELPATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
+# Mirrors the bash dispatcher's defense-in-depth check on relative-path
+# trigger fields (UI_ACCOUNTS_RELPATH / PRECHECK_RELPATH) and the charset rule
+# of MODEL_SETTINGS_DIR. Keep the regex anchored at both ends so a single bad
+# character anywhere in the path rejects the whole value (the bash version
+# uses case patterns to the same effect).
+_SAFE_PATH_CHARS_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 
 # Each model tier name becomes the GitLab label ``model:<name>``; restrict it
 # to label-safe characters (mirrors dispatch_prepare_tick.sh's model_tiers
@@ -40,14 +41,19 @@ _UI_ACCOUNTS_RELPATH_RE = re.compile(r"^[A-Za-z0-9_./-]+$")
 _MODEL_TIER_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 
-def _validate_ui_accounts_relpath(value: str) -> None:
-    """Reject paths that would let UI_ACCOUNTS_RELPATH escape ${REPO_PATH}.
+def _validate_relpath(value: str, field_name: str) -> None:
+    """Reject paths that would let a relpath trigger field escape ${REPO_PATH}.
 
-    Post-migration the relpath is resolved under the project checkout root
-    ``${REPO_PATH}`` (NOT under ``${REPO_PATH}/${DATA_BASENAME}/``), so these
-    rules guard against escaping that root.
+    Shared by ``ui_accounts_relpath`` and ``precheck_relpath`` — both are
+    resolved under the project checkout root ``${REPO_PATH}`` (NOT under
+    ``${REPO_PATH}/${DATA_BASENAME}/``), so these rules guard against escaping
+    that root. ``field_name`` selects the error prefix
+    (``invalid_ui_accounts_relpath`` / ``invalid_precheck_relpath``), which
+    must mirror the bash dispatcher's abort strings verbatim so operators
+    recognize them across the migration.
 
-    Same rules the legacy ``load_ui_accounts.sh`` enforces (exit code 16):
+    Same rules the legacy ``load_ui_accounts.sh`` enforces (exit code 16) and
+    ``dispatch_prepare_tick.sh`` enforces for ``precheck_relpath``:
     non-empty, not absolute, no ``.`` / ``..`` segments, no whitespace,
     characters limited to ``[A-Za-z0-9_./-]``. The dispatcher-side
     validation here is the first line of defense; the bash script still
@@ -62,22 +68,52 @@ def _validate_ui_accounts_relpath(value: str) -> None:
     "pool file missing" message. The extra strictness is a deliberate
     defense-in-depth tightening, not a contract divergence.
     """
+    prefix = f"invalid_{field_name}"
     if not value:
-        raise ValueError("invalid_ui_accounts_relpath: must not be empty")
+        raise ValueError(f"{prefix}: must not be empty")
     if value.startswith("/"):
         raise ValueError(
-            f"invalid_ui_accounts_relpath: must be relative, got '{value}'"
+            f"{prefix}: must be relative, got '{value}'"
         )
     segments = value.split("/")
     if any(seg in (".", "..") or seg == "" for seg in segments):
         raise ValueError(
-            "invalid_ui_accounts_relpath: must not contain '.' / '..' / empty "
+            f"{prefix}: must not contain '.' / '..' / empty "
             f"segments, got '{value}'"
         )
-    if not _UI_ACCOUNTS_RELPATH_RE.fullmatch(value):
+    if not _SAFE_PATH_CHARS_RE.fullmatch(value):
         raise ValueError(
-            "invalid_ui_accounts_relpath: characters limited to [A-Za-z0-9_./-], "
+            f"{prefix}: characters limited to [A-Za-z0-9_./-], "
             f"got '{value}'"
+        )
+
+
+def _validate_model_settings_dir(value: str) -> None:
+    """Validate the ``model_settings_dir`` trigger field (absolute directory).
+
+    Mirrors the bash dispatcher's trigger-parse validation in
+    ``dispatch_prepare_tick.sh`` (abort prefix ``invalid_model_settings_dir``):
+    must be an absolute path, must not be exactly ``/``, no ``.`` / ``..``
+    path segments, no whitespace, characters limited to ``[A-Za-z0-9_./-]``.
+    The bash side folds dot-segments / whitespace / charset into one case
+    pattern with one message; that message is mirrored verbatim here.
+    """
+    if value == "/":
+        raise ValueError("invalid_model_settings_dir: must not be /")
+    if not value.startswith("/"):
+        raise ValueError("invalid_model_settings_dir: must be an absolute path")
+    # value.split("/") on an absolute path yields a leading "" segment, which
+    # is expected; only literal "." / ".." segments are rejected. Whitespace
+    # and out-of-charset characters share the bash side's combined message.
+    segments = value.split("/")
+    if (
+        any(seg in (".", "..") for seg in segments)
+        or any(ch in value for ch in ("\n", "\r", "\t", " "))
+        or not _SAFE_PATH_CHARS_RE.fullmatch(value)
+    ):
+        raise ValueError(
+            "invalid_model_settings_dir: dot segments, whitespace, or "
+            "unsupported characters"
         )
 
 # Status enums kept as ``Literal`` aliases so JSON round-trips as plain strings
@@ -157,6 +193,16 @@ class CampaignInput:
     # carry-forward semantics the bash dispatcher gets from persisted
     # ``campaign_state.json`` are provided here by Temporal's Schedule input.
     ui_accounts_relpath: str = ""
+    # Relative path of the project-team-owned environment-precheck manifest,
+    # resolved under the project checkout root ${REPO_PATH}/ (same resolution
+    # and validation rules as `ui_accounts_relpath`). Mirrors trigger field
+    # `precheck_relpath`, which is **opt-in with no default**: the empty string
+    # means "this deployment does not run the environment precheck" and the
+    # whole §16b-equivalent gate is skipped. The carry-forward semantics the
+    # bash dispatcher gets from persisted ``campaign_state.json`` are provided
+    # here by Temporal's Schedule input (every firing re-delivers the full
+    # input). See ``references/precheck_manifest.md``.
+    precheck_relpath: str = ""
     max_concurrent_subagents: int = 1
     max_accounts_per_issue: int = 14
     # The two timeout fields below use the sentinel value ``0`` to mean
@@ -183,6 +229,30 @@ class CampaignInput:
     # accumulation count N at/above which resolve_model_tier raises the tier.
     model_tiers: tuple[str, ...] = ("flash", "pro", "max")
     model_upgrade_continue_threshold: int = 2
+    # model_settings_dir: absolute path to the directory holding the per-tier
+    # Claude Code settings files (`<tier>-settings.json`). When configured, the
+    # resolved model tier selects `${model_name}-settings.json`, which the
+    # `apply_model_settings` activity copies to
+    # ${WORKTREE_DIR}/.claude/settings.json so `acpx claude exec` actually runs
+    # on the tier's model. Empty (the default) = legacy behavior: no copy, the
+    # tier is only a prompt-text hint, and effective tiers = the full
+    # model_tiers list. The bash dispatcher's **per-tick** semantics (omitting
+    # the field on a tick reverts that tick to legacy, no carry-forward
+    # restore) are natural under Temporal: every Schedule firing re-delivers
+    # the complete input and there is no persisted-state restore at all.
+    # Supersedes the removed `claude_settings_path` single fixed-file override.
+    model_settings_dir: str = ""
+    # effective_model_tiers: the EFFECTIVE upgrade ladder for THIS tick — the
+    # ordered subset of model_tiers whose `<tier>-settings.json` exists under
+    # model_settings_dir (tier auto-discovery). NOT an operator/trigger field:
+    # the CampaignWorkflow overwrites it every tick via dataclasses.replace
+    # after the `derive_effective_tiers` activity runs, so every downstream
+    # activity argument carries the same per-tick value (reconcile's integer
+    # model_tier index and resolve_model_tier's ladder consume it; the FULL
+    # model_tiers list keeps feeding ensure_labels.sh / set_issue_label.sh).
+    # Empty (the default) = not yet derived → consumers fall back to
+    # model_tiers.
+    effective_model_tiers: tuple[str, ...] = ()
 
     # ── Workflow-internal tunables (not in the legacy trigger) ──────────────
     ticks_before_continue_as_new: int = 200
@@ -267,7 +337,15 @@ class CampaignInput:
         # skipped downstream and there is nothing to validate. Only enforce the
         # relative-path safety rules when a value is actually configured.
         if self.ui_accounts_relpath:
-            _validate_ui_accounts_relpath(self.ui_accounts_relpath)
+            _validate_relpath(self.ui_accounts_relpath, "ui_accounts_relpath")
+        # Environment precheck is opt-in the same way: empty = skipped.
+        if self.precheck_relpath:
+            _validate_relpath(self.precheck_relpath, "precheck_relpath")
+        # model_settings_dir is opt-in: empty = legacy behavior (no settings
+        # copy, effective = full). Validated with the bash dispatcher's
+        # absolute-path rules when configured.
+        if self.model_settings_dir:
+            _validate_model_settings_dir(self.model_settings_dir)
         return self
 
 
@@ -370,7 +448,9 @@ class IssueLiveState:
     has_failed_cc: bool             # `failed-cc` present (CC-side terminal)
     has_failed_dispatcher: bool     # `failed-dispatcher` present (dispatcher-side terminal)
     has_retry: bool
-    model_tier: int                 # current model:{tier} mapped to 0/1/2 (flash/pro/max); no label → 0
+    model_tier: int                 # current model:{tier} as 0-based index into the EFFECTIVE tier
+                                    # ladder (effective_model_tiers, falling back to model_tiers when
+                                    # auto-discovery is off); no matching label → 0
     labels: tuple[str, ...]
     retry_count: int = 0
     blocked_at_tick: int = -1

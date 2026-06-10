@@ -10,7 +10,7 @@
 
 1. **`failed` 按归因拆成 `failed-cc` / `failed-dispatcher`**（镜像 `blocked` 的拆法）。提升映射：`blocked-cc` 超限 → `failed-cc`；`blocked-dispatcher` 超限 → `failed-dispatcher`。目的：失败终态也"看到 label 即知改哪边"。
 2. **新增 `model:{tier}` 正交持久 label 维度** + **model 逐级自动升级机制**：按 issue 解决质量自动升 model（`model:flash → model:pro → model:max`），per-issue 单调不降。
-3. **新增一次性软信号 label `quality:low`**：人工在评审态加，作为升 model 档的软触发之一，升档生效后移除。
+3. **新增一次性软信号 label `quality:low`**：人工在评审态加，作为升 model 档的软触发之一，升档生效或已封顶时移除。
 4. **model 升档触发按侧统一**：CC 侧 `{blocked-cc, timeout, failed-cc}` 重跑 → 升一档；调度器侧 `{blocked-dispatcher, failed-dispatcher}` → 不升（升 model 对基础设施问题无用）。
 
 > 模型背景（更早版本已确立，非本次新增）：`pr` **替换** `done`（不再叠加）；`blocked` 已拆 `blocked-cc` / `blocked-dispatcher`。
@@ -59,10 +59,12 @@
 - 与工作标签**正交并存**；互斥只在本维度内部（恰好一个 `model:{tier}`）。
 - **per-issue 单调不降**：只换成更高档，跟随 issue 终身到 `CLOSED`。新 issue 无 `model:{tier}` → 视为 TIER_0；首次 PREPARE 显式打最低档。
 - source of truth = GitLab 标签；`state.json` 的 `model_tier` 仅缓存，`reconcile` 让缓存向标签看齐。
+- **档位如何真正生效**：解析出的 `MODEL`（如 `flash`/`pro`/`max`）在 PREPARE 阶段驱动一次"按档复制 settings"——当 trigger 配了 `model_settings_dir`（一个存放 `<tier>-settings.json` 的绝对目录）时，dispatcher 把 `${model_settings_dir}/${MODEL}-settings.json` 复制（并重命名）为 worktree 的 `.claude/settings.json` 并标 `skip-worktree`，acpx claude exec 随后读取它，从而真正切换底层模型。未配 `model_settings_dir` 时跳过复制（沿用 worktree 自带的 `.claude/settings.json`），此时 `model:{tier}` 仅作为 prompt 文本提示而不改变实际模型。
+- **档位自动发现 + 智慧序**：flash/pro/max 不必都有。配了 `model_settings_dir` 时，`model_tiers`（默认 `flash,pro,max`）退为"智慧序全集"，本部署实际升级阶梯 = 全集 ∩ 目录里实际有 `${tier}-settings.json` 的档（保智慧序，每 tick 重新发现，由 `derive_effective_model_tiers` 计算）。例：目录只放 `pro-settings.json`+`max-settings.json` → 阶梯 pro→max（首档 pro，失败升 max）；只放 flash+max → flash→max；只放一个 → 单档不升。`reconcile`/`resolve_model_tier` 用这个 effective 子集算 `model_tier` 索引与升档阶梯；`ensure_labels`/`set_issue_label` 仍用全集（建全部 `model:*` 标签 / 互斥清除，保证迁移时旧档标签可清）。配了但目录无任何匹配文件 → 整 tick fail（`no_model_settings_files`）。
 
 ### 2.3 `quality:low`（一次性软信号）
 
-人工在 `AWAITING_REVIEW` 加，表示"这轮质量一般"。作为升 model 档的软触发之一；**升档生效后被移除**（不长期存在）。
+人工在 `AWAITING_REVIEW` 加，表示"这轮质量一般"。作为升 model 档的软触发之一；**升档生效或已封顶时被移除**（不长期存在；首次打标且阶梯多于一档时不消费，留到下一次 PREPARE 驱动升档）。
 
 ---
 

@@ -14,5 +14,7 @@
   "data_basename": "ifp-data",
   "ui_accounts_relpath": "ifp-data/ifp-common/ifp_users.json",
   "max_concurrent_subagents": 2,
-  "acpx_timeout_seconds": 3600
+  "acpx_timeout_seconds": 3600,
+  "model_settings_dir": "",
+  "precheck_relpath": ""
 }

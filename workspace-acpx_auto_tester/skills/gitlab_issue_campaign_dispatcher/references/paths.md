@@ -23,6 +23,7 @@ ${REPO_PATH}/                                            ← parent checkout (de
             campaign.lock                                ← flock target for the orchestrator
             log/
                 reconcile-<ts>.json                      ← reconciliation evidence files
+                precheck-<ts>.json                       ← environment-precheck evidence files (when precheck_relpath configured)
             locks/
                 repo.lock                                ← flock target for clone_or_pull / prepare_attempt
         issues/                                          ← ${ISSUES_ROOT}; parent of per-issue persistent subtrees
@@ -75,7 +76,7 @@ Subsequent ticks skip step 1, run steps 2–4 (steps 2 and 4 are idempotent), an
 | `STATE_DIR`             | `${WORK_ROOT}`                                       | Campaign state file lives directly here (no further nesting).   |
 | `CAMPAIGN_STATE_FILE`   | `${STATE_DIR}/campaign_state.json`                   | Campaign progress cache.                                         |
 | `LOG_ROOT`              | `${WORK_ROOT}/log`                                   | Dispatcher log subtree root.                                    |
-| `DISPATCHER_LOG_DIR`    | `${LOG_ROOT}`                                        | `reconcile-<ts>.json` evidence files. Same dir as LOG_ROOT.     |
+| `DISPATCHER_LOG_DIR`    | `${LOG_ROOT}`                                        | `reconcile-<ts>.json` and `precheck-<ts>.json` evidence files. Same dir as LOG_ROOT. |
 | `ISSUES_ROOT`           | `${RESULT_ROOT}/issues`                              | Parent of `issue-<iid>/` subtrees (groups them under one folder so they don't visually mix with `_dispatcher/` and `.worktrees/`). |
 | `LOCK_FILE`             | `${STATE_DIR}/campaign.lock`                         | flock target.                                                    |
 | `WORKTREES_ROOT`        | `${RESULT_ROOT}/.worktrees`                          | Parent of every per-issue linked worktree (one per IID).        |

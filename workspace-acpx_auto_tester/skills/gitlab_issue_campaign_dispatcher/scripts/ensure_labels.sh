@@ -14,7 +14,7 @@
 #   flash → pro → max). The label set is DERIVED from MODEL_TIERS so that an
 #   operator who overrides model_tiers via trigger gets the right labels created.
 # One-shot soft signal:
-#   quality:low (human-applied in AWAITING_REVIEW; consumed on the next upgrade)
+#   quality:low (human-applied in AWAITING_REVIEW; consumed when an upgrade lands or the tier is capped)
 #
 # v2 note: the single `blocked` / `failed` labels were split by attribution
 # into `blocked-cc` / `blocked-dispatcher` and `failed-cc` / `failed-dispatcher`
@@ -69,6 +69,9 @@ REQUIRED_LABELS=(
   continue
   ${MODEL_LABELS[@]+"${MODEL_LABELS[@]}"}
   quality:low
+  # Dispatcher-side tick-level marker (§16b environment precheck): non-workflow,
+  # coexists with the workflow label, cleared on the next `doing` transition.
+  precheck-failed
 )
 
 existing="$(
@@ -79,9 +82,13 @@ existing="$(
 
 for label in "${REQUIRED_LABELS[@]}"; do
   if ! printf '%s\n' "${existing}" | grep -qx "${label}"; then
+    # Single grey for every label except the precheck-failed marker, which is
+    # red so a tick-level environment failure stands out on the issue board.
+    color="#808080"
+    [ "${label}" = "precheck-failed" ] && color="#d9534f"
     glab api --method POST \
       "projects/${PROJECT_URI}/labels" \
-      -f "name=${label}" -f "color=#808080" >/dev/null
+      -f "name=${label}" -f "color=${color}" >/dev/null
     echo "created:${label}"
   fi
 done

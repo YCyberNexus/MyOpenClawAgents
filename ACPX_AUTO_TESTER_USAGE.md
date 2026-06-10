@@ -154,7 +154,8 @@ blocked_policy=skip_and_retry
 | `kill_subagent_on_terminal` | `true` | terminal callback 后是否尽力清理 runtime child session。 |
 | `result_basename` | `ifp-result` | repo 内 agent runtime root 的目录名。 |
 | `data_basename` | `ifp-data` | repo 内测试知识库目录名。 |
-| `claude_settings_path` | 空 | 可选的 Claude Code settings JSON 绝对路径；会复制到 issue worktree 的 `.claude/settings.json`。 |
+| `model_settings_dir` | 空 | 可选的按档 settings 目录绝对路径（存放 `<tier>-settings.json`）；per-IID prep 时把当前档位文件复制为 worktree 的 `.claude/settings.json`，让 `model:<tier>` 升档真正切换 acpx 的模型。**per-tick 字段**：每个 trigger 都要带，省略即本 tick 回退 legacy 行为。取代已移除的 `claude_settings_path`。 |
+| `precheck_relpath` | 空 | 可选的环境 precheck 清单相对路径（相对 `${REPO_PATH}`）。配置后每 tick 在批次形成后运行 `precheck.sh`，`required` 项失败给本批 issue 打 `precheck-failed` 并中止本 tick。详见 `references/precheck_manifest.md`。 |
 | `gitlab_address` | 空 | 仅用于校验是否匹配部署固定 host；新配置通常不传。 |
 
 ### 字段覆盖规则
@@ -182,11 +183,14 @@ blocked_policy=skip_and_retry
 - `require_labels`
 - `require_labels_match`
 
-下面三个字段是 carry-forward：
+下面四个字段是 carry-forward：
 
 - `result_basename`
 - `data_basename`
 - `ui_accounts_relpath`
+- `precheck_relpath`
+
+注意 `model_settings_dir` 刻意**不是** carry-forward：它是 per-tick 字段，省略即当 tick 未配置（详见上表）。
 
 它们代表部署目录属性。trigger 传入后会持久化；后续 tick 省略时继续沿用已持久化值。
 

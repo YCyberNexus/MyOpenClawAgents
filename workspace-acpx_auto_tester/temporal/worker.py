@@ -66,9 +66,11 @@ from .activities.leaf import (
 )
 from .activities.orchestrator import (
     allocate_attempt_number,
+    apply_model_settings,
     build_executor_prompt,
     bump_campaign_tick_seq,
     clone_or_pull_repo,
+    derive_effective_tiers,
     ensure_workflow_labels,
     load_ui_account_pool,
     mark_issue_doing,
@@ -76,7 +78,9 @@ from .activities.orchestrator import (
     record_attempt_outcome,
     reconcile_gitlab,
     resolve_and_stamp_model_tier,
+    run_environment_precheck,
     self_heal_safety_bin,
+    tag_precheck_failed,
 )
 
 # Workflows
@@ -186,12 +190,16 @@ async def _run(args: argparse.Namespace) -> None:
             self_heal_safety_bin,
             clone_or_pull_repo,
             bump_campaign_tick_seq,
+            derive_effective_tiers,
+            run_environment_precheck,
+            tag_precheck_failed,
             load_ui_account_pool,
             allocate_attempt_number,
             prepare_attempt_worktree,
             build_executor_prompt,
             mark_issue_doing,
             resolve_and_stamp_model_tier,
+            apply_model_settings,
             record_attempt_outcome,
             # Leaf (A7–A16)
             run_claude_code_attempt,

@@ -73,15 +73,24 @@ def build_dispatcher_env(inp: CampaignInput) -> dict[str, str]:
         # subprocess-side defaults stay aligned with the CampaignInput value
         # the Workflow validated.
         "UI_ACCOUNTS_RELPATH": inp.ui_accounts_relpath,
+        # Forwarded to precheck.sh (via env_paths.sh, which derives
+        # PRECHECK_FILE="${REPO_PATH}/${PRECHECK_RELPATH}"). Empty is safe:
+        # env_paths.sh defaults it (`: "${PRECHECK_RELPATH:=}"`) and the
+        # workflow skips the precheck gate entirely when unconfigured.
+        "PRECHECK_RELPATH": inp.precheck_relpath,
         "BRANCH": inp.branch,
         "DEV_BRANCH": inp.dev_branch,
         "MAX_CONCURRENT_SUBAGENTS": str(inp.max_concurrent_subagents),
         "MAX_ACCOUNTS_PER_ISSUE": str(inp.max_accounts_per_issue),
-        # Single source of truth for the model dimension across ensure_labels.sh
-        # / reconcile.sh / set_issue_label.sh. Forwarding the validated
-        # model_tiers (default flash,pro,max) keeps label pre-creation, the
-        # model-dimension mutual exclusion, and the reconcile tier mapping
-        # consistent when an operator overrides model_tiers via trigger.
+        # The FULL configured model_tiers list (default flash,pro,max), NOT the
+        # effective auto-discovered subset. Deliberate: ensure_labels.sh
+        # (creates every model:<tier> label) and set_issue_label.sh (model:*
+        # mutual-exclusion clear-set) must keep seeing the full list so labels
+        # for tiers outside the current effective subset can still be created
+        # and cleared (migration safety — e.g. clearing a leftover model:flash
+        # in a pro+max deployment). The one consumer that needs the EFFECTIVE
+        # subset — reconcile.sh's integer model_tier index — gets it via an
+        # env override inside the reconcile_gitlab activity.
         "MODEL_TIERS": ",".join(inp.model_tiers),
     }
     return env

@@ -72,7 +72,24 @@ delta over "just run the commands below":
 5. **Author `/etc/acpx/campaign-input.json`.** It replaces the legacy trigger
    payload; `acpx-temporal-client create-schedule --input-file` validates it
    against `CampaignInput` before sending. See §Manage schedules for the field
-   set.
+   set. Two **optional** v2 fields (empty string / omitted = feature
+   disabled, the safe default):
+
+   * `model_settings_dir` — absolute directory holding per-tier
+     `<tier>-settings.json` files. When set, each tick auto-discovers the
+     effective model-tier ladder from the files present and copies the
+     resolved tier's file to the attempt worktree's `.claude/settings.json`
+     so `acpx claude exec` really runs on that tier's model. The bash
+     dispatcher's per-tick semantics are natural here: the Schedule re-sends
+     the full input every firing, so "keep it enabled" simply means keeping
+     the field in the input file.
+   * `precheck_relpath` — relative path (under the project checkout root
+     `${REPO_PATH}/`) of the project-team-maintained environment-precheck
+     manifest. When set, every tick with a non-empty batch runs `precheck.sh`
+     before any per-IID prep; a `required` failure tags the batch IIDs
+     `precheck-failed` and fails the tick
+     (`precheck_failed` / `precheck_manifest_error`). See the SKILL's
+     `references/precheck_manifest.md` for the manifest schema.
 
 6. **Keep `NODE_ID` consistent between the worker and the Schedule.** Both the
    `--task-queue` the worker binds and the `--task-queue` the Schedule targets

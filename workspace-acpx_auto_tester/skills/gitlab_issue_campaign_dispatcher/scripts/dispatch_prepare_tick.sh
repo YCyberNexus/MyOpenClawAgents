@@ -228,6 +228,50 @@ if [ -n "${T[ui_accounts_relpath]:-}" ]; then
   export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
 fi
 
+# precheck_relpath: relative path of the environment-precheck manifest under
+# ${REPO_PATH} (the project checkout root). Same carry-forward semantics and the
+# same relpath validation rules as ui_accounts_relpath. See
+# references/precheck_manifest.md. When unset (trigger + persisted state both
+# empty) the dispatcher skips the §16b precheck entirely.
+if [ -n "${T[precheck_relpath]:-}" ]; then
+  case "${T[precheck_relpath]}" in
+    /*)
+      emit_chat_failure "invalid_precheck_relpath: must be a relative path" ;;
+  esac
+  case "${T[precheck_relpath]}" in
+    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
+      emit_chat_failure "invalid_precheck_relpath: dot segments or whitespace not allowed" ;;
+  esac
+  case "${T[precheck_relpath]}" in
+    *[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_precheck_relpath: unsupported characters" ;;
+  esac
+  export PRECHECK_RELPATH="${T[precheck_relpath]}"
+fi
+
+# model_settings_dir: absolute path to the directory holding the per-tier
+# Claude Code settings files (`<tier>-settings.json`). The resolved MODEL_NAME
+# (flash/pro/max, from resolve_model_tier) selects `<MODEL_NAME>-settings.json`,
+# which §20 per-IID prep copies to ${WORKTREE_DIR}/.claude/settings.json so
+# acpx claude exec actually runs on the tier's model. Per-tick semantics — NOT
+# carry-forward (see the comment block after the carry-forward section below).
+# Validated here (absolute-path rules identical to the retired
+# claude_settings_path) at trigger-parse time so a malformed value aborts the
+# whole tick rather than per-IID. Because it is absolute it does NOT feed
+# env_paths.sh path derivation, so no re-source is needed below.
+if [ -n "${T[model_settings_dir]:-}" ]; then
+  case "${T[model_settings_dir]}" in
+    /) emit_chat_failure "invalid_model_settings_dir: must not be /" ;;
+    /*) ;;
+    *) emit_chat_failure "invalid_model_settings_dir: must be an absolute path" ;;
+  esac
+  case "${T[model_settings_dir]}" in
+    *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
+      emit_chat_failure "invalid_model_settings_dir: dot segments, whitespace, or unsupported characters" ;;
+  esac
+  export MODEL_SETTINGS_DIR="${T[model_settings_dir]}"
+fi
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
@@ -237,7 +281,7 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
 # Discover the existing runtime root under REPO_PATH before falling back to
 # a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ] || [ -z "${T[precheck_relpath]:-}" ]; } \
    && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
   shopt -s nullglob
   for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
@@ -256,6 +300,10 @@ if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z 
     if [ -z "${T[ui_accounts_relpath]:-}" ]; then
       PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
       [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
+    fi
+    if [ -z "${T[precheck_relpath]:-}" ]; then
+      PERSISTED_PCR="$(jq -r '.precheck_relpath // empty' "${candidate_state}")"
+      [ -n "${PERSISTED_PCR}" ] && export PRECHECK_RELPATH="${PERSISTED_PCR}"
     fi
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
@@ -288,6 +336,26 @@ if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
   fi
 fi
+# precheck_relpath carry-forward. Like ui_accounts_relpath, the relpath itself
+# does not feed dispatcher path derivation (the §16b precheck call passes
+# PRECHECK_RELPATH to precheck.sh, which re-derives PRECHECK_FILE on its own),
+# so no env_paths re-source is needed here.
+if [ -z "${T[precheck_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
+  PERSISTED_PCR="$(jq -r '.precheck_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
+  if [ -n "${PERSISTED_PCR}" ] && [ "${PERSISTED_PCR}" != "${PRECHECK_RELPATH}" ]; then
+    export PRECHECK_RELPATH="${PERSISTED_PCR}"
+  fi
+fi
+# model_settings_dir is intentionally NOT carry-forward (unlike ui_accounts_relpath
+# / model_tiers / the basenames). Omitting it on a trigger means "unconfigured this
+# tick": MODEL_SETTINGS_DIR stays at its env_paths.sh empty default, so the
+# per-tier settings copy + tier auto-discovery fall back to legacy behavior
+# (effective = full model_tiers, no settings copy, the tier is a prompt-text hint
+# only). The current tick's value (the trigger's, or empty) is still snapshotted
+# into campaign_state.json by the state jq below — NOT for carry-forward, but so
+# the same-batch callback (dispatch_followup.sh) derives the identical effective
+# tier list for its narrow reconcile. The single-batch invariant guarantees that
+# callback is processed before the next prepare tick can overwrite the snapshot.
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
 # The campaign lock lives inside the repo runtime root
@@ -465,6 +533,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
   --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
+  --arg precheck_relpath "${PRECHECK_RELPATH}" \
+  --arg model_settings_dir "${MODEL_SETTINGS_DIR}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -490,6 +560,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     result_basename: $result_basename,
     data_basename: $data_basename,
     ui_accounts_relpath: $ui_accounts_relpath,
+    precheck_relpath: $precheck_relpath,
+    model_settings_dir: $model_settings_dir,
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
@@ -623,10 +695,34 @@ if [ "${PENDING_COUNT}" -gt 0 ]; then
   exit 0
 fi
 
+# Configuration-driven model tier list (ordered, comma-separated). Two values:
+#   MODEL_TIERS_RAW     — the FULL configured list (model_tiers, default
+#                         "flash,pro,max" = the wisdom order flash<pro<max).
+#                         Drives ensure_labels.sh (creates every model:<tier>
+#                         label) and the model-tier set_issue_label.sh call's
+#                         model:* mutual-exclusion clear-set.
+#   EFFECTIVE_TIERS_CSV — the subset whose ${MODEL_SETTINGS_DIR}/<tier>-settings.json
+#                         exists (order preserved); empty MODEL_SETTINGS_DIR →
+#                         equals the full list. Drives reconcile.sh's integer
+#                         model_tier index and resolve_model_tier's upgrade
+#                         ladder + MODEL selection, so the ladder matches the
+#                         settings files actually present (tier auto-discovery:
+#                         e.g. only pro+max on disk → start pro, upgrade to max).
+EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_RAW}" "${MODEL_SETTINGS_DIR:-}")"
+if [ -n "${MODEL_SETTINGS_DIR:-}" ] && [ -z "${EFFECTIVE_TIERS_CSV}" ]; then
+  # Stable classification prefix + the configured tier list (no absolute path —
+  # the path would leak internal layout into the orchestrator chat and is not
+  # needed to classify; same spirit as ui_account_pool_too_small carrying sizes
+  # but not paths). The full path is left out of chat by design.
+  emit_chat_failure "no_model_settings_files: model_settings_dir is configured but contains none of the model_tiers (${MODEL_TIERS_RAW}) <tier>-settings.json files"
+fi
+
 # ─── 10. Reconcile ────────────────────────────────────────────────
+# reconcile maps model:{tier} labels to integer indices against the EFFECTIVE
+# ladder (must match resolve_model_tier below).
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-  MODEL_TIERS="${MODEL_TIERS_RAW}"
+  MODEL_TIERS="${EFFECTIVE_TIERS_CSV}"
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
@@ -921,6 +1017,57 @@ if [ "${BATCH_SIZE}" = "0" ]; then
   exit 0
 fi
 
+# ─── 16b. Environment precheck (only when configured) ─────────────
+# Runs after the batch is known (so a required failure can tag exactly the batch
+# IIDs) and BEFORE §17 per-IID prep (the heavy work). The manifest lives in the
+# cloned repo — clone_or_pull.sh (§13) has already populated it. A required
+# failure (or a malformed manifest) tags this tick's batch IIDs with
+# `precheck-failed` (best-effort) and aborts the whole tick; the tag is cleared
+# when the issue next enters `doing` (§20 REMOVE_LBLS). Skipped entirely when
+# PRECHECK_RELPATH is empty (neither trigger nor persisted state configured it).
+# Placed before the fresh-issue cursor advance below so an abort here does not
+# move the cursor (the advance is not persisted until §19 anyway).
+if [ -n "${PRECHECK_RELPATH}" ]; then
+  PRECHECK_OUT="$(mktemp)"
+  CLEANUP_FILES+=("${PRECHECK_OUT}")
+  set +e
+  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+    UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+    PRECHECK_RELPATH="${PRECHECK_RELPATH}" \
+    bash "${SCRIPT_DIR}/precheck.sh" >"${PRECHECK_OUT}" 2>&1
+  PRECHECK_RC=$?
+  set -e
+  cat "${PRECHECK_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
+  retire_temp_file "${PRECHECK_OUT}"
+  if [ "${PRECHECK_RC}" -ne 0 ]; then
+    # Tag the batch IIDs (best-effort) then abort. precheck-failed is a
+    # non-workflow marker (set_issue_label.sh adds it without disturbing the
+    # workflow label) and does NOT consume retry or upgrade the model tier.
+    # ATTEMPT_NUMBER=0 is passed explicitly: env_paths.sh hard-requires it
+    # whenever ISSUE_IID is set, and §17 allocate has not run yet at this
+    # point. set_issue_label.sh never uses attempt-level paths, so the
+    # placeholder value is inert (without it the labeling would silently
+    # no-op inside `|| true`).
+    mapfile -t PRECHECK_BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
+    for piid in "${PRECHECK_BATCH_IIDS[@]}"; do
+      PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+        UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+        ISSUE_IID="${piid}" ATTEMPT_NUMBER=0 \
+        bash "${SCRIPT_DIR}/set_issue_label.sh" add precheck-failed \
+        >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    done
+    case "${PRECHECK_RC}" in
+      2) PRECHECK_REASON="precheck_manifest_error" ;;
+      *) PRECHECK_REASON="precheck_failed" ;;
+    esac
+    emit_chat_failure "${PRECHECK_REASON} (exit ${PRECHECK_RC}; batch=[${PRECHECK_BATCH_IIDS[*]}]; see ${DISPATCHER_LOG_DIR}/precheck-*.json)"
+  fi
+fi
+
 # Move the fresh-issue cursor past any fresh IID selected for this batch. The
 # backlog/blocked paths do not affect it.
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
@@ -1130,30 +1277,6 @@ for iid in "${BATCH_IIDS[@]}"; do
       ;;
   esac
 
-  # claude_settings_path
-  if [ -n "${T[claude_settings_path]:-}" ]; then
-    csp="${T[claude_settings_path]}"
-    case "${csp}" in
-      /) prep_blocked "claude_settings_path must not be /"; continue ;;
-      /*) ;;
-      *) prep_blocked "claude_settings_path must be absolute: ${csp}"; continue ;;
-    esac
-    case "${csp}" in
-      *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
-        prep_blocked "invalid_claude_settings_path: ${csp}"; continue ;;
-    esac
-    if [ ! -r "${csp}" ]; then
-      prep_blocked "claude_settings_path file not found or not readable: ${csp}"; continue
-    fi
-    # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
-    # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
-    WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
-    if ! cp "${csp}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
-      prep_blocked "claude_settings copy failed"; continue
-    fi
-    git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
-  fi
-
   # Read live issue via glab.
   ISSUE_JSON="$(glab api "projects/${PROJECT_URI}/issues/${iid}" 2>/dev/null || true)"
   if [ -z "${ISSUE_JSON}" ]; then
@@ -1178,9 +1301,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   # `timeout` is included so that a reviewer who re-enqueued the IID (e.g. by
   # adding `retry` on top of `timeout`) doesn't end up with a `timeout +
   # doing` mix between this prep and `set_issue_label.sh add doing`.
+  # precheck-failed (the dispatcher-side §16b tick gate) is cleared here too:
+  # reaching `doing` means this tick's precheck passed, so the marker is stale.
   REMOVE_LBLS=(
     todo retry new continue contiune done pr timeout
-    blocked-cc blocked-dispatcher failed-cc failed-dispatcher
+    blocked-cc blocked-dispatcher failed-cc failed-dispatcher precheck-failed
   )
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
@@ -1210,7 +1335,8 @@ for iid in "${BATCH_IIDS[@]}"; do
   # the orthogonal model dimension) and BEFORE build_prompt + spawn. Reads the
   # issue's current model:{tier} label and the prior-attempt history, decides
   # UPGRADE?, stamps the resolved model:{tier} label (+ removes quality:low when
-  # an upgrade lands), and injects the resolved model name into build_prompt. ──
+  # an upgrade lands or the tier is capped), and injects the resolved model
+  # name into build_prompt. ──
   PRIOR_STATUS_FOR_MODEL=""
   PRIOR_CONTINUE_COUNT=0
   ISSUE_ROOT_X_PRE="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$ISSUE_ROOT"' "${SCRIPT_DIR}/env_paths.sh")"
@@ -1226,7 +1352,15 @@ for iid in "${BATCH_IIDS[@]}"; do
   if [ "${ISSUE_MODE}" = "continue" ]; then
     CONTINUE_COUNT_NOW=$((PRIOR_CONTINUE_COUNT + 1))
   fi
-  MODEL_TIERS_STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // ["flash","pro","max"]')"
+  # Upgrade ladder + MODEL selection run on the EFFECTIVE tier list (only tiers
+  # whose <tier>-settings.json exist on disk), so a deployment shipping e.g.
+  # only pro+max starts at pro and upgrades to max. EFFECTIVE_TIERS_CSV is
+  # guaranteed non-empty here (configured-but-empty aborted the tick before
+  # §10; unconfigured dir → equals the full list), so the split input is never
+  # empty. Were that invariant broken, an empty input would make the downstream
+  # `jq 'length'` fail outright (set -e) rather than silently yield an empty
+  # array — a loud failure, not a wrong default.
+  MODEL_TIERS_STATE_JSON="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | jq -Rc 'split(",")')"
   MODEL_UPGRADE_THRESHOLD_STATE="$(printf '%s' "${STATE_JSON}" | jq -r '.model_upgrade_continue_threshold // 2')"
   MODEL_DECISION="$(resolve_model_tier "${ISSUE_LABELS}" "${PRIOR_STATUS_FOR_MODEL}" \
     "${CONTINUE_COUNT_NOW}" "${MODEL_TIERS_STATE_JSON}" "${MODEL_UPGRADE_THRESHOLD_STATE}")"
@@ -1244,11 +1378,38 @@ for iid in "${BATCH_IIDS[@]}"; do
       >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || \
       wrapper_log prepare_tick "iid=${iid} model label add ${MODEL_LABEL_X} failed (non-fatal)"
   fi
-  # quality:low is one-shot — drop it once an upgrade it triggered has landed.
+  # quality:low is one-shot — drop it once an upgrade it triggered has landed,
+  # or when the tier is already capped (no further work to do).
   if [ "${MODEL_CONSUME_QLOW_X}" = "true" ]; then
     env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "quality:low" \
       >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || \
       wrapper_log prepare_tick "iid=${iid} quality:low removal failed (non-fatal)"
+  fi
+
+  # model settings (per-tier): copy ${MODEL_NAME_X}-settings.json →
+  # .claude/settings.json so acpx claude exec actually runs on the tier's
+  # model. MODEL_NAME_X was resolved above by resolve_model_tier and clamped
+  # into range (never null). The `cp` target is a file path, so the source
+  # `<tier>-settings.json` lands renamed as the `settings.json` Claude Code
+  # reads by default. This replaces the retired claude_settings_path
+  # single-file override. When MODEL_SETTINGS_DIR is unset (the trigger did not
+  # configure it this tick — per-tick, never restored from persisted state) the
+  # whole step is skipped and the worktree's committed .claude/settings.json is
+  # used as-is. A configured dir with a missing/unreadable tier file FAILS the
+  # IID (blocked-dispatcher) per the strict no-fallback policy — no downgrade
+  # to a default tier file.
+  if [ -n "${MODEL_SETTINGS_DIR:-}" ]; then
+    msf="${MODEL_SETTINGS_DIR}/${MODEL_NAME_X}-settings.json"
+    if [ ! -r "${msf}" ]; then
+      prep_blocked "model settings file not found or not readable: ${msf}"; continue
+    fi
+    # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
+    # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
+    WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
+    if ! cp "${msf}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
+      prep_blocked "model settings copy failed"; continue
+    fi
+    git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
   fi
 
   # build_prompt.sh — inject the resolved model so acpx runs under it.

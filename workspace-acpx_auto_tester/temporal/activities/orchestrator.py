@@ -7,12 +7,19 @@ already exist:
 * A1 ``reconcile_gitlab``           ← ``reconcile.sh``
 * A2 ``ensure_workflow_labels``     ← ``ensure_labels.sh``
 * A3 ``clone_or_pull_repo``         ← ``clone_or_pull.sh``
+* A3b ``derive_effective_tiers``    ← ``_dispatch_lib.sh::derive_effective_model_tiers`` twin
+* A3c ``run_environment_precheck``  ← ``precheck.sh`` (tick-level §16b gate)
+* A3d ``tag_precheck_failed``       ← ``set_issue_label.sh add precheck-failed`` (best-effort)
 * A4 ``load_ui_account_pool``       ← ``${REPO_PATH}/${ui_accounts_relpath}`` JSON parser
 * A4b ``allocate_attempt_number``   ← ``allocate_attempt.sh``
 * A5 ``prepare_attempt_worktree``   ← ``prepare_attempt.sh``
 * A6 ``build_executor_prompt``      ← ``build_prompt.sh``
 * A6a ``mark_issue_doing``          ← ``set_issue_label.sh add doing``
 * A6b ``record_attempt_outcome``    ← update per-issue ``state.json``
+* A6c ``resolve_and_stamp_model_tier`` ← §6 model-tier resolve + stamp
+* A6d ``apply_model_settings``      ← per-tier ``<tier>-settings.json`` →
+  ``${WORKTREE_DIR}/.claude/settings.json`` copy (Python-native; the bash
+  dispatcher inlines this in ``dispatch_prepare_tick.sh`` with no leaf script)
 
 Each leaf script keeps its existing contract; the activity layer only adds
 typed inputs/outputs and ApplicationError translation.
@@ -20,18 +27,21 @@ typed inputs/outputs and ApplicationError translation.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
 from temporalio import activity
 
-from ..shared.env import build_attempt_env, build_dispatcher_env
+from ..shared.env import build_attempt_env, build_dispatcher_env, merge_env
 from ..shared.errors import AcpxErrorType, raise_app_error
+from ..shared.model_tiers import derive_effective_model_tiers
 from ..shared.types import (
     AttemptInput,
     AttemptOutcome,
@@ -72,6 +82,14 @@ async def reconcile_gitlab(camp: CampaignInput) -> ReconcileEvidence:
     env = build_dispatcher_env(camp)
     env["MIN_IID"] = str(camp.issue_min_iid)
     env["MAX_IID"] = str(camp.issue_max_iid)
+    # reconcile.sh maps model:{tier} labels to integer indices against the
+    # EFFECTIVE ladder (must match resolve_model_tier's ladder, which also
+    # consumes effective_model_tiers). build_dispatcher_env deliberately
+    # carries the FULL model_tiers list for ensure_labels.sh /
+    # set_issue_label.sh; this override is the bash dispatcher's
+    # `RECONCILE_ARGS=(… MODEL_TIERS="${EFFECTIVE_TIERS_CSV}")` twin. The
+    # fallback to the full list covers a not-yet-derived (empty) field.
+    env["MODEL_TIERS"] = ",".join(camp.effective_model_tiers or camp.model_tiers)
 
     res = await run_script("reconcile.sh", env=env)
     if res.exit_code != 0:
@@ -312,6 +330,139 @@ async def clone_or_pull_repo(camp: CampaignInput) -> str:
             f"clone_or_pull.sh exit {res.exit_code}: {res.stderr[-500:]}",
         )
     return f"{camp.repo_parent_path.rstrip('/')}/{camp.project}"
+
+
+# ---------------------------------------------------------------------------
+# A3b — derive_effective_tiers (v2 tier auto-discovery)
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="derive_effective_tiers")
+async def derive_effective_tiers(camp: CampaignInput) -> tuple[str, ...]:
+    """Derive THIS tick's EFFECTIVE model-tier ladder from the settings files
+    on disk (``shared/model_tiers.py``; the Python twin of
+    ``_dispatch_lib.sh::derive_effective_model_tiers``).
+
+    * ``model_settings_dir`` empty → returns ``camp.model_tiers`` unchanged
+      (auto-discovery disabled; legacy behavior).
+    * configured but none of the tiers' ``<tier>-settings.json`` is readable →
+      non-retryable ``no_model_settings_files`` — the CampaignWorkflow lets it
+      fail the whole tick, the Temporal equivalent of the bash dispatcher's
+      ``emit_chat_failure "no_model_settings_files: …"`` abort. Like the bash
+      message, the abort string deliberately carries the configured tier list
+      but NOT the absolute directory path (no internal-layout leak into the
+      operator-facing failure).
+
+    Runs once per tick, BEFORE reconcile (bash §9 → §10 ordering), so the
+    workflow can thread the result into ``CampaignInput.effective_model_tiers``
+    and every downstream consumer of the ladder sees one consistent value.
+    """
+    effective = derive_effective_model_tiers(
+        camp.model_tiers, camp.model_settings_dir
+    )
+    if camp.model_settings_dir and not effective:
+        raise_app_error(
+            AcpxErrorType.NO_MODEL_SETTINGS_FILES,
+            "no_model_settings_files: model_settings_dir is configured but "
+            f"contains none of the model_tiers ({','.join(camp.model_tiers)}) "
+            "<tier>-settings.json files",
+        )
+    return effective
+
+
+# ---------------------------------------------------------------------------
+# A3c — run_environment_precheck (tick-level gate; §16b twin)
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="run_environment_precheck")
+async def run_environment_precheck(camp: CampaignInput) -> str:
+    """Run ``precheck.sh`` against the project-team-maintained manifest at
+    ``${REPO_PATH}/${precheck_relpath}``.
+
+    Exit-code contract (mirrors the script header):
+        * 0 → passed, or manifest absent (skipped) → return normally;
+        * 2 → malformed manifest → ``precheck_manifest_error`` (non-retryable);
+        * any other non-zero (1 = required failure) → ``precheck_failed``
+          (non-retryable) — same catch-all the bash §16b ``case`` uses.
+
+    The caller (CampaignWorkflow) only invokes this when the batch is
+    non-empty AND ``precheck_relpath`` is configured. maximum_attempts must be
+    1: the script retries its TCP probes internally, and a precheck failure is
+    a signal, not jitter. Evidence is written by the script itself to
+    ``${DISPATCHER_LOG_DIR}/precheck-<ts>.json`` (env var values never appear
+    there or here).
+    """
+    # Unlike every other dispatcher activity (whitelist env), precheck.sh gets
+    # the FULL worker environment with the contract vars layered on top —
+    # mirroring the bash §16b call, which inherits the dispatcher shell's env.
+    # The manifest's env_vars probes test "runner global environment" (e.g.
+    # JAVA_HOME), and the PRECHECK_TCP_* tuning knobs are also read from the
+    # environment; a whitelist would make every such probe report
+    # "unset or empty" and permanently fail the tick.
+    res = await run_script(
+        "precheck.sh", env=merge_env(os.environ, build_dispatcher_env(camp))
+    )
+    dispatcher_log_dir = (
+        f"{camp.repo_parent_path.rstrip('/')}/{camp.project}/"
+        f"{camp.result_basename}/_dispatcher/log"
+    )
+    if res.exit_code == 0:
+        lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+        return lines[-1] if lines else "ok"
+    if res.exit_code == 2:
+        raise_app_error(
+            AcpxErrorType.PRECHECK_MANIFEST_ERROR,
+            f"precheck_manifest_error (exit {res.exit_code}; "
+            f"see {dispatcher_log_dir}/precheck-*.json)",
+        )
+    raise_app_error(
+        AcpxErrorType.PRECHECK_FAILED,
+        f"precheck_failed (exit {res.exit_code}; "
+        f"see {dispatcher_log_dir}/precheck-*.json)",
+    )
+
+
+# ---------------------------------------------------------------------------
+# A3d — tag_precheck_failed (best-effort per-IID marker)
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="tag_precheck_failed")
+async def tag_precheck_failed(camp: CampaignInput, iid: int) -> None:
+    """Best-effort ``set_issue_label.sh add precheck-failed`` for one batch IID
+    after a precheck failure. The caller swallows ActivityError (the tag is
+    advisory; the tick abort happens regardless).
+
+    ``precheck-failed`` is a dispatcher-side NON-workflow marker: adding it
+    produces no workflow-group conflict clearing, it coexists with the issue's
+    workflow label, does NOT consume retry_count, and does NOT feed the model
+    upgrade triggers. It is removed again when the issue next enters ``doing``
+    (see :func:`mark_issue_doing`).
+
+    Why ``ATTEMPT_NUMBER="0"`` is passed: ``env_paths.sh`` hard-requires
+    ``ATTEMPT_NUMBER`` whenever ``ISSUE_IID`` is set, and this tag runs BEFORE
+    ``allocate_attempt_number`` — no real attempt number exists yet. The
+    statemachine bash dispatcher's §16b tagging call omits it, which makes
+    ``set_issue_label.sh`` exit during the ``env_paths.sh`` bootstrap and the
+    ``|| true`` swallow the failure — i.e. the label silently never lands on
+    GitLab there. Passing the dummy ``"0"`` is a DELIBERATE deviation that
+    fixes the port: ``set_issue_label.sh`` never reads attempt-scoped paths,
+    and ``env_paths.sh`` only uses the value for ``%03d`` padding and path
+    derivation (side effect: ``mkdir -p ${ISSUE_ROOT}``, harmless).
+    """
+    env = build_dispatcher_env(camp)
+    env["ISSUE_IID"] = str(iid)
+    env["ATTEMPT_NUMBER"] = "0"
+    res = await run_script(
+        "set_issue_label.sh", env=env, args=("add", "precheck-failed")
+    )
+    if res.exit_code != 0:
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            f"set_issue_label.sh add precheck-failed (iid={iid}) "
+            f"exit {res.exit_code}: {res.stderr[-500:]}",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -630,7 +781,10 @@ async def mark_issue_doing(camp: CampaignInput, att: AttemptInput) -> None:
     ``todo`` / ``retry`` / ``new`` / ``continue`` / ``blocked`` are removed by
     ``set_issue_label.sh add doing`` before the attempt is allowed to run.
     Trigger ``require_labels`` are one-shot entry labels too, so matched labels
-    are removed explicitly before adding ``doing``.
+    are removed explicitly before adding ``doing``. The non-workflow
+    ``precheck-failed`` marker is also removed explicitly (see below) — the
+    bash dispatcher does the same by listing it in the into-doing
+    ``REMOVE_LBLS`` set.
     """
     env = build_attempt_env(camp, att)
     env.update(_derive_paths(camp, att))
@@ -650,6 +804,23 @@ async def mark_issue_doing(camp: CampaignInput, att: AttemptInput) -> None:
                 "set_issue_label.sh remove required label "
                 f"{label!r} exit {remove_res.exit_code}: {remove_res.stderr[-500:]}",
             )
+
+    # precheck-failed is a NON-workflow dispatcher marker, so the workflow-group
+    # mutual exclusion inside `set_issue_label.sh add doing` does NOT clear it.
+    # Reaching doing means this tick's precheck passed, so the marker is stale —
+    # remove it explicitly. GitLab's remove_labels is idempotent (removing an
+    # absent label is a no-op success), so this is safe unconditionally.
+    precheck_res = await run_script(
+        "set_issue_label.sh",
+        env=env,
+        args=("remove", "precheck-failed"),
+    )
+    if precheck_res.exit_code != 0:
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            "set_issue_label.sh remove precheck-failed "
+            f"exit {precheck_res.exit_code}: {precheck_res.stderr[-500:]}",
+        )
 
     res = await run_script("set_issue_label.sh", env=env, args=("add", "doing"))
     if res.exit_code != 0:
@@ -833,7 +1004,8 @@ async def resolve_and_stamp_model_tier(
     camp: CampaignInput, att: AttemptInput
 ) -> tuple[str, int]:
     """Resolve this attempt's model tier (§6), stamp the resolved
-    ``model:{tier}`` label (and consume ``quality:low`` on an upgrade), persist
+    ``model:{tier}`` label (and consume ``quality:low`` when an upgrade lands
+    or the tier is capped), persist
     the resolved tier + ``continue_count`` into the per-issue state cache, and
     return ``(model_name, model_tier)`` for injection into build_prompt.
 
@@ -841,6 +1013,19 @@ async def resolve_and_stamp_model_tier(
     never clears the orthogonal model dimension) and BEFORE
     ``build_executor_prompt`` + the child spawn. The label is the source of
     truth; the state.json mirror only feeds the next tick's soft-trigger read.
+
+    The decision ladder is the EFFECTIVE tier subset
+    (``camp.effective_model_tiers``, derived per tick by
+    ``derive_effective_tiers`` from the ``<tier>-settings.json`` files on
+    disk; falls back to the full ``model_tiers`` when auto-discovery is off).
+    This guarantees the resolved ``model_name`` always has a matching settings
+    file for ``apply_model_settings`` to copy, and keeps the returned integer
+    ``model_tier`` index consistent with reconcile.sh's effective-ladder
+    mapping. A live ``model:<name>`` label whose name fell OUT of the
+    effective subset is ignored by the decision (same migration behavior as
+    bash: the issue is re-stamped at the effective ladder's lowest tier); the
+    stale label itself still gets cleared because ``set_issue_label.sh``'s
+    model:* mutual-exclusion clear-set runs on the FULL list.
     """
     env = build_attempt_env(camp, att)
     env.update(_derive_paths(camp, att))
@@ -858,7 +1043,10 @@ async def resolve_and_stamp_model_tier(
         labels=att.issue_labels,
         prior_status=prior_status,
         continue_count=continue_count_now,
-        model_tiers=camp.model_tiers,
+        # EFFECTIVE ladder (tier auto-discovery); falls back to the full list
+        # when model_settings_dir is unconfigured / not yet derived. Mirrors
+        # the bash dispatcher feeding EFFECTIVE_TIERS_CSV to resolve_model_tier.
+        model_tiers=camp.effective_model_tiers or camp.model_tiers,
         upgrade_continue_threshold=camp.model_upgrade_continue_threshold,
     )
     model_name = str(decision["model_name"])
@@ -881,7 +1069,8 @@ async def resolve_and_stamp_model_tier(
                 res.stderr[-300:],
             )
 
-    # quality:low is one-shot — drop it once an upgrade it triggered has landed.
+    # quality:low is one-shot — drop it once an upgrade it triggered has
+    # landed, or when the tier is already capped (no further work to do).
     if decision["consume_quality_low"]:
         res = await run_script(
             "set_issue_label.sh", env=env, args=("remove", "quality:low")
@@ -913,6 +1102,90 @@ async def resolve_and_stamp_model_tier(
     tmp.replace(state_path)
 
     return (model_name, target_tier)
+
+
+# ---------------------------------------------------------------------------
+# A6d — apply_model_settings (per-tier settings copy)
+# ---------------------------------------------------------------------------
+
+
+@activity.defn(name="apply_model_settings")
+async def apply_model_settings(camp: CampaignInput, att: AttemptInput) -> str:
+    """Copy ``${model_settings_dir}/${model_name}-settings.json`` to
+    ``${WORKTREE_DIR}/.claude/settings.json`` so ``acpx claude exec`` actually
+    runs on the resolved tier's model, then mark the file skip-worktree.
+
+    Python-native twin of the bash dispatcher's inline per-IID copy step
+    (there is no leaf script to wrap — ``dispatch_prepare_tick.sh`` inlines
+    it). Called by the CampaignWorkflow AFTER ``prepare_attempt_worktree``
+    (whose shared-config refresh resets ``.claude/`` from
+    ``origin/${dev_branch}`` and clears any prior skip-worktree bit) and
+    ``resolve_and_stamp_model_tier`` (``att.model_name`` is now resolved),
+    and BEFORE ``build_executor_prompt`` — the same ordering as bash.
+
+    * ``model_settings_dir`` empty → no-op (legacy: the worktree's committed
+      ``.claude/settings.json`` is used as-is). Returns "".
+    * tier file missing/unreadable → non-retryable ``model_settings_missing``
+      → the calling workflow's prep try-block routes it to
+      ``_record_pre_child_blocked`` → ``blocked_dispatcher`` for THAT IID
+      (strict no-fallback: no downgrade to a default tier file).
+    * the ``cp`` target is a file path, so the source ``<tier>-settings.json``
+      lands renamed as the ``settings.json`` Claude Code reads by default.
+    * ``git update-index --skip-worktree .claude/settings.json`` keeps the
+      copied file out of ``stage_and_guard.sh``'s staging (per-worktree index
+      bit → concurrent attempts and issue MRs unaffected). Failure is
+      tolerated, mirroring the bash ``|| true``.
+
+    Returns the destination path (or "" when skipped) for logging.
+    """
+    if not camp.model_settings_dir:
+        return ""
+    if not att.model_name:
+        raise_app_error(
+            AcpxErrorType.INVARIANT_VIOLATION,
+            "apply_model_settings called with empty att.model_name while "
+            "model_settings_dir is configured; resolve_and_stamp_model_tier "
+            "must run first",
+        )
+    src = Path(camp.model_settings_dir) / f"{att.model_name}-settings.json"
+    # Mirror bash `[ ! -r "${msf}" ]` (existence + readability in one probe).
+    if not os.access(src, os.R_OK):
+        raise_app_error(
+            AcpxErrorType.MODEL_SETTINGS_MISSING,
+            f"model settings file not found or not readable: {src}",
+        )
+    paths = _derive_paths(camp, att)
+    worktree_dir = paths["WORKTREE_DIR"]
+    dest = Path(worktree_dir) / ".claude" / "settings.json"
+    try:
+        shutil.copyfile(src, dest)
+    except OSError as exc:
+        # Retryable (SUBPROCESS_FAILED is not in NON_RETRYABLE_ERROR_TYPES and
+        # the copy is idempotent); on retry exhaustion the workflow's prep
+        # try-block still lands it in blocked_dispatcher. Message mirrors the
+        # bash `prep_blocked "model settings copy failed"`.
+        raise_app_error(
+            AcpxErrorType.SUBPROCESS_FAILED,
+            f"model settings copy failed: {src} -> {dest}: {exc}",
+        )
+    proc = await asyncio.create_subprocess_exec(
+        "git",
+        "update-index",
+        "--skip-worktree",
+        ".claude/settings.json",
+        cwd=worktree_dir,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    _, stderr_b = await proc.communicate()
+    if proc.returncode != 0:
+        LOG.warning(
+            "iid=%d git update-index --skip-worktree .claude/settings.json "
+            "failed (tolerated, mirrors bash `|| true`): %s",
+            att.iid,
+            (stderr_b or b"").decode("utf-8", errors="replace")[-300:],
+        )
+    return str(dest)
 
 
 @activity.defn(name="bump_campaign_tick_seq")
@@ -974,10 +1247,12 @@ async def _idle_heartbeat() -> None:
 
 
 __all__ = [
+    "apply_model_settings",
     "build_executor_prompt",
     "allocate_attempt_number",
     "bump_campaign_tick_seq",
     "clone_or_pull_repo",
+    "derive_effective_tiers",
     "ensure_workflow_labels",
     "load_ui_account_pool",
     "mark_issue_doing",
@@ -985,5 +1260,7 @@ __all__ = [
     "record_attempt_outcome",
     "reconcile_gitlab",
     "resolve_and_stamp_model_tier",
+    "run_environment_precheck",
     "self_heal_safety_bin",
+    "tag_precheck_failed",
 ]

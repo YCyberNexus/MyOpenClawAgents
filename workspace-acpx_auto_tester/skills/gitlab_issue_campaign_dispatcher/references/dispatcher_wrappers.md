@@ -130,6 +130,22 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     at or above `next_new_issue_iid`, then blocked IIDs whose
     `blocked_cooldown_ticks` has elapsed. Cap by
     `min(max_concurrent_subagents, hourly_issue_quota - quota_launched_this_tick)`.
+16b. **Environment precheck** — only when `PRECHECK_RELPATH` is non-empty
+    (trigger `precheck_relpath`, carry-forward persisted). Run `precheck.sh`,
+    which reads the manifest at `${REPO_PATH}/${PRECHECK_RELPATH}` and probes its
+    `urls` (pure-bash `/dev/tcp` TCP reachability — no curl), `commands`
+    (`command -v`), `env_vars` (set & non-empty; value never logged), and `files`
+    (`-f`/`-d`/`-e`). Exit `0` = every `required` passed (or manifest absent =
+    skipped) → proceed. Exit `1` (a `required` failed) or `2` (malformed
+    manifest) → tag every batch IID with `precheck-failed` (best-effort
+    `set_issue_label.sh add precheck-failed`), then
+    `status:"tick_failed", chat_summary:"precheck_failed …"` /
+    `"precheck_manifest_error …"`. Runs after batch formation so the tag names
+    exactly the batch IIDs, and before §17 (the heavy per-IID prep). Evidence:
+    `${DISPATCHER_LOG_DIR}/precheck-<ts>.json`. The tag is non-workflow, does NOT
+    consume retry or upgrade the model tier, and is cleared when the issue next
+    enters `doing` (§20). When `PRECHECK_RELPATH` is empty, skip entirely. See
+    [precheck_manifest.md](precheck_manifest.md).
 17. For each IID in the batch (sequential):
     1. `allocate_attempt.sh` → attempt number.
 18. `load_ui_accounts.sh` already ran in step 14; slice the captured
@@ -145,11 +161,36 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
        Failure → `prep_blocked` (drains pending, classifies as
        `blocked-dispatcher` — a per-IID prep failure is dispatcher-side,
        skips IID).
-    3. Optional `claude_settings_path` copy + `update-index --skip-worktree`.
-    4. `glab api projects/${PROJECT_URI}/issues/${iid}` → title, URL,
+    3. `glab api projects/${PROJECT_URI}/issues/${iid}` → title, URL,
        labels, description (truncated to 4 KB).
-    5. `set_issue_label.sh remove <entry-label>` × N then `add doing`.
-    6. `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`).
+    4. `set_issue_label.sh remove <entry-label>` × N then `add doing`.
+       The into-`doing` clear set also removes the non-workflow
+       `precheck-failed` marker (reaching `doing` means this tick's
+       precheck passed, so the marker is stale).
+    5. **resolve_model_tier** (v2; library function in `_dispatch_lib.sh`).
+       Fed the issue's live labels, the prior `state.json.status` /
+       `continue_count`, and the EFFECTIVE tier array
+       (`derive_effective_model_tiers` over `model_tiers` ×
+       `model_settings_dir` — only tiers whose `<tier>-settings.json`
+       exist; unconfigured dir → the full list). CC-side hard triggers
+       (`blocked-cc` / `timeout` / `failed-cc`) and soft triggers
+       (`quality:low`, `continue_count ≥
+       model_upgrade_continue_threshold`) raise one tier; dispatcher-side
+       failures never upgrade; a hit at the cap holds the cap. Stamps the
+       resolved `model:{tier}` (mutually exclusive within model:*) and
+       consumes `quality:low` when the upgrade it drove lands or the tier is
+       already capped (NOT on the very first stamp of a multi-tier ladder —
+       it then survives and drives the upgrade on the next PREPARE).
+    5b. **Per-tier settings copy** — only when `MODEL_SETTINGS_DIR` is
+       non-empty (per-tick trigger `model_settings_dir`): copy
+       `${MODEL_SETTINGS_DIR}/${MODEL_NAME}-settings.json` →
+       `${WORKTREE_DIR}/.claude/settings.json`, then `git update-index
+       --skip-worktree .claude/settings.json` (per-worktree index, never
+       staged into issue MRs). Missing/unreadable tier file →
+       `prep_blocked` (`blocked-dispatcher`, strict no-fallback).
+       Supersedes the removed `claude_settings_path` single-file copy.
+    6. `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`; injects the
+       resolved `MODEL_NAME` / `MODEL_TIER`).
     7. Initialize `${ATTEMPT_STATE_FILE}` + `${ISSUE_STATE_FILE}` with
        `status=in_progress`.
     8. Render `references/executor_prompt.md` fenced block via
@@ -177,7 +218,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 
 | Field | Meaning |
 | ----- | ------- |
-| `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs ended `blocked-dispatcher` during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
+| `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs ended `blocked-dispatcher` during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed, precheck_failed, precheck_manifest_error, no_model_settings_files; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
 | `dispatch_entries` | Array of `{iid, attempt_number, child_label, payload_path}` objects; empty unless `status == "ready"`. The LLM `Read`s each `payload_path` and feeds the file contents to `sessions_spawn(payload=...)`. **Token-sensitive:** the file holds the GitLab token in cleartext (substituted from `{GITLAB_TOKEN}`); the wrapper writes it with mode 0600 and `dispatch_record_spawn.sh STATUS=spawned` truncates it once the runtime has it. The wrapper.log MUST NEVER include the rendered prompt contents. |
 | `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |

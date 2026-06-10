@@ -6,22 +6,35 @@ parallel — mirroring the legacy dispatcher's flock contract.
 
 Each tick:
 
-1. ``reconcile_gitlab`` activity → live label snapshot (source of truth).
-2. Classify IIDs from evidence: completed / blocked / failed / timeout / open.
-3. Form a batch of up to ``max_concurrent_subagents`` open IIDs the campaign
+1. ``derive_effective_tiers`` activity → THIS tick's effective model-tier
+   ladder (v2 tier auto-discovery from ``model_settings_dir``; threaded into
+   ``CampaignInput.effective_model_tiers`` via ``dataclasses.replace``).
+2. ``reconcile_gitlab`` activity → live label snapshot (source of truth);
+   its ``MODEL_TIERS`` env is overridden to the effective ladder.
+3. Classify IIDs from evidence: completed / blocked / failed / timeout / open.
+4. Form a batch of up to ``max_concurrent_subagents`` open IIDs the campaign
    has launch quota for, subject to ``hourly_issue_quota``,
    ``blocked_cooldown_ticks``, ``issue_iids_whitelist``, ``require_labels``.
-4. For each batch IID:
+5. Environment precheck gate (only when ``precheck_relpath`` is configured
+   and the batch is non-empty): ``run_environment_precheck`` activity; a
+   failure tags each batch IID ``precheck-failed`` (best-effort) and fails
+   the whole tick with a non-retryable ApplicationError
+   (``precheck_failed`` / ``precheck_manifest_error``) — no retry_count is
+   consumed and no per-IID prep runs.
+6. For each batch IID:
 
    * acquire one UI account slot from :class:`AccountSemaphore`;
    * run ``prepare_attempt_worktree`` + ``mark_issue_doing`` +
-     ``build_executor_prompt`` activities;
+     ``resolve_and_stamp_model_tier`` + ``apply_model_settings`` (per-tier
+     ``<tier>-settings.json`` → ``.claude/settings.json`` copy; no-op when
+     ``model_settings_dir`` is unconfigured) + ``build_executor_prompt``
+     activities;
    * start :class:`IssueAttemptWorkflow` as a child with
      ``WorkflowIDReusePolicy.REJECT_DUPLICATE`` (same IID never runs twice).
 
-5. Await all children in this batch (single-batch invariant — no mid-batch
+7. Await all children in this batch (single-batch invariant — no mid-batch
    top-up). Drain semaphore on each child completion.
-6. Persist per-IID terminal outcome into the existing issue state cache so
+8. Persist per-IID terminal outcome into the existing issue state cache so
    later Schedule firings retain attempt numbering and blocked retry budget.
 """
 
@@ -40,9 +53,11 @@ from temporalio.workflow import ChildWorkflowCancellationType, ParentClosePolicy
 with workflow.unsafe.imports_passed_through():
     from ..activities.orchestrator import (
         allocate_attempt_number,
+        apply_model_settings,
         build_executor_prompt,
         bump_campaign_tick_seq,
         clone_or_pull_repo,
+        derive_effective_tiers,
         ensure_workflow_labels,
         load_ui_account_pool,
         mark_issue_doing,
@@ -50,9 +65,12 @@ with workflow.unsafe.imports_passed_through():
         record_attempt_outcome,
         reconcile_gitlab,
         resolve_and_stamp_model_tier,
+        run_environment_precheck,
         self_heal_safety_bin,
+        tag_precheck_failed,
     )
     from ..activities.leaf import sync_terminal_labels
+    from ..shared.errors import AcpxErrorType
     from ..shared.types import (
         AttemptInput,
         AttemptOutcome,
@@ -269,6 +287,37 @@ class CampaignWorkflow:
         )
         LOG.info("CampaignWorkflow tick=%d project=%s", self._tick_seq, inp.project)
 
+        # ── Effective model-tier ladder (v2 tier auto-discovery) ────────────
+        # Derived once per tick — after the tick counter, before reconcile
+        # (the bash dispatcher's §9 → §10 ordering) — and threaded into the
+        # input via dataclasses.replace so every downstream activity argument
+        # carries one consistent per-tick value. This satisfies the
+        # reconcile_gitlab "new inputs must be modeled as input dataclass
+        # fields" constraint instead of adding activity parameters. A
+        # configured model_settings_dir with NO matching <tier>-settings.json
+        # fails the whole tick (no_model_settings_files), mirroring the bash
+        # emit_chat_failure abort; the re-raise surfaces the exact abort
+        # string as a non-retryable workflow failure.
+        try:
+            effective_tiers = await workflow.execute_activity(
+                derive_effective_tiers,
+                args=[inp],
+                start_to_close_timeout=timedelta(seconds=10),
+                retry_policy=RetryPolicy(maximum_attempts=1),
+            )
+        except ActivityError as ae:
+            cause = ae.cause
+            if isinstance(cause, ApplicationError) and cause.type == str(
+                AcpxErrorType.NO_MODEL_SETTINGS_FILES
+            ):
+                raise ApplicationError(
+                    cause.message,
+                    type=str(AcpxErrorType.NO_MODEL_SETTINGS_FILES),
+                    non_retryable=True,
+                ) from ae
+            raise
+        inp = replace(inp, effective_model_tiers=tuple(effective_tiers))
+
         # ── Reconcile + classify ────────────────────────────────────────────
         evidence = await self._reconcile(inp)
         self._classify(inp, evidence)
@@ -289,6 +338,65 @@ class CampaignWorkflow:
         # by the operator. (TODO post-PoC: emit a Workflow Search Attribute
         # so operators can observe "campaign done" from the Web UI.)
         batch = self._select_batch(inp, evidence)
+
+        # ── Environment precheck gate (bash §16b twin) ──────────────────────
+        # Runs AFTER the batch is known (so a required failure can tag exactly
+        # this tick's batch IIDs) and BEFORE _run_batch (the heavy per-IID
+        # prep). Skipped entirely when the batch is empty (bash §16b sits
+        # after the no_eligible_iids early-return) or precheck_relpath is
+        # unconfigured. On failure: best-effort `precheck-failed` tag per
+        # batch IID, then a non-retryable ApplicationError fails this tick —
+        # the Temporal equivalent of emit_chat_failure (the next Schedule
+        # firing is a fresh execution = the bash "next tick retries").
+        # Deliberately bypasses _record_pre_child_blocked /
+        # record_attempt_outcome: precheck-failed is a non-workflow marker
+        # that consumes no retry_count and writes no blocked_at_tick.
+        if batch and inp.precheck_relpath:
+            try:
+                await workflow.execute_activity(
+                    run_environment_precheck,
+                    args=[inp],
+                    # Generous cap: the manifest's TCP probes retry internally
+                    # (timeout 5s × 3 tries + 2s spacing per URL) and sum up.
+                    start_to_close_timeout=timedelta(seconds=300),
+                    # No activity-level retry: probe retries live inside
+                    # precheck.sh, and a precheck failure is a signal, not
+                    # jitter.
+                    retry_policy=RetryPolicy(maximum_attempts=1),
+                )
+            except ActivityError as ae:
+                cause = ae.cause
+                # rc=2 → precheck_manifest_error; every other failure shape
+                # (rc=1, script missing, …) → precheck_failed, mirroring the
+                # bash §16b `case` catch-all.
+                err_type = (
+                    str(AcpxErrorType.PRECHECK_MANIFEST_ERROR)
+                    if isinstance(cause, ApplicationError)
+                    and cause.type == str(AcpxErrorType.PRECHECK_MANIFEST_ERROR)
+                    else str(AcpxErrorType.PRECHECK_FAILED)
+                )
+                batch_iids = [entry.iid for entry in batch]
+                for entry in batch:
+                    try:
+                        await workflow.execute_activity(
+                            tag_precheck_failed,
+                            args=[inp, entry.iid],
+                            start_to_close_timeout=timedelta(seconds=10),
+                            retry_policy=RetryPolicy(maximum_attempts=1),
+                        )
+                    except ActivityError as tag_ae:
+                        LOG.warning(
+                            "best-effort precheck-failed tag failed iid=%d: %s",
+                            entry.iid,
+                            _activity_error_message(tag_ae, default=str(tag_ae)),
+                        )
+                raise ApplicationError(
+                    f"{_activity_error_message(ae, default=err_type)}; "
+                    f"batch={batch_iids}",
+                    type=err_type,
+                    non_retryable=True,
+                ) from ae
+
         if batch:
             await self._run_batch(inp, batch)
 
@@ -520,8 +628,9 @@ class CampaignWorkflow:
                 # v2 resolve_model_tier (§6): runs AFTER mark_issue_doing (which
                 # never clears the orthogonal model dimension) and BEFORE
                 # build_executor_prompt. It stamps the resolved model:{tier}
-                # label, consumes quality:low on an upgrade, and returns the
-                # model name to inject into the executor prompt.
+                # label, consumes quality:low when an upgrade lands or the
+                # tier is capped, and returns the model name to inject into
+                # the executor prompt.
                 model_name, model_tier = await workflow.execute_activity(
                     resolve_and_stamp_model_tier,
                     args=[inp, att],
@@ -529,6 +638,22 @@ class CampaignWorkflow:
                     retry_policy=_RP_2_ATTEMPTS,
                 )
                 att = replace(att, model_name=model_name, model_tier=model_tier)
+
+                # v2 model-settings copy: AFTER prepare_attempt_worktree (whose
+                # shared-config refresh resets .claude/ from origin/${dev_branch})
+                # and resolve_and_stamp_model_tier (att.model_name is now
+                # resolved), BEFORE build_executor_prompt — the bash
+                # dispatcher's per-IID ordering. Kept inside this try block so
+                # a missing/unreadable tier file (model_settings_missing,
+                # non-retryable) falls through to _record_pre_child_blocked →
+                # blocked_dispatcher for THIS IID with zero new error
+                # plumbing. No-op when model_settings_dir is unconfigured.
+                await workflow.execute_activity(
+                    apply_model_settings,
+                    args=[inp, att],
+                    start_to_close_timeout=timedelta(seconds=15),
+                    retry_policy=_RP_2_ATTEMPTS,
+                )
 
                 # SECURITY: pass slot indices only — the build_executor_prompt
                 # activity de-references passwords from the env-mounted pool on
@@ -878,7 +1003,11 @@ def _required_labels_ok(labels: tuple[str, ...], inp: CampaignInput) -> bool:
 # Work labels that, if present alongside `continue`, force fresh mode instead
 # of continue mode (a reviewer accidentally left another work-state signal). v2
 # per-side blocked-*/failed-* replace the single blocked/failed. model:{tier}
-# and quality:low are orthogonal and intentionally NOT in this set.
+# and quality:low are orthogonal and intentionally NOT in this set — and
+# neither is `precheck-failed`: it is a dispatcher-side, non-workflow tick
+# marker (same orthogonal family), so its presence must not downgrade a
+# reviewer's continue request to fresh mode. It is cleared on the next
+# into-doing transition instead (see mark_issue_doing).
 _CONTINUE_RESET_LABELS = frozenset(
     {
         "todo",

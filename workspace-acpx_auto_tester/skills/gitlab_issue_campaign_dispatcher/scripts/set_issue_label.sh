@@ -26,6 +26,15 @@
 # mutually exclusive — adding one `model:{tier}` removes the other tiers, but
 # leaves every work label and `quality:low` untouched. The tier set is derived
 # from MODEL_TIERS so an operator override of model_tiers stays consistent.
+#
+# `precheck-failed` is a dispatcher-side, tick-level marker (NOT a workflow
+# state). It is an unknown non-workflow / non-model label here, so adding it
+# produces no conflicts and it coexists with any workflow label. The
+# dispatcher applies it to a tick's batch IIDs when environment precheck
+# fails (dispatch_prepare_tick.sh §16b) and removes it explicitly when the
+# issue next enters `doing` (it is in that script's into-`doing`
+# REMOVE_LBLS set). It does not consume retry and does not upgrade the model
+# tier. See references/precheck_manifest.md / references/label_lifecycle.md.
 
 set -euo pipefail
 
