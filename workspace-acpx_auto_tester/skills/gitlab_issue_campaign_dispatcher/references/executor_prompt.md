@@ -25,7 +25,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ISSUE_URL}`            | `{GITLAB_API_PROTOCOL}://{GITLAB_HOST}/{GROUP}/{PROJECT}/-/issues/{ISSUE_IID}`           |
 | `{ISSUE_LABELS}`         | comma-joined labels from the live issue (snapshot)                                      |
 | `{ISSUE_BODY}`           | issue body (already in `{LOG_DIR}/prompt.txt`; for the `<issue>` block only — keep ≤ 4 KB) |
-| `{ISSUE_MODE}`           | `fresh` or `continue`; what `prepare_attempt.sh` actually used (`mode_actual`)          |
+| `{ISSUE_MODE}`           | always `fresh` (continue / resume is disabled on benchmark-test); what `prepare_attempt.sh` actually used (`mode_actual`) |
 | `{BRANCH}`               | trigger (integration / target branch)                                                   |
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
@@ -33,7 +33,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
 | `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes spec output here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the shared per-issue worktree) |
-| `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
+| `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; the whole attempt log dir is force-added onto the per-attempt branch for benchmark archival) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
@@ -61,7 +61,7 @@ The **last line inside the fenced block** is a paired closer sentinel `# ACPX_AU
 ```
 # ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1
 You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
-The dispatcher has already prepared everything. Your job: run acpx → commit/push/wiki/MR/labels/summarize → return ONE compact JSON line. If acpx fails after producing files, still stage/commit/push anything committable before marking the issue blocked.
+The dispatcher has already prepared everything. Your job: run acpx → collect metrics → commit/push/wiki/labels/summarize → return ONE compact JSON line (benchmark-test has no MR / `pr`; `done` is the terminal success label). If acpx fails after producing files, still stage/commit/push anything committable before marking the issue blocked.
 
 DO NOT load any SKILL.md, SOUL.md, or AGENTS.md.
 DO NOT call sessions_spawn or sessions_history.
@@ -77,7 +77,7 @@ GITLAB_TOKEN={GITLAB_TOKEN}
 ISSUE_IID={ISSUE_IID}
 ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
-ISSUE_MODE={ISSUE_MODE}                     # fresh | continue
+ISSUE_MODE={ISSUE_MODE}                     # always fresh (continue disabled on benchmark-test)
 BRANCH={BRANCH}                             # integration / target branch (MR opens against this)
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (fresh-mode checkout; shared config refresh source for every run)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
@@ -192,7 +192,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits (the script's own `timeout` will eventually kill acpx and return 124/137; you read the exit code from there).
   - If the Bash tool itself returns without a captured `ACPX_EXIT=` line (tool-side command timeout, disconnect, or truncated output) — which should not normally happen because the script's `timeout` fires first and the deployment sets the Bash command timeout to {ACPX_TIMEOUT_SECONDS} + 120 — treat the situation identically to acpx_exit=124 and enter the TIMEOUT flow below (NOT the blocked flow). `run_acpx_attempt.sh` runs acpx in its own process group and installs a SIGTERM/INT/HUP trap that tears the acpx subtree down on a catchable shutdown signal, but a SIGKILL of the script cannot be trapped — so acpx MAY still be running in the background. That residual-orphan risk is exactly why a missing `ACPX_EXIT=` line MUST route to `timeout`, never `blocked`. Do NOT start another acpx for the same attempt.
-  - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. Continue-mode continuity comes from: the self-contained prompt (incl. prior attempt summaries + reviewer comments), the work-branch contents that continue-mode resets check out, and the restored same-IID runtime subtree. Fresh-mode runs deliberately quarantine same-IID runtime residue before the new acpx invocation.
+  - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. On benchmark-test every attempt runs fresh (continue / resume is disabled); fresh-mode runs deliberately quarantine any same-IID runtime residue before the new acpx invocation.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
   - do not call `acpx` directly; only call {SCRIPTS_DIR}/run_acpx_attempt.sh
