@@ -506,10 +506,11 @@ esac
 # `model_tiers` is the ordered, comma-separated model list backing the
 # `model:{tier}` dimension (lowest first; element 0 = TIER_0 = default). The
 # label for tier k is `model:<element-k>`; the default list yields
-# model:flash / model:pro / model:max. `model_upgrade_continue_threshold` (N)
-# is the soft-trigger threshold: a cumulative continue count ≥ N requests one
-# upgrade. N=0 disables the continue soft trigger. Both carry-forward when the
-# trigger omits them (handled in the override jq below).
+# model:flash / model:pro / model:max. It carries forward when the trigger
+# omits it (handled in the override jq below). (benchmark-test pins the model
+# per tick via pin_model_tier, so there is no failure-escalation soft/hard
+# trigger — model_tiers is only the wisdom-order list for effective-tier
+# discovery under model_settings_dir.)
 MODEL_TIERS_RAW="${T[model_tiers]:-}"
 MODEL_TIERS_JSON=""
 if [ -n "${MODEL_TIERS_RAW}" ]; then
@@ -522,13 +523,6 @@ if [ -n "${MODEL_TIERS_RAW}" ]; then
   if printf '%s' "${MODEL_TIERS_JSON}" | jq -e 'map(test("^[A-Za-z0-9_.-]+$") | not) | any' >/dev/null; then
     emit_chat_failure "invalid_model_tiers: tier names must match [A-Za-z0-9_.-]+"
   fi
-fi
-
-MODEL_CONTINUE_THRESHOLD="${T[model_upgrade_continue_threshold]:-}"
-if [ -n "${MODEL_CONTINUE_THRESHOLD}" ]; then
-  case "${MODEL_CONTINUE_THRESHOLD}" in
-    *[!0-9]*|"") emit_chat_failure "invalid_model_upgrade_continue_threshold: must be >= 0" ;;
-  esac
 fi
 
 # pin_model_tier (eval branch): the operator-pinned model tier for THIS tick.
@@ -573,8 +567,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson require_labels "${REQ_LABELS_JSON}" \
   --arg require_labels_match "${REQ_LABELS_MATCH}" \
   --argjson model_tiers_override "${MODEL_TIERS_JSON:-null}" \
-  --arg pin_model_tier "${PIN_MODEL_TIER}" \
-  --arg model_continue_threshold_override "${MODEL_CONTINUE_THRESHOLD}" '
+  --arg pin_model_tier "${PIN_MODEL_TIER}" '
   . + {
     project: $project,
     branch: $branch,
@@ -605,10 +598,6 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       if $model_tiers_override != null then $model_tiers_override
       elif (.model_tiers // []) | length > 0 then .model_tiers
       else ["flash","pro","max"] end
-    ),
-    model_upgrade_continue_threshold: (
-      if $model_continue_threshold_override != "" then ($model_continue_threshold_override | tonumber)
-      else (.model_upgrade_continue_threshold // 0) end
     ),
     tick_seq: ((.tick_seq // 0) + 1),
     blocked_at_tick_by_iid: (.blocked_at_tick_by_iid // {}),
@@ -810,17 +799,6 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
           | .blocked_iids    = (.blocked_iids    - [$e.iid])
           | .failed_iids     = (.failed_iids     - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
-        elif $e.has_pr == true and $e.needs_continue != true then
-          .completed_iids = (([$e.iid] + .completed_iids) | unique)
-          | .unfinished_iids = (.unfinished_iids - [$e.iid])
-          | .timeout_iids    = (.timeout_iids    - [$e.iid])
-        elif $e.needs_continue == true then
-          .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
-          | .completed_iids = (.completed_iids - [$e.iid])
-          | .blocked_iids   = (.blocked_iids - [$e.iid])
-          | .failed_iids    = (.failed_iids - [$e.iid])
-          | .timeout_iids   = (.timeout_iids - [$e.iid])
-          | .campaign_status = "running"
         elif $e.user_reopened == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
@@ -843,7 +821,7 @@ persist_state "${STATE_JSON}"
 ALL_DONE="$(printf '%s' "${STATE_JSON}" | jq -r --argjson ev "${EVIDENCE_JSON}" --argjson universe "${EFF_UNIVERSE_JSON}" '
   if (.issue_iids_whitelist | length) > 0 then false
   else
-    ($ev | map(.is_done_on_gitlab == true and .needs_continue != true) | all)
+    ($ev | map(.is_done_on_gitlab == true) | all)
     and (($universe | length) == ($ev | length))
   end')"
 if [ "${ALL_DONE}" = "true" ]; then
@@ -991,7 +969,6 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
         | ($byiid[($i|tostring)] // null) as $e
         | $e != null
         and ($e.is_closed_on_gitlab // false) != true
-        and (($e.has_pr // false) != true or ($e.needs_continue // false) == true)
       ))) as $eligible
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
@@ -1227,12 +1204,9 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_LABELS=""
   ISSUE_BODY=""
   ISSUE_TITLE_QUOTED="''"
-  # NEW_CONTINUE_COUNT is assigned only in the escalation (else) branch of the
-  # resolve_model_tier block, but the issue-state initializer below reads it
-  # unconditionally (`--argjson continue_count "${NEW_CONTINUE_COUNT}"`). The
-  # pin branch never enters the else, so default it here (set -u safety). Pin
-  # runs are forced fresh, so 0 is the correct cached continue count; the else
-  # branch overwrites this with the prior-count-based value when it runs.
+  # continue is disabled on benchmark-test, so the cached continue count is
+  # always 0; the issue-state initializer below writes it verbatim
+  # (`--argjson continue_count "${NEW_CONTINUE_COUNT}"`).
   NEW_CONTINUE_COUNT=0
 
   # Per-IID env for env_paths-derived paths. MODEL_TIERS is carried so the
@@ -1264,148 +1238,32 @@ for iid in "${BATCH_IIDS[@]}"; do
     TICK_OUTCOMES="$(printf '%s' "${TICK_OUTCOMES}" | jq -c --arg k "${iid}" --arg v "blocked: ${reason}" '. + {($k):$v}')"
   }
 
-  # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
-  # resume signal. Every other entry path (`todo`, `retry`, `new`,
-  # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
-  # baseline, even if this IID has prior attempts on disk.
-  ISSUE_MODE="fresh"
-  NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
-  RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
-    (.[] | select(.iid==$i) | .labels // []) as $labels
-    | (($labels | index("retry") != null) or ($labels | index("todo") != null))
-  ')"
-  if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
-    ISSUE_MODE="continue"
-  fi
-  # eval branch: every attempt runs FRESH from the clean DEV_BRANCH baseline so
-  # different pinned models are compared on identical inputs. continue/resume is
-  # disabled here (the `continue` label is ignored for mode selection).
+  # benchmark-test: every attempt runs FRESH from the clean DEV_BRANCH baseline
+  # so different pinned models are compared on identical inputs. continue/resume
+  # is disabled on this branch — there is no mode resolution, ISSUE_MODE is
+  # always "fresh".
   ISSUE_MODE="fresh"
 
-  # ─── resolve_model_tier (v2 §6) ─────────────────────────────────
-  # Evaluate UPGRADE? from the issue's PRIOR live labels (read from the
-  # reconcile evidence, which is captured BEFORE the doing transition below
-  # wipes the blocked-*/timeout/failed-* labels) plus the on-disk continue
-  # counter. The resolved model name is injected into build_prompt.sh via the
-  # MODEL env var; the resolved tier label is applied (and quality:low consumed
-  # on a soft-trigger upgrade) together with the doing transition.
-  #
-  #   UPGRADE? = hard ∪ soft, restricted to the CC side:
-  #     hard  : prior outcome ∈ { blocked-cc, timeout, failed-cc }
-  #     soft  : quality:low present
-  #             ∨ continue_count ≥ model_upgrade_continue_threshold (when > 0)
-  #             ∨ auto-score < threshold   (NOT IMPLEMENTED — placeholder; see
-  #                                          AUTO_SCORE_UPGRADE hook below)
-  #     never : blocked-dispatcher / failed-dispatcher / precheck-failed
-  #             (infrastructure / environment side — a higher model would not
-  #             help; precheck-failed is neither in the hard set above nor a
-  #             soft trigger, so it already never upgrades — no special-casing)
-  # A new issue with no model:{tier} label is TIER_0; the first PREPARE
-  # explicitly stamps the lowest tier. A hit at the cap keeps the cap.
-  # Upgrade ladder + MODEL selection run on the EFFECTIVE tier list (only tiers
-  # whose <tier>-settings.json exist on disk), so a deployment shipping e.g.
-  # only pro+max starts at pro and upgrades to max. EFFECTIVE_TIERS_CSV is
-  # guaranteed non-empty here (configured-but-empty aborted the tick at the
-  # reconcile section above; unconfigured dir → equals the full list), so the
-  # split input is never empty. Were that invariant broken, an empty input
-  # would make the downstream `jq 'length'` fail outright (set -e) rather than
-  # silently yield an empty array — a loud failure, not a wrong default.
-  if [ -n "${PIN_MODEL_TIER:-}" ]; then
-    # PINNED (eval branch): model chosen by the operator. Bypass the entire
-    # hard/soft upgrade ladder AND the monotonic-raise invariant. set_issue_label.sh's
-    # model:* mutual exclusion clears any other model:<tier> in the same update, so
-    # pinning a LOWER tier than the issue's current label works (no monotonic
-    # constraint). EFFECTIVE_TIERS_CSV was derived at the top of the tick.
-    case ",${EFFECTIVE_TIERS_CSV}," in
-      *",${PIN_MODEL_TIER},"*) ;;
-      *) prep_blocked "pin_model_tier '${PIN_MODEL_TIER}' not in effective tiers (${EFFECTIVE_TIERS_CSV})"; continue ;;
-    esac
-    MODEL="${PIN_MODEL_TIER}"
-    MODEL_TIER_LABEL="model:${PIN_MODEL_TIER}"
-    CONSUME_QUALITY_LOW=false
-    # Set NEW_TIER to the pinned tier's 0-based index so the cached integer
-    # model_tier written into issue state.json stays consistent with the pin
-    # (membership was just confirmed above, so grep always matches).
-    NEW_TIER="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | tr ',' '\n' | grep -nxF "${PIN_MODEL_TIER}" | head -n1 | cut -d: -f1)"
-    NEW_TIER=$(( NEW_TIER - 1 ))
-  else
-  MODEL_TIERS_ARR_JSON="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | jq -Rc 'split(",")')"
-  MODEL_MAX_TIER=$(( $(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq 'length') - 1 ))
-  MODEL_CONTINUE_N="$(printf '%s' "${STATE_JSON}" | jq -r '.model_upgrade_continue_threshold // 0')"
-
-  CUR_TIER="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .model_tier // 0')"
-  [ -z "${CUR_TIER}" ] && CUR_TIER=0
-  # Clamp CUR_TIER into [0, MODEL_MAX_TIER] BEFORE the upgrade decision. A live
-  # label can sit above the current list (config drift that shrank model_tiers,
-  # or a hand-applied higher tier); without this clamp NEW_TIER would stay
-  # out-of-range and `.[$k]` would resolve to null → model:null / MODEL=null.
-  [ "${CUR_TIER}" -lt 0 ] && CUR_TIER=0
-  [ "${CUR_TIER}" -gt "${MODEL_MAX_TIER}" ] && CUR_TIER="${MODEL_MAX_TIER}"
-  PRIOR_CONTINUE_COUNT="$(test -f "${ISSUES_ROOT}/issue-${iid}/state.json" \
-    && jq -r '.continue_count // 0' "${ISSUES_ROOT}/issue-${iid}/state.json" 2>/dev/null || echo 0)"
-  [ -z "${PRIOR_CONTINUE_COUNT}" ] && PRIOR_CONTINUE_COUNT=0
-  # continue_count for THIS attempt (incremented before the soft check so an
-  # Nth continue can itself trigger the upgrade).
-  NEW_CONTINUE_COUNT="${PRIOR_CONTINUE_COUNT}"
-  [ "${ISSUE_MODE}" = "continue" ] && NEW_CONTINUE_COUNT=$((PRIOR_CONTINUE_COUNT + 1))
-
-  IID_EVID="$(printf '%s' "${EVIDENCE_JSON}" | jq -c --argjson i "${iid}" '.[] | select(.iid==$i)')"
-  # First-stamp detection (v2 §6): a brand-new issue carries NO model:{tier}
-  # label at all. Such an issue is TIER_0 and the first PREPARE must stamp the
-  # LOWEST tier explicitly — a soft signal (e.g. quality:low) that happens to
-  # be present on the very first round must NOT skip TIER_0 straight to TIER_1.
-  # The model_tier integer alone can't tell "no label" from "model:<lowest>"
-  # (both report 0), so test the raw labels for any model:<configured-tier>.
-  HAS_ANY_MODEL="$(printf '%s' "${IID_EVID}" | jq -r --argjson tiers "${MODEL_TIERS_ARR_JSON}" '
-    (.labels // []) as $labels
-    | [ $tiers[] | . as $t | select(($labels | index("model:" + $t)) != null) ] | length > 0')"
-  HARD_UPGRADE="$(printf '%s' "${IID_EVID}" | jq -r '
-    if (.has_blocked_cc // false) or (.has_timeout // false) or (.has_failed_cc // false)
-    then "true" else "false" end')"
-  HAS_QUALITY_LOW="$(printf '%s' "${IID_EVID}" | jq -r '(.labels // []) | index("quality:low") != null')"
-  SOFT_UPGRADE=false
-  [ "${HAS_QUALITY_LOW}" = "true" ] && SOFT_UPGRADE=true
-  if [ "${MODEL_CONTINUE_N}" -gt 0 ] && [ "${NEW_CONTINUE_COUNT}" -ge "${MODEL_CONTINUE_N}" ]; then
-    SOFT_UPGRADE=true
-  fi
-  # AUTO_SCORE_UPGRADE hook (v2 §6 black-box auto-score soft trigger): NOT
-  # IMPLEMENTED in this version. When implemented, set SOFT_UPGRADE=true here
-  # if the latest attempt's auto-score is below the configured threshold.
-
-  NEW_TIER="${CUR_TIER}"
-  CONSUME_QUALITY_LOW=false
-  if [ "${HAS_ANY_MODEL}" != "true" ]; then
-    # First PREPARE for this issue: no prior model:{tier} round exists. Stamp
-    # the lowest tier explicitly (v2 §6 "new issue 视为 TIER_0; 首次 PREPARE 显式
-    # 打最低档"). Hard/soft upgrades only take effect from the SECOND round on,
-    # so a soft signal present on the first round is still consumed (cleared)
-    # below without skipping TIER_0.
-    NEW_TIER=0
-    [ "${HAS_QUALITY_LOW}" = "true" ] && CONSUME_QUALITY_LOW=true
-  elif [ "${HARD_UPGRADE}" = "true" ] || [ "${SOFT_UPGRADE}" = "true" ]; then
-    if [ "${CUR_TIER}" -lt "${MODEL_MAX_TIER}" ]; then
-      NEW_TIER=$((CUR_TIER + 1))
-    fi
-    # quality:low is a one-shot signal: consume it on any upgrade evaluation
-    # that was driven (at least partly) by it, regardless of whether the tier
-    # was already capped.
-    [ "${HAS_QUALITY_LOW}" = "true" ] && CONSUME_QUALITY_LOW=true
-  fi
-  # quality:low is a strictly one-shot soft signal. Consume it on ANY PREPARE
-  # where it is present — including when the tier is already at the cap and no
-  # upgrade is possible — so it can never linger as permanent noise that would
-  # re-fire (or just clutter) on every subsequent round.
-  [ "${HAS_QUALITY_LOW}" = "true" ] && CONSUME_QUALITY_LOW=true
-
-  # Defensive clamp of NEW_TIER into [0, MODEL_MAX_TIER] before it indexes the
-  # tier list. CUR_TIER is already clamped above and +1 stays in range, but a
-  # second clamp guarantees `.[$k]` never resolves to null (→ model:null /
-  # MODEL=null) regardless of how the value was derived.
-  [ "${NEW_TIER}" -lt 0 ] && NEW_TIER=0
-  [ "${NEW_TIER}" -gt "${MODEL_MAX_TIER}" ] && NEW_TIER="${MODEL_MAX_TIER}"
-  MODEL_TIER_LABEL="model:$(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq -r --argjson k "${NEW_TIER}" '.[$k]')"
-  MODEL="$(printf '%s' "${MODEL_TIERS_ARR_JSON}" | jq -r --argjson k "${NEW_TIER}" '.[$k]')"
-  fi
+  # ─── model tier (pinned) ─────────────────────────────────────────
+  # benchmark-test: the model is pinned per tick by the REQUIRED pin_model_tier
+  # trigger field (validated at parse time, so it is always set here). There is
+  # NO failure-escalation ladder and NO model:{tier} monotonic-raise invariant —
+  # the issue is stamped exactly model:<pin>. set_issue_label.sh's model:* mutual
+  # exclusion clears any other model:<tier> in the same update, so pinning a
+  # LOWER tier than the issue's prior label is fine. EFFECTIVE_TIERS_CSV (the
+  # tiers whose <tier>-settings.json exist on disk) was derived at the top of the
+  # tick; the pin MUST be one of them.
+  case ",${EFFECTIVE_TIERS_CSV}," in
+    *",${PIN_MODEL_TIER},"*) ;;
+    *) prep_blocked "pin_model_tier '${PIN_MODEL_TIER}' not in effective tiers (${EFFECTIVE_TIERS_CSV})"; continue ;;
+  esac
+  MODEL="${PIN_MODEL_TIER}"
+  MODEL_TIER_LABEL="model:${PIN_MODEL_TIER}"
+  # NEW_TIER = the pin's 0-based index in EFFECTIVE_TIERS_CSV, for the cached
+  # integer model_tier written into issue state.json (membership confirmed above,
+  # so grep always matches).
+  NEW_TIER="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | tr ',' '\n' | grep -nxF "${PIN_MODEL_TIER}" | head -n1 | cut -d: -f1)"
+  NEW_TIER=$(( NEW_TIER - 1 ))
 
   # prepare_attempt.sh — keep stdout clean (the script's contract is two
   # lines on stdout: mode_actual, LOCAL_ATTEMPT_BRANCH). `git fetch` /
@@ -1502,7 +1360,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # upgrade.
   # precheck-failed (the dispatcher-side §16b tick gate) is cleared here too:
   # reaching `doing` means this tick's precheck passed, so the marker is stale.
-  REMOVE_LBLS=(todo retry new continue contiune blocked-cc blocked-dispatcher done pr timeout failed-cc failed-dispatcher precheck-failed)
+  REMOVE_LBLS=(todo retry new blocked-cc blocked-dispatcher done timeout failed-cc failed-dispatcher precheck-failed)
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \
@@ -1537,13 +1395,6 @@ for iid in "${BATCH_IIDS[@]}"; do
     prep_blocked "set_issue_label add ${MODEL_TIER_LABEL} failed"
     continue
   fi
-  # Consume the one-shot quality:low signal once an upgrade evaluation used it.
-  if [ "${CONSUME_QUALITY_LOW}" = "true" ]; then
-    env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove quality:low \
-      >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || \
-      wrapper_log prepare_tick "iid=${iid} quality:low removal failed (best-effort)"
-  fi
-
   # build_prompt.sh — inject the resolved model name via MODEL.
   set +e
   env "${iid_env[@]}" BRANCH="${T[branch]}" DEV_BRANCH="${T[dev_branch]}" \
@@ -1566,10 +1417,8 @@ for iid in "${BATCH_IIDS[@]}"; do
   ATTEMPT_STATE_X="${ISSUE_ROOT_X}/attempt_state.json"
   ISSUE_STATE_X="${ISSUE_ROOT_X}/state.json"
   NOW="$(utc_now)"
+  # mode is always "fresh" on benchmark-test; mode_downgraded_from stays null.
   MODE_DOWNGRADED="null"
-  if [ "${ISSUE_MODE}" = "continue" ] && [ "${MODE_ACTUAL}" = "fresh" ]; then
-    MODE_DOWNGRADED='"continue"'
-  fi
   jq -n \
     --argjson iid "${iid}" \
     --argjson attempt_number "${attempt}" \
