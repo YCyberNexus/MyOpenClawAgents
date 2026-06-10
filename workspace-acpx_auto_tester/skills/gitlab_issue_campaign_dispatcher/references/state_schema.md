@@ -343,7 +343,8 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "labels_removed": ["doing"],
   "summary_posted": true,
   "block_reason": "",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-003"
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-003",
+  "metrics": {"iid":14,"attempt_number":3,"model":null,"wall_clock_seconds":842,"accuracy":{"available":true,"passed":18,"failed":2,"skipped":0,"total":20,"pass_rate":0.9,"robot_files":5}}
 }
 ```
 
@@ -362,11 +363,12 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `merge_request_url`  | string          | Empty `""` if Step 7 did not run.                                      |
 | `mr_action`          | string (enum)   | `created` / `rotated` / `none`. `rotated` when one or more prior open MRs were closed before creating the new one, `created` when no prior open MR existed, `none` when Step 7 did not run. The legacy `reused` value is retired — both fresh and continue modes now always close + create. |
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |
-| `labels_added`       | array of string | The labels the subagent ADDED in Steps 6 / 7b or fail-flow label sync (e.g. `["done","pr"]` for done, `["blocked"]` for a blocked failure before done). |
+| `labels_added`       | array of string | The labels the subagent ADDED in Step 6 or fail-flow label sync. On benchmark-test: `["done"]` for done (terminal success — there is no `pr`), `["blocked-cc"]` for a blocked failure, `["timeout"]` for timeout. |
 | `labels_removed`     | array of string | The labels the subagent REMOVED in Step 6 or fail-flow label sync (e.g. `["doing"]`). |
 | `summary_posted`     | bool            | `true` iff `summarize_attempt.sh` posted a GitLab issue note. Failure paths set `SUMMARY_POST_TO_ISSUE=false`, so this is normally `false` even when `${SUMMARY_FILE}` was written locally. |
 | `block_reason`       | string          | Required non-empty when `status` is `blocked`, `failed`, or `timeout`; empty `""` otherwise. For `timeout`, the value typically reads `acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap`. |
 | `log_dir`            | string          | Absolute path; mirrors `${LOG_DIR}`. Helps the dispatcher locate logs without re-deriving paths. |
+| `metrics`            | object / null   | Benchmark metrics from `collect_metrics.sh` (Step 1.5): `wall_clock_seconds` (efficiency) and `accuracy.{available,passed,failed,skipped,total,pass_rate,robot_files}` (robot pass rate). Best-effort and only present on the `done` path (the blocked/timeout flows skip Step 1.5); may be `null` or absent. `model` is `null` here (the executor prompt does not thread MODEL into metrics.json); Phase 6 appends this object — enriched with the dispatcher-resolved `model` from issue `state.json` — to the append-only benchmark ledger `<RESULT_BASENAME>/_dispatcher/benchmark/metrics.jsonl`. |
 
 ### Tolerated variations
 

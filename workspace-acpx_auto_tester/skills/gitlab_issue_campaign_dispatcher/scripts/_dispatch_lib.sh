@@ -298,7 +298,8 @@ phase6_normalize_reply() {
       labels_removed: (.labels_removed | a),
       summary_posted: (.summary_posted // false),
       block_reason: (.block_reason | s),
-      log_dir: (.log_dir | s)
+      log_dir: (.log_dir | s),
+      metrics: (.metrics // null)
     }
     | if .status == "no_changes" then
         .status = "blocked"
@@ -319,16 +320,17 @@ phase6_normalize_reply() {
 # workflow mutual-exclusion group in the same GitLab update (and never touches
 # the orthogonal model:{tier} / quality:low dimensions), so each branch only
 # needs the single `add` plus a defensive `remove doing` to guarantee the
-# transient `doing` label is gone. v2: `add pr` removes `done`, so a `done`
-# outcome ends carrying ONLY `pr` (pr replaces done).
+# transient `doing` label is gone. eval branch: the MR/pr flow is removed, so a
+# `done` outcome ends carrying `done` (no `pr`).
 phase6_sync_labels() {
   local iid="$1" final_status="$2"
   local rc=0
   case "${final_status}" in
     done)
-      # pr replaces done: add pr last so the issue ends with only `pr`.
+      # eval branch: `done` is the terminal success label; the MR/pr flow is
+      # removed, so the issue ends carrying `done` (NOT `pr`).
       _label_op "${iid}" remove doing || rc=$?
-      _label_op "${iid}" add pr       || rc=$?
+      _label_op "${iid}" add done     || rc=$?
       ;;
     blocked_cc)
       _label_op "${iid}" remove doing       || rc=$?
@@ -487,6 +489,32 @@ phase6_write_state_files() {
       }
     ')"
   printf '%s' "${new_issue_state}" | atomic_write_json "${issue_state_file}"
+
+  # ─── benchmark metrics ledger (append-only) ───
+  # The compact reply may carry a `metrics` object (collect_metrics.sh, Step 1.5).
+  # Append one line per terminal attempt so aggregate_benchmark.sh can build the
+  # issue × model matrix without depending on per-attempt branches. The model
+  # name is taken from the dispatcher-resolved issue state (authoritative — the
+  # executor prompt does not thread MODEL into metrics.json), falling back to
+  # whatever the reply's metrics carried. Best-effort: a write failure NEVER
+  # fails the callback. Synthesized blocked replies carry no metrics, so
+  # dispatcher-side / unparseable failures simply leave no ledger line.
+  local _metrics _model
+  _metrics="$(printf '%s' "${reply}" | jq -c '.metrics // null' 2>/dev/null || echo null)"
+  if [ "${_metrics}" != "null" ] && [ -n "${_metrics}" ]; then
+    _model="$(printf '%s' "${prior_issue_state}" | jq -r '.model // empty' 2>/dev/null || echo "")"
+    local _ledger_dir="${RESULT_ROOT}/_dispatcher/benchmark"
+    mkdir -p "${_ledger_dir}" 2>/dev/null || true
+    printf '%s' "${_metrics}" | jq -c \
+      --argjson iid "${iid}" --argjson att "${attempt_number}" \
+      --arg status "${final_status}" --arg ts "${now}" \
+      --arg model "${_model}" '
+      . + {iid:$iid, attempt_number:$att, status:$status, ts:$ts,
+           model:(if (.model // "") != "" then .model
+                  elif $model != "" then $model
+                  else null end)}' \
+      >> "${_ledger_dir}/metrics.jsonl" 2>/dev/null || true
+  fi
 
   echo "${new_retry_count}"
 }
