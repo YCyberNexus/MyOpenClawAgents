@@ -8,9 +8,9 @@
 按你们提供的清单,逐项确认**项目依赖的外部服务能否连通、需要的命令/环境变量/文件是否就位**。
 
 - 检查**全部通过** → 正常跑批。
-- 有 `required`(必需)项**不通过** → 本轮**跳过跑批**,并在受影响的 issue 上打一个红色
-  `precheck-failed` 标记,方便你们一眼看到「这批因为环境没就绪没能跑」。环境修好后,下一轮
-  自动重试,issue 开始处理时该标记会自动消失。
+- 有 `required`(必需)项**不通过** → 本轮**跳过跑批**,并在本轮原计划处理的 issue 上打一个红色
+  `precheck-failed` 标记,方便你们一眼看到「这批因为环境没就绪没能跑」。之后每轮都会自动重试,
+  环境修好后即恢复跑批;issue 开始处理时该标记会自动消失。
 - `optional`(可选)项不通过 → 只记录告警,**不影响**跑批。
 
 这样可以避免「环境其实没准备好,却白白跑了一整批、报错还散落在各处」的情况。
@@ -19,13 +19,20 @@
 
 1. 在**项目仓库**里放一个 JSON 清单文件,推荐路径 `hulat/precheck.json`(也可放别的位置)。
 2. 把这个文件的**相对路径**告诉我们(我们会配置到调度参数 `precheck_relpath`)。
-3. 后续依赖有变化时,直接改这个文件即可,无需联系我们。
+3. 后续依赖有变化时,直接改这个文件的**内容**即可,无需联系我们。但请**不要移动或重命名**它:
+   路径一变,系统会当作「清单未提供」而**静默跳过检查**(不报错、无告警);确需调整路径,
+   请重新告知我们。
 
 > 没配置或文件还没放?——没关系,系统会**自动跳过** precheck,功能向后兼容,可以先接入再补清单。
 
 ## 三、清单格式
 
 一个 JSON 文件,顶层按**四类**分组,每类是一个数组。**用不到的类可以省略。**
+
+> **重要:所有检查都在自动化测试 agent 的运行机器上执行**,不是你们的开发机——`urls` 测的是
+> 从运行机器出发能否连通(内网服务请确认对该机器网络可达),`commands` 查的是运行机器的
+> `PATH`,`env_vars` 看的是运行机器上实际生效的环境变量,`files` 的绝对路径也是运行机器上的
+> 路径。填写前请按「agent 跑批的那台机器」来核对。
 
 ```json
 {
@@ -42,7 +49,7 @@
 | 字段 | 是否必填 | 说明 |
 | --- | --- | --- |
 | `name` | 必填 | 给这条检查起个好认的名字,只用于报告展示(例如 `backend-api`、`java-home`) |
-| `severity` | 可选 | `required`(必需,**缺省即此值**)或 `optional`(可选)。`required` 不通过会跳过本轮跑批;`optional` 只告警 |
+| `severity` | 可选 | 取值 `required`(必需)或 `optional`(可选),**不填时默认按 `required`**。`required` 不通过会跳过本轮跑批;`optional` 只告警 |
 
 ### 1. `urls` —— 服务连通性
 
@@ -53,14 +60,18 @@
 | `url` | 必须带前缀:`http://主机[:端口]`(默认端口 80)、`https://主机[:端口]`(默认端口 443)、`tcp://主机:端口`(端口必填,用于数据库/redis 等非 HTTP 服务) |
 
 ```json
-{ "name": "backend-api",    "url": "https://api.example.com",        "severity": "required" }
-{ "name": "artifact-repo",  "url": "https://nexus.example.com:8081", "severity": "required" }
-{ "name": "local-postgres", "url": "tcp://localhost:5432",           "severity": "optional" }
+"urls": [
+  { "name": "backend-api",    "url": "https://api.example.com",        "severity": "required" },
+  { "name": "artifact-repo",  "url": "https://nexus.example.com:8081", "severity": "required" },
+  { "name": "local-postgres", "url": "tcp://localhost:5432",           "severity": "optional" }
+]
 ```
 
 注意:
 - **只检查 TCP 能否连通**(能否建立连接),**不会发送 HTTP 请求、不看返回状态码、不校验证书**。
   `https://` 仅用来推断默认端口 443。
+- URL 带路径或查询参数(例如健康检查地址 `https://api.example.com/health`)也能解析,但
+  **路径和查询参数部分都会被忽略**——只取主机和端口做 TCP 连通探测,不会真的请求 `/health`。
 - 带超时与重试,能抵抗瞬时网络抖动。
 - 主机请写**裸主机名或 IPv4**,**不支持** `user:pass@host` 这种带账号的写法,也不支持 IPv6
   字面量 `[::1]`(会被判为格式错误)。
@@ -74,9 +85,11 @@
 | `bin` | 可执行文件名 |
 
 ```json
-{ "name": "node", "bin": "node", "severity": "required" }
-{ "name": "java", "bin": "java", "severity": "required" }
-{ "name": "mvn",  "bin": "mvn",  "severity": "optional" }
+"commands": [
+  { "name": "node", "bin": "node", "severity": "required" },
+  { "name": "java", "bin": "java", "severity": "required" },
+  { "name": "mvn",  "bin": "mvn",  "severity": "optional" }
+]
 ```
 
 > 只检查「是否存在」,不检查版本号。
@@ -90,8 +103,10 @@
 | `var` | 环境变量名 |
 
 ```json
-{ "name": "java-home", "var": "JAVA_HOME",       "severity": "required" }
-{ "name": "api-key",   "var": "EXAMPLE_API_KEY", "severity": "optional" }
+"env_vars": [
+  { "name": "java-home", "var": "JAVA_HOME",       "severity": "required" },
+  { "name": "api-key",   "var": "EXAMPLE_API_KEY", "severity": "optional" }
+]
 ```
 
 注意:
@@ -109,8 +124,10 @@
 | `kind` | `file`(必须是文件)/ `dir`(必须是目录)/ `any`(存在即可,**缺省值**) |
 
 ```json
-{ "name": "knowledge-base", "path": "ifp-data",         "kind": "dir",  "severity": "required" }
-{ "name": "tls-cert",       "path": "/etc/ssl/app.pem", "kind": "file", "severity": "optional" }
+"files": [
+  { "name": "knowledge-base", "path": "ifp-data",         "kind": "dir",  "severity": "required" },
+  { "name": "tls-cert",       "path": "/etc/ssl/app.pem", "kind": "file", "severity": "optional" }
+]
 ```
 
 ## 四、`required` 还是 `optional`?
@@ -155,7 +172,7 @@
 | 情况 | 结果 |
 | --- | --- |
 | 全部 `required` 通过(`optional` 可有不通过) | 正常跑批 |
-| 有 `required` 不通过 | 跳过本轮跑批;受影响 issue 打 `precheck-failed` 标记;下一轮自动重试 |
+| 有 `required` 不通过 | 跳过本轮跑批;本轮原计划处理的 issue 打 `precheck-failed` 标记;之后每轮自动重试 |
 | 清单 JSON 写错了(格式非法) | 同上(跳过 + 打标记),请检查 JSON 语法 |
 | 清单文件还没放 / 没配置 | 自动跳过 precheck,正常跑批 |
 
