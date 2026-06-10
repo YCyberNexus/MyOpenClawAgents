@@ -202,6 +202,19 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - do not substitute another LLM CLI (`openai` / `gemini` / `ollama` / etc.)
   - if acpx fails, preserve all of {LOG_DIR}; do NOT delete partial logs
 
+Step 1.5 — COLLECT METRICS (best-effort; MUST NOT fail the attempt)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/collect_metrics.sh
+  This writes {LOG_DIR}/metrics.json (efficiency = wall-clock seconds from
+  timing.txt; accuracy = Robot Framework pass rate parsed from output.xml under
+  {OUTPUT_DIR}). It is OBSERVATIONAL: if it exits non-zero or metrics.json is
+  absent, NOTE it and CONTINUE to Step 2 — metrics must NEVER block staging /
+  commit / push. Read {LOG_DIR}/metrics.json (or treat it as {} if missing) and
+  keep its JSON object for Step 10's `metrics` field.
+
 Step 2 — STAGE
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
@@ -257,46 +270,16 @@ Step 6 — TRANSITION doing → done
     bash {SCRIPTS_DIR}/set_issue_label.sh add done
   Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
   CAPTURE labels_removed includes "doing"; labels_added includes "done".
-  NOTE: `done` is the TRANSIENT pre-MR state. Step 8 adds `pr`, which REPLACES
-  `done` (pr is no longer additive) — after Step 8 the issue carries `pr` only.
+  On benchmark-test `done` is the TERMINAL SUCCESS label — there is no MR and no
+  `pr`. Steps 7 and 8 are removed below. Set ATTEMPT_STATUS=done and go straight
+  to Step 9.
 
-Step 7 — CREATE / rotate the MR
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} WORKTREE_DIR={WORKTREE_DIR} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
-    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-    ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
-    bash {SCRIPTS_DIR}/create_mr.sh
-  CAPTURE: merge_request_url = first stdout line, mr_action = second stdout line (one of: created, rotated).
-  Non-zero exit → FAIL status=blocked block_reason="MR creation failed: <last stderr line>".
+Step 7 — (REMOVED on benchmark-test)
+  No merge request is created — evaluation runs are never merged. Skip to Step 9.
+  merge_request_url stays empty; mr_action is "none".
 
-  Rotation policy (both ISSUE_MODE values follow the same path; the
-  script `cd`s into {WORKTREE_DIR} first because glab `mr create` shells
-  out to `git` internally even with `--repo`):
-  - If one or more open MRs already point at {WORK_BRANCH}, close them
-    without merging (the integration branch is untouched; closed MR
-    objects remain as historical record) and then create a fresh MR
-    whose description references them as `Supersedes !<old_iid>`.
-    mr_action = "rotated".
-  - If no open MR exists, just create a new one. mr_action = "created".
-  - mr_action = "reused" no longer occurs — every new attempt produces
-    a fresh MR object so reviewers see attempts as separate MRs rather
-    than a force-pushed branch silently updating an old MR.
-
-  Do NOT call `glab mr merge`. Do NOT close the issue. GitLab auto-closes via `Closes #{ISSUE_IID}` in the MR body.
-
-Step 8 — ADD `pr` label
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
-    bash {SCRIPTS_DIR}/set_issue_label.sh add pr
-  Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
-
-  `set_issue_label.sh add pr` REMOVES `done` in the same update (pr replaces
-  done), so after this step the live issue carries `pr` only — NOT `done` + `pr`.
-  Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr"; labels_removed includes "done".
+Step 8 — (REMOVED on benchmark-test)
+  No `pr` label. `done` from Step 6 is the terminal success label. Skip to Step 9.
 
 Step 9 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
@@ -317,16 +300,16 @@ Step 9 — SUMMARIZE
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
+  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}","metrics":<the metrics.json object from Step 1.5, or {} if it was missing>}
 
   Field rules:
-  - status = done           when Steps 0-8 all succeeded.
+  - status = done           when Steps 0-6 all succeeded (Steps 7/8 are removed on benchmark-test; `done` is the terminal success label).
   - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
   - status = blocked        when any FAIL flow or BLOCKED_PUSH flow was entered with a retryable reason. block_reason MUST be non-empty. You emit the side-AGNOSTIC `blocked` here — the dispatcher's Phase 6 attributes it to the CC side (live label `blocked-cc`), because every failure you can report came from running acpx or its post-acpx steps. Dispatcher-side failures (prep / spawn / eviction) never reach you; the dispatcher synthesizes those itself as `blocked-dispatcher`.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`. A direct `failed` is attributed to the CC side (`failed-cc`).
   - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137} or tool-side timeout). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
-  - labels_added / labels_removed: the actual transitions you performed. For done: ["pr"] added, ["doing","done"] removed (pr replaces the transient done). For blocked before `done`: ["blocked-cc"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked-cc" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed. (The compact-reply `status` field stays side-agnostic `blocked` / `failed`; only the live LABELS you apply use the `-cc` variant.)
-  - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / BLOCKED_PUSH / timeout).
+  - labels_added / labels_removed: the actual transitions you performed. For done (terminal success on this branch): ["done"] added, ["doing"] removed — there is NO `pr` on benchmark-test. For blocked: ["blocked-cc"] added, ["doing"] removed. For timeout: ["timeout"] added, ["doing"] removed. (The compact-reply `status` field stays side-agnostic `blocked` / `failed`; only the live LABELS you apply use the `-cc` variant.)
+  - mr_action = always "none" on benchmark-test (the MR step is removed); merge_request_url is always "".
   - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
