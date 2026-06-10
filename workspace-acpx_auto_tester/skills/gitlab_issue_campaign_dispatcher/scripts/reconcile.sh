@@ -28,18 +28,16 @@
 #       "state":             "opened" | "closed" | null,
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
-#       "has_pr":            bool,   # labels include "pr" (v2 completion signal: pr REPLACES done)
 #       "is_closed_on_gitlab": bool,  # state is "closed"
-#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR has_pr
+#       "is_done_on_gitlab": bool,   # terminal for dispatcher: state is "closed" (benchmark-test: `done` is a live label but GitLab-level completion is closed only)
 #       "has_blocked_cc":    bool,   # labels include "blocked-cc" (Claude Code-side retryable failure)
 #       "has_blocked_dispatcher": bool, # labels include "blocked-dispatcher" (dispatcher-side retryable failure)
 #       "has_failed_cc":     bool,   # labels include "failed-cc" (CC-side retry budget exhausted, terminal)
 #       "has_failed_dispatcher": bool,  # labels include "failed-dispatcher" (dispatcher-side terminal)
 #       "model_tier":        <integer 0-based>, # index of the highest present model:<tier> in the configured MODEL_TIERS list (0 when none present); default flash,pro,max → flash=0/pro=1/max=2
-#       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry/continue)
+#       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry)
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
-#       "user_reopened":     bool,   # opened, no completed signal, and no failed-*/blocked-*/continue/contiune label; timeout is allowed only with retry
-#       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
+#       "user_reopened":     bool,   # opened, no failed-*/blocked-* label; timeout is allowed only with retry
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
 #
@@ -52,20 +50,13 @@
 # variants never upgrade the model.
 #
 # Semantics for the dispatcher (consumed in Source-of-Truth Policy):
-#   - `is_closed_on_gitlab == true`                       → finished, skip
-#   - `is_done_on_gitlab == true` AND no `needs_continue` → finished, skip
-#         (v2: `is_done_on_gitlab` is closed OR `has_pr`; `done` alone is the
-#         pre-MR transient state and is NOT terminal completion)
-#   - `needs_continue == true`                            → re-enqueue; the
-#         executor will re-run the resolution flow against the existing
-#         work branch (or build one from master if none exists)
-#   - `user_reopened == true`                             → re-enqueue from
-#         scratch (label was reverted to todo / doing, or is done-only
-#         before MR / pr completion)
+#   - `is_closed_on_gitlab == true`  → finished, skip (benchmark-test does not
+#         auto-close issues — closed means a human closed it)
+#   - `user_reopened == true`        → re-enqueue from scratch (an opened issue
+#         carrying no failed-*/blocked-* label; e.g. relabelled to todo / doing)
 #
-# Closed issue state wins over every label combination, including `continue`.
-# For opened issues, `needs_continue` wins over every other label combination.
-# The jq below keeps `needs_continue` and `user_reopened` mutually exclusive.
+# Closed issue state wins over every label combination. continue/resume is
+# disabled on benchmark-test, so there is no needs_continue signal.
 
 set -euo pipefail
 
@@ -140,10 +131,7 @@ for iid in "${IIDS[@]}"; do
     digest="$(echo "${body}" | jq -c --argjson iid "${iid}" --argjson tiers "${MODEL_TIERS_JSON}" '
       . as $issue |
       ($issue.labels // []) as $labels |
-      # v2: pr REPLACES done; the completion signal is just the `pr` label.
-      ($labels | index("pr") != null) as $has_pr |
       ($issue.state == "closed") as $closed |
-      (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
       (($labels | index("retry") != null)) as $has_retry |
       (($labels | index("timeout") != null)) as $has_timeout |
       ($labels | index("blocked-cc") != null) as $has_blocked_cc |
@@ -166,9 +154,8 @@ for iid in "${IIDS[@]}"; do
         state: $issue.state,
         labels: $labels,
         title: $issue.title,
-        has_pr: $has_pr,
         is_closed_on_gitlab: $closed,
-        is_done_on_gitlab: ($closed or $has_pr),
+        is_done_on_gitlab: $closed,
         has_blocked_cc: $has_blocked_cc,
         has_blocked_dispatcher: $has_blocked_dispatcher,
         has_failed_cc: $has_failed_cc,
@@ -178,19 +165,16 @@ for iid in "${IIDS[@]}"; do
         has_retry: $has_retry,
         user_reopened: (
           ($closed | not) and
-          ($has_pr | not) and
           ($has_failed_cc | not) and
           ($has_failed_dispatcher | not) and
           ($has_blocked_cc | not) and
           ($has_blocked_dispatcher | not) and
-          (($has_timeout | not) or $has_retry) and
-          ($needs_continue | not)
+          (($has_timeout | not) or $has_retry)
         ),
-        needs_continue: (($closed | not) and $needs_continue),
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_blocked_cc:false, has_blocked_dispatcher:false, has_failed_cc:false, has_failed_dispatcher:false, model_tier:0, has_timeout:false, has_retry:false, user_reopened:false, needs_continue:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_blocked_cc:false, has_blocked_dispatcher:false, has_failed_cc:false, has_failed_dispatcher:false, model_tier:0, has_timeout:false, has_retry:false, user_reopened:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"
