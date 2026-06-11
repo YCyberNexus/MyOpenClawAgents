@@ -33,6 +33,8 @@
 #       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR done+pr
 #       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry/continue)
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
+#       "has_blocked":       bool,   # labels include "blocked" (lets the dispatcher honor a hand-applied blocked label as a terminal park)
+#       "has_failed":        bool,   # labels include "failed" (lets the dispatcher honor a hand-applied failed label as a terminal park)
 #       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue/contiune label; timeout is allowed only with retry
 #       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "missing":           bool    # GET returned non-OK (treat as not done)
@@ -117,6 +119,8 @@ for iid in "${IIDS[@]}"; do
       (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
       (($labels | index("retry") != null)) as $has_retry |
       (($labels | index("timeout") != null)) as $has_timeout |
+      (($labels | index("blocked") != null)) as $has_blocked |
+      (($labels | index("failed") != null)) as $has_failed |
       {
         iid: $iid,
         state: $issue.state,
@@ -127,6 +131,8 @@ for iid in "${IIDS[@]}"; do
         is_done_on_gitlab: ($closed or $done_with_pr),
         has_timeout: $has_timeout,
         has_retry: $has_retry,
+        has_blocked: $has_blocked,
+        has_failed: $has_failed,
         user_reopened: (
           ($closed | not) and
           ($done_with_pr | not) and
@@ -139,7 +145,7 @@ for iid in "${IIDS[@]}"; do
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, user_reopened:false, needs_continue:false, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, has_blocked:false, has_failed:false, user_reopened:false, needs_continue:false, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

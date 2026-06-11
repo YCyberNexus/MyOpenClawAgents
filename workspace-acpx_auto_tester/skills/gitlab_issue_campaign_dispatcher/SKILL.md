@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-06-01.3] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry with best-effort partial-work force-push after acpx failures, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-06-11.1] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry with best-effort partial-work force-push after acpx failures, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -299,12 +299,33 @@ is only the dispatcher's progress cache.** Both wrappers enforce this:
 - `dispatch_prepare_tick.sh` runs `reconcile.sh` mandatorily and writes
   an evidence file at `${DISPATCHER_LOG_DIR}/reconcile-<ts>.json` before
   any "early return / skip" decision. No evidence file = tick fails.
+  As of `2026-06-11.1`, reconcile + the disk-cache correction run on
+  **every reachable scheduled tick, including ticks where a batch is in
+  flight** (the `waiting_for_callbacks` gate was moved to AFTER reconcile),
+  so a reviewer's live label edit during an active batch is synced on the
+  very next tick instead of waiting for the batch to drain. In-flight and
+  same-tick-evicted IIDs are skipped by the correction so Phase 6 stays
+  their sole owner. Two operator-visible consequences: (a) a `reconcile.sh`
+  failure during an active batch now surfaces as `tick_failed` in chat
+  instead of a silent `waiting_for_callbacks` (pending bookkeeping is
+  already persisted, so the next tick recovers — nothing is lost); (b)
+  reconcile now hits GitLab over the full `[issue_min_iid, issue_max_iid]`
+  range on every wake-up, so per-tick `glab api` volume scales with the
+  range size even while idle-waiting. Widen the schedule interval if the
+  call volume is a concern.
 - `dispatch_followup.sh` runs a narrow `reconcile.sh MIN_IID=<iid> MAX_IID=<iid>`
   before writing terminal state, so reviewer relabels between spawn and
   callback get picked up.
 
 Disk cache is corrected to match GitLab — never the other way around.
-The LLM does NOT need to second-guess this; the wrappers handle it.
+A hand-applied bare `blocked` / `failed` label (one the dispatcher did
+not itself write into `blocked_iids` / `failed_iids`) is honored as a
+**terminal park**: the IID is excluded from `backlog` and `fresh`
+selection and is NOT auto-retried; a reviewer re-runs it by applying
+`retry` (fresh reset, wins over the lingering label) or `continue`
+(resume). Dispatcher-applied `blocked` (tracked in `blocked_iids`) keeps
+its existing cooldown-then-retry behavior. The LLM does NOT need to
+second-guess any of this; the wrappers handle it.
 
 ## Locking
 

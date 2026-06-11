@@ -488,6 +488,16 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   }
   | del(.accounts_per_issue)')"
 
+# Diagnostic for the "stale scalar in campaign_state.json" class of report
+# (e.g. blocked_cooldown_ticks edited 10->1 but the file still shows 10). The
+# override merge above unconditionally re-applies every trigger scalar, and
+# persist_state below flushes it BEFORE any early return, so a persisted stale
+# value can ONLY mean this tick's trigger stdin still literally carried the old
+# value (a stale scheduler payload), or no tick reached this point since the
+# edit. Logging the values ACTUALLY parsed from this tick's stdin makes that
+# self-diagnosing: compare wrapper.log against what you believe you sent.
+wrapper_log prepare_tick "trigger scalars parsed: blocked_cooldown_ticks=${T[blocked_cooldown_ticks]} blocked_retry_limit=${T[blocked_retry_limit]} hourly_issue_quota=${T[hourly_issue_quota]} max_runtime_minutes=${T[max_runtime_minutes]} max_concurrent_subagents=${MAX_CONCURRENT}"
+
 # Schema migration: legacy scalar active_issue_iid (singular). The
 # legacy active_issue_session field is intentionally dropped because the
 # next block unconditionally rebuilds active_issue_sessions from
@@ -579,23 +589,12 @@ for piid in ${PENDING_KEYS}; do
 done
 persist_state "${STATE_JSON}"
 
-# ─── 9. If pending still non-empty → waiting_for_callbacks ───────
-PENDING_COUNT="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys | length')"
-if [ "${PENDING_COUNT}" -gt 0 ]; then
-  STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
-  persist_state "${STATE_JSON}"
-  PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.pending_subagents | keys | map(tonumber)')"
-  jq -nc \
-    --argjson pending "${PENDING_IIDS_JSON}" \
-    --argjson evicted "${EVICTED_IIDS_JSON}" \
-    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
-    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
-    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}") scope_evicted=$(jq -c . <<<"${SCOPE_EVICTED_IIDS_JSON}")" '
-    {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
-     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
-     cleanup_actions:$cleanup_actions, chat_summary:$chat}'
-  exit 0
-fi
+# ─── 9. (relocated) waiting_for_callbacks gate ───────────────────
+# The pending gate USED to short-circuit here, BEFORE reconcile. That meant a
+# live GitLab label edit made while a batch was in flight (pending non-empty)
+# never reached campaign_state.json until the batch drained. The gate now runs
+# AFTER reconcile + disk-cache correction (§11 below), so live labels are synced
+# on EVERY scheduled tick. See "§11b. Pending gate" just after the correction.
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
@@ -641,37 +640,65 @@ EV_KIND="$(printf '%s' "${EVIDENCE_JSON}" | jq -r 'type' 2>/dev/null || echo inv
 if [ "${EV_KIND}" != "array" ]; then
   emit_chat_failure "reconcile_failed: evidence file at ${EVIDENCE_PATH} is ${EV_KIND}, expected a JSON array (reconcile.sh produced an empty or malformed file)"
 fi
-STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}" '
+STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}" --argjson evicted "${EVICTED_IIDS_JSON}" '
   . as $s
+  | ($s.pending_subagents | keys | map(tonumber)) as $pending
   | reduce $ev[] as $e ($s;
       .completed_iids = (.completed_iids // [])
       | .unfinished_iids = (.unfinished_iids // [])
       | .blocked_iids   = (.blocked_iids // [])
       | .failed_iids    = (.failed_iids // [])
       | .timeout_iids   = (.timeout_iids // [])
-      | if $e.is_closed_on_gitlab == true then
+      | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid // {})
+      | if (($pending | index($e.iid)) != null) or (($evicted | index($e.iid)) != null) then
+          # In-flight (doing) IID owned by Phase 6, or an IID this same tick
+          # eviction loop just classified blocked: the live-label pass must NOT
+          # reclassify or drain it. Skipping protects pending bookkeeping and
+          # the blocked_cooldown_ticks stamp the eviction just wrote (GitLab may
+          # still show a slow subagent as doing if its blocked-label sync has
+          # not landed, which would otherwise look like user_reopened).
+          .
+        elif $e.is_closed_on_gitlab == true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
           | .unfinished_iids = (.unfinished_iids - [$e.iid])
           | .blocked_iids    = (.blocked_iids    - [$e.iid])
           | .failed_iids     = (.failed_iids     - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         elif $e.has_done_pr == true and $e.needs_continue != true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
           | .unfinished_iids = (.unfinished_iids - [$e.iid])
+          | .blocked_iids    = (.blocked_iids - [$e.iid])
+          | .failed_iids     = (.failed_iids - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         elif $e.needs_continue == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
           | .blocked_iids   = (.blocked_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
           | .timeout_iids   = (.timeout_iids - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
           | .campaign_status = "running"
+        elif $e.has_retry == true then
+          # A live `retry` label re-enqueues from scratch and WINS over a
+          # lingering blocked / failed / timeout (a reviewer asked to re-run).
+          # user_reopened is false whenever blocked/failed is present, so this
+          # explicit branch is what makes a stacked blocked+retry / failed+retry
+          # actually re-run instead of falling through to the no-op else.
+          .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
+          | .completed_iids = (.completed_iids - [$e.iid])
+          | .blocked_iids   = (.blocked_iids - [$e.iid])
+          | .failed_iids    = (.failed_iids - [$e.iid])
+          | .timeout_iids   = (.timeout_iids - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         elif $e.user_reopened == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
           | .blocked_iids   = (.blocked_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
           | .timeout_iids   = (.timeout_iids - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         elif $e.has_timeout == true then
           # Live label says timeout but our cache disagrees — adopt the truth.
           .timeout_iids     = (([$e.iid] + .timeout_iids) | unique)
@@ -679,14 +706,38 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
           | .completed_iids  = (.completed_iids - [$e.iid])
           | .blocked_iids    = (.blocked_iids - [$e.iid])
           | .failed_iids     = (.failed_iids - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         else .
       end)
   ')"
 persist_state "${STATE_JSON}"
 
+# ─── 11b. Pending gate (relocated from §9) → waiting_for_callbacks ──
+# Now runs AFTER reconcile + correction so the cache reflects live GitLab labels
+# even while a batch is in flight. Still short-circuits the rest of the tick: no
+# new batch forms while pending is non-empty (single-batch-in-flight invariant).
+PENDING_COUNT="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys | length')"
+if [ "${PENDING_COUNT}" -gt 0 ]; then
+  STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
+  persist_state "${STATE_JSON}"
+  PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.pending_subagents | keys | map(tonumber)')"
+  jq -nc \
+    --arg ev "${EVIDENCE_PATH}" \
+    --argjson pending "${PENDING_IIDS_JSON}" \
+    --argjson evicted "${EVICTED_IIDS_JSON}" \
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    --arg chat "waiting_for_callbacks; pending=$(jq -c . <<<"${PENDING_IIDS_JSON}") evicted=$(jq -c . <<<"${EVICTED_IIDS_JSON}") scope_evicted=$(jq -c . <<<"${SCOPE_EVICTED_IIDS_JSON}")" '
+    {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions, last_reconcile_evidence:$ev, chat_summary:$chat}'
+  exit 0
+fi
+
 # ─── 12. Early-return: all done? ─────────────────────────────────
 ALL_DONE="$(printf '%s' "${STATE_JSON}" | jq -r --argjson ev "${EVIDENCE_JSON}" --argjson universe "${EFF_UNIVERSE_JSON}" '
   if (.issue_iids_whitelist | length) > 0 then false
+  elif ((.pending_subagents // {}) | length) > 0 then false
   else
     ($ev | map(.is_done_on_gitlab == true and .needs_continue != true) | all)
     and (($universe | length) == ($ev | length))
@@ -841,6 +892,9 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       (($s.blocked_iids // []) | index($i) | not)
       and (($s.timeout_iids // []) | index($i) | not)
       and (($s.unfinished_iids // []) | index($i))
+      and (($byiid[($i|tostring)] // {}) as $e
+           | ((($e.has_blocked // false) != true) and (($e.has_failed // false) != true))
+             or (($e.has_retry // false) == true) or (($e.needs_continue // false) == true))
     )) | sort) as $backlog
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
@@ -849,6 +903,9 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       and (($s.failed_iids // []) | index($i) | not)
       and (($s.timeout_iids // []) | index($i) | not)
       and ($i >= $next_new)
+      and (($byiid[($i|tostring)] // {}) as $e
+           | ((($e.has_blocked // false) != true) and (($e.has_failed // false) != true))
+             or (($e.has_retry // false) == true) or (($e.needs_continue // false) == true))
     )) | sort) as $fresh
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i))
