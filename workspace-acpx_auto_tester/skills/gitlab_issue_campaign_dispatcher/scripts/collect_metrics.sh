@@ -87,7 +87,13 @@ PY
 fi
 
 # ── assemble metrics.json ─────────────────────────────────────────────────────
-jq -nc \
+# The best-effort contract covers MISSING/GARBLED INPUTS (no output.xml, no
+# timing.txt → available:false / null, exit 0). It does NOT cover a genuine
+# IO/bash fault when WRITING the result: an unwritable LOG_DIR or a jq failure
+# must surface as a hard error, otherwise the ledger silently loses this row
+# while the caller believes metrics were written. Guard the final write so a
+# write/encode failure exits non-zero instead of being swallowed by `set +e`.
+if ! jq -nc \
   --argjson iid "${ISSUE_IID}" \
   --argjson attempt "${ATTEMPT_NUMBER}" \
   --arg model "${MODEL}" \
@@ -96,7 +102,10 @@ jq -nc \
   '{iid:$iid, attempt_number:$attempt,
     model:(if $model=="" then null else $model end),
     wall_clock_seconds:$wall,
-    accuracy:$accuracy}' > "${metrics_file}"
+    accuracy:$accuracy}' > "${metrics_file}"; then
+  echo "collect_metrics: FATAL — failed to write ${metrics_file}" >&2
+  exit 1
+fi
 
 echo "${metrics_file}"
 exit 0

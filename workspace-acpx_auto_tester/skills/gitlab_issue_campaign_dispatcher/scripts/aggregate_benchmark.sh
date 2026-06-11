@@ -26,12 +26,16 @@ if [ ! -f "${ledger}" ]; then
   exit 0
 fi
 
-# Slurp the JSONL into an array, keep the latest record per (iid, model)
-# (group_by is stable, so within a key the last appended line is .[-1]),
-# then render a markdown matrix: rows = issues, columns = models,
-# cell = "<wall_clock_seconds>s / <pass_rate>%" (or "n/a" when accuracy
-# is unavailable, "-" when that (iid, model) was never run).
-jq -rs '
+# The ledger is append-only JSONL: a crash or a concurrent half-written append
+# can leave a truncated/garbled line. A single bad line must NOT take down the
+# whole matrix, so first pass each RAW line through `fromjson? // empty`, which
+# drops anything that does not parse (and emits nothing for a blank line),
+# yielding a clean stream of objects. The second jq then slurps that stream,
+# keeps the latest record per (iid, model) (group_by is stable, so within a key
+# the last appended line is .[-1]), and renders a markdown matrix: rows = issues,
+# columns = models, cell = "<wall_clock_seconds>s / <pass_rate>%" (or "n/a" when
+# accuracy is unavailable, "-" when that (iid, model) was never run).
+jq -Rc 'fromjson? // empty' "${ledger}" | jq -rs '
   (group_by([.iid, .model]) | map(.[-1])) as $rows
   | ($rows | map(.model) | unique) as $models
   | ($rows | map(.iid)   | unique | sort) as $iids
@@ -51,4 +55,4 @@ jq -rs '
                 end
             ] | join(" | ") )
         + " |" )
-' "${ledger}"
+'

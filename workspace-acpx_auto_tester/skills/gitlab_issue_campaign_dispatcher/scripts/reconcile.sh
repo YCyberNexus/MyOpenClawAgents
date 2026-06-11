@@ -29,7 +29,7 @@
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
 #       "is_closed_on_gitlab": bool,  # state is "closed"
-#       "is_done_on_gitlab": bool,   # terminal for dispatcher: state is "closed" (benchmark-test: `done` is a live label but GitLab-level completion is closed only)
+#       "is_done_on_gitlab": bool,   # success terminal: state "closed" OR live `done` label (benchmark-test stays opened on done; operator re-runs the next model via retry/trigger; a live `retry` wins over `done`)
 #       "has_blocked_cc":    bool,   # labels include "blocked-cc" (Claude Code-side retryable failure)
 #       "has_blocked_dispatcher": bool, # labels include "blocked-dispatcher" (dispatcher-side retryable failure)
 #       "has_failed_cc":     bool,   # labels include "failed-cc" (CC-side retry budget exhausted, terminal)
@@ -37,7 +37,7 @@
 #       "model_tier":        <integer 0-based>, # index of the highest present model:<tier> in the configured MODEL_TIERS list (0 when none present); default flash,pro,max → flash=0/pro=1/max=2
 #       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry)
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
-#       "user_reopened":     bool,   # opened, no failed-*/blocked-* label; timeout is allowed only with retry
+#       "user_reopened":     bool,   # opened, NOT done, no failed-*/blocked-* label; timeout is allowed only with retry
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
 #
@@ -50,10 +50,12 @@
 # variants never upgrade the model.
 #
 # Semantics for the dispatcher (consumed in Source-of-Truth Policy):
-#   - `is_closed_on_gitlab == true`  → finished, skip (benchmark-test does not
-#         auto-close issues — closed means a human closed it)
+#   - `is_done_on_gitlab == true`    → success terminal, drain & converge
+#         (closed, OR an opened issue carrying the `done` label — benchmark-test
+#         leaves a finished round opened so the operator can launch the next
+#         model). A live `retry` label WINS over `done` and re-enqueues it.
 #   - `user_reopened == true`        → re-enqueue from scratch (an opened issue
-#         carrying no failed-*/blocked-* label; e.g. relabelled to todo / doing)
+#         carrying neither `done` nor any failed-*/blocked-* label)
 #
 # Closed issue state wins over every label combination. continue/resume is
 # disabled on benchmark-test, so there is no needs_continue signal.
@@ -134,6 +136,7 @@ for iid in "${IIDS[@]}"; do
       ($issue.state == "closed") as $closed |
       (($labels | index("retry") != null)) as $has_retry |
       (($labels | index("timeout") != null)) as $has_timeout |
+      (($labels | index("done") != null)) as $has_done |
       ($labels | index("blocked-cc") != null) as $has_blocked_cc |
       ($labels | index("blocked-dispatcher") != null) as $has_blocked_dispatcher |
       ($labels | index("failed-cc") != null) as $has_failed_cc |
@@ -155,7 +158,7 @@ for iid in "${IIDS[@]}"; do
         labels: $labels,
         title: $issue.title,
         is_closed_on_gitlab: $closed,
-        is_done_on_gitlab: $closed,
+        is_done_on_gitlab: ($closed or $has_done),
         has_blocked_cc: $has_blocked_cc,
         has_blocked_dispatcher: $has_blocked_dispatcher,
         has_failed_cc: $has_failed_cc,
@@ -165,6 +168,7 @@ for iid in "${IIDS[@]}"; do
         has_retry: $has_retry,
         user_reopened: (
           ($closed | not) and
+          ($has_done | not) and
           ($has_failed_cc | not) and
           ($has_failed_dispatcher | not) and
           ($has_blocked_cc | not) and

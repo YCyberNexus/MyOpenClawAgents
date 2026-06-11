@@ -45,7 +45,20 @@ fi
 # eval mode: also push an IMMUTABLE per-attempt remote branch so every attempt
 # (= every pinned model run) is preserved and never overwritten. LOCAL_ATTEMPT_BRANCH
 # is "issue/<iid>-auto-fix-att<NNN>" (unique per attempt); push it to the same
-# name on the remote (NOT force — it must never already exist for a fresh attempt).
-git push origin "${LOCAL_ATTEMPT_BRANCH}:${LOCAL_ATTEMPT_BRANCH}"
+# name on the remote (NOT force — it must never overwrite an existing ref).
+#
+# Idempotency guard: a same-(IID, attempt) re-run (stuck-pending eviction that
+# re-feeds the IID, a lost-callback re-dispatch) can legitimately reach here with
+# the immutable branch already on origin. A plain non-force push would then be
+# rejected (non-fast-forward) and abort the whole script under `set -e`, which
+# the executor contract misattributes to `blocked-cc` (a CC-side failure) even
+# though the WORK_BRANCH force-push above already succeeded. Skip the immutable
+# push when the ref exists so the re-run stays green and never overwrites the
+# preserved artifact.
+if git ls-remote --exit-code --heads origin "${LOCAL_ATTEMPT_BRANCH}" >/dev/null 2>&1; then
+  echo "commit_and_push: immutable per-attempt branch ${LOCAL_ATTEMPT_BRANCH} already on origin; skipping immutable push (same-attempt re-run)" >&2
+else
+  git push origin "${LOCAL_ATTEMPT_BRANCH}:${LOCAL_ATTEMPT_BRANCH}"
+fi
 
 git rev-parse HEAD

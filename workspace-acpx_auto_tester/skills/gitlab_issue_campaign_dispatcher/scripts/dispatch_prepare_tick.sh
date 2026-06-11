@@ -822,6 +822,20 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
           | .failed_iids    = (.failed_iids - [$e.iid])
           | .timeout_iids   = (.timeout_iids - [$e.iid])
           | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
+        elif $e.is_done_on_gitlab == true then
+          # benchmark-test: `done` (a live label on a still-opened issue, OR a
+          # closed issue) is a SUCCESS terminal. Drain it like a closed issue so
+          # the campaign converges and a finished round is NOT re-run every tick.
+          # This branch sits AFTER has_retry on purpose: a done+retry issue takes
+          # the has_retry branch above and re-runs, so the operator launches the
+          # next model round explicitly (add `retry`, or name the IID in the
+          # trigger range) rather than relying on auto re-enqueue.
+          .completed_iids = (([$e.iid] + .completed_iids) | unique)
+          | .unfinished_iids = (.unfinished_iids - [$e.iid])
+          | .blocked_iids    = (.blocked_iids    - [$e.iid])
+          | .failed_iids     = (.failed_iids     - [$e.iid])
+          | .timeout_iids    = (.timeout_iids    - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         elif $e.user_reopened == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
@@ -869,7 +883,12 @@ ALL_DONE="$(printf '%s' "${STATE_JSON}" | jq -r --argjson ev "${EVIDENCE_JSON}" 
   if (.issue_iids_whitelist | length) > 0 then false
   elif ((.pending_subagents // {}) | length) > 0 then false
   else
-    ($ev | map(.is_done_on_gitlab == true) | all)
+    # unfinished_iids must be empty too: a done+retry issue is re-enqueued there
+    # by the reduce above even though its reconcile evidence still reads
+    # is_done_on_gitlab==true, so without this guard ALL_DONE would short-circuit
+    # to completed and the operator-driven retry round would never launch.
+    (((.unfinished_iids // []) | length) == 0)
+    and ($ev | map(.is_done_on_gitlab == true) | all)
     and (($universe | length) == ($ev | length))
   end')"
 if [ "${ALL_DONE}" = "true" ]; then
