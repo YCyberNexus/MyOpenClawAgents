@@ -16,7 +16,7 @@ Full algorithm with step-by-step env vars and failure mapping: [`skills/gitlab_i
 
 Runs in the fixed scheduled session (`agent:acpx_auto_tester:main`).
 
-The orchestrator owns every state-file write, every glab label mutation outside the subagent's terminal sync, and every `sessions_spawn` decision. It runs Phases 1–5 on scheduled wake-ups and Phase 6 on each callback wake-up (or inline-synthesized blocked reply). It MUST NOT do the per-issue technical work itself — that is the subagent's job.
+The orchestrator owns every state-file write, every glab label mutation outside the subagent's terminal sync, and every `sessions_spawn` decision. It runs Phases 1–5 on scheduled wake-ups and Phase 6 on each callback wake-up (or inline-synthesized blocked/timeout reply). It MUST NOT do the per-issue technical work itself — that is the subagent's job.
 
 Full per-Phase step list, env-var contract, and failure mapping: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm.
 

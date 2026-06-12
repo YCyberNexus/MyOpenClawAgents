@@ -320,7 +320,7 @@ Step 10 — REPLY
   - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
   - status = blocked        when any FAIL flow or BLOCKED_PUSH flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
-  - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137} or tool-side timeout). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
+  - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137}, tool-side timeout, or the whole-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap from <constraints>). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap", or "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" for the whole-run cap). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
   - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
   - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / BLOCKED_PUSH / timeout).
   - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
@@ -336,7 +336,7 @@ Step 10 — REPLY
 - Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
 - Destructive deletion is forbidden. Do NOT call `rm`, `/bin/rm`, `git rm`, `unlink`, `find -delete`, or script file deletion through another runtime. If cleanup appears necessary, leave files in place and FAIL status=blocked with a clear reason.
-- Hard timeout: {ACPX_TIMEOUT_MINUTES} minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded {ACPX_TIMEOUT_MINUTES}-minute soft cap".
+- Hard timeout: {ACPX_TIMEOUT_MINUTES} minutes wall-clock for the whole subagent run. If you cannot finish in time, enter <timeout_flow> with ATTEMPT_STATUS=timeout and BLOCK_REASON="executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" — NEVER reply status=blocked for running out of time. Timeouts park terminally (no auto-retry); a blocked reply would wrongly re-enter the retry pool.
 - Never paste full diffs, full claude_result.txt, or long issue bodies into chat.
 </constraints>
 
@@ -466,14 +466,18 @@ HARD rules for the blocked push flow:
 <timeout_flow>
 Entered when Step 1 saw a clean `ACPX_EXIT=124` or `ACPX_EXIT=137` line (the
 script's `timeout` wrapper killed acpx because it exceeded
-{ACPX_TIMEOUT_SECONDS}s) OR when the Step 1 output carried NO `ACPX_EXIT=`
+{ACPX_TIMEOUT_SECONDS}s), OR when the Step 1 output carried NO `ACPX_EXIT=`
 line at all (tool-side command timeout, disconnect, or truncated output — acpx
-did not cleanly terminate under the script's control and may still be running).
-Both cases land here, NOT in the blocked flow.
+did not cleanly terminate under the script's control and may still be running),
+OR when the whole-subagent-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap
+from <constraints> is exceeded at any point in the algorithm.
+All three cases land here, NOT in the blocked flow — running out of time is
+always status=timeout, never status=blocked.
 
-Set ATTEMPT_STATUS=timeout and
-    BLOCK_REASON="acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"
-up front; these stick through the rest of the flow regardless of which
+Set ATTEMPT_STATUS=timeout up front, with BLOCK_REASON matching the entry:
+    acpx kill / missing ACPX_EXIT → "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"
+    whole-run cap                 → "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap"
+These stick through the rest of the flow regardless of which
 sub-steps succeed.
 
 T1 — STAGE (same script as Step 2 of the normal flow)

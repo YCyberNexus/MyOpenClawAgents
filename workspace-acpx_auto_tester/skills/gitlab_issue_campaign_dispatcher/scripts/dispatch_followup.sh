@@ -78,13 +78,46 @@ fi
 
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 
-# Read the compact reply from stdin. Empty stdin → synthesize blocked.
+# Synthesized-reply status for a dead subagent (empty / unparseable /
+# status-less worker_result_json). 只要超时就不重试: when the run already
+# outlived its acpx wall-clock budget (elapsed since spawned_at ≥
+# acpx_timeout_seconds - 60s slack for ack-timestamp skew), the
+# termination is timeout-shaped — the runtime's runTimeoutSeconds kill or
+# a death inside the subagent's own timeout flow — so the IID is parked
+# as `timeout` (no auto-retry) instead of `blocked` (retryable). A reply
+# that parses and carries an explicit status is never reclassified: a
+# live subagent's own verdict wins (phase6_normalize_reply contract).
+SYNTH_STATUS="blocked"
+ELAPSED_S=""
+# Budget pinned in the pending entry at spawn time (Phase 4 step 19); fall
+# back to the campaign-level value for entries spawned before the field
+# existed. A trigger override applied while this run was in flight must not
+# change which budget the run is judged against.
+ACPX_TIMEOUT_S="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.acpx_timeout_seconds // empty')"
+[ -n "${ACPX_TIMEOUT_S}" ] || ACPX_TIMEOUT_S="$(printf '%s' "${STATE_JSON}" | jq -r '.acpx_timeout_seconds // 18000')"
+SP_EPOCH="$(iso_to_epoch "$(printf '%s' "${PENDING_ENTRY}" | jq -r '.spawned_at // ""')")"
+if [ "${SP_EPOCH}" -gt 0 ]; then
+  ELAPSED_S=$(( $(date -u +%s) - SP_EPOCH ))
+  TIMEOUT_FLOOR_S=$(( ACPX_TIMEOUT_S - 60 ))
+  [ "${TIMEOUT_FLOOR_S}" -lt 0 ] && TIMEOUT_FLOOR_S=0
+  if [ "${ELAPSED_S}" -ge "${TIMEOUT_FLOOR_S}" ]; then
+    SYNTH_STATUS="timeout"
+  fi
+fi
+
+# Read the compact reply from stdin. Empty stdin → synthesize a terminal
+# reply: timeout when the run consumed its time budget, blocked otherwise.
 RAW_REPLY="$(cat)"
 if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
-  REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_ATTEMPT}" \
-    "callback worker_result_json was empty")"
+  if [ "${SYNTH_STATUS}" = "timeout" ]; then
+    REPLY_JSON="$(phase6_synthesize_timeout "${IID}" "${PENDING_ATTEMPT}" \
+      "callback worker_result_json was empty after ${ELAPSED_S}s >= acpx_timeout_seconds(${ACPX_TIMEOUT_S})-60s — timeout-shaped termination, parked without retry")"
+  else
+    REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_ATTEMPT}" \
+      "callback worker_result_json was empty")"
+  fi
 else
-  REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_ATTEMPT}")"
+  REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_ATTEMPT}" "${SYNTH_STATUS}")"
 fi
 
 # IID cross-check. phase6_normalize_reply preserves a parseable reply's iid, so

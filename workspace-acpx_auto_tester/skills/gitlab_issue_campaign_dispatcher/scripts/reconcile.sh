@@ -35,7 +35,7 @@
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
 #       "has_blocked":       bool,   # labels include "blocked" (lets the dispatcher honor a hand-applied blocked label as a terminal park)
 #       "has_failed":        bool,   # labels include "failed" (lets the dispatcher honor a hand-applied failed label as a terminal park)
-#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/continue/contiune label; timeout is allowed only with retry
+#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/doing/continue/contiune label; timeout is allowed only with retry. `doing` excludes because a non-pending issue still wearing it is a dispatcher-owned terminal whose label sync did not land — the disk-cached park (esp. timeout) must win, not be silently un-parked
 #       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "missing":           bool    # GET returned non-OK (treat as not done)
 #     }
@@ -138,6 +138,7 @@ for iid in "${IIDS[@]}"; do
           ($done_with_pr | not) and
           ($labels | index("failed") == null) and
           ($labels | index("blocked") == null) and
+          ($labels | index("doing") == null) and
           (($has_timeout | not) or $has_retry) and
           ($needs_continue | not)
         ),

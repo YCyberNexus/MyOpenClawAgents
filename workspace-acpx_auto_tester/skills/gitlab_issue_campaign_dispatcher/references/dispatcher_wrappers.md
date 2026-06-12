@@ -95,8 +95,16 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    `cleanup_actions[]` kill request for the recorded child session key
    when present. Then apply the stuck-pending backstop to remaining
    entries where `(now - spawned_at) >= stuck_after_minutes` (or a
-   placeholder with `spawned_at = null`). Stuck eviction is still
-   classified as blocked but does not emit a kill request unless future
+   placeholder with `spawned_at = null`). A stuck eviction whose run
+   already outlived its acpx wall-clock budget
+   (`now - spawned_at >= acpx_timeout_seconds - 60s`) is timeout-shaped:
+   it synthesizes a Phase 6 **timeout** reply, so the IID parks in
+   `timeout_iids` with no auto-retry (只要超时就不重试). With the default
+   `stuck_after_minutes` (`ceil(run_timeout_seconds/60)+30`) every stuck
+   eviction passes that budget check; only an operator-shortened
+   `stuck_after_minutes` can evict early enough to stay **blocked**
+   (retryable). Placeholder evictions (spawn never landed) always stay
+   blocked. Stuck eviction does not emit a kill request unless future
    tooling adds one.
 9. If `pending_subagents` is still non-empty after eviction → emit
    `status:"waiting_for_callbacks"` envelope and exit 0.
@@ -180,7 +188,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 | `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |
 | `backoff_seconds` | Always `2` today. Sleep between retries. |
-| `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. |
+| `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. Stuck evictions whose run outlived `acpx_timeout_seconds - 60s` are classified `timeout` (parked, no auto-retry); scope/placeholder evictions and early stuck evictions are classified `blocked`. |
 | `scope_evicted_iids` | Subset of `evicted_iids` evicted because the IID was outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`. |
 | `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked blocked. |
 | `label_filtered_in` / `label_filtered_out` | Optional — only emitted when `require_labels` is non-empty. |
@@ -261,8 +269,12 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 ### Inputs
 
 - **stdin**: the subagent's terminal compact JSON (the runtime's
-  `worker_result_json` payload). Empty stdin → synthesized blocked
-  reply with `block_reason="callback worker_result_json was empty"`.
+  `worker_result_json` payload). Empty stdin → synthesized terminal
+  reply: **timeout** (parked, no auto-retry) when the run already
+  outlived its acpx wall-clock budget
+  (`now - spawned_at >= acpx_timeout_seconds - 60s` — the
+  runtime-kill / dead-timeout-flow signature), otherwise **blocked**
+  (retryable) with `block_reason="callback worker_result_json was empty"`.
   The orchestrator MUST feed this with a heredoc
   (`… bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`),
   never with `echo "<literal>" | … bash …`. The compact JSON is
@@ -281,8 +293,14 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
    logged but not aborting).
 3. Load campaign_state.json; look up `pending_subagents[IID]`. Missing
    → emit `callback_status:"stale_or_already_drained"`, exit 0.
-4. Parse compact reply via `phase6_normalize_reply` (parse errors and
-   missing fields normalized to a synthesized blocked reply).
+4. Parse compact reply via `phase6_normalize_reply` (parse errors and a
+   missing or non-enum `status` field — anything outside
+   `{done, no_changes, blocked, failed, timeout}`, including the empty
+   string — normalize to a synthesized terminal reply: `timeout` when the
+   run outlived `acpx_timeout_seconds - 60s` since `spawned_at` (budget
+   pinned in the pending entry at spawn time), else `blocked`; a parseable
+   reply with an explicit enum `status` always keeps the subagent's own
+   verdict).
 5. Cross-check `reply.attempt_number == pending.attempt_number`; mismatch
    → stale, exit 0.
 6. Run `phase6_process` with `is_launch_synth=false`:

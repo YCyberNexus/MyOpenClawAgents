@@ -14,10 +14,17 @@
 #   atomic_write_json <path>     ← reads JSON from stdin, atomic mv
 #   load_state                   → cat CAMPAIGN_STATE_FILE (or fresh init)
 #   wrapper_log <phase> <msg...> → append to dispatcher log
+#   iso_to_epoch <iso8601>       → epoch seconds (0 when unparseable)
+#   phase6_synthesize_reply <iid> <attempt_number> <status> <block_reason>
+#                                → emit a synthetic compact reply JSON (status=blocked|timeout)
 #   phase6_synthesize_blocked <iid> <attempt_number> <block_reason>
-#                                → emit a synthetic compact reply JSON
-#   phase6_normalize_reply <reply_json> <ctx_iid> <ctx_attempt>
-#                                → validated + normalized reply JSON
+#                                → phase6_synthesize_reply with status=blocked
+#   phase6_synthesize_timeout <iid> <attempt_number> <block_reason>
+#                                → phase6_synthesize_reply with status=timeout
+#   phase6_normalize_reply <reply_json> <ctx_iid> <ctx_attempt> [synth_status]
+#                                → validated + normalized reply JSON; synth_status
+#                                  (default blocked) is used when the raw reply is
+#                                  unparseable or carries no status field
 #   phase6_sync_labels <iid> <final_status>
 #                                → run set_issue_label.sh ops; echo any append-on-failure text
 #   phase6_write_state_files <iid> <attempt_number> <reply_json> <final_status>
@@ -42,6 +49,17 @@ set -euo pipefail
 # ─── Generic helpers ───────────────────────────────────────────────
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Parse an ISO-8601 UTC timestamp into epoch seconds. Echoes 0 when the
+# input is empty / null / unparseable so callers can branch on `-gt 0`.
+iso_to_epoch() {
+  local ts="$1"
+  if [ -z "${ts}" ] || [ "${ts}" = "null" ]; then
+    echo 0
+    return 0
+  fi
+  date -u -d "${ts}" +%s 2>/dev/null || gdate -u -d "${ts}" +%s 2>/dev/null || echo 0
+}
 
 atomic_write_json() {
   local target="$1"
@@ -156,16 +174,25 @@ persist_state() {
 
 # ─── Phase 6 helpers ───────────────────────────────────────────────
 
-phase6_synthesize_blocked() {
-  local iid="$1" attempt_number="$2" block_reason="$3"
+# Emit a synthetic compact reply. status MUST be blocked or timeout:
+# `blocked` re-enters the retry pool; `timeout` parks the IID in
+# timeout_iids with no auto-retry (只要超时就不重试 — see SKILL.md
+# §Timeout-shaped synthesized replies).
+phase6_synthesize_reply() {
+  local iid="$1" attempt_number="$2" status="$3" block_reason="$4"
+  case "${status}" in
+    blocked|timeout) ;;
+    *) status="blocked" ;;
+  esac
   jq -n \
     --argjson iid "${iid}" \
     --argjson attempt_number "${attempt_number}" \
+    --arg status "${status}" \
     --arg block_reason "${block_reason}" \
     '{
       iid: $iid,
       attempt_number: $attempt_number,
-      status: "blocked",
+      status: $status,
       mode_actual: "",
       work_branch: "",
       local_branch: "",
@@ -181,17 +208,36 @@ phase6_synthesize_blocked() {
     }'
 }
 
+phase6_synthesize_blocked() {
+  phase6_synthesize_reply "$1" "$2" blocked "$3"
+}
+
+phase6_synthesize_timeout() {
+  phase6_synthesize_reply "$1" "$2" timeout "$3"
+}
+
 # Validate the compact reply per state_schema.md §Compact Subagent Reply.
 # Inputs:
 #   $1 = the reply JSON (raw text — may be invalid JSON)
 #   $2 = expected iid (from pending entry)
 #   $3 = expected attempt_number (from pending entry)
+#   $4 = synth_status (optional, default "blocked"): the status used when the
+#        raw reply is unparseable or carries no status field. The caller passes
+#        "timeout" when the run already outlived its acpx wall-clock budget, so
+#        a dead subagent's garbled/empty terminal payload parks the IID as
+#        timeout (no auto-retry) instead of re-entering the blocked retry pool.
+#        A parseable reply with an explicit status keeps that status — a live
+#        subagent's own verdict always wins.
 # Output (stdout): a normalized JSON object (always valid; synthesized on
 # parse failure / iid mismatch). The orchestrator's "drop stale callback"
 # check happens BEFORE this — by the time the caller gets here, the IID
 # is known to match a pending entry.
 phase6_normalize_reply() {
-  local raw="$1" exp_iid="$2" exp_attempt="$3"
+  local raw="$1" exp_iid="$2" exp_attempt="$3" synth_status="${4:-blocked}"
+  case "${synth_status}" in
+    blocked|timeout) ;;
+    *) synth_status="blocked" ;;
+  esac
   local parsed
   if ! parsed="$(printf '%s' "${raw}" | jq -c . 2>/dev/null)"; then
     local first200
@@ -200,7 +246,7 @@ phase6_normalize_reply() {
     # the (possibly non-JSON) raw as one string, replacing any invalid bytes with
     # U+FFFD, then slices by codepoint and flattens CR/LF for a one-line reason.
     first200="$(printf '%s' "${raw}" | jq -Rsr '.[0:200] | gsub("\\r";"") | gsub("\\n";" ")' 2>/dev/null || printf '%s' "${raw}" | head -c 200 | tr -d '\r' | tr '\n' ' ')"
-    phase6_synthesize_blocked "${exp_iid}" "${exp_attempt}" \
+    phase6_synthesize_reply "${exp_iid}" "${exp_attempt}" "${synth_status}" \
       "callback worker_result_json not valid JSON: ${first200}"
     return 0
   fi
@@ -208,13 +254,14 @@ phase6_normalize_reply() {
   # require non-empty block_reason for blocked/failed/timeout.
   printf '%s' "${parsed}" | jq -c \
     --argjson exp_iid "${exp_iid}" \
-    --argjson exp_attempt "${exp_attempt}" '
+    --argjson exp_attempt "${exp_attempt}" \
+    --arg synth_status "${synth_status}" '
     def s: if . == null then "" else . end;
     def a: if . == null then [] else . end;
     {
       iid: (.iid // $exp_iid),
       attempt_number: (.attempt_number // $exp_attempt),
-      status: (.status // "blocked"),
+      status: (.status // $synth_status),
       mode_actual: (.mode_actual | s),
       work_branch: (.work_branch | s),
       local_branch: (.local_branch | s),
@@ -228,6 +275,19 @@ phase6_normalize_reply() {
       block_reason: (.block_reason | s),
       log_dir: (.log_dir | s)
     }
+    | .status as $st
+    | if (($st | type) != "string")
+         or ((["done","no_changes","blocked","failed","timeout"] | index($st)) == null) then
+        # Status present but empty/garbage — the subagent did not author a
+        # usable verdict, so this is a dead-subagent shape like a missing
+        # status: coerce to synth_status (timeout when the run outlived its
+        # budget) instead of letting phase6_sync_labels reject it and the
+        # sync-failure path demote it to retryable blocked.
+        .status = $synth_status
+        | (if (.block_reason | length) == 0 then
+             .block_reason = ("subagent reply carried unsupported status " + ($st | tostring) + " — coerced to " + $synth_status)
+           else . end)
+      else . end
     | if .status == "no_changes" then
         .status = "blocked"
         | (if (.block_reason | length) == 0 then .block_reason = "subagent produced no staged changes" else . end)
@@ -548,7 +608,9 @@ phase6_process() {
       ')"
       # best-effort timeout sync — leaves issue without `doing` removal in worst case,
       # but the dispatcher refuses to spawn for an IID in timeout_iids on the next tick,
-      # so no parallel acpx can start regardless.
+      # so no parallel acpx can start regardless. The lingering `doing` also keeps
+      # reconcile's user_reopened false (reconcile.sh excludes live `doing`), so the
+      # live-label correction cannot silently un-park the cached timeout either.
       phase6_sync_labels "${iid}" timeout >/dev/null 2>&1 || true
     elif [ "${final_status}" != "failed" ]; then
       final_status="blocked"

@@ -546,6 +546,15 @@ for piid in ${PENDING_KEYS}; do
   CHILD_SESSION_KEY="$(printf '%s' "${ENTRY}" | jq -r '.child_session_key // ""')"
   EVICT=false
   EVICT_KIND=""
+  # 只要超时就不重试: a stuck-evicted run that already outlived its acpx
+  # wall-clock budget is a timeout-shaped termination — synthesize `timeout`
+  # (parked in timeout_iids, no auto-retry) instead of `blocked` (retryable).
+  # Scope evictions and surviving placeholders are not time-based failures
+  # and stay `blocked`. With the default stuck_after_minutes
+  # (ceil(run_timeout_seconds/60)+30) every stuck eviction passes the budget
+  # check; only an operator-shortened stuck_after_minutes can evict a run
+  # early enough to stay `blocked`.
+  EVICT_SYNTH="blocked"
   if ! printf '%s' "${EFF_UNIVERSE_JSON}" | jq -e --argjson iid "${piid}" 'index($iid) != null' >/dev/null; then
     EVICT=true
     EVICT_KIND="scope"
@@ -558,20 +567,37 @@ for piid in ${PENDING_KEYS}; do
       REASON="placeholder pending entry survived: spawn was never observed to land"
     fi
   else
-    # parse spawned_at as ISO-8601
-    SP_EPOCH="$(date -u -d "${SP_AT}" +%s 2>/dev/null || gdate -u -d "${SP_AT}" +%s 2>/dev/null || echo 0)"
+    SP_EPOCH="$(iso_to_epoch "${SP_AT}")"
     if [ "${SP_EPOCH}" -gt 0 ]; then
-      DELTA=$(( (NOW_TS - SP_EPOCH) / 60 ))
+      ELAPSED_S=$(( NOW_TS - SP_EPOCH ))
+      DELTA=$(( ELAPSED_S / 60 ))
       if [ "${DELTA}" -ge "${STUCK_AFTER}" ]; then
         EVICT=true
         EVICT_KIND="stuck"
-        REASON="no callback received within stuck_after_minutes (${DELTA} min)"
+        # Judge against the budget pinned in the entry at spawn time; fall
+        # back to this tick's value for entries spawned before the field
+        # existed. A trigger override applied mid-flight must not change
+        # which budget the run is judged against.
+        ENTRY_ACPX="$(printf '%s' "${ENTRY}" | jq -r '.acpx_timeout_seconds // empty')"
+        [ -n "${ENTRY_ACPX}" ] || ENTRY_ACPX="${ACPX_TIMEOUT}"
+        TIMEOUT_FLOOR_S=$(( ENTRY_ACPX - 60 ))
+        [ "${TIMEOUT_FLOOR_S}" -lt 0 ] && TIMEOUT_FLOOR_S=0
+        if [ "${ELAPSED_S}" -ge "${TIMEOUT_FLOOR_S}" ]; then
+          EVICT_SYNTH="timeout"
+          REASON="no callback received within stuck_after_minutes (${DELTA} min) and the run outlived acpx_timeout_seconds(${ENTRY_ACPX}) — timeout-shaped, parked without retry"
+        else
+          REASON="no callback received within stuck_after_minutes (${DELTA} min)"
+        fi
       fi
     fi
   fi
   if [ "${EVICT}" = true ]; then
-    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} reason='${REASON}'"
-    REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
+    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} synth=${EVICT_SYNTH} reason='${REASON}'"
+    if [ "${EVICT_SYNTH}" = "timeout" ]; then
+      REPLY_JSON="$(phase6_synthesize_timeout "${piid}" "${PA_NUM}" "${REASON}")"
+    else
+      REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
+    fi
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     EVICTED_IIDS_JSON="$(printf '%s' "${EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
@@ -652,11 +678,12 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
       | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid // {})
       | if (($pending | index($e.iid)) != null) or (($evicted | index($e.iid)) != null) then
           # In-flight (doing) IID owned by Phase 6, or an IID this same tick
-          # eviction loop just classified blocked: the live-label pass must NOT
-          # reclassify or drain it. Skipping protects pending bookkeeping and
-          # the blocked_cooldown_ticks stamp the eviction just wrote (GitLab may
-          # still show a slow subagent as doing if its blocked-label sync has
-          # not landed, which would otherwise look like user_reopened).
+          # eviction loop just classified blocked/timeout: the live-label pass
+          # must NOT reclassify or drain it. Skipping protects pending
+          # bookkeeping and the blocked_cooldown_ticks stamp the eviction just
+          # wrote (GitLab may still show a slow subagent as doing if its
+          # terminal-label sync has not landed, which would otherwise look
+          # like user_reopened).
           .
         elif $e.is_closed_on_gitlab == true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
@@ -915,7 +942,10 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     # Phase 6 promotes blocked → failed (and moves the IID into failed_iids)
     # whenever retry_count > blocked_retry_limit. Launch-side synthesized
     # blocked replies (dispatch_record_spawn.sh STATUS=launch_failed) and
-    # stuck-pending evictions (dispatch_prepare_tick.sh) both DO NOT
+    # the rare early stuck-pending evictions that stay blocked (run did NOT
+    # outlive acpx_timeout_seconds — possible only under an operator-shortened
+    # stuck_after_minutes; budget-exhausted evictions synthesize timeout and
+    # land in timeout_iids instead) both DO NOT
     # increment retry_count, but they also do not violate the invariant —
     # they just defer one extra tick before another launch attempt. Per-
     # issue retry_count lives in issues/issue-<iid>/state.json and is
@@ -1054,10 +1084,14 @@ done
 # Build the placeholder additions in one jq pass to avoid quoting hell.
 # active_issue_sessions uses the canonical "issue-<project>-<iid>" format
 # per state_schema.md §active_issue_iids / active_issue_sessions.
-PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" )
+# acpx_timeout_seconds pins the wall-clock budget in effect at spawn time:
+# the timeout-shaped classification (followup empty/unparseable callback,
+# stuck eviction) must compare elapsed time against THIS run's budget, not
+# against whatever a later trigger overrode the campaign-level value to.
+PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" --argjson acpx_timeout "${ACPX_TIMEOUT}" )
 FILTER='.pending_subagents = (.pending_subagents // {})'
 for iid in "${BATCH_IIDS[@]}"; do
-  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, ui_account_index_start: \$off_${iid}, ui_account_count: \$cnt_${iid}, spawned_at: null, placeholder: true}"
+  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, ui_account_index_start: \$off_${iid}, ui_account_count: \$cnt_${iid}, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout}"
 done
 FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)'
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
