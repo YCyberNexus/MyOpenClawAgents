@@ -1,7 +1,7 @@
 # model-eval agent 特化改造设计（benchmark-test 分支）
 
 > 分支：`benchmark-test`　│　日期：2026-06-10
-> 目标：把 `acpx_auto_tester` 在 `benchmark-test` 分支上**特化为专门测 model 的 agent**，从 **效率 / 准确率** 两维评价候选模型，反推 `flash` / `pro` / `max` 三档各配哪个真实模型。
+> 目标：把 `acpx_auto_tester_test` 在 `benchmark-test` 分支上**特化为专门测 model 的 agent**，从 **效率 / 准确率** 两维评价候选模型，反推 `flash` / `pro` / `max` 三档各配哪个真实模型。
 > 这是一次**有意的分叉**：benchmark-test 不需兼容生产工作流，可直接颠覆为生产服务的复杂度。
 
 ---

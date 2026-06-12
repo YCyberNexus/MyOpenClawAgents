@@ -70,7 +70,7 @@ retire_temp_file() {
   # instead of deleting it.
   : >"${path}" 2>/dev/null || true
 
-  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester_test.retired"
   mkdir -p "${retire_dir}" 2>/dev/null || return 0
   mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
 }
@@ -394,7 +394,7 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
     BOOTSTRAP_LOG_HINT="${DISPATCHER_LOG_DIR}/wrapper.log"
     cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
   else
-    BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/acpx_auto_tester.bootstrap.${PROJECT}.log"
+    BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/acpx_auto_tester_test.bootstrap.${PROJECT}.log"
     cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
     chmod 600 "${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
   fi

@@ -85,7 +85,7 @@ if [ -n "${GITLAB_ADDRESS:-}" ]; then
 fi
 
 # Refresh glab's stored token against the pinned host.
-LOCK_ROOT="/tmp/acpx_auto_tester_locks"
+LOCK_ROOT="/tmp/acpx_auto_tester_test_locks"
 mkdir -p "${LOCK_ROOT}"
 LOCK_HOST="$(printf '%s' "${GITLAB_HOST}" | tr -c 'A-Za-z0-9_.-' '_')"
 exec 8>"${LOCK_ROOT}/glab-auth-${LOCK_HOST}.lock"
