@@ -31,7 +31,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
-| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes spec output here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
+| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes spec output here. Every run is fresh-mode: it quarantines same-IID runtime residue before recreating empty current output/log directories. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the shared per-issue worktree) |
 | `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; the whole attempt log dir is force-added onto the per-attempt branch for benchmark archival) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
@@ -78,12 +78,12 @@ ISSUE_IID={ISSUE_IID}
 ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}                     # always fresh (continue disabled on benchmark-test)
-BRANCH={BRANCH}                             # integration / target branch (MR opens against this)
+BRANCH={BRANCH}                             # integration / target branch
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (fresh-mode checkout; shared config refresh source for every run)
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
-WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are refreshed from latest origin/{DEV_BRANCH} before every run. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
+WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are refreshed from latest origin/{DEV_BRANCH} before every run. Every run is fresh-mode: it quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
@@ -300,7 +300,7 @@ Step 9 — SUMMARIZE
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}","metrics":<the metrics.json object from Step 1.5, or {} if it was missing>}
+  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"","mr_action":"none","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}","metrics":<the metrics.json object from Step 1.5, or {} if it was missing>}
 
   Field rules:
   - status = done           when Steps 0-6 all succeeded (Steps 7/8 are removed on benchmark-test; `done` is the terminal success label).

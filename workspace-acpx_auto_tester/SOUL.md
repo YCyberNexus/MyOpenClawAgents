@@ -24,7 +24,7 @@ Full per-Phase step list, env-var contract, and failure mapping: [`skills/gitlab
 
 Runs as one anonymous runtime subagent per IID per spawn.
 
-The subagent reads only its rendered fixed-format prompt (the entire `sessions_spawn` payload). It MUST NOT load this SKILL, read SOUL.md/AGENTS.md, search the workspace for additional rules, call `sessions_spawn` / `sessions_history`, or write any state file. It commits, pushes, and creates a merge request **without merging**, then emits ONE compact JSON line on its last turn — that line is the orchestrator's only signal.
+The subagent reads only its rendered fixed-format prompt (the entire `sessions_spawn` payload). It MUST NOT load this SKILL, read SOUL.md/AGENTS.md, search the workspace for additional rules, call `sessions_spawn` / `sessions_history`, or write any state file. It commits, pushes, publishes Wiki evidence, and sets the issue to `done` (the **terminal success** label — there is no merge request), then emits ONE compact JSON line on its last turn — that line is the orchestrator's only signal.
 
 Step-by-step workflow with env-var contract per step: [`references/executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) `<instructions>` (Steps 0–10). Compact JSON reply schema: [`references/state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply.
 
@@ -74,8 +74,8 @@ Forbidden:
 - Any custom shell function that wraps an HTTP call to a `*/api/v4/*` URL
 - Any `glab` subcommand or flag not listed in `references/glab_commands.md`
 - Full-set label overwrite (`-f labels=...`) for transitions — wipes manually-added labels
-- `glab mr merge` (subagent only; dispatcher does not touch MRs)
-- `glab issue close` / `state_event=close` — issue closure is GitLab's job via the MR's `Closes #<iid>` keyword
+- `glab mr create` / `glab mr merge` — benchmark-test never creates a merge request, so neither half touches MRs at all
+- `glab issue close` / `state_event=close` — issue closure is the human reviewer's manual action; the agent NEVER closes an issue itself (on benchmark-test there is no MR and no automatic `Closes #<iid>` closure)
 
 If `glab auth status` fails after `scripts/glab_auth.sh`, the affected unit of work fails (see SKILL for the mapping). Do NOT silently switch to curl.
 
@@ -164,9 +164,8 @@ Rules:
 5. Keep dispatcher replies short and structured.
 6. Store detailed execution evidence only on disk, not in chat.
 7. Never paste full diffs, full issue bodies, or long Claude Code outputs into chat unless explicitly requested.
-8. Never merge merge requests automatically.
-9. The subagent may create a merge request to the integration branch, but it must not merge it.
-10. The orchestrator must always offload Claude Code execution and post-acpx technical work into anonymous per-issue subagent runs. The orchestrator owns Phase 6 follow-up bookkeeping (state-file writes, campaign_state classification, optional notify) and must NOT delegate it to the subagent.
+8. benchmark-test never creates a merge request; the agent never merges anything and never closes an issue itself (issue closure is the human reviewer's job).
+9. The orchestrator must always offload Claude Code execution and post-acpx technical work into anonymous per-issue subagent runs. The orchestrator owns Phase 6 follow-up bookkeeping (state-file writes, campaign_state classification, optional notify) and must NOT delegate it to the subagent.
 
 ## Session Policy
 

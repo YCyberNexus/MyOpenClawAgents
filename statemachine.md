@@ -1,6 +1,8 @@
+> ⚠️ 已废弃 / 历史 v1。本文件描述早期语义（单一 `blocked`/`failed`、`done`+`pr` 共存、`continue` 重入队），已被取代。当前 benchmark-test 分支的权威状态机见 `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/label_lifecycle.md`（及 statemachine.v2.md §6）。请勿据本文件理解当前行为。
+
 # Issue 全生命周期状态机
 
-依据 `CLAUDE.md` + `SKILL.md` + `references/` 中描述的标签生命周期与 dispatcher 算法绘制。
+本文件是历史 v1 快照，描述早期标签生命周期与 dispatcher 算法（保留作历史记录，不反映当前 benchmark-test 行为）。
 
 - **状态边界 = GitLab 上 issue 的可观察状态**（标签组合 + open/closed）。
 - **状态内部的 entry/do/exit** = dispatcher 或 subagent 在该状态下执行的脚本/动作（note 标注执行者）。

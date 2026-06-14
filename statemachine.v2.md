@@ -2,7 +2,12 @@
 
 > 这是给 Claude 自己看的持久化记忆，只记**状态机语义**（有哪些状态、哪些 issue label、迁移/触发规则）。
 > 图的画法（节点布局、走线、记法）在 `statemachine.v2.drawio`，本文件不复述。
-> 实现仓库：`workspace-acpx_auto_tester/`（脚本 `scripts/`、Temporal `temporal/workflows/`）。
+> 实现仓库：`workspace-acpx_auto_tester/`（脚本 `scripts/`；Temporal 工作流 `temporal/workflows/` 仅在 `temporal` 分支，不在本分支）。
+
+> **⚠️ 分支差异声明（先读这段）：** 下文 §0–§5 描述的是**通用 / production 版 v2 设计**（`pr` 替换 `done`、`resolve_model_tier` 失败升档阶梯、`continue` 续作）。
+> 本仓库当前所在的 **benchmark-test 分支的实际行为以 §6 与 [`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/label_lifecycle.md`](workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/label_lifecycle.md) 为准**，关键偏离：
+> 无 MR / 无 `pr` 标签、`done` 即终态成功（永不被替换）、`continue` / resume 已禁用（每次 attempt 强制 fresh）、模型档位由 per-tick 必填触发字段 `pin_model_tier` 钉死（无失败升档、无单调只升不变式，pin 可下调档位）。
+> §0–§5 的设计描述按原样保留供对照，**不要据其推断 benchmark-test 的真实行为**。
 
 ---
 
@@ -106,15 +111,16 @@ UPGRADE? = 硬触发 ∪ 软触发
 
 ---
 
-## 4. 实现状态（重要：目前是设计提案，未落地）
+## 4. 实现状态（已落地）
 
-上述 enriched label 模型（`blocked` 拆分、`failed` 拆分、`pr` 替换 `done`、`model:{tier}`、`quality:low`）目前**只在状态机图与本文件里，代码尚未实现**。落地点：
+per-side 拆分（`blocked-cc` / `blocked-dispatcher` / `failed-cc` / `failed-dispatcher` / `timeout`）与 `model:{tier}` 正交持久维度**均已在 `scripts/` 里落地**，不再是设计提案。落地点：
 
-- `scripts/ensure_labels.sh`：创建 `blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`/`timeout`/`pr`/`model:flash|pro|max`/`quality:low`，移除单一 `blocked`/`failed`。
+- `scripts/ensure_labels.sh`：创建 `blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`/`timeout`/`model:flash|pro|max`，移除单一 `blocked`/`failed`。
 - `scripts/set_issue_label.sh`：工作标签互斥组扩展（含两类 `failed`）；把 `model:{tier}` 排除出"进 `doing` 清除集"。
 - `scripts/reconcile.sh`：`has_blocked`/`has_failed` 信号按侧拆两路；新增读取当前 `model:{tier}`。
-- `temporal/workflows/campaign.py`：`_classify` 与 outcome→label 同步按侧拆；`pr` 替换 `done`；新增 PREPARE 阶段 `resolve_model_tier`（求 `UPGRADE?`、写 `model:{tier}`、注入 build_prompt）。
-- executor 失败路径按归因 sync `blocked-cc`/`blocked-dispatcher`/`timeout`；成功路径 `done → pr`。
+- executor 失败路径按归因 sync `blocked-cc`/`blocked-dispatcher`/`timeout`；成功路径直达 `done`（终态）。
+
+**与 §3 的唯一实现差异（benchmark-test 分支）：** model 档位不走 §3.3 的 `resolve_model_tier` hard/soft 失败升档阶梯，而由 per-tick 必填触发字段 `pin_model_tier` 钉死（详见 §6）。`resolve_model_tier` 函数在本分支任何脚本里都不存在；`pr` 替换 `done` 与 `continue` 续作同样不适用——以 §6 与 `references/label_lifecycle.md` 为准。Temporal 工作流（`temporal/workflows/campaign.py`）只在 `temporal` 分支，本分支不含该文件。
 
 这些改动落在 `workspace-acpx_auto_tester/` 下，会触发 `SKILL_VERSION` 升版与 code-review 流程。
 
