@@ -60,16 +60,16 @@
 #   snapshots the current `${RESULT_BASENAME}/issue-<iid>/` subtree, archives
 #   it, and then quarantines any active same-IID runtime subtree that survived
 #   checkout, so old files are not physically deleted but also do not
-#   contaminate the fresh run. (benchmark-test is fresh-only; there is no
-#   continue-mode restore of that snapshot.)
+#   contaminate the fresh run. (benchmark-test is fresh-only; the snapshot is
+#   only archived for forensics — it is never restored back into the worktree.)
 #
 # Shared config freshness:
 #   Test-team-owned `.claude/`, `hulat/`, and `${DATA_BASENAME}/` may change on
 #   DEV_BRANCH while an issue's WORK_BRANCH is still being reviewed. Every
 #   attempt refreshes those tracked paths from the just-fetched
 #   origin/${DEV_BRANCH} after the base checkout and before acpx runs. This
-#   keeps continue-mode attempts on the latest runner/materials config without
-#   changing the resume base for issue output/log history.
+#   keeps every fresh attempt on the latest runner/materials config without
+#   changing the fresh DEV_BRANCH base for issue output/log history.
 #
 # What this script does NOT do:
 #   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
@@ -92,7 +92,7 @@
 #   ATTEMPT_NUMBER_PADDED, WORK_BRANCH, LOCAL_ATTEMPT_BRANCH
 #
 # Output (to stdout, two lines):
-#   <actual-mode>           "fresh" or "continue"
+#   <actual-mode>           always "fresh" (continue is disabled on benchmark-test)
 #   <local-branch-name>     ${LOCAL_ATTEMPT_BRANCH}
 
 set -euo pipefail
@@ -148,9 +148,9 @@ fi
 #                (per-(IID,attempt), pre-shared-per-IID)
 #
 # Both can hold untracked scratch (Claude Code local state, intermediate
-# notes, log files) that continue-mode attempts must carry forward —
-# that is the whole reason the worktree was restructured to be shared
-# per IID. The previous version of this script deleted legacy paths
+# notes, log files) that the shared per-IID worktree preserves across
+# attempts — that is the whole reason the worktree was restructured to be
+# shared per IID. The previous version of this script deleted legacy paths
 # unconditionally, which silently discarded the very data the new
 # scheme was supposed to preserve. We now collect the legacy paths
 # here, pick the most recent one as a salvage source, defer deletion
@@ -447,10 +447,10 @@ git worktree prune >&2
 
 # Recreate ONLY the current attempt's log dir so stale evidence from a
 # same-(IID, attempt) rerun is not mixed with the current run. The
-# worktree is now on ${BASE_REF}; in continue mode that ref may already
-# contain prior attempts' tracked `log/attempt-<earlier>/` directories,
-# but those use different attempt numbers and so do not collide with the
-# current LOG_DIR. Fresh mode has already quarantined the active same-IID
+# worktree is now on ${BASE_REF} (always origin/${DEV_BRANCH} on
+# benchmark-test); that clean baseline carries no prior attempts' tracked
+# `log/attempt-<earlier>/` directories, so there is nothing to collide with
+# the current LOG_DIR. Fresh mode has already quarantined the active same-IID
 # runtime subtree, so this reset only needs to defend against an exact
 # same-(IID, attempt) rerun.
 # This is defensive against an exact same-(IID, attempt) rerun (rare —

@@ -251,7 +251,7 @@ fi
 
 # model_settings_dir: absolute path to the directory holding the per-tier
 # Claude Code settings files (`<tier>-settings.json`). The resolved MODEL
-# (flash/pro/max, from resolve_model_tier) selects `${MODEL}-settings.json`,
+# (flash/pro/max, pinned per tick from pin_model_tier) selects `${MODEL}-settings.json`,
 # which Phase 4 per-IID prep copies to ${WORKTREE_DIR}/.claude/settings.json so
 # acpx claude exec actually runs on the tier's model. Same carry-forward
 # persistence semantics as ui_accounts_relpath. Validated here (absolute-path
@@ -723,10 +723,11 @@ persist_state "${STATE_JSON}"
 #   EFFECTIVE_TIERS_CSV — the subset whose ${MODEL_SETTINGS_DIR}/<tier>-settings.json
 #                         exists (order preserved); empty MODEL_SETTINGS_DIR →
 #                         equals the full list. Drives reconcile.sh's integer
-#                         model_tier index and resolve_model_tier's upgrade
-#                         ladder + MODEL selection, so the ladder matches the
-#                         settings files actually present (tier auto-discovery:
-#                         e.g. only pro+max on disk → start pro, upgrade to max).
+#                         model_tier index and the per-tick MODEL selection
+#                         pinned from pin_model_tier, so the resolvable tiers
+#                         match the settings files actually present (tier
+#                         auto-discovery: e.g. only pro+max on disk → pin_model_tier
+#                         picks from {pro,max}).
 MODEL_TIERS_CSV="$(printf '%s' "${STATE_JSON}" | jq -r '(.model_tiers // ["flash","pro","max"]) | join(",")')"
 EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_CSV}" "${MODEL_SETTINGS_DIR:-}")"
 if [ -n "${MODEL_SETTINGS_DIR:-}" ] && [ -z "${EFFECTIVE_TIERS_CSV}" ]; then
@@ -739,7 +740,7 @@ fi
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
 # reconcile maps model:{tier} labels to integer indices against the EFFECTIVE
-# ladder (must match resolve_model_tier below).
+# tier list (must match the per-tick MODEL pinned from pin_model_tier below).
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
@@ -1384,7 +1385,7 @@ for iid in "${BATCH_IIDS[@]}"; do
 
   # model settings (per-tier): copy ${MODEL}-settings.json → .claude/settings.json
   # so acpx claude exec actually runs on the tier's model. MODEL was resolved
-  # above by resolve_model_tier and clamped into range (never null). The `cp`
+  # above from pin_model_tier (never null). The `cp`
   # target is a file path, so the source `<tier>-settings.json` lands renamed as
   # the `settings.json` Claude Code reads by default. This replaces the retired
   # claude_settings_path single-file override. When MODEL_SETTINGS_DIR is unset
@@ -1430,9 +1431,9 @@ for iid in "${BATCH_IIDS[@]}"; do
   #
   # The persistent `model:{tier}` dimension and the one-shot `quality:low`
   # signal are DELIBERATELY NOT in this list — model tier must survive into
-  # `doing` (it follows the issue for life), and `quality:low` is consumed
-  # separately by resolve_model_tier below, only when it actually drives an
-  # upgrade.
+  # `doing` (it follows the issue for life, though pin_model_tier re-pins it
+  # each tick), and `quality:low` is not consumed on this branch (no upgrade
+  # ladder exists here), so it is left untouched rather than stripped.
   # precheck-failed (the dispatcher-side §16b tick gate) is cleared here too:
   # reaching `doing` means this tick's precheck passed, so the marker is stale.
   REMOVE_LBLS=(todo retry new blocked-cc blocked-dispatcher done timeout failed-cc failed-dispatcher precheck-failed)

@@ -12,8 +12,8 @@
 #   - if acpx hasn't exited within the grace window, SIGKILL is sent
 #   - the script returns exit code 124 (SIGTERM) or 137 (SIGKILL)
 # The subagent prompt detects 124 / 137 and enters the dedicated timeout
-# flow (commit + push partial work to ${WORK_BRANCH}, label `timeout`, NO
-# MR). See references/executor_prompt.md §timeout_flow.
+# flow (commit + push partial work to ${WORK_BRANCH}, label `timeout`; there
+# is no MR step in this campaign). See references/executor_prompt.md §timeout_flow.
 #
 # Orphan prevention (defense-in-depth): acpx is launched as a backgrounded
 # job in its OWN process group and reaped with `wait`, with a SIGTERM/INT/HUP

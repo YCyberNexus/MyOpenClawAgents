@@ -84,7 +84,7 @@ EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_CSV}" "${MODE
 
 # Phase 6 step 0 — narrow reconcile (best-effort; failure does NOT abort).
 # The GitLab live state is consulted again so any reviewer relabel between
-# spawn and callback (e.g. continue → reviewer-rejected → blocked) gets
+# spawn and callback (e.g. reviewer marks the issue rejected → blocked) gets
 # picked up at terminal-write time.
 if ! PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \

@@ -57,11 +57,12 @@ utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 #     - configured but no <tier>-settings.json matches → echoes the empty
 #       string; the caller decides (prepare aborts the tick, followup falls
 #       back to the full list because its narrow reconcile is best-effort).
-#   Consumers: reconcile.sh (integer model_tier index) and resolve_model_tier
-#   (upgrade ladder + MODEL selection) MUST use this. ensure_labels.sh (creates
-#   every model:<tier> label) and set_issue_label.sh (model:* mutual-exclusion
-#   clear-set) keep receiving the FULL list so migration / future tier switches
-#   can still create and clear labels outside the current effective subset.
+#   Consumers: reconcile.sh (integer model_tier index) and the per-tick tier
+#   pinning in dispatch_prepare_tick.sh (pin_model_tier → MODEL selection) MUST
+#   use this. ensure_labels.sh (creates every model:<tier> label) and
+#   set_issue_label.sh (model:* mutual-exclusion clear-set) keep receiving the
+#   FULL list so migration / future tier switches can still create and clear
+#   labels outside the current effective subset.
 derive_effective_model_tiers() {
   local full_csv="$1" msd="$2"
   if [ -z "${msd}" ]; then
@@ -165,10 +166,12 @@ fresh_init_state() {
       require_labels: [],
       require_labels_match: "or",
       model_tiers: ["flash", "pro", "max"],
-      model_upgrade_continue_threshold: 0,
+      pin_model_tier: null,
       result_basename: $result_basename,
       data_basename: $data_basename,
       ui_accounts_relpath: $ui_accounts_relpath,
+      precheck_relpath: null,
+      model_settings_dir: null,
       next_new_issue_iid: null,
       tick_seq: 0,
       active_issue_iids: [],
@@ -182,6 +185,7 @@ fresh_init_state() {
       timeout_iids: [],
       campaign_status: "running",
       quota_launched_this_tick: 0,
+      quota_completed_this_tick: 0,
       last_reconcile_evidence: null,
       updated_at: null
     }'
@@ -537,12 +541,12 @@ phase6_write_state_files() {
 # unions: both `*_cc` and `*_dispatcher` outcomes land in the same list, since
 # batch scheduling only cares whether an IID is blocked-and-retryable or
 # terminally-failed regardless of which side produced it. The side only drives
-# the live label (`blocked-cc` vs `blocked-dispatcher`) and the model-upgrade
-# decision in PREPARE.
+# the live label (`blocked-cc` vs `blocked-dispatcher`); the model tier is
+# pinned per tick in PREPARE independent of the side.
 #
 # `timeout` lands in `timeout_iids` and is NOT added to `unfinished_iids`,
 # so the dispatcher does NOT auto-retry it. A human reviewer strips the
-# `timeout`, adds `retry`, or applies `continue` to re-enqueue.
+# `timeout` or adds `retry` to re-enqueue.
 phase6_apply_state_classify() {
   local state_json="$1" iid="$2" final_status="$3"
   # Collapse the side variants into the campaign-list bucket.

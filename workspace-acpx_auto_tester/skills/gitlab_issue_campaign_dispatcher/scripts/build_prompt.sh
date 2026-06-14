@@ -14,8 +14,9 @@
 #
 # Optional env var (v2 model tier injection):
 #   MODEL  — the model name the dispatcher resolved for THIS attempt in
-#            PREPARE (resolve_model_tier; see SKILL.md §Dispatcher Algorithm
-#            and label_lifecycle.md §model tier). When set and non-empty it
+#            PREPARE (per-tick tier pinning from the pin_model_tier trigger
+#            field; see SKILL.md §Dispatcher Algorithm and label_lifecycle.md
+#            §model tier). When set and non-empty it
 #            is surfaced in the prompt's "# Working environment" section so
 #            the Claude Code run knows which tier it is operating at. When
 #            unset / empty the model line is omitted (legacy behavior).

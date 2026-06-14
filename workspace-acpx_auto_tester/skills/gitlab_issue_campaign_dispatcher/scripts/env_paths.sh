@@ -313,8 +313,9 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree
   # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/ so successive attempts
   # do NOT overwrite each other's prompt.txt / claude_result.txt. Only those
-  # two files are force-added into the MR; the rest stay locally ignored via
-  # the repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
+  # two files are force-added onto `${WORK_BRANCH}`; the rest stay locally
+  # ignored via the repository `.git/info/exclude` entry for
+  # `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"

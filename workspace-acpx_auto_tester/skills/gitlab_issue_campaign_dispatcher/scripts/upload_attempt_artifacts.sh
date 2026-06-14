@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # upload_attempt_artifacts.sh -- publish attempt-scoped execution evidence
-# to GitLab Wiki pages and link them from the issue before done labeling
-# and MR creation.
+# to GitLab Wiki pages and link them from the issue before done labeling.
+# (No MR is ever created on this branch; done is the terminal success label.)
 #
 # Required env vars:
 #   GITLAB_HOST              from glab_auth.sh
@@ -23,8 +23,9 @@
 #       issue<IID>/attempt-NNN/report.html
 #   - Posts a GitLab issue note with links to the Wiki pages.
 #
-# The posted note uses a hidden marker so continue-mode prompt generation can
-# recognize it as an agent note, not reviewer guidance.
+# The posted note uses a hidden marker tagging it as an agent note, not
+# reviewer guidance. (Its former continue-mode prompt-generation consumer is
+# inactive here -- continue/resume is disabled and ISSUE_MODE is always fresh.)
 
 set -euo pipefail
 
@@ -134,7 +135,7 @@ fi
   echo "<!-- acpx_auto_tester_test:attempt-wiki-artifacts v1 attempt=${ATTEMPT_NUMBER_PADDED} -->"
   echo "## acpx_auto_tester_test attempt ${ATTEMPT_NUMBER_PADDED} OpenClaw logs"
   echo
-  echo "Attempt-scoped files published to this project's GitLab Wiki before the issue is labeled \`done\` and before merge request creation / rotation:"
+  echo "Attempt-scoped files published to this project's GitLab Wiki before the issue is labeled \`done\` (the terminal success label on this branch):"
   echo
   cat "${LINKS_FILE}"
   if [ -z "${REPORT_SOURCE}" ]; then

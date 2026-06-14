@@ -2,9 +2,9 @@
 # post_push_verify.sh — sanity-check that the force-push made it to origin.
 #
 # Path-based protection has been removed: this script no longer rejects
-# anything in the MR diff. It only fetches the relevant remote refs so the
-# caller can be sure origin/${WORK_BRANCH} exists after Step 3, then prints
-# REMOTE_CLEAN and exits 0.
+# anything in the per-issue diff on ${WORK_BRANCH}. It only fetches the
+# relevant remote refs so the caller can be sure origin/${WORK_BRANCH} exists
+# after Step 3, then prints REMOTE_CLEAN and exits 0.
 #
 # Required env vars:
 #   WORKTREE_DIR    repo root cwd
@@ -13,7 +13,7 @@
 #   ISSUE_IID       current issue IID (kept for log correlation)
 #
 # Exit codes:
-#   0   remote fetch succeeded; safe to create / keep MR
+#   0   remote fetch succeeded; origin/${WORK_BRANCH} is present and healthy
 #   non-zero only if `git fetch` itself fails
 
 set -euo pipefail

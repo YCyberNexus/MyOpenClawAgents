@@ -15,8 +15,8 @@
 #   WORK_BRANCH              "issue/<iid>-auto-fix" (single remote)
 #   ISSUE_TITLE              short human title for commit message
 #
-# Why force-push: Strategy A keeps a single MR pointing at a single
-# remote branch. Each attempt overwrites that branch's tip with the
+# Why force-push: Strategy A keeps a single fixed remote work branch
+# ${WORK_BRANCH}. Each attempt overwrites that branch's tip with the
 # new attempt's history. Local attempt branches are preserved in
 # ${REPO_PATH}/.git/refs/heads/ for audit; only the remote moves.
 

@@ -7,14 +7,15 @@
 # Detailed evidence (full claude_result.txt, full git_diff.patch,
 # acpx_raw.log, prompt.txt) lives on the runner under ${LOG_DIR}. On
 # push-ready attempts, prompt/result/report evidence is also published to
-# the project Wiki before MR creation. The summary itself stays scannable.
+# the project Wiki (Wiki publish completes the `done` terminal; no MR
+# follows on benchmark-test). The summary itself stays scannable.
 #
 # Required env vars:
 #   GITLAB_HOST              from glab_auth.sh
 #   PROJECT_URI              URI-encoded "${GROUP}/${PROJECT}"
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
-#   ISSUE_MODE               "fresh" or "continue"
+#   ISSUE_MODE               "fresh" (continue disabled on benchmark-test)
 #   ATTEMPT_DIR              issue dir for the current attempt
 #   LOG_DIR                  current-attempt log dir
 #   SUMMARY_FILE             ${ISSUE_ROOT}/summary.md
@@ -25,7 +26,7 @@
 #                            ("blocked"/"failed"/"no_changes" are legacy; the value is
 #                            only echoed into the summary markdown, never branched on)
 #   COMMIT_SHA               last commit on the work branch (if pushed)
-#   MERGE_REQUEST_URL        MR URL (if known)
+#   MERGE_REQUEST_URL        always empty on benchmark-test (no MR is ever created)
 #   BLOCK_REASON             when ATTEMPT_STATUS is any blocked-*/failed-*/timeout
 #   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
 #                            so evidence stays local under ${LOG_DIR} / ${ISSUE_ROOT}.
@@ -89,9 +90,9 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive in the MR diff)"
+  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive on the issue's work branch)"
   if [ -f "${LOG_DIR}/wiki_artifacts.md" ]; then
-    echo "- **Wiki evidence**: published and linked from this issue before MR creation"
+    echo "- **Wiki evidence**: published and linked from this issue"
   fi
 
   if [ -n "${CHANGED_PREVIEW}" ] && [ "${CHANGED_COUNT}" -gt 0 ]; then
