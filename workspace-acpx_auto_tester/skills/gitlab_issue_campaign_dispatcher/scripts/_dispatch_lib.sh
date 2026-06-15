@@ -303,35 +303,66 @@ phase6_normalize_reply() {
 
 # Synchronize live workflow labels via set_issue_label.sh.
 # Inputs: $1=iid, $2=final_status (done|blocked|failed|timeout)
+#         $3=block_side (cc|dispatcher, 默认 dispatcher) — selects
+#            blocked-cc/blocked-dispatcher and failed-cc/failed-dispatcher.
 # Returns: 0 on success, non-zero with stderr if any required op fails.
 phase6_sync_labels() {
-  local iid="$1" final_status="$2"
+  local iid="$1" final_status="$2" block_side="${3:-dispatcher}"
+  case "${block_side}" in cc|dispatcher) ;; *) block_side="dispatcher" ;; esac
   local rc=0
   case "${final_status}" in
     done)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove blocked || rc=$?
-      _label_op "${iid}" remove failed  || rc=$?
-      _label_op "${iid}" remove timeout || rc=$?
-      _label_op "${iid}" add done       || rc=$?
-      _label_op "${iid}" add pr         || rc=$?
+      # C: pr 替换 done —— 终态只留 pr。
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove blocked-cc         || rc=$?
+      _label_op "${iid}" remove blocked-dispatcher || rc=$?
+      _label_op "${iid}" remove failed-cc          || rc=$?
+      _label_op "${iid}" remove failed-dispatcher  || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" remove timeout            || rc=$?
+      _label_op "${iid}" add pr                    || rc=$?
+      _label_op "${iid}" remove done               || rc=$?
       ;;
     blocked)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove timeout || rc=$?
-      _label_op "${iid}" add blocked    || rc=$?
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove timeout            || rc=$?
+      _label_op "${iid}" remove failed-cc          || rc=$?
+      _label_op "${iid}" remove failed-dispatcher  || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      if [ "${block_side}" = "cc" ]; then
+        _label_op "${iid}" remove blocked-dispatcher || rc=$?
+        _label_op "${iid}" add blocked-cc            || rc=$?
+      else
+        _label_op "${iid}" remove blocked-cc         || rc=$?
+        _label_op "${iid}" add blocked-dispatcher    || rc=$?
+      fi
       ;;
     failed)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove blocked || rc=$?
-      _label_op "${iid}" remove timeout || rc=$?
-      _label_op "${iid}" add failed     || rc=$?
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove blocked-cc         || rc=$?
+      _label_op "${iid}" remove blocked-dispatcher || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" remove timeout            || rc=$?
+      if [ "${block_side}" = "cc" ]; then
+        _label_op "${iid}" remove failed-dispatcher || rc=$?
+        _label_op "${iid}" add failed-cc            || rc=$?
+      else
+        _label_op "${iid}" remove failed-cc         || rc=$?
+        _label_op "${iid}" add failed-dispatcher    || rc=$?
+      fi
       ;;
     timeout)
-      _label_op "${iid}" remove doing   || rc=$?
-      _label_op "${iid}" remove blocked || rc=$?
-      _label_op "${iid}" remove failed  || rc=$?
-      _label_op "${iid}" add timeout    || rc=$?
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove blocked-cc         || rc=$?
+      _label_op "${iid}" remove blocked-dispatcher || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      _label_op "${iid}" remove failed-cc          || rc=$?
+      _label_op "${iid}" remove failed-dispatcher  || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" add timeout               || rc=$?
       ;;
     *)
       echo "phase6_sync_labels: unsupported final_status=${final_status}" >&2
