@@ -411,7 +411,7 @@ phase6_read_prior_issue_state() {
 # campaign-level classification with the same value).
 phase6_write_state_files() {
   local iid="$1" attempt_number="$2" reply="$3" final_status="$4" \
-        prior_issue_state="$5" is_launch_synth="$6"
+        prior_issue_state="$5" is_launch_synth="$6" block_side="${7:-}"
 
   local issue_root="${ISSUES_ROOT}/issue-${iid}"
   local attempt_padded
@@ -447,6 +447,7 @@ phase6_write_state_files() {
   new_attempt_state="$(printf '%s' "${prior_attempt_state}" | jq \
     --arg now "${now}" \
     --arg final_status "${final_status}" \
+    --arg block_side "${block_side}" \
     --arg summary_file "${summary_file}" \
     --argjson summary_exists "${summary_exists}" \
     --argjson reply "${reply}" \
@@ -461,7 +462,8 @@ phase6_write_state_files() {
         attempt_artifacts_posted_to_wiki: ($reply.wiki_url != ""),
         summary_file: (if $summary_exists then $summary_file else null end),
         summary_posted_to_issue: ($reply.summary_posted // false),
-        block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end)
+        block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end),
+        block_side: (if ($final_status == "blocked" or $final_status == "failed") and ($block_side != "") then $block_side else null end)
       }
     ')"
   printf '%s' "${new_attempt_state}" | atomic_write_json "${attempt_state_file}"
@@ -473,6 +475,7 @@ phase6_write_state_files() {
     --argjson attempt_number "${attempt_number}" \
     --arg now "${now}" \
     --arg final_status "${final_status}" \
+    --arg block_side "${block_side}" \
     --arg issue_root "${issue_root}" \
     --argjson new_retry_count "${new_retry_count}" \
     --argjson reply "${reply}" \
@@ -491,7 +494,8 @@ phase6_write_state_files() {
         block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end),
         commit_sha: (if $reply.commit_sha == "" then null else $reply.commit_sha end),
         merge_request_url: (if $reply.merge_request_url == "" then null else $reply.merge_request_url end),
-        updated_at: $now
+        updated_at: $now,
+        block_side: (if ($final_status == "blocked" or $final_status == "failed") and ($block_side != "") then $block_side else ($prior.block_side // null) end)
       }
     ')"
   printf '%s' "${new_issue_state}" | atomic_write_json "${issue_state_file}"
@@ -618,6 +622,8 @@ phase6_process() {
   iid="$(printf '%s' "${reply_json}" | jq -r '.iid')"
   attempt_number="$(printf '%s' "${reply_json}" | jq -r '.attempt_number')"
   reply_status="$(printf '%s' "${reply_json}" | jq -r '.status')"
+  local block_side
+  block_side="$(printf '%s' "${reply_json}" | jq -r '.block_side // "dispatcher"')"
 
   # Capture child_session_key BEFORE drain.
   local child_session_key
@@ -633,7 +639,7 @@ phase6_process() {
   local label_err=""
   local final_status="${reply_status}"
   local _err=""
-  if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" 2>&1 >/dev/null)"; then
+  if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" "${block_side}" 2>&1 >/dev/null)"; then
     label_err="${_err}"
     if [ "${final_status}" = "timeout" ]; then
       reply_json="$(printf '%s' "${reply_json}" | jq -c \
@@ -648,14 +654,16 @@ phase6_process() {
       phase6_sync_labels "${iid}" timeout >/dev/null 2>&1 || true
     elif [ "${final_status}" != "failed" ]; then
       final_status="blocked"
+      block_side="dispatcher"
       # append to block_reason
       reply_json="$(printf '%s' "${reply_json}" | jq -c \
         --arg le "phase6 label sync failed: ${label_err}" '
         .status = "blocked"
+        | .block_side = "dispatcher"
         | (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
       ')"
       # best-effort blocked sync
-      phase6_sync_labels "${iid}" blocked >/dev/null 2>&1 || true
+      phase6_sync_labels "${iid}" blocked "dispatcher" >/dev/null 2>&1 || true
     fi
   fi
 
@@ -664,17 +672,17 @@ phase6_process() {
   prior_issue_state="$(phase6_read_prior_issue_state "${iid}")"
   local new_retry_count blocked_retry_limit
   new_retry_count="$(phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
-    "${final_status}" "${prior_issue_state}" "${is_launch_synth}")"
+    "${final_status}" "${prior_issue_state}" "${is_launch_synth}" "${block_side}")"
 
   # Promote blocked → failed if retry_count > blocked_retry_limit.
   blocked_retry_limit="$(printf '%s' "${state_json}" | jq -r '.blocked_retry_limit // 0')"
   if [ "${final_status}" = "blocked" ] && [ "${is_launch_synth}" != "true" ] \
      && [ "${new_retry_count}" -gt "${blocked_retry_limit}" ]; then
     final_status="failed"
-    phase6_sync_labels "${iid}" failed >/dev/null 2>&1 || true
+    phase6_sync_labels "${iid}" failed "${block_side}" >/dev/null 2>&1 || true
     # rewrite issue state with final_status=failed (retry_count already incremented)
     phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
-      "${final_status}" "${prior_issue_state}" "${is_launch_synth}" >/dev/null
+      "${final_status}" "${prior_issue_state}" "${is_launch_synth}" "${block_side}" >/dev/null
   fi
 
   # Apply campaign-state classification + drain.
