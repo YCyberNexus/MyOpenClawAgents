@@ -1223,8 +1223,80 @@ for iid in "${BATCH_IIDS[@]}"; do
       ;;
   esac
 
+  # ── resolve_model_tier（D：model:{tier} 文件式自动升档；仅当 model_tiers 配置）──
+  RESOLVED_MODEL_TIER=""
+  MODEL_SETTINGS_SRC=""
+  if [ -n "${T[model_tiers]:-}" ]; then
+    MT_JSON="${T[model_tiers]}"
+    mapfile -t MT_TIERS < <(printf '%s' "${MT_JSON}" | jq -r '.[].tier')
+    if [ "${#MT_TIERS[@]}" -eq 0 ]; then
+      prep_blocked "model_tiers configured but empty/invalid"; continue
+    fi
+    DEFAULT_TIER="${MT_TIERS[0]}"
+    CAP_TIER="${MT_TIERS[$(( ${#MT_TIERS[@]} - 1 ))]}"
+    # 当前档：live model 标签（reconcile evidence）→ state.json 缓存 → TIER_0
+    CUR_TIER="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .model_tier // empty')"
+    [ -n "${CUR_TIER}" ] || CUR_TIER="$( [ -f "${ISSUES_ROOT}/issue-${iid}/state.json" ] && jq -r '.model_tier // empty' "${ISSUES_ROOT}/issue-${iid}/state.json" || true )"
+    [ -n "${CUR_TIER}" ] || CUR_TIER="${DEFAULT_TIER}"
+    PRIOR_STATE="$( [ -f "${ISSUES_ROOT}/issue-${iid}/state.json" ] && cat "${ISSUES_ROOT}/issue-${iid}/state.json" || echo '{}' )"
+    PRIOR_STATUS="$(printf '%s' "${PRIOR_STATE}" | jq -r '.status // ""')"
+    PRIOR_SIDE="$(printf '%s' "${PRIOR_STATE}" | jq -r '.block_side // ""')"
+    CONT_COUNT="$(printf '%s' "${PRIOR_STATE}" | jq -r '.continue_count // 0')"
+    CONT_THRESHOLD="$(printf '%s' "${STATE_JSON}" | jq -r '.continue_upgrade_threshold // 2')"
+    HAS_QUALITY_LOW="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | (.labels // []) | index("quality:low") != null')"
+    UPGRADE="no"
+    # 硬触发：CC 侧 {blocked-cc, timeout, failed-cc}（timeout 恒 CC）
+    case "${PRIOR_STATUS}" in
+      timeout) UPGRADE="yes" ;;
+      blocked|failed) [ "${PRIOR_SIDE}" = "cc" ] && UPGRADE="yes" ;;
+    esac
+    # 软触发：quality:low ∨ continue 累计 ≥ 阈值（自动评分=占位 no-op）
+    [ "${HAS_QUALITY_LOW}" = "true" ] && UPGRADE="yes"
+    [ "${CONT_COUNT}" -ge "${CONT_THRESHOLD}" ] && [ "${CONT_THRESHOLD}" -ge 1 ] && UPGRADE="yes"
+    # 求新档（单调升、封顶）
+    NEW_TIER="${CUR_TIER}"
+    if [ "${UPGRADE}" = "yes" ] && [ "${CUR_TIER}" != "${CAP_TIER}" ]; then
+      cur_idx=-1
+      for i_t in "${!MT_TIERS[@]}"; do [ "${MT_TIERS[$i_t]}" = "${CUR_TIER}" ] && cur_idx="${i_t}"; done
+      if [ "${cur_idx}" -ge 0 ] && [ "$(( cur_idx + 1 ))" -lt "${#MT_TIERS[@]}" ]; then
+        NEW_TIER="${MT_TIERS[$(( cur_idx + 1 ))]}"
+      fi
+    fi
+    RESOLVED_MODEL_TIER="${NEW_TIER}"
+    MODEL_SETTINGS_SRC="$(printf '%s' "${MT_JSON}" | jq -r --arg t "${NEW_TIER}" '.[] | select(.tier==$t) | .settings // empty')"
+    # 写 model:{新档}：先 remove 其它档（知道全集），再 add 新档
+    for t_other in "${MT_TIERS[@]}"; do
+      [ "${t_other}" = "${NEW_TIER}" ] && continue
+      env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "model:${t_other}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    done
+    env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" add "model:${NEW_TIER}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    if [ "${HAS_QUALITY_LOW}" = "true" ]; then
+      env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "quality:low" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    fi
+  fi
+
   # claude_settings_path
-  if [ -n "${T[claude_settings_path]:-}" ]; then
+  # model_tiers 档位 settings 优先（D）
+  if [ -n "${MODEL_SETTINGS_SRC}" ]; then
+    case "${MODEL_SETTINGS_SRC}" in
+      /) prep_blocked "model_tiers settings must not be /"; continue ;;
+      /*) : ;;
+      *) prep_blocked "model_tiers settings must be absolute: ${MODEL_SETTINGS_SRC}"; continue ;;
+    esac
+    case "${MODEL_SETTINGS_SRC}" in
+      *..*|*' '*|*[!A-Za-z0-9_./-]*) prep_blocked "invalid model_tiers settings path: ${MODEL_SETTINGS_SRC}"; continue ;;
+    esac
+    if [ ! -r "${MODEL_SETTINGS_SRC}" ]; then
+      prep_blocked "model_tiers settings file not found or not readable: ${MODEL_SETTINGS_SRC}"; continue
+    fi
+    # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
+    # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
+    WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
+    if ! cp "${MODEL_SETTINGS_SRC}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
+      prep_blocked "model_tiers settings copy failed"; continue
+    fi
+    git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
+  elif [ -n "${T[claude_settings_path]:-}" ]; then
     csp="${T[claude_settings_path]}"
     case "${csp}" in
       /) prep_blocked "claude_settings_path must not be /"; continue ;;
