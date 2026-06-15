@@ -1253,7 +1253,11 @@ for iid in "${BATCH_IIDS[@]}"; do
     esac
     # 软触发：quality:low ∨ continue 累计 ≥ 阈值（自动评分=占位 no-op）
     [ "${HAS_QUALITY_LOW}" = "true" ] && UPGRADE="yes"
-    [ "${CONT_COUNT}" -ge "${CONT_THRESHOLD}" ] && [ "${CONT_THRESHOLD}" -ge 1 ] && UPGRADE="yes"
+    # 计入当前这次 continue：本 tick 的 continue_count 自增发生在 state.json init（晚于本块），
+    # 故这里用 effective = 磁盘值 + 当前是否 continue，确保第 N 次 continue 即触发（而非第 N+1 次）。
+    EFFECTIVE_CONT_COUNT="${CONT_COUNT}"
+    [ "${MODE_ACTUAL}" = "continue" ] && EFFECTIVE_CONT_COUNT=$(( CONT_COUNT + 1 ))
+    [ "${EFFECTIVE_CONT_COUNT}" -ge "${CONT_THRESHOLD}" ] && [ "${CONT_THRESHOLD}" -ge 1 ] && UPGRADE="yes"
     # 定位当前档索引；未知/失效缓存档（如运维改了 tier 名）→ 回落 DEFAULT_TIER（TIER_0）
     cur_idx=-1
     for i_t in "${!MT_TIERS[@]}"; do [ "${MT_TIERS[$i_t]}" = "${CUR_TIER}" ] && cur_idx="${i_t}"; done
