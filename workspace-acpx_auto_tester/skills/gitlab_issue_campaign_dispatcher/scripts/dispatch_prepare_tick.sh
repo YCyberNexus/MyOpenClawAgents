@@ -1254,22 +1254,27 @@ for iid in "${BATCH_IIDS[@]}"; do
     # 软触发：quality:low ∨ continue 累计 ≥ 阈值（自动评分=占位 no-op）
     [ "${HAS_QUALITY_LOW}" = "true" ] && UPGRADE="yes"
     [ "${CONT_COUNT}" -ge "${CONT_THRESHOLD}" ] && [ "${CONT_THRESHOLD}" -ge 1 ] && UPGRADE="yes"
-    # 求新档（单调升、封顶）
+    # 定位当前档索引；未知/失效缓存档（如运维改了 tier 名）→ 回落 DEFAULT_TIER（TIER_0）
+    cur_idx=-1
+    for i_t in "${!MT_TIERS[@]}"; do [ "${MT_TIERS[$i_t]}" = "${CUR_TIER}" ] && cur_idx="${i_t}"; done
+    if [ "${cur_idx}" -lt 0 ]; then
+      echo "resolve_model_tier: iid=${iid} cached model_tier '${CUR_TIER}' not in current model_tiers; resetting to default '${DEFAULT_TIER}'" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
+      CUR_TIER="${DEFAULT_TIER}"; cur_idx=0
+    fi
+    # 求新档（单调升、封顶）；cur_idx 此时恒有效 → NEW_TIER 恒为列表内合法档
     NEW_TIER="${CUR_TIER}"
-    if [ "${UPGRADE}" = "yes" ] && [ "${CUR_TIER}" != "${CAP_TIER}" ]; then
-      cur_idx=-1
-      for i_t in "${!MT_TIERS[@]}"; do [ "${MT_TIERS[$i_t]}" = "${CUR_TIER}" ] && cur_idx="${i_t}"; done
-      if [ "${cur_idx}" -ge 0 ] && [ "$(( cur_idx + 1 ))" -lt "${#MT_TIERS[@]}" ]; then
-        NEW_TIER="${MT_TIERS[$(( cur_idx + 1 ))]}"
-      fi
+    if [ "${UPGRADE}" = "yes" ] && [ "$(( cur_idx + 1 ))" -lt "${#MT_TIERS[@]}" ]; then
+      NEW_TIER="${MT_TIERS[$(( cur_idx + 1 ))]}"
     fi
     RESOLVED_MODEL_TIER="${NEW_TIER}"
     MODEL_SETTINGS_SRC="$(printf '%s' "${MT_JSON}" | jq -r --arg t "${NEW_TIER}" '.[] | select(.tier==$t) | .settings // empty')"
-    # 写 model:{新档}：先 remove 其它档（知道全集），再 add 新档
-    for t_other in "${MT_TIERS[@]}"; do
-      [ "${t_other}" = "${NEW_TIER}" ] && continue
-      env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "model:${t_other}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
-    done
+    # model 维度互斥：移除该 issue 现有所有 model:* 标签（除新档），再 add 新档。
+    # 按 reconcile 证据枚举现有标签，可一并清掉因 tier 改名残留的孤儿档。
+    while IFS= read -r _ml; do
+      [ -z "${_ml}" ] && continue
+      [ "${_ml}" = "model:${NEW_TIER}" ] && continue
+      env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "${_ml}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    done < <(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | (.labels // [])[] | select(startswith("model:"))')
     env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" add "model:${NEW_TIER}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
     if [ "${HAS_QUALITY_LOW}" = "true" ]; then
       env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "quality:low" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
