@@ -434,9 +434,38 @@ case "${REQ_LABELS_MATCH}" in
     ;;
 esac
 
+# model_tiers (JSON array) + continue_upgrade_threshold (int): optional,
+# carry-forward. When the trigger supplies them they override the persisted
+# value; when omitted the persisted value is preserved (// $prior.* in the
+# merge filter below). model_tiers is validated as a JSON array here;
+# continue_upgrade_threshold is validated as an integer >= 1.
+MODEL_TIERS_PROVIDED=false
+MODEL_TIERS_JSON="null"
+if [ -n "${T[model_tiers]:-}" ]; then
+  if ! MODEL_TIERS_JSON="$(printf '%s' "${T[model_tiers]}" | jq -ce 'if type == "array" then . else error("not an array") end' 2>/dev/null)"; then
+    emit_chat_failure "invalid_model_tiers: must be a JSON array"
+  fi
+  MODEL_TIERS_PROVIDED=true
+fi
+
+CONT_UPGRADE_THRESHOLD_PROVIDED=false
+CONT_UPGRADE_THRESHOLD="null"
+if [ -n "${T[continue_upgrade_threshold]:-}" ]; then
+  case "${T[continue_upgrade_threshold]}" in
+    *[!0-9]*|"") emit_chat_failure "invalid_continue_upgrade_threshold: must be >= 1" ;;
+  esac
+  [ "${T[continue_upgrade_threshold]}" -ge 1 ] || emit_chat_failure "invalid_continue_upgrade_threshold: must be >= 1"
+  CONT_UPGRADE_THRESHOLD="${T[continue_upgrade_threshold]}"
+  CONT_UPGRADE_THRESHOLD_PROVIDED=true
+fi
+
 # Apply trigger overrides into the state JSON.
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg project "${PROJECT}" \
+  --argjson model_tiers_provided "${MODEL_TIERS_PROVIDED}" \
+  --argjson model_tiers "${MODEL_TIERS_JSON}" \
+  --argjson cont_threshold_provided "${CONT_UPGRADE_THRESHOLD_PROVIDED}" \
+  --argjson cont_threshold "${CONT_UPGRADE_THRESHOLD}" \
   --arg branch "${T[branch]}" \
   --arg dev_branch "${T[dev_branch]}" \
   --arg repo_path "${REPO_PARENT_PATH}" \
@@ -466,6 +495,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     result_basename: $result_basename,
     data_basename: $data_basename,
     ui_accounts_relpath: $ui_accounts_relpath,
+    model_tiers: (if $model_tiers_provided then $model_tiers else (.model_tiers // null) end),
+    continue_upgrade_threshold: (if $cont_threshold_provided then $cont_threshold else (.continue_upgrade_threshold // 2) end),
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,

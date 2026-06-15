@@ -145,6 +145,8 @@ fresh_init_state() {
       result_basename: $result_basename,
       data_basename: $data_basename,
       ui_accounts_relpath: $ui_accounts_relpath,
+      model_tiers: null,
+      continue_upgrade_threshold: 2,
       next_new_issue_iid: null,
       tick_seq: 0,
       active_issue_iids: [],
