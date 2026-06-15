@@ -1236,7 +1236,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # `timeout` is included so that a reviewer who re-enqueued the IID (e.g. by
   # adding `retry` on top of `timeout`) doesn't end up with a `timeout +
   # doing` mix between this prep and `set_issue_label.sh add doing`.
-  REMOVE_LBLS=(todo retry new continue contiune blocked done pr timeout)
+  REMOVE_LBLS=(todo retry new continue contiune blocked blocked-cc blocked-dispatcher failed failed-cc failed-dispatcher done pr timeout)
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \
