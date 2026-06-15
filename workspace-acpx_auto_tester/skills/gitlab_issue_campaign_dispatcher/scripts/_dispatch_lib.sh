@@ -204,7 +204,8 @@ phase6_synthesize_reply() {
       labels_removed: [],
       summary_posted: false,
       block_reason: $block_reason,
-      log_dir: ""
+      log_dir: "",
+      block_side: "dispatcher"
     }'
 }
 
@@ -273,7 +274,8 @@ phase6_normalize_reply() {
       labels_removed: (.labels_removed | a),
       summary_posted: (.summary_posted // false),
       block_reason: (.block_reason | s),
-      log_dir: (.log_dir | s)
+      log_dir: (.log_dir | s),
+      block_side: "cc"
     }
     | .status as $st
     | if (($st | type) != "string")
@@ -284,6 +286,7 @@ phase6_normalize_reply() {
         # budget) instead of letting phase6_sync_labels reject it and the
         # sync-failure path demote it to retryable blocked.
         .status = $synth_status
+        | .block_side = "dispatcher"
         | (if (.block_reason | length) == 0 then
              .block_reason = ("subagent reply carried unsupported status " + ($st | tostring) + " — coerced to " + $synth_status)
            else . end)
