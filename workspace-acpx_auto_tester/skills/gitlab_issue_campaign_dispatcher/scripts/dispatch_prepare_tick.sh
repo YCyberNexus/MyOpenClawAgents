@@ -1406,16 +1406,25 @@ for iid in "${BATCH_IIDS[@]}"; do
       status:"in_progress"}' | atomic_write_json "${ATTEMPT_STATE_X}"
 
   PRIOR_RETRY="$(test -f "${ISSUE_STATE_X}" && jq -r '.retry_count // 0' "${ISSUE_STATE_X}" || echo 0)"
+  PRIOR_CONTINUE_COUNT="$( [ -f "${ISSUE_STATE_X}" ] && jq -r '.continue_count // 0' "${ISSUE_STATE_X}" || echo 0 )"
+  NEW_CONTINUE_COUNT="${PRIOR_CONTINUE_COUNT}"
+  [ "${MODE_ACTUAL}" = "continue" ] && NEW_CONTINUE_COUNT=$(( PRIOR_CONTINUE_COUNT + 1 ))
+  PRIOR_MODEL_TIER="$( [ -f "${ISSUE_STATE_X}" ] && jq -r '.model_tier // empty' "${ISSUE_STATE_X}" || true )"
   jq -n \
     --argjson iid "${iid}" \
     --argjson attempts_total "${attempt}" \
     --argjson latest_attempt_number "${attempt}" \
     --arg latest_attempt_dir "${ISSUE_ROOT_X}" \
     --argjson retry_count "${PRIOR_RETRY}" \
+    --argjson continue_count "${NEW_CONTINUE_COUNT}" \
+    --arg model_tier "${RESOLVED_MODEL_TIER:-}" \
+    --arg prior_model_tier "${PRIOR_MODEL_TIER}" \
     --arg session "issue-${PROJECT}-${iid}" \
     --arg mode "${MODE_ACTUAL}" \
     --arg updated_at "${NOW}" \
     '{iid:$iid, session:$session, status:"in_progress", mode:$mode,
+      continue_count:$continue_count,
+      model_tier:(if $model_tier == "" then (if $prior_model_tier == "" then null else $prior_model_tier end) else $model_tier end),
       attempts_total:$attempts_total, latest_attempt_number:$latest_attempt_number,
       latest_attempt_dir:$latest_attempt_dir, retry_count:$retry_count,
       block_reason:null, commit_sha:null, merge_request_url:null,
