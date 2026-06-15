@@ -6,7 +6,8 @@
 #   GITLAB_HOST    from glab_auth.sh
 #   PROJECT_URI    URI-encoded "${GROUP}/${PROJECT}"
 #
-# Workflow labels: todo retry new doing pr done blocked failed timeout continue
+# Workflow labels: todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue
+# Orthogonal: model:<tier> (created from trigger model_tiers; persistent), quality:low (one-shot soft signal)
 #
 # `continue` is a human-applied review label. Reviewers set it on an issue
 # whose MR was created and labeled `done` + `pr` by the agent, but where the
@@ -29,7 +30,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}"
 
-REQUIRED_LABELS=(todo retry new doing pr done blocked failed timeout continue)
+REQUIRED_LABELS=(todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue quality:low)
+
+# model:{tier} 档位标签按 trigger model_tiers 动态创建（缺省=不创建，特性关）。
+if [ -n "${MODEL_TIERS:-}" ]; then
+  while IFS= read -r _tier; do
+    [ -n "${_tier}" ] && REQUIRED_LABELS+=("model:${_tier}")
+  done < <(printf '%s' "${MODEL_TIERS}" | jq -r '.[].tier // empty' 2>/dev/null || true)
+fi
 
 existing="$(
   glab api --paginate \
@@ -38,7 +46,7 @@ existing="$(
 )"
 
 for label in "${REQUIRED_LABELS[@]}"; do
-  if ! printf '%s\n' "${existing}" | grep -qx "${label}"; then
+  if ! printf '%s\n' "${existing}" | grep -qxF "${label}"; then
     glab api --method POST \
       "projects/${PROJECT_URI}/labels" \
       -f "name=${label}" -f "color=#808080" >/dev/null
