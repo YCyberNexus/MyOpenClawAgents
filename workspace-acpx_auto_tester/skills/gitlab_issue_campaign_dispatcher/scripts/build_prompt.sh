@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build_prompt.sh — generate ${LOG_DIR}/prompt.txt from the live issue
-# title/description/notes plus a small instruction header.
+# title/description plus a small instruction header. (Issue notes are NOT
+# read: continue-mode is disabled and no script consumes the notes.)
 #
 # The prompt has a single input section — the issue title + description.
 # (benchmark-test is fresh-only; continue-mode resume — past-attempt summary
