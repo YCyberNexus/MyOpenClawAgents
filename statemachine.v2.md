@@ -13,7 +13,7 @@
 3. **新增一次性软信号 label `quality:low`**：人工在评审态加，作为升 model 档的软触发之一，升档生效后移除。
 4. **model 升档触发按侧统一**：CC 侧 `{blocked-cc, timeout, failed-cc}` 重跑 → 升一档；调度器侧 `{blocked-dispatcher, failed-dispatcher}` → 不升（升 model 对基础设施问题无用）。
 
-> 模型背景（更早版本已确立，非本次新增）：`pr` **替换** `done`（不再叠加）；`blocked` 已拆 `blocked-cc` / `blocked-dispatcher`。
+> 本次落地：`pr` **替换** `done`（不再叠加，`done` 仅瞬态）；`blocked` 拆成 `blocked-cc` / `blocked-dispatcher`；`failed` 拆成 `failed-cc` / `failed-dispatcher`；新增 `model:{tier}` 正交维度与 `quality:low` 软信号。
 
 ---
 
@@ -104,17 +104,16 @@ UPGRADE? = 硬触发 ∪ 软触发
 
 ---
 
-## 4. 实现状态（重要：目前是设计提案，未落地）
+## 4. 实现状态（已落地）
 
-上述 enriched label 模型（`blocked` 拆分、`failed` 拆分、`pr` 替换 `done`、`model:{tier}`、`quality:low`）目前**只在状态机图与本文件里，代码尚未实现**。落地点：
+上述 enriched label 模型（`blocked` 拆分、`failed` 拆分、`pr` 替换 `done`、`model:{tier}`、`quality:low`）**已在脚本与参考文档中落地**。落地点（实际文件）：
 
-- `scripts/ensure_labels.sh`：创建 `blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`/`timeout`/`pr`/`model:flash|pro|max`/`quality:low`，移除单一 `blocked`/`failed`。
-- `scripts/set_issue_label.sh`：工作标签互斥组扩展（含两类 `failed`）；把 `model:{tier}` 排除出"进 `doing` 清除集"。
-- `scripts/reconcile.sh`：`has_blocked`/`has_failed` 信号按侧拆两路；新增读取当前 `model:{tier}`。
-- `temporal/workflows/campaign.py`：`_classify` 与 outcome→label 同步按侧拆；`pr` 替换 `done`；新增 PREPARE 阶段 `resolve_model_tier`（求 `UPGRADE?`、写 `model:{tier}`、注入 build_prompt）。
-- executor 失败路径按归因 sync `blocked-cc`/`blocked-dispatcher`/`timeout`；成功路径 `done → pr`。
-
-这些改动落在 `workspace-acpx_auto_tester/` 下，会触发 `SKILL_VERSION` 升版与 code-review 流程。
+- `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/scripts/ensure_labels.sh`：创建 `blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`/`timeout`/`done`/`pr`/`model:<tier>`（按 `model_tiers` 配置）/`quality:low`；不再创建单一 `blocked`/`failed`（仍兼容识别残留）。
+- `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/scripts/set_issue_label.sh`：工作标签互斥组扩展（含 `blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`）；`model:{tier}` 排除出"进 `doing` 清除集"（正交直通）；三组语义：work 互斥、model:\* 正交、quality:\* 正交。
+- `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/scripts/reconcile.sh`：完成判定改为「有 `pr`」（不再要求 `done∧pr`）；`has_blocked`/`has_failed` 按侧拆两路信号；新增读取当前 `model:{tier}` 写入 evidence digest。
+- `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/scripts/_dispatch_lib.sh`（Phase 6 链）：blocked/failed 按 `block_side`（内部推导，不来自 compact reply）落 `blocked-cc`/`blocked-dispatcher`/`failed-cc`/`failed-dispatcher`；`done` 成功路径最终写 `pr`（移除 `done`）；`timeout` 永不自动提升 `failed`。
+- `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/scripts/dispatch_prepare_tick.sh`：carry-forward `model_tiers`/`continue_upgrade_threshold`；Phase 4 执行 `resolve_model_tier`（读 GitLab model 标签、求 `UPGRADE?`、写 `model:{tier}`、注入 settings 文件、消费 `quality:low`）；写 `state.json.model_tier`/`block_side`/`continue_count`。
+- `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md`：子代理失败路径按归因 sync `blocked-cc`/`blocked-dispatcher`/`timeout`；成功路径 Step 6 `done`（瞬态）→ Step 8 `pr`（替换 `done`）；compact reply 不含 `block_side` 字段（dispatcher 内部推导）。
 
 ---
 
