@@ -23,7 +23,7 @@ The single v1 `blocked` and `failed` labels are **removed** from the vocabulary 
 
 `continue` / resume is **disabled** on this branch. There is no `continue` (or legacy `contiune`) label handling: every attempt runs FRESH from `origin/${dev_branch}`. Reconciliation never re-enqueues an IID into continue mode and the dispatcher never checks out the existing work branch for resume.
 
-`timeout` — **subagent-applied terminal label.** Set when `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`, default 18000s). Whatever Claude Code produced before the kill is still committed and force-pushed to `${WORK_BRANCH}`. The dispatcher treats `timeout` as terminal: the IID is parked in `timeout_iids`, `retry_count` is NOT consumed, the IID is NOT auto-retried on later ticks, and `timeout` is **never** promoted to a `failed-*` variant. Reviewers re-run the issue by stripping `timeout`, or by adding `retry` on top of `timeout` for a fresh reset.
+`timeout` — **subagent-applied terminal label.** Set when `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`, default 18000s). Whatever Claude Code produced before the kill is still committed and pushed to `${LOCAL_ATTEMPT_BRANCH}`. The dispatcher treats `timeout` as terminal: the IID is parked in `timeout_iids`, `retry_count` is NOT consumed, the IID is NOT auto-retried on later ticks, and `timeout` is **never** promoted to a `failed-*` variant. Reviewers re-run the issue by stripping `timeout`, or by adding `retry` on top of `timeout` for a fresh reset.
 
 When the scheduled trigger supplies `require_labels`, those labels are also treated as one-shot entry labels for the matched issue on that tick: if a required label is present on the issue selected for execution, the dispatcher removes it while transitioning the issue to `doing`.
 
@@ -57,10 +57,10 @@ The **"进 doing 清除集"** (the labels the dispatcher strips when transitioni
              ──► doing ──► done            (done is terminal success — no MR / pr)
                 │
                 ├──► blocked-cc          (CC-side retryable failure; acpx failures still
-                │                          force-push committable partial work)
+                │                          push committable partial work)
                 ├──► blocked-dispatcher  (dispatcher-side retryable failure: prep / spawn /
                 │                          eviction; no CC output)
-                └──► timeout             (acpx wall-clock cap; partial work force-pushed;
+                └──► timeout             (acpx wall-clock cap; partial work pushed;
                                           terminal until human relabel)
 
   blocked-cc          ──► doing  (after cooldown, lowest priority) ──► …
@@ -76,7 +76,7 @@ The subagent's compact reply still uses the side-agnostic `status` vocabulary (`
 
 | outcome (source)                                                                 | reply.status | side | internal final_status | live label              |
 | -------------------------------------------------------------------------------- | ------------ | ---- | --------------------- | ----------------------- |
-| solved, work force-pushed                                                        | `done`       | cc   | `done`                | `done` (terminal)       |
+| solved, work pushed                                                              | `done`       | cc   | `done`                | `done` (terminal)       |
 | acpx non-timeout failure / NO_CHANGES / push rejected / acpx post-step failure    | `blocked`    | cc   | `blocked_cc`          | `blocked-cc`            |
 | prep failure / spawn launch failure / scope or stuck eviction                     | `blocked`    | disp | `blocked_dispatcher`  | `blocked-dispatcher`    |
 | acpx exceeded wall-clock cap                                                      | `timeout`    | cc   | `timeout`             | `timeout`               |
@@ -105,9 +105,9 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 | `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / `timeout` / `failed-*` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep (always fresh mode) | remove the entire workflow group (entry labels + done + blocked-*/timeout/failed-* + matched trigger `require_labels`) plus the non-workflow `precheck-failed` marker; add `doing`; preserve `model:{tier}` |
 | (any)      | `model:{tier}` | dispatcher | tier pinning in PREPARE, after the `doing` transition | `set_issue_label.sh add model:<pin_model_tier>` (removes the old model:* in the same update — the pin may down-shift) |
 | `doing`    | `done`     | subagent   | branch pushed, post-push verified, Wiki artifacts published | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done` (terminal success — no `pr`) |
-| `doing`    | `blocked-cc` | subagent | CC-side retryable failure; committable partial work first force-pushed to `${WORK_BRANCH}` when possible | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-cc` |
+| `doing`    | `blocked-cc` | subagent | CC-side retryable failure; committable partial work first pushed to `${LOCAL_ATTEMPT_BRANCH}` when possible | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-cc` |
 | `doing`    | `blocked-dispatcher` | dispatcher | prep / spawn / eviction failure (no CC output) | Phase 6 synthesizes the reply and syncs `blocked-dispatcher` |
-| `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work force-pushed | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
+| `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work pushed | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
 | `done`     | `done` + `blocked-cc` | subagent | CC-side failure after Wiki + `done` | `set_issue_label.sh add blocked-cc`                  |
 | `blocked-cc` / `blocked-dispatcher` | `doing` | dispatcher | retry begins on a later tick after no non-blocked backlog or fresh candidates remain | normal `*` → `doing` transition above |
 | `blocked-cc` | `failed-cc` | dispatcher | `retry_count > blocked_retry_limit` in Phase 6 (launch-side synths do not increment) | `set_issue_label.sh add failed-cc` |
@@ -135,7 +135,7 @@ The agent's terminal success label is `done`; GitLab-level completion is the iss
 
 | Signal              | Who sets it                         | When                                              | Means                                  |
 | ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
-| `done` label        | the subagent                        | after the solved work is force-pushed and Wiki evidence published | "the agent finished this attempt successfully" |
+| `done` label        | the subagent                        | after the solved work is pushed and Wiki evidence published | "the agent finished this attempt successfully" |
 | issue closed (`state=closed`) | a human reviewer | when the work is accepted                          | "a human reviewed and closed the issue" |
 
 There is no MR and no auto-close on this branch. **The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`); closing is the human reviewer's prerogative, and the subagent's job ends when `done` is present.

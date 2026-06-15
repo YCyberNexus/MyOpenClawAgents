@@ -25,7 +25,7 @@
 #                            | "failed-cc" | "failed-dispatcher" | "timeout"
 #                            ("blocked"/"failed"/"no_changes" are legacy; the value is
 #                            only echoed into the summary markdown, never branched on)
-#   COMMIT_SHA               last commit on the work branch (if pushed)
+#   COMMIT_SHA               last commit on the immutable per-attempt branch ${LOCAL_ATTEMPT_BRANCH} (if pushed)
 #   MERGE_REQUEST_URL        always empty on benchmark-test (no MR is ever created)
 #   BLOCK_REASON             when ATTEMPT_STATUS is any blocked-*/failed-*/timeout
 #   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
@@ -90,7 +90,7 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive on the issue's work branch)"
+  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive on the issue's immutable per-attempt branch \`${LOCAL_ATTEMPT_BRANCH}\`)"
   if [ -f "${LOG_DIR}/wiki_artifacts.md" ]; then
     echo "- **Wiki evidence**: published and linked from this issue"
   fi

@@ -51,10 +51,10 @@
 #                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
 #                                                        ← LOG_DIR (still attempt-scoped
 #                                                          inside the shared worktree;
-#                                                          prompt.txt + claude_result.txt
-#                                                          force-added by stage_and_guard.sh,
-#                                                          other files stay locally ignored
-#                                                          via .git/info/exclude)
+#                                                          the whole LOG_DIR is
+#                                                          force-added by stage_and_guard.sh
+#                                                          (only post-push wiki_* stay
+#                                                          locally ignored via .git/info/exclude)
 #
 # Path derivation is layered:
 #
@@ -312,10 +312,10 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
   # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree
   # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/ so successive attempts
-  # do NOT overwrite each other's prompt.txt / claude_result.txt. Only those
-  # two files are force-added onto `${WORK_BRANCH}`; the rest stay locally
-  # ignored via the repository `.git/info/exclude` entry for
-  # `/${RESULT_BASENAME}/`.
+  # do NOT overwrite each other's artifacts. The whole LOG_DIR present at
+  # staging time is force-added onto `${LOCAL_ATTEMPT_BRANCH}` (eval full
+  # archival); only the post-push wiki_* files stay locally ignored via the
+  # repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"

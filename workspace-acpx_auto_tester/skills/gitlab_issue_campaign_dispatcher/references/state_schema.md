@@ -265,12 +265,12 @@ lists remain side-agnostic unions (both sides land in the same list).
 | -------------------- | ---------------------------------------------------------------------------- | --------- |
 | `pending`            | After dispatcher reconciliation re-enqueues; before dispatcher prep starts.  | no        |
 | `in_progress`        | After dispatcher prep finishes (repo checkout + prompt ready); during Claude execution and post-acpx subagent flow. | no |
-| `blocked_cc`         | CC-side retryable failure (acpx non-timeout failure, NO_CHANGES, push rejected, post-acpx step failed). For acpx failures after worktree prep, the subagent first tries to stage, commit, and force-push any committable partial work to `${WORK_BRANCH}`; it still opens no MR and consumes retry budget. Live label: `blocked-cc`. | no |
+| `blocked_cc`         | CC-side retryable failure (acpx non-timeout failure, NO_CHANGES, push rejected, post-acpx step failed). For acpx failures after worktree prep, the subagent first tries to stage, commit, and push any committable partial work to `${LOCAL_ATTEMPT_BRANCH}`; it still opens no MR and consumes retry budget. Live label: `blocked-cc`. | no |
 | `blocked_dispatcher` | Dispatcher-side retryable failure (prep failed for this IID, spawn launch failed, scope/stuck eviction). No CC output. Live label: `blocked-dispatcher`. | no |
 | `failed_cc`          | CC-side non-recoverable, or `blocked_cc` with `retry_count > blocked_retry_limit`. Live label: `failed-cc`. | yes |
 | `failed_dispatcher`  | Dispatcher-side non-recoverable, or `blocked_dispatcher` with `retry_count > blocked_retry_limit`. Live label: `failed-dispatcher`. | yes |
 | `done`               | After post-push verification, Wiki evidence publication, and `doing → done` succeeded. benchmark-test: `done` is the terminal success label (no MR, no `pr`). | yes |
-| `timeout`            | `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`). The subagent still commits + force-pushes the partial work to `${WORK_BRANCH}`. Terminal until a human strips `timeout` or adds `retry` — `retry_count` is NOT consumed and the dispatcher does NOT auto-retry. Never promoted to a `failed-*` variant. | yes (until human relabel) |
+| `timeout`            | `acpx claude exec` exceeded its wall-clock cap (`acpx_timeout_seconds`). The subagent still commits + pushes the partial work to `${LOCAL_ATTEMPT_BRANCH}`. Terminal until a human strips `timeout` or adds `retry` — `retry_count` is NOT consumed and the dispatcher does NOT auto-retry. Never promoted to a `failed-*` variant. | yes (until human relabel) |
 | `no_changes`         | Legacy compact-reply value for `stage_and_guard.sh` `NO_CHANGES`; new prompts normalize this to `blocked` (→ `blocked_cc`). | no |
 
 ## issue-<iid>/attempt_state.json — current-attempt state
@@ -333,7 +333,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "attempt_number": 3,
   "status": "done",
   "mode_actual": "fresh",
-  "work_branch": "issue/14-auto-fix",
+  "work_branch": "",
   "local_branch": "issue/14-auto-fix-att003",
   "commit_sha": "abc1234deadbeef",
   "merge_request_url": "",
@@ -357,9 +357,9 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `status`             | string (enum)   | `done` / `no_changes` / `blocked` / `failed` / `timeout` — side-AGNOSTIC. New subagent prompts convert no-diff outcomes to `blocked`; `no_changes` is accepted only for legacy replies and normalized by the dispatcher. The subagent prefers `blocked`. v2: the dispatcher attributes a real subagent reply's `blocked` / `failed` to the **CC side** (live labels `blocked-cc` / `failed-cc`) and promotes `blocked-cc → failed-cc` in Phase 6 when the retry budget is exhausted; dispatcher-synthesized blocked replies carry `block_side: "dispatcher"` and map to `blocked-dispatcher` / `failed-dispatcher`. The subagent emits `timeout` only from the dedicated timeout flow (see `executor_prompt.md` §timeout_flow); the dispatcher does NOT promote `timeout`. |
 | `block_side`         | string (enum)   | Optional. `"cc"` (default) or `"dispatcher"`. Real subagent replies omit it (treated as `cc`); only the dispatcher's `phase6_synthesize_blocked` sets `"dispatcher"`. Determines whether a blocked/failed outcome syncs the `-cc` or `-dispatcher` label variant. |
 | `mode_actual`        | string (enum)   | Always `fresh` on benchmark-test — `prepare_attempt.sh` always resets from `origin/${dev_branch}` (continue / resume is disabled). |
-| `work_branch`        | string          | `issue/<iid>-auto-fix` — the single force-pushed remote branch.        |
-| `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` — per-attempt local branch kept for audit.   |
-| `commit_sha`         | string          | Empty `""` if commit/push did not run or failed. May be non-empty for `done`, `timeout`, or `blocked` replies when partial work was successfully force-pushed. |
+| `work_branch`        | string          | Always empty `""` on benchmark-test — the legacy mutable `${WORK_BRANCH}` is no longer pushed (see `local_branch`). |
+| `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` (`issue/<iid>-auto-fix-att<NNN>`) — the single immutable per-attempt remote branch, pushed once and never overwritten. |
+| `commit_sha`         | string          | Empty `""` if commit/push did not run or failed. May be non-empty for `done`, `timeout`, or `blocked` replies when partial work was successfully pushed. |
 | `merge_request_url`  | string          | Always empty `""` on benchmark-test — MR creation is removed.          |
 | `mr_action`          | string (enum)   | Always `none` on benchmark-test — MR creation is removed (no `create_mr.sh`). The legacy `created` / `rotated` / `reused` values are retired. |
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |

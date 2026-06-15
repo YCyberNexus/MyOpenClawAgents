@@ -21,7 +21,7 @@
 #
 # `timeout` is a subagent-applied terminal label set when `acpx claude exec`
 # exceeded its wall-clock cap. Whatever Claude Code produced is still committed
-# and force-pushed to `${WORK_BRANCH}`, but no MR is opened. Treated as terminal
+# and pushed to `${LOCAL_ATTEMPT_BRANCH}`, but no MR is opened. Treated as terminal
 # (NOT auto-retried) until a human strips the label; never consumes retry budget
 # and never promoted to a `failed-*` variant.
 #

@@ -2,7 +2,9 @@
 # prepare_attempt.sh — ensure a per-issue linked git worktree exists for
 # this IID and put it on the right starting point for the current attempt.
 #
-# Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
+# Per-attempt immutable remote branches. ${WORK_BRANCH} ("issue/<iid>-auto-fix")
+# is a naming prefix only and is NO LONGER pushed; each attempt instead
+# publishes its own immutable remote branch ${LOCAL_ATTEMPT_BRANCH}.
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
 # "${WORK_BRANCH}-att${PADDED}") checked out into a SHARED per-issue
 # linked worktree at ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}
@@ -12,7 +14,7 @@
 # checkout itself leaves untracked files alone. Continue mode restores the
 # same-IID runtime subtree for resume, while fresh reset mode quarantines
 # that subtree before recreating empty output/log directories. The local
-# attempt branch is force-pushed to ${WORK_BRANCH} at commit time.
+# attempt branch is pushed to its own name ${LOCAL_ATTEMPT_BRANCH} (immutable) at commit time.
 # Cross-IID parallelism stays safe because different IIDs use different
 # worktree paths; same-IID attempts never run concurrently (single-batch
 # invariant enforced by the dispatcher's `pending_subagents` bookkeeping),
@@ -65,7 +67,7 @@
 #
 # Shared config freshness:
 #   Test-team-owned `.claude/`, `hulat/`, and `${DATA_BASENAME}/` may change on
-#   DEV_BRANCH while an issue's WORK_BRANCH is still being reviewed. Every
+#   DEV_BRANCH while an issue's per-attempt branches are still being reviewed. Every
 #   attempt refreshes those tracked paths from the just-fetched
 #   origin/${DEV_BRANCH} after the base checkout and before acpx runs. This
 #   keeps every fresh attempt on the latest runner/materials config without
@@ -388,9 +390,9 @@ else
   # the shared per-issue linked worktree branched from ${BASE_REF}. This
   # is the cwd Claude Code runs in; OUTPUT_DIR and LOG_DIR are inside it.
   # OUTPUT_DIR is force-added by stage_and_guard.sh after the run;
-  # LOG_DIR's prompt.txt + claude_result.txt are force-added by the same
-  # script, the remaining log files stay locally ignored via the
-  # repository `.git/info/exclude` entry.
+  # the ENTIRE LOG_DIR present at staging time is force-added by the same
+  # script (eval full archival); only the post-push wiki_* files stay
+  # locally ignored via the repository `.git/info/exclude` entry.
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
