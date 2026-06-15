@@ -14,7 +14,10 @@
 # Use this script (not a full labels overwrite) for every label transition,
 # so manually-added labels on the issue are preserved. Adding a workflow label
 # also removes conflicting workflow labels to keep the issue in a single
-# workflow state, except for the allowed done+pr and done+blocked pairs.
+# workflow state. Allowed transient pairs: done+blocked-cc and done+blocked-dispatcher
+# (failure after `done` wiki, before `pr`). `pr` replaces `done` (done removed when pr added).
+# model:<tier> and quality:low are orthogonal (not in WORKFLOW_LABELS) — adding/removing
+# them never disturbs work labels, and adding a work label never disturbs them.
 
 set -euo pipefail
 
@@ -32,7 +35,10 @@ fi
 OP="$1"
 LABEL="$2"
 
-WORKFLOW_LABELS=(todo retry new doing pr done blocked failed timeout continue contiune)
+# Legacy single `blocked`/`failed` are kept in this list ONLY so that adding a
+# new workflow state still clears any stray residue of them; the agent never
+# WRITES single blocked/failed anymore (it uses *-cc / *-dispatcher).
+WORKFLOW_LABELS=(todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher blocked failed timeout continue contiune)
 
 is_workflow_label() {
   local label="$1"
@@ -68,10 +74,13 @@ workflow_conflicts_for_add() {
 
   case "${label}" in
     pr)
-      keep=(done pr)
+      keep=(pr)
       ;;
-    blocked)
-      keep=(done blocked)
+    blocked-cc)
+      keep=(done blocked-cc)
+      ;;
+    blocked-dispatcher)
+      keep=(done blocked-dispatcher)
       ;;
   esac
 
