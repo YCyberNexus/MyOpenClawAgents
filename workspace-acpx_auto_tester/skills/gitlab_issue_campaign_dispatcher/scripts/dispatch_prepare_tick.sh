@@ -442,8 +442,8 @@ esac
 MODEL_TIERS_PROVIDED=false
 MODEL_TIERS_JSON="null"
 if [ -n "${T[model_tiers]:-}" ]; then
-  if ! MODEL_TIERS_JSON="$(printf '%s' "${T[model_tiers]}" | jq -ce 'if type == "array" then . else error("not an array") end' 2>/dev/null)"; then
-    emit_chat_failure "invalid_model_tiers: must be a JSON array"
+  if ! MODEL_TIERS_JSON="$(printf '%s' "${T[model_tiers]}" | jq -ce 'if type == "array" and (all(.[]; (.tier | type == "string" and (length > 0)) and (.settings | type == "string" and (length > 0)))) then . else error("invalid") end' 2>/dev/null)"; then
+    emit_chat_failure "invalid_model_tiers: must be a JSON array of {tier:non-empty-string, settings:non-empty-string}"
   fi
   MODEL_TIERS_PROVIDED=true
 fi
@@ -815,6 +815,7 @@ set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
+  MODEL_TIERS="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // empty')" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
 set -e
@@ -1226,8 +1227,8 @@ for iid in "${BATCH_IIDS[@]}"; do
   # ── resolve_model_tier（D：model:{tier} 文件式自动升档；仅当 model_tiers 配置）──
   RESOLVED_MODEL_TIER=""
   MODEL_SETTINGS_SRC=""
-  if [ -n "${T[model_tiers]:-}" ]; then
-    MT_JSON="${T[model_tiers]}"
+  MT_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // empty')"
+  if [ -n "${MT_JSON}" ] && [ "${MT_JSON}" != "null" ] && [ "$(printf '%s' "${MT_JSON}" | jq 'length')" -gt 0 ]; then
     mapfile -t MT_TIERS < <(printf '%s' "${MT_JSON}" | jq -r '.[].tier')
     if [ "${#MT_TIERS[@]}" -eq 0 ]; then
       prep_blocked "model_tiers configured but empty/invalid"; continue
