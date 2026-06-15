@@ -292,7 +292,7 @@ Step 8 — ADD `pr` label
     bash {SCRIPTS_DIR}/set_issue_label.sh add pr
   Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
 
-  After this step the live issue should carry both `done` and `pr`. Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr".
+  After this step the live issue should carry `pr` only — `set_issue_label.sh add pr` removes `done` (pr replaces done). Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr"; labels_removed includes "done".
 
 Step 9 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
@@ -321,7 +321,7 @@ Step 10 — REPLY
   - status = blocked        when any FAIL flow or BLOCKED_PUSH flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
   - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137}, tool-side timeout, or the whole-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap from <constraints>). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap", or "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" for the whole-run cap). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
-  - labels_added / labels_removed: the actual transitions you performed. For done: ["done","pr"] added, ["doing"] removed. For blocked before `done`: ["blocked"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
+  - labels_added / labels_removed: the actual transitions you performed. For done: ["pr"] added, ["doing","done"] removed (pr replaces done — done was a transient set in Step 6 then removed when pr is added). For blocked before `done`: ["blocked-cc"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked-cc" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
   - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / BLOCKED_PUSH / timeout).
   - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
@@ -354,9 +354,9 @@ When any step instructs "FAIL with status=X, block_reason=Y":
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
          RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
-         bash {SCRIPTS_DIR}/set_issue_label.sh add blocked
+         bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
      - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
-     - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked` and without `pr`.
+     - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked-cc` and without `pr`.
   4. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
   5. Run Step 9 (summarize) with ATTEMPT_STATUS / BLOCK_REASON and SUMMARY_POST_TO_ISSUE=false.
   6. Output the compact JSON per Step 10 with status=X and block_reason=Y filled in.
@@ -420,12 +420,12 @@ B4 — LABEL doing → blocked
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
       RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
-      bash {SCRIPTS_DIR}/set_issue_label.sh add blocked
+      bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
   If either exec fails, append "; blocked label sync failed: <stderr>"
   to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
   the compact reply.
   CAPTURE: record successful operations in labels_removed (include
-  "doing") and labels_added (include "blocked").
+  "doing") and labels_added (include "blocked-cc").
 
 B5 — SUMMARIZE (local-only; SAME script as Step 9)
   ATTEMPT_STATUS=blocked \
@@ -449,7 +449,7 @@ B6 — REPLY
     merge_request_url = ""
     wiki_url          = ""
     commit_sha        = <captured in B2; "" if B2 was skipped or failed>
-    labels_added      = ["blocked"]      (plus any other successfully-added)
+    labels_added      = ["blocked-cc"]   (plus any other successfully-added)
     labels_removed    = ["doing"]        (plus any other successfully-removed)
     summary_posted    = false
     block_reason      = <BLOCK_REASON, non-empty>
