@@ -19,6 +19,9 @@ out/
 *.swp
 *.swo
 
+# drawio 编辑器自动生成的备份/临时文件（.$<name>.bkp）
+.$*.bkp
+
 # Python
 __pycache__/
 *.py[cod]
