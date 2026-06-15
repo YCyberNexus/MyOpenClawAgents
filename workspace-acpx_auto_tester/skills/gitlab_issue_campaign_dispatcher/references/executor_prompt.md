@@ -80,7 +80,7 @@ ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}                     # always fresh (continue disabled on benchmark-test)
 BRANCH={BRANCH}                             # integration / target branch
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (fresh-mode checkout; shared config refresh source for every run)
-WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
+WORK_BRANCH={WORK_BRANCH}                   # naming prefix only; NOT pushed as a remote branch on this eval branch (LOCAL_ATTEMPT_BRANCH derives from it)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
 WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are refreshed from latest origin/{DEV_BRANCH} before every run. Every run is fresh-mode: it quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
@@ -162,8 +162,9 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
                                      described in <timeout_flow> below — do NOT
                                      enter the normal FAIL flow and do NOT mark
                                      the issue blocked. The partial work in the
-                                     worktree still gets force-pushed to
-                                     {WORK_BRANCH}, but no MR / `pr` is opened.
+                                     worktree still gets pushed to its immutable
+                                     per-attempt branch {LOCAL_ATTEMPT_BRANCH},
+                                     but no MR / `pr` is opened.
     - any other `ACPX_EXIT=<n>`  → a clean, script-reported acpx failure
       (n ∉ {0, 124, 137})            (n is acpx's real exit code). Enter the
                                      dedicated BLOCKED_PUSH flow described in
@@ -227,7 +228,7 @@ Step 2 — STAGE
                                 Do NOT push. Do NOT create an MR.
   any other non-zero exit     → FAIL status=blocked block_reason="stage step failed: <last stderr line>".
 
-Step 3 — COMMIT + force-push (Strategy A)
+Step 3 — COMMIT + push (immutable per-attempt branch)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
@@ -295,12 +296,12 @@ Step 9 — SUMMARIZE
   CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
   Run this on EVERY terminal path — done, no_changes, blocked, failed, timeout.
   Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, no_changes, and timeout.
-  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
+  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully pushed partial work.
 
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"","mr_action":"none","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}","metrics":<the metrics.json object from Step 1.5, or {} if it was missing>}
+  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"","mr_action":"none","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}","metrics":<the metrics.json object from Step 1.5, or {} if it was missing>}
 
   Field rules:
   - status = done           when Steps 0-6 all succeeded (Steps 7/8 are removed on benchmark-test; `done` is the terminal success label).
@@ -320,7 +321,7 @@ Step 10 — REPLY
 - No-fallback. If any {SCRIPTS_DIR}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead. Do NOT inspect a script's *internal* tooling (jq, python3, git, glab) and decide it is buggy: these scripts are deployment-pinned and version-tested against this runner. A non-zero exit or a surprising message means report the exact stderr and FAIL — not "diagnose, patch, retry".
 - acpx is script-owned. The only allowed acpx execution path is {SCRIPTS_DIR}/run_acpx_attempt.sh; do not type an acpx command in any tool call.
 - glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
-- Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
+- The immutable per-attempt branch push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push` / `git push --force` outside it. No rebase + re-push.
 - Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
 - Destructive deletion is forbidden. Do NOT call `rm`, `/bin/rm`, `git rm`, `unlink`, `find -delete`, or script file deletion through another runtime. If cleanup appears necessary, leave files in place and FAIL status=blocked with a clear reason.
 - Hard timeout: {ACPX_TIMEOUT_MINUTES} minutes wall-clock for the whole subagent run. If you cannot finish, FAIL status=blocked block_reason="executor exceeded {ACPX_TIMEOUT_MINUTES}-minute soft cap".
@@ -354,8 +355,8 @@ Always prefer `blocked` over `failed` — the dispatcher promotes `blocked-cc �
 <blocked_push_flow>
 Entered when Step 1 saw a non-timeout acpx failure after the shared worktree
 was prepared. The current attempt still ends as `blocked`, but any committable
-generated files should be force-pushed to {WORK_BRANCH} if the normal staging
-and push scripts can do so.
+generated files should be pushed to the immutable per-attempt branch
+{LOCAL_ATTEMPT_BRANCH} if the normal staging and push scripts can do so.
 
 Set ATTEMPT_STATUS=blocked and set BLOCK_REASON to the Step 1 failure reason
 before starting this flow. Keep that status even if stage, commit, push, or
@@ -376,7 +377,7 @@ B1 — STAGE (same script as Step 2 of the normal flow)
   - non-zero exit → SKIP B2 + B3. Append "; stage step failed: <stderr>"
                     to BLOCK_REASON. Jump to B4.
 
-B2 — COMMIT + force-push (same script as Step 3 of the normal flow)
+B2 — COMMIT + push (same script as Step 3 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
@@ -476,7 +477,7 @@ T1 — STAGE (same script as Step 2 of the normal flow)
   - non-zero exit → SKIP T2 + T3. Append "; stage step failed: <stderr>"
                     to BLOCK_REASON. Jump to T4.
 
-T2 — COMMIT + force-push (same script as Step 3 of the normal flow)
+T2 — COMMIT + push (same script as Step 3 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \

@@ -9,7 +9,7 @@
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
-#   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH,
+#   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, LOCAL_ATTEMPT_BRANCH, BRANCH,
 #   DEV_BRANCH, UI_ACCOUNTS
 #
 # Optional env var (v2 model tier injection):
@@ -55,7 +55,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${GITLAB_HOST:?run scripts/glab_auth.sh first}"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
-  "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
+  "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${LOCAL_ATTEMPT_BRANCH:?}" \
   "${BRANCH:?}" "${DEV_BRANCH:?}"
 
 # UI accounts are allocated by the dispatcher per-batch from the pool at
@@ -131,7 +131,7 @@ EOF
 - Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
 - Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
-- Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
+- Remote branch (this attempt): origin/${LOCAL_ATTEMPT_BRANCH} (immutable per-attempt branch; this attempt's commit is pushed here at commit time, never overwritten)
 - Source baseline:            origin/${DEV_BRANCH} (clean baseline; shared config paths are refreshed from latest ${DEV_BRANCH} before every run)
 - Integration / target branch: ${BRANCH}
 $([ -n "${MODEL:-}" ] && printf -- '- Model tier (this attempt):  %s  (pinned per tick by the dispatcher for benchmarking)\n' "${MODEL}")
