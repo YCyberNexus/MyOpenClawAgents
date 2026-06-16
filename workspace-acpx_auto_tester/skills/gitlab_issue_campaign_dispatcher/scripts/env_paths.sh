@@ -346,14 +346,25 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
-  export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
+  # Per-issue subtree INSIDE the shared worktree — the common parent of
+  # OUTPUT_DIR and the per-attempt LOG_DIR. The done-flow scorecard summary.md
+  # is written at its root (see BRANCH_SUMMARY_FILE below) so it lands on the
+  # immutable per-attempt branch alongside the spec output and the logs.
+  export WORKTREE_ISSUE_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}"
+  export OUTPUT_DIR="${WORKTREE_ISSUE_DIR}/hulat-spec-issue${ISSUE_IID}"
   # The `-${MODEL}` suffix stamps the pinned model tier (flash/pro/max) onto
   # both the per-attempt run folder and the immutable per-attempt branch so the
   # model used for a run is visible at a glance from `ls` and from the GitLab
   # branch list, without opening state.json / metrics.json or the issue labels.
-  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}-${MODEL}"
+  export LOG_DIR="${WORKTREE_ISSUE_DIR}/log/attempt-${ATTEMPT_NUMBER_PADDED}-${MODEL}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
+  # Worktree-internal per-attempt scorecard (key-value: Issue / Attempt / Model
+  # / Time / Accuracy). Distinct from SUMMARY_FILE above, which lives OUTSIDE
+  # the worktree (${ISSUE_ROOT}/summary.md) and is the GitLab-note source. This
+  # one is force-added by write_branch_summary.sh onto ${LOCAL_ATTEMPT_BRANCH}
+  # for done runs only (the normal flow's Step 2.5).
+  export BRANCH_SUMMARY_FILE="${WORKTREE_ISSUE_DIR}/summary.md"
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}-${MODEL}"
 
   # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR

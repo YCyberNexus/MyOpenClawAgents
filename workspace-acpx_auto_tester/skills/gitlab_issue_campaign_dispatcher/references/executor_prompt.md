@@ -230,6 +230,23 @@ Step 2 — STAGE
                                 Do NOT push. Do NOT create an MR.
   any other non-zero exit     → FAIL status=blocked block_reason="stage step failed: <last stderr line>".
 
+Step 2.5 — WRITE BRANCH SUMMARY (done-flow ONLY; best-effort; MUST NOT fail the attempt)
+  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
+    REPO_PATH={REPO_PATH} \
+    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
+    bash {SCRIPTS_DIR}/write_branch_summary.sh
+  Runs ONLY here in the normal flow — after Step 2 returned STAGED_OK and before
+  Step 3 commits. It writes a key-value scorecard (Issue / Attempt / Model /
+  Time / Accuracy, read from {LOG_DIR}/metrics.json) to the worktree-internal
+  {RESULT_BASENAME}/issue-{ISSUE_IID}/summary.md and force-adds it so it lands on
+  {LOCAL_ATTEMPT_BRANCH} with the rest of this commit. No commit sha / branch
+  name is recorded — the file lives ON the attempt branch, so the branch itself
+  identifies the run. It is OBSERVATIONAL: if it exits non-zero, NOTE it and
+  CONTINUE to Step 3 — the scorecard must NEVER block staging / commit / push /
+  done. <blocked_push_flow> and <timeout_flow> MUST NOT run it, so only
+  successful (done) attempt branches carry summary.md.
+
 Step 3 — COMMIT + push (immutable per-attempt branch)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
