@@ -56,12 +56,21 @@ wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
 # The GitLab live state is consulted again so any reviewer relabel between
 # spawn and callback (e.g. continue → reviewer-rejected → blocked) gets
 # picked up at terminal-write time.
-if ! PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+# Capture the narrow reconcile's evidence path so the completion guard below can
+# consult fresh GitLab live labels before any regressing terminal write.
+RECON_EVIDENCE_PATH=""
+set +e
+RECON_OUT="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
         RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
         MIN_IID="${IID}" MAX_IID="${IID}" \
-        bash "${SCRIPT_DIR}/reconcile.sh" >/dev/null 2>&1; then
+        bash "${SCRIPT_DIR}/reconcile.sh" 2>/dev/null)"
+RECON_RC=$?
+set -e
+if [ "${RECON_RC}" -ne 0 ]; then
   wrapper_log followup "narrow reconcile failed for iid=${IID}; proceeding with cached labels"
+else
+  RECON_EVIDENCE_PATH="$(printf '%s' "${RECON_OUT}" | grep -E '^/.+/reconcile-[0-9TZ]+\.json$' | tail -n 1 || true)"
 fi
 
 # Load campaign state.
@@ -137,6 +146,32 @@ if [ "${REPLY_ATTEMPT}" != "${PENDING_ATTEMPT}" ]; then
   jq -nc --argjson iid "${IID}" --arg att "${REPLY_ATTEMPT}" \
     '{callback_status:"stale_or_already_drained", iid:$iid, attempt_number:$att,
       chat_summary:("stale callback: reply attempt=" + ($att|tostring) + " does not match pending attempt for #" + ($iid|tostring))}'
+  exit 0
+fi
+
+# Completion guard (Source-of-Truth). A stale/orphan callback for an earlier
+# attempt can arrive after a later attempt already completed the issue (e.g.
+# att1 killed out-of-band, att2 done, gateway restarted, att1's dead-session
+# callback re-delivered while pending_subagents[IID] still holds att1 so the
+# attempt-number cross-check above passes). Applying its regressing status would
+# call phase6_sync_labels → set_issue_label.sh: a regressing `timeout`/`failed` /
+# `blocked-*` maps to an `add` that STRIPS the live `pr` completion label via the
+# workflow-label mutual-exclusion group (the keep-table never preserves `pr`).
+# So if GitLab live labels already show this issue completed/closed, DROP the
+# regressing reply without touching labels and drain the stale pending entry.
+# `done` replies are never dropped (a success on a completed issue is idempotent).
+REPLY_STATUS="$(printf '%s' "${REPLY_JSON}" | jq -r '.status')"
+if [ "${REPLY_STATUS}" != "done" ] && [ -n "${RECON_EVIDENCE_PATH}" ] \
+   && phase6_evidence_shows_completed "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
+  DRAINED_STATE="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" --arg project "${PROJECT}" '
+    .pending_subagents       = (.pending_subagents | del(.[($iid|tostring)]))
+    | .active_issue_iids     = (.pending_subagents | keys | map(tonumber) | sort)
+    | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))')"
+  persist_state "${DRAINED_STATE}"
+  wrapper_log followup "completed-ghost-drop iid=${IID} reply_status=${REPLY_STATUS}: GitLab live labels show completed/closed — dropped regressing callback without label change, drained pending"
+  jq -nc --argjson iid "${IID}" --arg st "${REPLY_STATUS}" \
+    '{callback_status:"stale_or_already_drained", iid:$iid, reply_status:$st,
+      chat_summary:("stale callback: GitLab live labels show #" + ($iid|tostring) + " already completed/closed — dropped regressing " + $st + " reply without touching labels, drained pending")}'
   exit 0
 fi
 

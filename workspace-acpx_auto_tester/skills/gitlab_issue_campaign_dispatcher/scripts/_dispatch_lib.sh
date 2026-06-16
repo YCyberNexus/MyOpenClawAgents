@@ -219,6 +219,50 @@ phase6_synthesize_timeout() {
   phase6_synthesize_reply "$1" "$2" timeout "$3"
 }
 
+# phase6_evidence_shows_completed <iid> <evidence_json>
+# Pure check (NO GitLab call): returns 0 (true) iff the reconcile evidence array
+# in <evidence_json> marks <iid> as already in a GitLab-completed/closed terminal
+# state. Tolerant of both label vocabularies — v2 `pr` via has_done_pr /
+# is_done_on_gitlab, benchmark-test `done` via is_done_on_gitlab — and of missing
+# fields (null → false). This is the Source-of-Truth guard: a completed/closed
+# issue must NEVER be regressed to timeout/blocked/failed by a stale earlier
+# attempt's late callback or stuck-eviction. (needs_continue is intentionally NOT
+# excluded here — a `pr`+`continue` issue must also be protected from a stale
+# regression; §11 reconcile correction still routes it to continue afterwards.)
+phase6_evidence_shows_completed() {
+  local iid="$1" evidence_json="$2"
+  [ -n "${evidence_json}" ] || return 1
+  printf '%s' "${evidence_json}" | jq -e --argjson iid "${iid}" '
+    (type == "array") and any(.[];
+      (.iid == $iid) and (
+        (.is_closed_on_gitlab == true)
+        or (.is_done_on_gitlab == true)
+        or (.has_done_pr == true)))' >/dev/null 2>&1
+}
+
+# phase6_iid_completed_live <iid>
+# Best-effort: narrowly reconcile ONE iid against GitLab live labels (reconcile.sh
+# is the only sanctioned GitLab access path; it self-auths via env_paths.sh) and
+# return 0 (true) iff it is already completed/closed. On ANY failure (reconcile
+# error, missing/malformed evidence) returns 1 (false) so the caller proceeds with
+# its normal eviction/regression — the stuck-eviction backstop stays live even
+# when GitLab is unreachable; the guard only suppresses a regression when fresh
+# ground truth is actually available.
+phase6_iid_completed_live() {
+  local iid="$1"
+  local script_dir out ev_path ev_json
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  out="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+        MIN_IID="${iid}" MAX_IID="${iid}" \
+        bash "${script_dir}/reconcile.sh" 2>/dev/null)" || return 1
+  ev_path="$(printf '%s' "${out}" | grep -E '^/.+/reconcile-[0-9TZ]+\.json$' | tail -n 1)" || return 1
+  [ -n "${ev_path}" ] && [ -f "${ev_path}" ] || return 1
+  ev_json="$(cat "${ev_path}")" || return 1
+  phase6_evidence_shows_completed "${iid}" "${ev_json}"
+}
+
 # Validate the compact reply per state_schema.md §Compact Subagent Reply.
 # Inputs:
 #   $1 = the reply JSON (raw text — may be invalid JSON)

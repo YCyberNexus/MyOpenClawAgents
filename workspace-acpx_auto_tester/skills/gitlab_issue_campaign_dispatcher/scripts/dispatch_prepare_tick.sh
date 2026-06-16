@@ -623,6 +623,32 @@ for piid in ${PENDING_KEYS}; do
     fi
   fi
   if [ "${EVICT}" = true ]; then
+    # Completion guard (Source-of-Truth). A stale pending entry for an earlier
+    # attempt can survive an out-of-band `subagents kill` + a later attempt's
+    # success across a gateway restart. Regressing it here calls phase6_process
+    # → phase6_sync_labels → set_issue_label.sh: the eviction's `add timeout` /
+    # `add blocked-dispatcher` STRIPS the live `pr` completion label via the
+    # workflow-label mutual-exclusion group (the keep-table never preserves
+    # `pr`) — silently destroying a finished issue's terminal state. reconcile
+    # can no longer recover a stripped label (the
+    # ground truth is already overwritten) and §11 deliberately skips just-
+    # evicted IIDs. So consult GitLab live labels BEFORE any regressing write:
+    # if the issue is already completed/closed, drain the stale ghost WITHOUT
+    # regressing and let §11's reconcile correction classify it completed (we do
+    # NOT add it to EVICTED_IIDS_JSON, so §11 does not skip it). We do NOT call
+    # phase6_process for the ghost on purpose — the later attempt already wrote
+    # the terminal state files and counted quota; re-running phase6_process with
+    # a synthesized reply would clobber that completion metadata with nulls and
+    # double-count. Best-effort: on reconcile failure the eviction proceeds, so
+    # the stuck-eviction backstop stays live when GitLab is unreachable.
+    if phase6_iid_completed_live "${piid}"; then
+      wrapper_log prepare_tick "completed-ghost-drain iid=${piid}: GitLab live labels show completed/closed — draining stale pending entry without regressing (was about to ${EVICT_KIND}-evict synth=${EVICT_SYNTH})"
+      STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${piid}" --arg project "${PROJECT}" '
+        .pending_subagents       = (.pending_subagents | del(.[($iid|tostring)]))
+        | .active_issue_iids     = (.pending_subagents | keys | map(tonumber) | sort)
+        | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))')"
+      continue
+    fi
     wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} synth=${EVICT_SYNTH} reason='${REASON}'"
     if [ "${EVICT_SYNTH}" = "timeout" ]; then
       REPLY_JSON="$(phase6_synthesize_timeout "${piid}" "${PA_NUM}" "${REASON}")"
