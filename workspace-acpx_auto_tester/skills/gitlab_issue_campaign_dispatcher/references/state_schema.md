@@ -290,10 +290,10 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "mode_downgraded_from": null,
   "no_reviewer_comments": false,
   "prior_attempt_count": 0,
-  "local_branch": "issue/14-auto-fix-att002",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-002",
+  "local_branch": "issue/14-auto-fix-att002-pro",
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-002-pro",
   "commit_sha": "abc1234...",
-  "wiki_artifacts_file": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-002/wiki_artifacts.md",
+  "wiki_artifacts_file": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-002-pro/wiki_artifacts.md",
   "attempt_artifacts_posted_to_wiki": true,
   "status": "done",
   "block_reason": null,
@@ -334,7 +334,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "status": "done",
   "mode_actual": "fresh",
   "work_branch": "",
-  "local_branch": "issue/14-auto-fix-att003",
+  "local_branch": "issue/14-auto-fix-att003-pro",
   "commit_sha": "abc1234deadbeef",
   "merge_request_url": "",
   "mr_action": "none",
@@ -343,7 +343,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "labels_removed": ["doing"],
   "summary_posted": true,
   "block_reason": "",
-  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-003",
+  "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-003-pro",
   "metrics": {"iid":14,"attempt_number":3,"model":null,"wall_clock_seconds":842,"accuracy":{"available":true,"passed":18,"failed":2,"skipped":0,"total":20,"pass_rate":0.9,"robot_files":5}}
 }
 ```
@@ -358,7 +358,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `block_side`         | string (enum)   | Optional. `"cc"` (default) or `"dispatcher"`. Real subagent replies omit it (treated as `cc`); only the dispatcher's `phase6_synthesize_blocked` sets `"dispatcher"`. Determines whether a blocked/failed outcome syncs the `-cc` or `-dispatcher` label variant. |
 | `mode_actual`        | string (enum)   | Always `fresh` on benchmark-test — `prepare_attempt.sh` always resets from `origin/${dev_branch}` (continue / resume is disabled). |
 | `work_branch`        | string          | Always empty `""` on benchmark-test — the legacy mutable `${WORK_BRANCH}` is no longer pushed (see `local_branch`). |
-| `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` (`issue/<iid>-auto-fix-att<NNN>`) — the single immutable per-attempt remote branch, pushed once and never overwritten. |
+| `local_branch`       | string          | `${LOCAL_ATTEMPT_BRANCH}` (`issue/<iid>-auto-fix-att<NNN>-<tier>`, e.g. `issue/14-auto-fix-att003-pro`) — the single immutable per-attempt remote branch, pushed once and never overwritten; the trailing `-<tier>` is the pinned model so the branch name records which model produced the run. |
 | `commit_sha`         | string          | Empty `""` if commit/push did not run or failed. May be non-empty for `done`, `timeout`, or `blocked` replies when partial work was successfully pushed. |
 | `merge_request_url`  | string          | Always empty `""` on benchmark-test — MR creation is removed.          |
 | `mr_action`          | string (enum)   | Always `none` on benchmark-test — MR creation is removed (no `create_mr.sh`). The legacy `created` / `rotated` / `reused` values are retired. |

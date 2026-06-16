@@ -99,7 +99,7 @@ ${REPO_PATH}/                                  ← parent checkout (default /dat
                                                  files Claude wrote in the previous attempt survive into the next one)
                 .claude/ hulat/ ifp-data/      ← tracked config refreshed from origin/${DEV_BRANCH}
                 ifp-result/issue-<iid>/hulat-spec-issue<iid>/   ← Claude Code's spec output (legacy path kept; force-added; lands on ${LOCAL_ATTEMPT_BRANCH}); shared across attempts
-                ifp-result/issue-<iid>/log/attempt-NNN/         ← ${LOG_DIR}; attempt-scoped inside the shared worktree;
+                ifp-result/issue-<iid>/log/attempt-NNN-<tier>/  ← ${LOG_DIR}; attempt-scoped inside the shared worktree; -<tier> = pinned model (flash/pro/max) so the run folder shows the model at a glance;
                                                                  whole LOG_DIR (prompt.txt, claude_result.txt, acpx_raw.log, git_status.txt, git_diff.patch, acpx_command.txt, timing.txt, metrics.json, etc.) force-added (lands on ${LOCAL_ATTEMPT_BRANCH});
                                                                  only the post-push wiki_* files stay locally ignored and removed with the worktree
 ```
@@ -114,7 +114,7 @@ The clone parent defaults to `/data`; trigger `repo_path` overrides that parent,
 
 - `branch` (typically `master`) — **integration / target** branch. There is no MR on this branch; the target branch only names the merge destination a human would use after closing the issue. Each issue's spec output lives under `ifp-result/issue-<iid>/hulat-spec-issue<iid>/` so per-issue work branches never collide.
 - `dev_branch` (typically `dev`) — **clean baseline and shared config source**. Every attempt resets its per-issue worktree FRESH to `origin/${dev_branch}` (continue / resume is disabled) so Claude Code does not see past issues' spec accumulation on tracked files, then refreshes tracked `hulat/`, `.claude/`, and `${DATA_BASENAME}/` from latest `origin/${dev_branch}` before acpx runs. Set `dev_branch=<same-as-branch>` to disable.
-- `WORK_BRANCH=issue/<iid>-auto-fix` — a naming prefix only; it is **no longer pushed** as a remote branch. Each attempt instead publishes its own **immutable** remote branch `LOCAL_ATTEMPT_BRANCH=${WORK_BRANCH}-att<NNN>` (pushed once, never overwritten) from inside the shared per-issue worktree, so every pinned-model run is preserved for benchmarking. The local refs are also kept in `${REPO_PATH}/.git` for audit.
+- `WORK_BRANCH=issue/<iid>-auto-fix` — a naming prefix only; it is **no longer pushed** as a remote branch. Each attempt instead publishes its own **immutable** remote branch `LOCAL_ATTEMPT_BRANCH=${WORK_BRANCH}-att<NNN>-<tier>` (pushed once, never overwritten) from inside the shared per-issue worktree, so every pinned-model run is preserved for benchmarking; the trailing `-<tier>` is the pinned model (flash/pro/max), so the GitLab branch list shows which model produced each run (the same suffix is on the run's `log/attempt-<NNN>-<tier>/` folder). `MODEL` is now a required per-issue env var in `env_paths.sh` (the dispatcher threads it through `iid_env` and the executor prompt) because both `LOG_DIR` and `LOCAL_ATTEMPT_BRANCH` embed it. The local refs are also kept in `${REPO_PATH}/.git` for audit.
 
 ## Model-tier dimension and per-side terminal labels (v2 state machine)
 

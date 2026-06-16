@@ -1288,12 +1288,20 @@ for iid in "${BATCH_IIDS[@]}"; do
   # Per-IID env for env_paths-derived paths. MODEL_TIERS is carried so the
   # model:{tier} set_issue_label.sh call below resolves its internal model
   # mutual-exclusion against the same configured tier list (the other
-  # workflow-label ops ignore it).
+  # workflow-label ops ignore it). MODEL carries the per-tick pinned tier
+  # (pin_model_tier, validated as required at parse time so it is always set
+  # here) — env_paths.sh REQUIRES it because LOG_DIR / LOCAL_ATTEMPT_BRANCH now
+  # embed the tier as a `-<tier>` suffix; putting it in iid_env covers every
+  # per-issue env_paths derivation below in one place (prepare_attempt,
+  # set_issue_label, build_prompt, and the WORKTREE_DIR/LOG_DIR/OUTPUT_DIR
+  # extraction subshells). The per-IID effective-tier membership of the pin is
+  # validated below before any env "${iid_env[@]}" invocation runs.
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
     RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
     MODEL_TIERS="${MODEL_TIERS_CSV}"
+    MODEL="${PIN_MODEL_TIER}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
@@ -1595,6 +1603,7 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_DEV_BRANCH="${T[dev_branch]}" \
               TPL_WORK_BRANCH="${WORK_BRANCH_X}" \
               TPL_LOCAL_ATTEMPT_BRANCH="${LOCAL_ATTEMPT_BRANCH}" \
+              TPL_MODEL="${MODEL}" \
               TPL_REPO_PATH="${REPO_PATH}" \
               TPL_WORKTREE_DIR="${WORKTREE_DIR_X}" \
               TPL_OUTPUT_DIR="${OUTPUT_DIR_X}" \

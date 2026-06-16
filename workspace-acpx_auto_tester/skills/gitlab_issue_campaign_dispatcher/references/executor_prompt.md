@@ -20,6 +20,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ISSUE_IID}`            | this batch member                                                                       |
 | `{ATTEMPT_NUMBER}`       | dispatcher's `allocate_attempt.sh` for this IID                                         |
 | `{ATTEMPT_NUMBER_PADDED}`| `printf '%03d'` of `{ATTEMPT_NUMBER}`                                                   |
+| `{MODEL}`                | the pinned model tier name for this tick (`flash` / `pro` / `max`, from `pin_model_tier`). REQUIRED on every `{SCRIPTS_DIR}/*.sh` exec — `env_paths.sh` embeds it as the `-<tier>` suffix of `{LOG_DIR}` and `{LOCAL_ATTEMPT_BRANCH}`, so a missing/divergent value would split path derivation. |
 | `{ISSUE_TITLE}`          | from the live issue (human-readable; for the `<issue>` block only)                      |
 | `{ISSUE_TITLE_QUOTED}`   | shell-safe single-quoted form of the title (for env-var passing on script invocations)  |
 | `{ISSUE_URL}`            | `{GITLAB_API_PROTOCOL}://{GITLAB_HOST}/{GROUP}/{PROJECT}/-/issues/{ISSUE_IID}`           |
@@ -29,11 +30,11 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{BRANCH}`               | trigger (integration / target branch)                                                   |
 | `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
-| `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
+| `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}-{MODEL}` (the `-{MODEL}` tier suffix makes the GitLab branch list show which model produced the run, e.g. `issue/14-auto-fix-att003-pro`) |
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
 | `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes spec output here. Every run is fresh-mode: it quarantines same-IID runtime residue before recreating empty current output/log directories. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the shared per-issue worktree) |
-| `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; the whole attempt log dir is force-added onto the per-attempt branch for benchmark archival) |
+| `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}-{MODEL}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; the `-{MODEL}` tier suffix makes the run folder show the pinned model at a glance; the whole attempt log dir is force-added onto the per-attempt branch for benchmark archival) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
@@ -77,15 +78,16 @@ GITLAB_TOKEN={GITLAB_TOKEN}
 ISSUE_IID={ISSUE_IID}
 ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
+MODEL={MODEL}                               # pinned model tier (flash/pro/max); REQUIRED on every {SCRIPTS_DIR}/*.sh exec so env_paths.sh re-derives the tier-suffixed LOG_DIR / LOCAL_ATTEMPT_BRANCH
 ISSUE_MODE={ISSUE_MODE}                     # always fresh (continue disabled on benchmark-test)
 BRANCH={BRANCH}                             # integration / target branch
 DEV_BRANCH={DEV_BRANCH}                     # clean baseline (fresh-mode checkout; shared config refresh source for every run)
 WORK_BRANCH={WORK_BRANCH}                   # naming prefix only; NOT pushed as a remote branch on this eval branch (LOCAL_ATTEMPT_BRANCH derives from it)
-LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
+LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH} # immutable per-attempt branch; name ends with the pinned tier (…-att<NNN>-<tier>, e.g. issue/14-auto-fix-att003-pro) so the GitLab branch list shows which model produced it
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
 WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are refreshed from latest origin/{DEV_BRANCH} before every run. Every run is fresh-mode: it quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
-LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
+LOG_DIR={LOG_DIR}                           # this attempt's log dir (…/log/attempt-<NNN>-<tier>/, tier suffix = the pinned model so the run folder shows it at a glance); prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
 RESULT_BASENAME={RESULT_BASENAME}           # basename of agent runtime root in the repo (default: ifp-result)
@@ -107,11 +109,11 @@ Body (first ~4KB; full prompt is at {LOG_DIR}/prompt.txt):
 Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix the minimum env vars on every script invocation. The minimum for any {SCRIPTS_DIR}/*.sh exec is:
 
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-  ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+  ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
   REPO_PATH={REPO_PATH} \
   RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME}
 
-`REPO_PATH` carries the parent checkout — the shared object database every per-issue worktree branches from (default `/data/{PROJECT}`; with trigger `repo_path=/data/ifp1`, `/data/ifp1/{PROJECT}`). It is NOT the same as `WORKTREE_DIR` (which is your shared per-issue linked worktree for this IID, reused across attempts). Pass `REPO_PATH={REPO_PATH}` so `env_paths.sh` can re-derive `WORKTREE_DIR={WORKTREE_DIR}` from `ISSUE_IID` (the path no longer depends on `ATTEMPT_NUMBER`, though `LOG_DIR` still does). `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
+`REPO_PATH` carries the parent checkout — the shared object database every per-issue worktree branches from (default `/data/{PROJECT}`; with trigger `repo_path=/data/ifp1`, `/data/ifp1/{PROJECT}`). It is NOT the same as `WORKTREE_DIR` (which is your shared per-issue linked worktree for this IID, reused across attempts). Pass `REPO_PATH={REPO_PATH}` so `env_paths.sh` can re-derive `WORKTREE_DIR={WORKTREE_DIR}` from `ISSUE_IID` (the worktree path no longer depends on `ATTEMPT_NUMBER`, though `LOG_DIR` still does). `MODEL={MODEL}` is the pinned model tier (`flash`/`pro`/`max`) and is REQUIRED on every exec: `env_paths.sh` embeds it as the `-{MODEL}` suffix of `LOG_DIR` (`…/log/attempt-<NNN>-<tier>/`) and `LOCAL_ATTEMPT_BRANCH` (`…-att<NNN>-<tier>`), so every script that re-derives those paths must see the same value — omitting it aborts the script. `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
 </env_contract>
 
 <instructions>
@@ -126,7 +128,7 @@ Step 0 — SETUP
 
 Step 1 — EXECUTE acpx (one-shot, long-running)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
@@ -205,7 +207,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
 
 Step 1.5 — COLLECT METRICS (best-effort; MUST NOT fail the attempt)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/collect_metrics.sh
@@ -218,7 +220,7 @@ Step 1.5 — COLLECT METRICS (best-effort; MUST NOT fail the attempt)
 
 Step 2 — STAGE
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -230,7 +232,7 @@ Step 2 — STAGE
 
 Step 3 — COMMIT + push (immutable per-attempt branch)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -241,7 +243,7 @@ Step 3 — COMMIT + push (immutable per-attempt branch)
 
 Step 4 — POST-PUSH verify
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
@@ -250,7 +252,7 @@ Step 4 — POST-PUSH verify
 
 Step 5 — WIKI evidence (must land before `done`)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/upload_attempt_artifacts.sh
@@ -260,12 +262,12 @@ Step 5 — WIKI evidence (must land before `done`)
 
 Step 6 — TRANSITION doing → done
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add done
@@ -288,7 +290,7 @@ Step 9 — SUMMARIZE
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed,timeout}> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
@@ -334,12 +336,12 @@ When any step instructs "FAIL with status=X, block_reason=Y":
   2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
   3. Immediately sync the live issue label to blocked-cc before summarizing. Each invocation MUST be a separate Bash exec, in the exact form used at Step 6 / B4 / T4 (full `bash {SCRIPTS_DIR}/set_issue_label.sh ...` absolute path + inline env vars):
      - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
          REPO_PATH={REPO_PATH} \
          RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
          bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
      - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
          REPO_PATH={REPO_PATH} \
          RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
          bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
@@ -365,7 +367,7 @@ reclassifying.
 
 B1 — STAGE (same script as Step 2 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -379,7 +381,7 @@ B1 — STAGE (same script as Step 2 of the normal flow)
 
 B2 — COMMIT + push (same script as Step 3 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -390,7 +392,7 @@ B2 — COMMIT + push (same script as Step 3 of the normal flow)
 
 B3 — POST-PUSH verify (best-effort; same script as Step 4)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
@@ -400,12 +402,12 @@ B3 — POST-PUSH verify (best-effort; same script as Step 4)
 B4 — LABEL doing → blocked-cc
   Each invocation MUST be a separate Bash exec.
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
       REPO_PATH={REPO_PATH} \
       RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
       REPO_PATH={REPO_PATH} \
       RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
@@ -421,7 +423,7 @@ B5 — SUMMARIZE (local-only; SAME script as Step 9)
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
     BLOCK_REASON=<BLOCK_REASON> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
@@ -465,7 +467,7 @@ sub-steps succeed.
 
 T1 — STAGE (same script as Step 2 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -479,7 +481,7 @@ T1 — STAGE (same script as Step 2 of the normal flow)
 
 T2 — COMMIT + push (same script as Step 3 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -492,7 +494,7 @@ T2 — COMMIT + push (same script as Step 3 of the normal flow)
 
 T3 — POST-PUSH verify (best-effort; same script as Step 4)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
@@ -502,12 +504,12 @@ T3 — POST-PUSH verify (best-effort; same script as Step 4)
 T4 — LABEL doing → timeout
   Each invocation MUST be a separate Bash exec.
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
       REPO_PATH={REPO_PATH} \
       RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
       REPO_PATH={REPO_PATH} \
       RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh add timeout
@@ -523,7 +525,7 @@ T5 — SUMMARIZE (local-only; SAME script as Step 9)
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
     BLOCK_REASON=<BLOCK_REASON> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} MODEL={MODEL} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \

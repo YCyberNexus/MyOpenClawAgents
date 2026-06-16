@@ -78,14 +78,35 @@ if [ "${PENDING_ATTEMPT}" != "${ATTEMPT_NUMBER}" ]; then
 fi
 
 scrub_spawn_payload() {
-  local attempt_padded payload_file
+  local attempt_padded glob_base payload_file any nullglob_prev
   attempt_padded="$(printf '%03d' "${ATTEMPT_NUMBER}")"
-  payload_file="${WORKTREES_ROOT}/issue-${IID}/${RESULT_BASENAME}/issue-${IID}/log/attempt-${attempt_padded}/spawn_payload.txt"
-  if [ -f "${payload_file}" ]; then
+  # LOG_DIR now carries the pinned model tier as a `-<tier>` suffix
+  # (env_paths.sh: log/attempt-NNN-<tier>/), so the payload that
+  # dispatch_prepare_tick.sh wrote lives under the tier-suffixed dir. This
+  # script does NOT source the per-issue env_paths layer (it uses IID, not
+  # ISSUE_IID, and the tier is not in its required env), so match by prefix
+  # instead of hardcoding the old bare `attempt-NNN` name: the glob covers the
+  # tier-suffixed dir AND any legacy bare dir (or an attempt spawned just
+  # before this change deployed). The spawn payload holds the GitLab token in
+  # cleartext until this scrub runs, so missing the path would be a
+  # token-exposure regression — prefix-matching keeps the scrub robust without
+  # needing to know the tier here.
+  glob_base="${WORKTREES_ROOT}/issue-${IID}/${RESULT_BASENAME}/issue-${IID}/log/attempt-${attempt_padded}"
+  any=false
+  # Save and restore the caller's nullglob state rather than blindly disabling
+  # it — nullglob must be ON so a no-match glob expands to nothing (instead of
+  # the literal pattern, which `: >` would then create as a stray file), but we
+  # leave the shell option set exactly as we found it.
+  nullglob_prev="$(shopt -p nullglob)"
+  shopt -s nullglob
+  for payload_file in "${glob_base}"/spawn_payload.txt "${glob_base}"-*/spawn_payload.txt; do
+    any=true
     : >"${payload_file}" 2>/dev/null \
-      && wrapper_log record_spawn "scrubbed spawn payload iid=${IID}" \
+      && wrapper_log record_spawn "scrubbed spawn payload iid=${IID} (${payload_file})" \
       || wrapper_log record_spawn "warn: could not scrub spawn payload at ${payload_file}"
-  fi
+  done
+  eval "${nullglob_prev}"
+  [ "${any}" = true ] || wrapper_log record_spawn "no spawn payload found to scrub iid=${IID} attempt=${attempt_padded}"
 }
 
 case "${STATUS}" in

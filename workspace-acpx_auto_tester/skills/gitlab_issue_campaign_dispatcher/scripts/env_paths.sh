@@ -48,9 +48,13 @@
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
 #                                                        ← OUTPUT_DIR (force-added; shared
 #                                                          across attempts of this IID)
-#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
+#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN-<tier>/
 #                                                        ← LOG_DIR (still attempt-scoped
-#                                                          inside the shared worktree;
+#                                                          inside the shared worktree; the
+#                                                          `-<tier>` suffix is the pinned
+#                                                          model tier MODEL (flash/pro/max)
+#                                                          so the run folder shows at a glance
+#                                                          which model produced it;
 #                                                          the whole LOG_DIR is
 #                                                          force-added by stage_and_guard.sh
 #                                                          (only post-push wiki_* stay
@@ -65,7 +69,12 @@
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
 #         ISSUES_ROOT, LOCK_FILE, WORKTREES_ROOT
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
-#                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
+#                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER, MODEL
+#       (MODEL = the pinned model tier name, e.g. flash/pro/max; it is REQUIRED
+#        here because LOG_DIR and LOCAL_ATTEMPT_BRANCH carry it as a `-<tier>`
+#        suffix, and every dispatcher / subagent script re-derives those paths
+#        by sourcing this file — a missing or divergent MODEL would split the
+#        pipeline across two path spellings.)
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
 #         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
 #         LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
@@ -270,6 +279,24 @@ export -f issue_state_file_for
 if [ -n "${ISSUE_IID:-}" ]; then
   : "${ATTEMPT_NUMBER:?env_paths.sh: ATTEMPT_NUMBER must be set when ISSUE_IID is set (dispatcher allocates via allocate_attempt.sh)}"
 
+  # MODEL (the pinned model tier name, e.g. flash/pro/max) participates in
+  # LOG_DIR and LOCAL_ATTEMPT_BRANCH so the per-attempt log directory and the
+  # immutable per-attempt branch both carry the tier as a `-<tier>` suffix
+  # (e.g. .../log/attempt-003-pro, issue/<iid>-auto-fix-att003-pro) for quick
+  # at-a-glance benchmarking. It is REQUIRED here for the same reason
+  # ATTEMPT_NUMBER is: every dispatcher and subagent script re-derives these
+  # paths by sourcing this file, so a missing or divergent MODEL would split the
+  # pipeline across two path spellings. The dispatcher pins it per tick from
+  # pin_model_tier and threads it through iid_env (dispatcher side) and the
+  # executor prompt's env contract (subagent side).
+  : "${MODEL:?env_paths.sh: MODEL (pinned model tier, e.g. flash/pro/max) must be set when ISSUE_IID is set — the dispatcher threads it via iid_env / the executor prompt so LOG_DIR and LOCAL_ATTEMPT_BRANCH carry the tier suffix consistently}"
+  case "${MODEL}" in
+    *[!A-Za-z0-9._-]*)
+      echo "env_paths.sh: MODEL='${MODEL}' contains characters outside [A-Za-z0-9._-]; refusing to build LOG_DIR / LOCAL_ATTEMPT_BRANCH with an unsafe tier slug" >&2
+      exit 1
+      ;;
+  esac
+
   export ISSUE_ROOT="${ISSUES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
   export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
@@ -311,18 +338,23 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # persistent subtree). Cross-attempt state (state.json, attempt_state.json,
   # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
   # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree
-  # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/ so successive attempts
-  # do NOT overwrite each other's artifacts. The whole LOG_DIR present at
+  # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN-<tier>/ so successive
+  # attempts do NOT overwrite each other's artifacts AND the run folder shows
+  # the pinned model tier at a glance. The whole LOG_DIR present at
   # staging time is force-added onto `${LOCAL_ATTEMPT_BRANCH}` (eval full
   # archival); only the post-push wiki_* files stay locally ignored via the
   # repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
-  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
+  # The `-${MODEL}` suffix stamps the pinned model tier (flash/pro/max) onto
+  # both the per-attempt run folder and the immutable per-attempt branch so the
+  # model used for a run is visible at a glance from `ls` and from the GitLab
+  # branch list, without opening state.json / metrics.json or the issue labels.
+  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}-${MODEL}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
-  export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
+  export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}-${MODEL}"
 
   # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR
   # are created inside prepare_attempt.sh after `git worktree add`

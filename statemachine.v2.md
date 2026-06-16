@@ -10,7 +10,7 @@
 > - 无 MR / 无 `pr` 标签，`done` 即**终态成功**（永不被替换）；GitLab 级别完成 = 人工关闭 issue。
 > - `continue` / resume **已禁用**：每次 attempt 强制 fresh，从 `origin/${dev_branch}` 干净基线起跑。
 > - 模型档位由 per-tick **必填**触发字段 `pin_model_tier` 钉死：**无失败升档阶梯、无单调只升不变式**，pin 可下调档位。
-> - 每 attempt 只推送**一个不可变的 per-attempt 远端分支** `LOCAL_ATTEMPT_BRANCH = issue/<iid>-auto-fix-att<NNN>`（非 force、推一次、永不覆盖）；`WORK_BRANCH = issue/<iid>-auto-fix` 退化为**仅命名前缀，不再推送**。
+> - 每 attempt 只推送**一个不可变的 per-attempt 远端分支** `LOCAL_ATTEMPT_BRANCH = issue/<iid>-auto-fix-att<NNN>-<tier>`（非 force、推一次、永不覆盖；尾部 `-<tier>` 是本次锁定的模型等级 flash/pro/max，同样的后缀也加在该次运行的 `log/attempt-<NNN>-<tier>/` 目录上，便于从分支列表与文件夹一眼看出用了哪档模型）；`WORK_BRANCH = issue/<iid>-auto-fix` 退化为**仅命名前缀，不再推送**。
 >
 > production / 通用版 v2 设计（`pr` 替换 `done`、`resolve_model_tier` 失败升档、`continue` 续作、`quality:low` 软信号、Temporal 工作流 `temporal/workflows/`）**不在本分支、也不在本文件**——如需参考见其它分支与 git 历史，不要据其推断 benchmark-test 的真实行为。
 
@@ -113,7 +113,7 @@ subagent compact 回执用 side-agnostic 的 `status` 词表（`done` / `no_chan
 
 ## 4. 推送模型（每 attempt 不可变远端分支）
 
-- 每个 attempt 推送**恰好一个**远端分支：不可变的 per-attempt 分支 `LOCAL_ATTEMPT_BRANCH = issue/<iid>-auto-fix-att<NNN>`，由 `commit_and_push.sh` 用**非 force** push 推送（分支名每 attempt 唯一，首推总是新分支），带 `ls-remote` 幂等跳过（同 attempt 重跑时若 ref 已在 origin 则跳过，不覆盖留档产物）。**永不覆盖**。
+- 每个 attempt 推送**恰好一个**远端分支：不可变的 per-attempt 分支 `LOCAL_ATTEMPT_BRANCH = issue/<iid>-auto-fix-att<NNN>-<tier>`（尾部 `-<tier>` 为本次锁定的模型等级），由 `commit_and_push.sh` 用**非 force** push 推送（分支名每 attempt 唯一，首推总是新分支），带 `ls-remote` 幂等跳过（同 attempt 重跑时若 ref 已在 origin 则跳过，不覆盖留档产物）。**永不覆盖**。
 - 旧的可变"最新指针" `WORK_BRANCH = issue/<iid>-auto-fix` **不再被推送**；它退化为 `env_paths.sh` 派生 `LOCAL_ATTEMPT_BRANCH` 的**命名前缀**，无远端推送/校验意义。`post_push_verify.sh` 的 push 后健康检查 fetch 的也是 `${LOCAL_ATTEMPT_BRANCH}`。
 - partial work（`blocked-cc` / `timeout` 路径）同样尽力 commit + push 到不可变 per-attempt 分支；不发 Wiki 证据、不开 MR、不加 `pr`。
 - compact 回执的 `work_branch` 字段**恒为空字符串 `""`**（旧的 `WORK_BRANCH` 不再推送，无意义）；真实推送的远端分支由 `local_branch` 字段承载。
@@ -131,6 +131,6 @@ subagent compact 回执用 side-agnostic 的 `status` 词表（`done` / `no_chan
 
 `benchmark-test` 把 agent 特化为专门评测 model 的工具，从**效率 + 准确率**两维对比候选模型（cost 不采，交专门部门）。除了上面已贯穿全文的行为（`pin_model_tier` 钉档、`done` 终态无 `pr`、强制 fresh、每 attempt 不可变分支），它还有：
 
-- **全量留档。** `stage_and_guard` force-add 当前 issue 的 `${OUTPUT_DIR}` 与**整个** `${LOG_DIR}`（全部 artifact，非仅 reviewer 文件）；每 attempt 的不可变分支 `issue/<iid>-auto-fix-att<NNN>` 永久保留该次运行的完整产物，供 `issue × model` 横向对比。
+- **全量留档。** `stage_and_guard` force-add 当前 issue 的 `${OUTPUT_DIR}` 与**整个** `${LOG_DIR}`（全部 artifact，非仅 reviewer 文件）；每 attempt 的不可变分支 `issue/<iid>-auto-fix-att<NNN>-<tier>`（与运行目录 `log/attempt-<NNN>-<tier>/` 同样带模型等级后缀）永久保留该次运行的完整产物，供 `issue × model` 横向对比。
 - **指标采集与汇总。** subagent Step 1.5 调 `collect_metrics.sh` 写 `metrics.json`（wall_clock + robot 通过率，best-effort），随 compact 回执回传；Phase 6 append 到 `${RESULT_BASENAME}/_dispatcher/benchmark/metrics.jsonl`（model 由 issue state 权威补齐）；`aggregate_benchmark.sh` 出 `issue × model` 矩阵。
 - **保留不变的可靠性核心：** `reconcile` + 证据文件、`flock`、`precheck`、`timeout` / 孤儿防护、UI 账号池、并发 per-issue worktree、anonymous spawn + async callback、per-side 失败标签拆分（`blocked-cc` / `blocked-dispatcher` / `failed-cc` / `failed-dispatcher`）。
