@@ -1,12 +1,19 @@
 #!/usr/bin/env bash
 # Stop hook: block end-of-turn if workspace-acpx_auto_tester/ has unreviewed changes
 # made during THIS conversation (not pre-existing dirty files).
-# Baseline (auto-initialized once): .claude/.review-baseline — fingerprint at conversation start.
-# Sentinel: .claude/.review-done-sha — fingerprint of the last reviewed state.
+# Baseline (auto-initialized once): .review-baseline — fingerprint at conversation start.
+# Sentinel: .review-done-sha — fingerprint of the last reviewed state.
+# Both sentinels live next to this script (workspace-acpx_auto_tester/.claude/) and are
+# resolved as ABSOLUTE paths, so the hook works whether Claude Code is launched from the
+# repo root or from inside workspace-acpx_auto_tester/ (the diff scope stays git-root-relative).
 set -euo pipefail
 
 # Drain stdin (hook input JSON) — not needed for logic, but keeps the pipe tidy.
 cat >/dev/null || true
+
+# Resolve the sentinel directory from this script's own location BEFORE any cd
+# (BASH_SOURCE is still relative to the launch cwd at this point).
+claude_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
 cd "$repo_root"
@@ -27,7 +34,7 @@ if [ "$fingerprint" = "$empty_hash" ]; then
 fi
 
 # Baseline: auto-initialize on first hook run so pre-existing dirty files don't count.
-baseline=".claude/.review-baseline"
+baseline="$claude_dir/.review-baseline"
 if [ ! -f "$baseline" ]; then
   printf %s "$fingerprint" > "$baseline"
   exit 0
@@ -36,7 +43,7 @@ if [ "$fingerprint" = "$(cat "$baseline" 2>/dev/null)" ]; then
   exit 0
 fi
 
-sentinel=".claude/.review-done-sha"
+sentinel="$claude_dir/.review-done-sha"
 if [ -f "$sentinel" ] && [ "$(cat "$sentinel" 2>/dev/null)" = "$fingerprint" ]; then
   exit 0
 fi

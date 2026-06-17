@@ -18,6 +18,8 @@ out/
 *~
 *.swp
 *.swo
+# drawio autosave backups (e.g. .$statemachine.v2.drawio.bkp)
+.$*.bkp
 
 # drawio 编辑器自动生成的备份/临时文件（.$<name>.bkp）
 .$*.bkp
@@ -35,5 +37,5 @@ node_modules/
 *.log
 
 # Claude Code hook sentinels (state, not config)
-.claude/.review-done-sha
-.claude/.review-baseline
+workspace-acpx_auto_tester/.claude/.review-done-sha
+workspace-acpx_auto_tester/.claude/.review-baseline
