@@ -1,0 +1,22 @@
+# ─── acpx_auto_tester agent runtime ─────────────────────────────
+# All agent runtime files (campaign state, locks, dispatcher logs,
+# per-issue state.json / attempt_state.json / log/ / summary.md) live
+# under the agent runtime root and must NEVER be committed. The default
+# basename is `ifp-result/`; projects that pass `result_basename=<name>`
+# in the trigger should replace the entry below with the matching name
+# (e.g. `pts-result/`). The agent additionally writes the chosen
+# basename into `.git/info/exclude` per-clone, so this `.gitignore`
+# entry is belt-and-suspenders rather than strictly required.
+#
+# The ONLY exception is each issue's output directory
+# `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/`, which the agent
+# explicitly force-adds via `git add -f` in stage_and_guard.sh —
+# that bypasses this gitignore for the single allowed path.
+ifp-result/
+
+# ─── Common local noise ─────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
