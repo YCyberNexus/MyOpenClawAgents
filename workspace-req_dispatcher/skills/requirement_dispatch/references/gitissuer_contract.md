@@ -20,6 +20,39 @@ req_dispatcher 是薄透传，对 git_issuer 的唯一硬依赖是：
 - [ ] **project 解析失败**：git_issuer 解析不出 project 时，回调按"失败 + 原因"返回（req_dispatcher 记 ledger + 可选 ops 通知，不自动重试）。
 - [ ] **用户通知归属**：确认"issue 已建 / 测试结果"由 git_issuer / acpx 各自的 channel 通知企微用户——req_dispatcher 极简、不主动回状态，依赖此前提成立。
 
+## 回传消息模板（git_issuer 完成回调的终态输出）
+
+git_issuer 建完 issue 后，在它**最后一轮的最后一行**只输出**一行紧凑 JSON**（无散文、无代码围栏、无日志）。OpenClaw runtime 捕获该行作为完成回调的终态输出，交给 req_dispatcher 的回调路径解析（与 acpx 子代理的 compact-reply 同一约定）。承载该行的回调信封字段名待对齐，见 [`trigger_command.md`](trigger_command.md) §回调 trigger ⚠️。
+
+**成功**（实际就输出这一行）：
+
+```
+{"status":"success","issue_iid":312,"issue_url":"http://<host>/<group>/<project>/-/issues/312","project":"<group>/<project>","entry_label":"todo","reason":null,"correlation_id":null}
+```
+
+**失败**：
+
+```
+{"status":"failed","issue_iid":null,"issue_url":null,"project":null,"entry_label":null,"reason":"无法从需求文本解析出目标 project","correlation_id":null}
+```
+
+### 字段语义
+
+| 字段 | 何时必填 | 含义 / req_dispatcher 怎么用 |
+|------|---------|------------------------------|
+| `status` | 总是 | `"success"` \| `"failed"`。映射到 `drain_pending.sh` 的 `OUTCOME`（success→success，failed→failed）。**git_issuer 不发 `launch_failed`**——那是 req_dispatcher 在 spawn 失败时自己合成的（见 state_schema.md 的 outcome 枚举）。 |
+| `issue_iid` | success | 整数 IID → `ISSUE_IID`。正整数、无前导零。 |
+| `issue_url` | success | issue 完整 URL → `ISSUE_URL`。 |
+| `project` | 建议 | git_issuer 从需求文本解析出的实际 `<group>/<project>`。供审计，并用于确认 acpx 衔接前提（该 project 是否有 acpx campaign 在跑，见 [`../../../AGENTS.md`](../../../AGENTS.md) §acpx 衔接依赖）。 |
+| `entry_label` | 建议 | 实际打上的 acpx 入口标签（如 `todo`/`new`）。供排查"为何 acpx 没捞起"。 |
+| `reason` | failed | 失败原因（解析不出 project / `glab` 建 issue 失败 / 打标签失败……）→ `REASON`。 |
+| `correlation_id` | 可选 | **默认 `null`**。仅当走待对齐的"回显模式"才回显 req_dispatcher 传来的值（见下方"不依赖项"与 trigger_command.md §匹配）。 |
+
+### 两条约定
+
+1. **匹配不靠这个 JSON**：req_dispatcher 用 runtime 回调自带的 `run_id` 匹配 pending（对 git_issuer 零侵入）。本 JSON 只承载"issue 事实"；git_issuer **不需要知道也不需要回显 `run_id`**。
+2. **只输出最后一行那一条**：运行过程的日志/散文随意，但最后一轮的最后一行必须只有这一行紧凑 JSON，runtime 才能干净捕获。
+
 ## 不依赖项（明确）
 
 - req_dispatcher **不**依赖 git_issuer 回显任何 req_dispatcher 生成的 token（匹配以 `run_id` 为主，见 trigger_command.md §匹配）。仅在 `run_id`/`child_session_key` 都拿不到的退化情形才需要回显 `correlation_id`。
