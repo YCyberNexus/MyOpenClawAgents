@@ -20,7 +20,8 @@ req_dispatcher 是薄透传，对 git_issuer 的唯一硬依赖是：
 - [ ] **失败表达**：失败如何表示、原因字段名。SKILL 据此填 `OUTCOME=failed` + `REASON`。
 - [ ] **入口标签**：git_issuer 默认打哪个 acpx 入口标签？是否按 project 不同而不同？（若需 req_dispatcher 显式指定，则启用 `config/dispatcher.env` 的 `DEFAULT_ENTRY_LABEL` 并随 payload 传——默认不需要。）
 - [ ] **project 解析失败**：git_issuer 解析不出 project 时，回调按"失败 + 原因"返回（req_dispatcher 记 ledger + 可选 ops 通知，不自动重试）。
-- [ ] **用户通知归属**：确认"issue 已建 / 测试结果"由 git_issuer / acpx 各自的 channel 通知企微用户——req_dispatcher 极简、不主动回状态，依赖此前提成立。
+- [ ] **origin 标记（测试结果闭环用）**：从需求文本解析出发起人 origin（channel/user/conversation id，和 project 一样从文本解析），建好 issue 后写一条隐藏标记 note `<!-- req_origin v1 {...} -->`（**不写进 description**），供 acpx 终态读出来通知发起人。supersede 出新 issue 时一并复制。完整端到端契约见 [`result_notify_loop.md`](result_notify_loop.md)。
+- [ ] **用户通知归属**：已决定走"按用户闭环"（[`result_notify_loop.md`](result_notify_loop.md)）：issue 已建由 git_issuer 通知发起人；**测试结果由 acpx 读 `req_origin` 后通知发起人**。req_dispatcher 极简、不主动回状态，依赖此分工成立。
 
 ## 回传消息模板（git_issuer 完成回调的终态输出）
 

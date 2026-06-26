@@ -173,7 +173,7 @@ GIT_ISSUER_AGENT=git_issuer          # 下游目标 agent 名
 
 **非目标**：
 - 不实现 PRD 生成 / 语义建模 / Issue 拆分（那是架构图蓝区其它 agent 的事；本链路里 git_issuer 直接"需求→issue"）。
-- 不实现测试结果回流企微。
+- 不实现测试结果回流企微 **（已变更）**：后续决定走"按用户闭环"，但**不经过 req_dispatcher**——由 git_issuer 写 `req_origin` 标记、acpx 终态读出后通知发起人。req_dispatcher 在该闭环里保持不变。端到端契约见 [`../../integration/result_notify_loop.md`](../../integration/result_notify_loop.md)。
 - 不实现需求去重。
 
 **风险**：

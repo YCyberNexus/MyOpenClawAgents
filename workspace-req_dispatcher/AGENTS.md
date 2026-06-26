@@ -48,6 +48,8 @@ schema 详见 [`skills/requirement_dispatch/references/state_schema.md`](skills/
 
 req_dispatcher 的终点是"issue 已建且带 acpx 入口标签"，之后完全交给 `acpx_auto_tester` 既有 cron tick。**前提**：目标 project 必须有对应的 acpx campaign 在 cron 上跑，acpx 才能捞起该 issue。由于 project 由 git_issuer 按需求解析、acpx 是 per-project 部署，**全公司多 project 场景下，每个目标 project 都需有对应的 acpx campaign**——这属于 acpx/部署侧职责，不在 req_dispatcher 范围，但在此显式记录为依赖。
 
+**测试结果闭环**：acpx 处理完 issue 后把结果回报给发起需求的企微用户，这条闭环**不经过 req_dispatcher**（req_dispatcher 与 acpx 无 spawn 关系、已 drain、不知会话）——靠 git_issuer 在 issue 写 `req_origin` 标记、acpx 终态读出来通知。端到端契约见 [`docs/integration/result_notify_loop.md`](docs/integration/result_notify_loop.md)；req_dispatcher 在其中不变。
+
 ## 不在本机运行
 
 与 `acpx_auto_tester` 一样，本工作区是 **OpenClaw agent 部署工件**，只在 server 上跑。本地开发只做静态检查（`bash -n`）与脚本功能冒烟（纯本地 state 操作可跑），不启动 agent。详见 [`CLAUDE.md`](CLAUDE.md)。
