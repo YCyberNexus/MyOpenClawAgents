@@ -188,6 +188,15 @@ glab api --method PUT \
 
 The subagent constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}/-/wikis/${WIKI_TITLE}` and posts those links back to the issue with G9.
 
+### G14 — Test-result回报: read `req_origin` + post `req_result` (dispatcher, Phase 6)
+
+Used by `scripts/post_result_note.sh` when `result_note_enabled` is on, after a terminal `done` / `failed` / `timeout` drains. It reuses the existing note primitives — no new API surface:
+
+- **Read** the issue's notes with **G1b** (`GET .../issues/${IID}/notes`), then extract the last `<!-- req_origin v1 {…} -->` marker's JSON payload (written upstream by `git_issuer`). If no such marker exists, the script is a no-op (the issue did not originate from the req_dispatcher → git_issuer pipeline).
+- **Post** a `req_result` note with **G9** (`POST .../issues/${IID}/notes -F body=@<file>`), body's first line `<!-- req_result v1 {iid,status,attempt,mr_url,reason,ts,origin} -->` plus a human-readable summary line. An external relay (the 114 side) polls/webhooks these markers and delivers the result to the original requester.
+
+This is best-effort and dispatcher-side: failure is logged to `wrapper.log` and never aborts Phase 6. It touches only issue **notes** — never labels, MR, or state files. Full cross-region contract: the req_dispatcher workspace's `docs/integration/result_notify_loop.md`.
+
 ## What is FORBIDDEN
 
 - `glab mr merge` — under any circumstances. The MR stays open until a human merges.

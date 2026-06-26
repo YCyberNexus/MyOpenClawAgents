@@ -187,6 +187,7 @@ FINAL_STATUS="$(printf '%s' "${PHASE6_OUT}" | jq -r '.final_status')"
 CLEANUP="$(printf '%s' "${PHASE6_OUT}" | jq -c '.cleanup')"
 REMAINING_COUNT="$(printf '%s' "${PHASE6_OUT}" | jq -r '.remaining_pending_count')"
 MR_URL="$(printf '%s' "${REPLY_JSON}" | jq -r '.merge_request_url // ""')"
+WIKI_URL="$(printf '%s' "${REPLY_JSON}" | jq -r '.wiki_url // ""')"
 CAMPAIGN_STATUS="$(printf '%s' "${NEW_STATE}" | jq -r '.campaign_status // "running"')"
 if [ "${REMAINING_COUNT}" = "0" ] && [ "${CAMPAIGN_STATUS}" = "waiting_for_callbacks" ]; then
   CAMPAIGN_STATUS="running"
@@ -202,6 +203,31 @@ CHAT_SUMMARY="#${IID} ${FINAL_STATUS}"
 CLEANUP_REASON="$(printf '%s' "${CLEANUP}" | jq -r '.reason')"
 CLEANUP_ACTION="$(printf '%s' "${CLEANUP}" | jq -r '.action')"
 CHAT_SUMMARY="${CHAT_SUMMARY} cleanup=${CLEANUP_ACTION}:${CLEANUP_REASON}"
+
+# Best-effort 测试结果回报 (result_notify_loop.md, option A). Gated by
+# campaign_state.result_note_enabled (default false; carry-forward from a
+# scheduled tick). Only terminal, user-meaningful outcomes (done/failed/
+# timeout) — never `blocked` (retryable, would re-post each attempt).
+# Isolation: stdout → /dev/null (the envelope below is the LLM's ONLY stdout),
+# and `set +e` so a notify failure NEVER aborts Phase 6. post_result_note.sh
+# is itself a no-op when the issue has no req_origin marker.
+RESULT_NOTE_ENABLED="$(printf '%s' "${NEW_STATE}" | jq -r '.result_note_enabled // false')"
+case "${FINAL_STATUS}" in
+  done|failed|timeout)
+    if [ "${RESULT_NOTE_ENABLED}" = "true" ]; then
+      set +e
+      PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+      REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+      RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
+      IID="${IID}" ATTEMPT_NUMBER="${REPLY_ATTEMPT}" \
+      FINAL_STATUS="${FINAL_STATUS}" MR_URL="${MR_URL}" WIKI_URL="${WIKI_URL}" BLOCK_REASON="${BLOCK_REASON}" \
+      bash "${SCRIPT_DIR}/post_result_note.sh" >/dev/null 2>>"${DISPATCHER_LOG_DIR}/wrapper.log"
+      RN_RC=$?
+      set -e
+      [ "${RN_RC}" -eq 0 ] || wrapper_log followup "result-note best-effort rc=${RN_RC} iid=${IID} (non-fatal)"
+    fi
+    ;;
+esac
 
 jq -nc \
   --argjson iid "${IID}" \

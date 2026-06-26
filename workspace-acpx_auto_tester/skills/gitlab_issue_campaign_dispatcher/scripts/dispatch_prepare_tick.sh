@@ -459,9 +459,23 @@ if [ -n "${T[continue_upgrade_threshold]:-}" ]; then
   CONT_UPGRADE_THRESHOLD_PROVIDED=true
 fi
 
+# result_note_enabled (bool): optional, carry-forward. Opt-in switch for the
+# Phase 6 test-result回报 (result_notify_loop.md, option A). When the trigger
+# supplies it, it overrides; when omitted, the persisted value is preserved
+# (default false). Off by default so existing deployments are unaffected.
+RESULT_NOTE_PROVIDED=false
+RESULT_NOTE_ENABLED="false"
+if [ -n "${T[result_note_enabled]:-}" ]; then
+  RESULT_NOTE_ENABLED="$(to_bool "${T[result_note_enabled]}")"
+  [ "${RESULT_NOTE_ENABLED}" = INVALID ] && emit_chat_failure "invalid_result_note_enabled"
+  RESULT_NOTE_PROVIDED=true
+fi
+
 # Apply trigger overrides into the state JSON.
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg project "${PROJECT}" \
+  --argjson result_note_provided "${RESULT_NOTE_PROVIDED}" \
+  --argjson result_note_enabled "${RESULT_NOTE_ENABLED}" \
   --argjson model_tiers_provided "${MODEL_TIERS_PROVIDED}" \
   --argjson model_tiers "${MODEL_TIERS_JSON}" \
   --argjson cont_threshold_provided "${CONT_UPGRADE_THRESHOLD_PROVIDED}" \
@@ -509,6 +523,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     run_timeout_seconds: $run_timeout_seconds,
     acpx_timeout_seconds: $acpx_timeout_seconds,
     kill_subagent_on_terminal: $kill_subagent_on_terminal,
+    result_note_enabled: (if $result_note_provided then $result_note_enabled else (.result_note_enabled // false) end),
     issue_iids_whitelist: $issue_iids_whitelist,
     require_labels: $require_labels,
     require_labels_match: $require_labels_match,

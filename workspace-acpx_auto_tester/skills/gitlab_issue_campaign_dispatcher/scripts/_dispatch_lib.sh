@@ -139,6 +139,7 @@ fresh_init_state() {
       acpx_timeout_seconds: 18000,
       kill_subagent_on_terminal: true,
       kill_subagent_on_done: true,
+      result_note_enabled: false,
       issue_iids_whitelist: [],
       require_labels: [],
       require_labels_match: "or",
