@@ -45,5 +45,5 @@ openclaw --gateway-url ws://<104-host>:<port> \
 ## 依赖与对齐项
 
 - 跨 agent 调用原语 + 回调字段：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)（待对齐）。
-- git_issuer I/O 契约：[`skills/requirement_dispatch/references/gitissuer_contract.md`](skills/requirement_dispatch/references/gitissuer_contract.md)（待与同事对齐）。
+- git_issuer 对接文档（跨团队，待与同事对齐）：创建契约 [`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)、变更请求契约 [`docs/integration/gitissuer_change_request.md`](docs/integration/gitissuer_change_request.md)。
 - acpx 衔接前提（目标 project 需有对应 acpx campaign 在跑）：[`AGENTS.md`](AGENTS.md) §acpx 衔接依赖。

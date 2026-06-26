@@ -36,7 +36,8 @@
 | `config/README.md` | 配置说明与部署步骤 |
 | `skills/requirement_dispatch/SKILL.md` | 唯一 SKILL：两路径算法（含 SKILL_VERSION） |
 | `skills/requirement_dispatch/references/trigger_command.md` | 两条 trigger 字段契约 + 跨 agent 原语/回调形态（占位待补） |
-| `skills/requirement_dispatch/references/gitissuer_contract.md` | git_issuer 入参/回调契约（占位，与同事对齐） |
+| `docs/integration/gitissuer_contract.md` | git_issuer 创建契约 + 回传模板（跨团队对接文档，非运行时 reference） |
+| `docs/integration/gitissuer_change_request.md` | git_issuer 需求变更对接契约（跨团队对接文档） |
 | `skills/requirement_dispatch/references/state_schema.md` | pending.json / ledger schema |
 | `skills/requirement_dispatch/scripts/env_paths.sh` | 路径自举（每脚本顶部 source） |
 | `skills/requirement_dispatch/scripts/record_pending.sh` | 接入路径：记一条 pending（flock） |

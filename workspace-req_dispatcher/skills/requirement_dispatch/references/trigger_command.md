@@ -27,7 +27,21 @@
 
 - [ ] 回调 trigger 的确切名称（占位：`RUN_GITISSUER_CALLBACK`）。
 - [ ] 回调里 `run_id`（或 `child_session_key`）字段名——**回调路径以此为主匹配键**。
-- [ ] git_issuer 终态输出承载在哪个字段（类比 acpx 的 `worker_result_json`），以及其结构（见 [`gitissuer_contract.md`](gitissuer_contract.md)）。
+- [ ] git_issuer 终态输出承载在哪个字段（类比 acpx 的 `worker_result_json`）。其完整结构与字段含义（git_issuer 一侧的产出规格）见 [`gitissuer_contract.md`](../../../docs/integration/gitissuer_contract.md)（跨团队对接文档，**orchestrator 运行时不必读它**——下面这张映射表才是回调路径解析所需的运行时契约）。
+
+### 回调字段 → drain_pending env（运行时解析契约，已定）
+
+orchestrator 回调路径从 git_issuer 终态 JSON 取值，填入 `drain_pending.sh` 的 env：
+
+| git_issuer JSON 字段 | drain_pending env | 备注 |
+|----------------------|-------------------|------|
+| `status`（`success`\|`failed`） | `OUTCOME` | 原样透传；`launch_failed` 不来自 git_issuer（spawn 失败时 req_dispatcher 自合成）。 |
+| `issue_iid` | `ISSUE_IID` | success 才有。 |
+| `issue_url` | `ISSUE_URL` | success 才有。 |
+| `reason` | `REASON` | failed 才有。 |
+| —（不取） | `RUN_ID` | **来自 runtime 回调自带的 `run_id`，不取自这段 JSON**（匹配键，见 §匹配）。 |
+
+`project` / `entry_label` / `action` / `superseded_by` 等字段供审计/排查，orchestrator 不强依赖。完整字段表与变更场景的 `action` 扩展见 docs/integration 下的两份对接文档。
 
 ## 匹配策略
 

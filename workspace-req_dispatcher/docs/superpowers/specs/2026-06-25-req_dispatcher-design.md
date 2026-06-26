@@ -80,10 +80,12 @@ workspace-req_dispatcher/
   skills/
     requirement_dispatch/
       SKILL.md            ← 唯一 SKILL：接入 + 回调两路径算法（含 SKILL_VERSION=YYYY-MM-DD.N）
-      references/
-        trigger_command.md    ← 两条 trigger 的字段契约（含跨 agent 原语/回调具体形态，占位待补）
-        gitissuer_contract.md ← git_issuer 入参/回调契约（占位，与同事对齐）
+      references/                 ← orchestrator 运行时读的契约（仅这些）
+        trigger_command.md    ← 两条 trigger 字段契约 + 回调字段→drain env 运行时映射（占位待补）
         state_schema.md       ← pending map / state 文件 schema
+  docs/integration/             ← 跨团队对接文档（orchestrator 运行时不读，给 git_issuer/114 作者）
+    gitissuer_contract.md       ← git_issuer 创建契约 + 回传模板（占位，与同事对齐）
+    gitissuer_change_request.md ← 需求变更（update/close/supersede）对接契约
       scripts/
         env_paths.sh          ← 路径自举（极简版，每脚本顶部 source）
         record_pending.sh     ← 接入路径：记一条 pending
@@ -149,7 +151,7 @@ GIT_ISSUER_AGENT=git_issuer          # 下游目标 agent 名
 ### 10.1 跨 agent 调用原语（→ references/trigger_command.md）
 待补：确切工具名 + 调用参数（如何指定 target=git_issuer、如何传 payload、如何拿到 `run_id`/`child_session_key`）；回调 trigger 的确切名字与字段（`run_id` / `worker_result_json` 等在哪个字段、git_issuer 终态输出如何承载）。**匹配策略以 run_id 为主**，故即便 git_issuer 不回显 correlation_id 也能工作。
 
-### 10.2 git_issuer I/O 契约（→ references/gitissuer_contract.md）
+### 10.2 git_issuer I/O 契约（→ docs/integration/gitissuer_contract.md，跨团队对接文档非运行时 reference）
 待与同事对齐：入参字段（除 requirement_text 外是否还需别的）；回调里成功/失败如何表达；issue IID/URL 在哪个字段；git_issuer 是否确实负责打 acpx 入口标签、打哪个标签、按什么规则解析 project。
 
 ### 10.3 ack 投递（→ USER.md）
