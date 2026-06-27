@@ -9,7 +9,7 @@
 | `GIT_ISSUER_AGENT` | 是 | 下游目标 agent 名。`req_dispatcher` 跨 agent 异步派发给它，由它"需求→issue"并打 acpx 入口标签。默认 `git_issuer`。 |
 | `STATE_ROOT` | 是 | 运行时 state 根目录。`pending.json` / `ledger.jsonl` / 锁 / 序号 / 日志都在 `${STATE_ROOT}/_dispatcher/` 下。必须是 server 上 agent 可写的持久目录。 |
 | `STUCK_AFTER_MINUTES` | 是 | stuck/timeout 兜底阈值（分钟）。pending 超过该时长仍没等到回调 → 合成失败并 drain，避免 pending 永久泄漏。应略大于 git_issuer 单次建 issue 预期最大耗时 + 余量。 |
-| `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel。留空则不通知。 |
+| `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定 acpx 入口标签时用。默认空＝由 git_issuer 自决。 |
 | 跨 agent 原语连接参数 | 待定 | 形态类 `sessions_spawn`、可指定目标 agent、异步回调。具体工具名与参数待与 OpenClaw 维护者/同事对齐，见 `skills/requirement_dispatch/references/trigger_command.md` 占位块。 |
 

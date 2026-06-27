@@ -36,3 +36,7 @@ node_modules/
 # Claude Code hook sentinels (state, not config)
 workspace-acpx_auto_tester/.claude/.review-done-sha
 workspace-acpx_auto_tester/.claude/.review-baseline
+workspace-req_dispatcher/.claude/.review-done-sha
+workspace-req_dispatcher/.claude/.review-baseline
+workspace-req_executor/.claude/.review-done-sha
+workspace-req_executor/.claude/.review-baseline
