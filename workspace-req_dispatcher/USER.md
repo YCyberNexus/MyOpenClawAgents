@@ -1,6 +1,6 @@
 # req_dispatcher User Contract
 
-把本工作区用作"企微需求 → 自动测试"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；本 agent 派发给 `git_issuer` 建 issue，之后被动走 `acpx_auto_tester` 既有流程。
+把本工作区用作"企微需求 → 自动测试"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；本 agent 主动驱动整条链：派发给 `git_issuer` 建 issue → 按 project 路由选目标 `req_executor` 部署、spawn 其单测入口即时测 → 收测试结果回调 → 把结论推回发起需求的企微用户。本 agent 仍不碰 GitLab（不持 token、不调 glab、不解析 project）。
 
 ## 114 如何调用
 
@@ -18,32 +18,38 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 - 发的就是**一段自由文本需求**，不是结构化字段。
 - **目标 project 写在需求文本里**（如"在 project X 里……"）。req_dispatcher 不解析、整段透传，由 `git_issuer` 自己从文本解析 project。
-- `--deliver` 把本 agent 的回复投回企微侧。本 agent 只回一条**最小受理 ack**。
+- 若需把测试结果推回**发起需求的具体企微用户**，需在需求文本里携带 origin 元数据（channel/user/conversation）——确切约定待对齐（见 trigger_command.md §origin）。缺省则结果推送退化为留痕。
+- `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；测试结论稍后由本 agent 经出站通道**异步推回**（不在 ack 里）。
 
 ## 你会收到什么
 
-- **来自 req_dispatcher**：一条最小受理 ack，例如：
-  > 需求已受理，正在创建 issue；进度与结果将由后续流程通知。
+- **同步：来自 req_dispatcher 的最小受理 ack**，例如：
+  > 需求已受理，正在创建 issue 并自动测试，结果稍后通知。
 
-  （ack 是同步返回；issue 由 git_issuer 异步创建，IID/URL 不在 ack 里。）
-- **来自 git_issuer / acpx**：实质通知（issue 已建、测试进度/结果）由它们各自的 channel 发——req_dispatcher 极简，不主动回这些状态。
+  （ack 同步返回；issue 由 git_issuer 异步创建、随后自动测试，IID/URL/结论均不在 ack 里。）
+- **异步：来自 req_dispatcher 的终态结论**（受理 ack 之外的实质通知，仅终态推一次）：
+  - 测试完成 → "#<iid> 测试完成，MR：<mr_url>"
+  - 测试未通过 → "#<iid> 测试未通过：<reason>，证据见 <wiki_url>"
+  - 测试超时 → "#<iid> 测试超时未完成，已停放待人工处理"
+  - 流程性失败（建 issue 失败 / 该 project 未接入执行器 / 启动测试失败）→ 对应失败说明。
 
-> ⚠️ ack 文案与"`--deliver` 是否真把 ack 投回企微"待部署确认；确认后在此固化文案。
+> ⚠️ ack 文案、终态结论的出站推送通道（企微回投 / 经 114）、origin 约定均待部署/对齐确认；未对齐前结论落 ledger/log 留痕，不静默丢，对齐后可回放补投。
 
 ## 预期行为
 
-- 同一个编排器 session 承接所有接入消息与回调。
-- 每条需求 → 一次跨 agent 异步 spawn git_issuer → 一条 pending（主键 `run_id`）→ 回调 drain。
+- 同一个编排器 session 承接接入消息、git_issuer 回调、executor 回调三类唤醒。
+- 每条需求 → 两段异步 spawn（先 git_issuer 建 issue，回调成功后按路由起 req_executor 单测）→ 各一条 pending（各自 `run_id`）→ 各自回调 drain → 终态推用户一次。
 - 多条需求可并发在飞，互不干扰。
-- 失败（spawn 耗尽重试 / git_issuer 报失败 / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 可选 ops 通知。**不自动重试**——重试请重发需求。
-- req_dispatcher **不**追踪测试结果、**不**给企微用户回测试结论。
+- 失败（spawn 耗尽重试 / git_issuer 报失败 / 路由未接入 / 测试 failed/timeout / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 推用户对应说明 + 可选 ops 通知。**不自动重试**——重试请重发需求。
+- req_dispatcher 现在**会**把测试结论推回企微发起人（终态一次），但仍**不**做测试进度播报、**不**碰 GitLab。
 
 ## 配置
 
-部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`。**group/project 不在配置里**（随需求文本传入）。
+部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表）；待对齐占位 `USER_NOTIFY_CHANNEL`（用户推送通道）/ `DISPATCHER_CALLBACK_TARGET`（结果回调目标）。多 project 路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不在配置里**（随需求文本传入）；**GitLab token 不在配置里**（归执行器侧）。
 
 ## 依赖与对齐项
 
-- 跨 agent 调用原语 + 回调字段：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)（待对齐）。
+- 两段跨 agent 调用原语 + 两类回调字段 + executor spawn(I1)/结果回调(I2) 信封：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)（待对齐）。
+- 用户出站推送通道、origin 约定、`correlation_id` 生成：同上 + [`config/README.md`](config/README.md)（待对齐占位）。
 - git_issuer 对接文档（跨团队，待与同事对齐）：创建契约 [`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)、变更请求契约 [`docs/integration/gitissuer_change_request.md`](docs/integration/gitissuer_change_request.md)。
-- acpx 衔接前提（目标 project 需有对应 acpx campaign 在跑）：[`AGENTS.md`](AGENTS.md) §acpx 衔接依赖。
+- req_executor 衔接前提（目标 project 需有路由 + 对应 req_executor 部署可被 spawn）：[`AGENTS.md`](AGENTS.md) §req_executor 衔接依赖；主动编排设计稿 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)。

@@ -10,6 +10,17 @@ Your execution model is **one thick orchestrator session + one anonymous subagen
 
 Full algorithm with step-by-step env vars and failure mapping: [`skills/gitlab_issue_campaign_dispatcher/SKILL.md`](skills/gitlab_issue_campaign_dispatcher/SKILL.md) §Dispatcher Algorithm.
 
+## Pipeline role: req_dispatcher's dedicated test executor
+
+This workspace is the **dedicated test executor for the `req_dispatcher` → `git_issuer` requirement pipeline** ("WeChat-Work 需求 → 自动测试", 104 侧). It originated as a verbatim copy of `acpx_auto_tester` (identity rename only at copy time), carved off so this pipeline can be adapted without disturbing the standalone `acpx_auto_tester` executor. Their dispatcher logic remains identical, so they MUST run **different GitLab projects** and never scan the same issues — they share workflow labels (`todo`/`doing`/`pr`/…) and `WORK_BRANCH=issue/<iid>-auto-fix`, so co-scanning one project would collide. The clone lock `/tmp/req_executor.clone.<project>.lock` is already agent-scoped, so both executors may coexist on one runner host.
+
+There are **two pipeline shapes**, and this agent serves both:
+
+- **Driven (active orchestration, primary going forward).** `req_dispatcher` orchestrates one requirement end-to-end: after `git_issuer` creates the issue, `req_dispatcher` actively drives this executor via the `RUN_SINGLE_ISSUE_TEST` trigger (the **driven single-issue entry**, I1: `project` / `iid` / `correlation_id` / `dispatcher_callback_target` / optional `group`; every other campaign field comes from this agent's `config/` pin). `dispatch_single_issue.sh` records the cross-agent origin to the issue's `dispatch_origin.json`, then synthesizes an equivalent single-IID `RUN_SCHEDULED_ISSUE_CAMPAIGN` (quota=1, concurrency=1) and runs the SAME machine. On a terminal `done` / `failed` / `timeout`, this agent's **Phase 6 best-effort回调 `req_dispatcher`** via `notify_dispatcher.sh` with the I2 result envelope `{correlation_id, iid, project, status, mr_url, wiki_url, reason}`, and **SKIPS** the cron `req_result` note (the user-facing回投 is `req_dispatcher`'s job on this path). The cross-agent send 原语 is 待对齐 (design §9; until aligned the envelope is留痕 to `dispatcher_callbacks.jsonl`). Full contract: `skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md` §Driven single-issue trigger and the req_dispatcher workspace's active-orchestration design.
+- **Cron (passive, retained for batch/backfill & non-driven sources).** `git_issuer` applies an **executor entry label** (`todo`/`new`); this agent's `RUN_SCHEDULED_ISSUE_CAMPAIGN` cron passively picks up the labeled issue and runs the test. This is the legacy "handoff is purely the entry label" shape — the target project must have this agent's campaign running on cron (the "req_executor 衔接依赖" recorded in the req_dispatcher workspace's `AGENTS.md`). The driven path does NOT replace cron; both coexist (design §3.6).
+
+**Cron test-result loop** (`result_notify_loop`, cron path only): `git_issuer` writes a `<!-- req_origin v1 {...} -->` marker note on the issue; on a terminal `done` / `failed` / `timeout`, this agent's Phase 6 runs `post_result_note.sh`, which reads that marker and — only if present — posts a `<!-- req_result v1 {...} -->` note for the 114 side to relay back to the original requester. Gated by trigger `result_note_enabled` (**default off**; turn it on only after `git_issuer` writes `req_origin` and the 114 side polls `req_result`). On the **driven** path this loop is NOT used — the result goes back through the I2 callback above instead, and `post_result_note.sh` is skipped. The two are mutually exclusive, decided by whether the issue carries a `dispatch_origin.json`. End-to-end contract: the req_dispatcher workspace's `docs/integration/result_notify_loop.md`.
+
 ## Roles
 
 ### 1. Campaign Orchestrator
@@ -177,12 +188,13 @@ Full spawn shape and parameter handling: [`skills/gitlab_issue_campaign_dispatch
 
 ## Trigger Commands
 
-The orchestrator handles two trigger commands:
+The orchestrator handles three trigger commands:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` — scheduler tick; runs Phases 1–5.
 - `RUN_CHILD_COMPLETION_CALLBACK` — runtime callback per subagent termination; runs Phase 6 for one IID.
+- `RUN_SINGLE_ISSUE_TEST` — `req_dispatcher`-driven single-issue entry (I1). `dispatch_single_issue.sh` pins the rest of the campaign from `config/`, records the issue's `dispatch_origin.json` (`correlation_id` + `dispatcher_callback_target`), and synthesizes an equivalent single-IID `RUN_SCHEDULED_ISSUE_CAMPAIGN` (quota=1, concurrency=1). Its terminal result is reported back to `req_dispatcher` via the Phase 6 I2 callback (`notify_dispatcher.sh`), not the cron `req_result` note.
 
-Required / optional fields, validation rules, and override semantics for both triggers live in [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
+Required / optional fields, validation rules, and override semantics for all three triggers — including the I1 inputs and the I2 result envelope — live in [`skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md`](skills/gitlab_issue_campaign_dispatcher/references/trigger_command.md).
 
 The subagent does NOT receive a "trigger command" envelope. The orchestrator renders [`executor_prompt.md`](skills/gitlab_issue_campaign_dispatcher/references/executor_prompt.md) into a single fixed-format string and ships it as the entire `sessions_spawn` payload (structured as `<config>` / `<issue>` / `<env_contract>` / `<instructions>` (Steps 0–10) / `<constraints>` / `<fail_flow>`). On its last turn the subagent emits ONE compact JSON line per [`state_schema.md`](skills/gitlab_issue_campaign_dispatcher/references/state_schema.md) §Compact Subagent Reply and stops — that line is the orchestrator's only signal.
 

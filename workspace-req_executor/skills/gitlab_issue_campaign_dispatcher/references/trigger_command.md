@@ -1,9 +1,10 @@
 # Trigger Commands (Dispatcher)
 
-The orchestrator handles **two** trigger commands:
+The orchestrator handles **three** trigger commands:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` — sent by the scheduler on every tick (Phases 1–5)
 - `RUN_CHILD_COMPLETION_CALLBACK` — sent by the runtime when a subagent's terminal compact JSON is available (Phase 6)
+- `RUN_SINGLE_ISSUE_TEST` — sent by `req_dispatcher` to drive one issue end-to-end (the driven entry; see §Driven single-issue trigger below). It synthesizes an equivalent single-IID `RUN_SCHEDULED_ISSUE_CAMPAIGN` and runs the SAME machine; its terminal result is reported back to `req_dispatcher` via the I2 callback envelope rather than (or in addition to nothing on) the cron `req_result` note.
 
 ## Scheduled-tick trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 
@@ -167,3 +168,54 @@ For this workspace's scheduling contract to hold, the runtime MUST:
 4. Deliver the callback even if the subagent terminated abnormally (timeout, runtime error, manual cancel). In those cases `worker_status` should be `blocked` or `failed` and `worker_result_json` should be a synthetic minimal compact JSON the runtime constructs (with `iid`, `attempt_number`, `status`, `block_reason`).
 
 If (4) is not feasible on the deployment, the orchestrator's stuck-pending eviction (`stuck_after_minutes`, defaulting to `ceil(run_timeout_seconds / 60) + 30` after `spawned_at`) recovers — but at the cost of UI account lockup for that duration.
+
+---
+
+## Driven single-issue trigger: `RUN_SINGLE_ISSUE_TEST`
+
+Sent by `req_dispatcher` when it orchestrates one requirement end-to-end and wants this executor to test exactly one IID, then report the terminal result back so `req_dispatcher` can push it to the original requester. Wakes the same orchestrator session as the scheduled trigger (`agent:req_executor:main`). Handled by `scripts/dispatch_single_issue.sh`, which validates the inputs, pins the rest of the campaign from `config/`, records the driven origin, then synthesizes and runs an equivalent single-IID `RUN_SCHEDULED_ISSUE_CAMPAIGN` (Phases 1–5). The driven path is independent of the cron path — `RUN_SCHEDULED_ISSUE_CAMPAIGN` + cron is retained unchanged for batch/backfill and non-driven sources (design §3.6).
+
+Trigger form (multi-line key=value, same text format as the scheduled trigger):
+
+```text
+RUN_SINGLE_ISSUE_TEST
+project=<group/project 全名>
+iid=<iid>
+correlation_id=<correlation_id>
+dispatcher_callback_target=<dispatcher_callback_target>   # ⚠️ 待对齐 form
+group=<group>            # optional; falls back to the config pin when omitted
+```
+
+### Inputs (I1)
+
+Only the fields below are accepted. **Every other campaign field is read from the deployment pin (`config/gitlab.env` + `config/campaign_defaults.env`), NEVER from this trigger** — `gitlab_token` / `branch` / `dev_branch` / `hourly_issue_quota` / `max_concurrent_subagents` / `max_accounts_per_issue` / `ui_accounts_relpath` / `acpx_timeout_seconds` / `run_timeout_seconds` / `result_basename` / `data_basename` / `repo_path` are all pinned. The driven path is always `hourly_issue_quota=1`, `max_concurrent_subagents=1`, scoped to one IID.
+
+| Field                         | Required | Notes                                                                                          |
+| ----------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `project`                     | yes      | Full `<group>/<project>` name to test (the `git_issuer` callback form, forwarded verbatim by `req_dispatcher` — it is also `req_dispatcher`'s routing key). `dispatch_single_issue.sh` **splits** it into a bare project slug (exported `PROJECT`, used by `env_paths.sh` to build `REPO_PATH`/`PROJECT_FULL`) + group (exported `GROUP`). A bare slug with no slash is also accepted when `group` is supplied separately. Feeding `env_paths.sh` an unsplit `group/project` would double the group and mis-locate the clone — hence the split. |
+| `iid`                         | yes      | The single issue IID to test. Must be a positive integer (`>= 1`); a non-integer / `0` / missing value aborts `dispatch_single_issue.sh` with exit 2 (CONFIG-shape error — surface and stop per §No-Fallback). |
+| `correlation_id`              | yes      | `req_dispatcher`'s关联 token. Persisted into `dispatch_origin.json` and echoed back verbatim in the I2 result envelope so `req_dispatcher` matches its pending entry. Missing → exit 2. |
+| `dispatcher_callback_target`  | yes for I2 | ⚠️ **待对齐** — the exact form of the result-callback target (`req_dispatcher`'s agent/session identifier) is an open integration item (design §9). Carried opaquely into `dispatch_origin.json`; when empty the Phase 6 callback is a no-op (`notify_dispatcher.sh exit 0`). |
+| `group`                       | no       | GitLab group slug. When omitted, falls back to the `GROUP` env override or the pin; `dispatch_single_issue.sh` aborts (exit 2) only if no source supplies one (the synthesized tick still requires `group`). |
+
+`dispatch_single_issue.sh` writes `{correlation_id, dispatcher_callback_target, project, iid}` to `${ISSUE_ROOT}/dispatch_origin.json` (= `${ISSUES_ROOT}/issue-<iid>/dispatch_origin.json`) before delegating; that file is the ONLY driven-specific artifact and is what Phase 6 consults to choose the result-callback path. See [`state_schema.md`](state_schema.md) §dispatch_origin.json.
+
+### Result callback (I2) — executor → req_dispatcher
+
+On a Phase 6 terminal `done` / `failed` / `timeout` for a driven issue, `dispatch_followup.sh` best-effort runs `scripts/notify_dispatcher.sh`, which emits the **I2 result envelope** (one compact JSON line):
+
+```json
+{"correlation_id":"<echo of I1>","iid":<int>,"project":"<group/project>","status":"done|failed|timeout","mr_url":<string|null>,"wiki_url":<string|null>,"reason":<string|null>}
+```
+
+- `status` is the Phase 6 `final_status`. `blocked` is **excluded** (retryable — would报 each attempt); only the three terminal states report back.
+- `mr_url` / `wiki_url` / `reason` are `null` when not applicable (e.g. `mr_url`/`wiki_url` on a `failed`/`timeout` reply, `reason` on a `done` reply).
+- The driven path **skips** `post_result_note.sh` entirely (no `req_origin`/`req_result` note — the user-facing回投 is `req_dispatcher`'s job on this path). The cron path (`result_note_enabled`) is unaffected. A driven issue is detected solely by `dispatch_origin.json` carrying a non-empty `correlation_id` + `dispatcher_callback_target`; a truncated origin falls back to cron semantics.
+- Isolation mirrors `post_result_note.sh`: `set +e`, stdout → `/dev/null`, failure logged to `wrapper.log`, NEVER aborts Phase 6.
+
+⚠️ **待对齐** (design §9): the cross-agent send 原语 that carries this envelope to `req_dispatcher` — the actual send tool and the field name that wraps the JSON inside the cross-agent callback envelope — is an open integration item. Until aligned, `notify_dispatcher.sh` appends the I2 JSON line to `${WORK_ROOT}/log/dispatcher_callbacks.jsonl` and exits 0 (留痕, never silently dropped); only a malformed send shape (illegal `STATUS` value) exits non-zero. The req_dispatcher-side matching contract (`run_id` primary key, `correlation_id` secondary check) lives in the req_dispatcher workspace's `references/trigger_command.md` and the active-orchestration design.
+
+### What the driven path does NOT change
+
+- The per-IID subagent prompt, Steps 0–10, the per-issue worktree, anonymous `sessions_spawn`, and the `RUN_CHILD_COMPLETION_CALLBACK` path are all **unchanged** — the driven setup is transparent to them.
+- `RUN_CHILD_COMPLETION_CALLBACK` (above) is still how the subagent's terminal compact JSON reaches Phase 6; the I2 callback to `req_dispatcher` is an additional best-effort step layered on top of the normal terminal drain, gated by `dispatch_origin.json`.

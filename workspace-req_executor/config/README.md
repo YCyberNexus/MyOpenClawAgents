@@ -27,6 +27,36 @@ The agent runs unattended for long stretches. Re-parsing the host out of `${GITL
 
 This workspace assumes a single GitLab deployment per runner. If you ever need to point a different runner at a different GitLab, change `gitlab.env` on that runner. Do not try to make the agent multi-tenant by reading the host from trigger inputs — that defeats the whole point of pinning.
 
+## `campaign_defaults.env` (driven single-issue test pin)
+
+Pins every campaign field that the **driven** `RUN_SINGLE_ISSUE_TEST` entry point needs but does NOT receive from its trigger. On the driven path, `req_dispatcher` sends only the I1 trigger inputs — `project`, `iid`, `correlation_id`, `dispatcher_callback_target`, and optional `group` — and `dispatch_single_issue.sh` (the driven entry script) sources this file to synthesize a campaign env equivalent to a `RUN_SCHEDULED_ISSUE_CAMPAIGN` over `issue_iids=[iid]`. **Trigger inputs do not override these values on the driven path.**
+
+Like `gitlab.env`, this file is `source`d (and may be loaded under `set -a`), so it must stay pure `KEY=value` lines — no shell logic, no command substitution, no conditionals.
+
+### Why these are pinned (and not on the trigger)
+
+The driven path tests exactly **one** issue per trigger and must stay deterministic regardless of who drives it. Pinning the campaign shape here keeps `req_dispatcher` a thin driver (it only knows which issue to test, not how the executor is configured) and keeps the executor's behavior identical to its scheduled path. In particular the driven single test is **fixed at `quota=1` / `concurrency=1`**: one IID is dispatched, one subagent runs, and the UI-account pool (when configured) divides into a single slot — there is no cross-IID batching on this path.
+
+### Fields
+
+| Field | Pinned value | Meaning |
+| --- | --- | --- |
+| `BRANCH` | `master` | Integration / MR target branch; MRs are opened against it (see CLAUDE.md §Two-branch model). |
+| `DEV_BRANCH` | `dev` | Clean baseline + shared-config source branch; fresh-mode attempts reset the per-issue worktree to `origin/${DEV_BRANCH}`. Set equal to `BRANCH` to disable. |
+| `HOURLY_ISSUE_QUOTA` | `1` | Per-tick launch quota. Pinned to 1 — the driven path tests exactly one issue per trigger. |
+| `MAX_CONCURRENT_SUBAGENTS` | `1` | Batch-size + in-flight-subagent cap. Pinned to 1 — the single driven IID is the only thing in flight (no cross-IID parallelism). |
+| `MAX_ACCOUNTS_PER_ISSUE` | `14` | Cap on UI accounts handed to one IID after the pool is divided by concurrency. Matches the dispatcher default. |
+| `UI_ACCOUNTS_RELPATH` | *(empty)* | Relpath (under the project checkout root) of the UI-account pool file. Empty = UI accounts opt-out: the dispatcher skips the entire UI-account flow and the rendered prompt omits its `# UI test accounts` section. Pin a relpath (e.g. `ifp-data/ifp-common/ifp_users.json`) to opt in. See the UI-account section below. |
+| `ACPX_TIMEOUT_SECONDS` | `18000` | acpx exec wall-clock cap for one attempt; on overrun the attempt is parked as terminal `timeout` (never auto-retried). |
+| `RUN_TIMEOUT_SECONDS` | `18120` | Subagent runtime cap forwarded to `sessions_spawn` as `runTimeoutSeconds`; kept just above `ACPX_TIMEOUT_SECONDS` (acpx cap + 120) so the runtime never kills the subagent before acpx's own timeout flow runs. |
+| `RESULT_BASENAME` | `ifp-result` | Basename of the agent runtime root inside the checkout; `env_paths.sh` derives `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}`. |
+| `DATA_BASENAME` | `ifp-data` | Basename of the test team's knowledge-base directory; `env_paths.sh` derives `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`. |
+| `REPO_PARENT_PATH` | `/data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. |
+
+### Token injection — 待对齐
+
+`GITLAB_TOKEN` is **not** pinned in this file, and the driven trigger (I1) does not carry one either. How the token reaches `dispatch_single_issue.sh` on the driven path is a deployment-integration decision still **待对齐** — see the explicit `待对齐` comment block at the bottom of `campaign_defaults.env` for the candidate options (pin in-file / out-of-band env injection / runner-local secret file). Until that is aligned, the driven entry script reads `GITLAB_TOKEN` from the environment (as the scheduled path already does) and fails loudly when it is absent.
+
 ## UI account pool: `${UI_ACCOUNTS_RELPATH}` (optional — no default)
 
 Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents. This file is committed/maintained by the test team inside the cloned project repo, not edited in this agent workspace.

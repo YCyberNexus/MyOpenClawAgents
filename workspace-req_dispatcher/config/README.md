@@ -6,12 +6,32 @@
 
 | 字段 | 必填 | 说明 |
 |------|------|------|
-| `GIT_ISSUER_AGENT` | 是 | 下游目标 agent 名。`req_dispatcher` 跨 agent 异步派发给它，由它"需求→issue"并打 acpx 入口标签。默认 `git_issuer`。 |
+| `GIT_ISSUER_AGENT` | 是 | 下游目标 agent 名。`req_dispatcher` 跨 agent 异步派发给它，由它"需求→issue"并打执行器入口标签。默认 `git_issuer`。 |
 | `STATE_ROOT` | 是 | 运行时 state 根目录。`pending.json` / `ledger.jsonl` / 锁 / 序号 / 日志都在 `${STATE_ROOT}/_dispatcher/` 下。必须是 server 上 agent 可写的持久目录。 |
 | `STUCK_AFTER_MINUTES` | 是 | stuck/timeout 兜底阈值（分钟）。pending 超过该时长仍没等到回调 → 合成失败并 drain，避免 pending 永久泄漏。应略大于 git_issuer 单次建 issue 预期最大耗时 + 余量。 |
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
-| `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定 acpx 入口标签时用。默认空＝由 git_issuer 自决。 |
+| `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
+| `ROUTING_FILE` | 是 | 多 project 路由表文件路径（见下「`routing.env`」）。git_issuer 回调透传回 project 后据此选目标 `req_executor` agent。消费方 `scripts/route_project.sh`。默认相对 SKILL_DIR 的 `../../config/routing.env`，也可改绝对路径。 |
+| `USER_NOTIFY_CHANNEL` | 否（**待对齐**） | 用户出站推送通道：req_dispatcher 主动给企微发起人（origin）推实质结果（受理 ack 之外）。确切机制**待对齐**（企微 webhook 回投 / 经 114，设计稿 §9.2）。留空＝`scripts/notify_user.sh` no-op（仅记 ledger 留痕、不静默丢）。 |
+| `DISPATCHER_CALLBACK_TARGET` | 否（**待对齐**） | 结果回调目标：spawn `req_executor` 的 `RUN_SINGLE_ISSUE_TEST` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。确切形态 = req_dispatcher 的 agent/session 标识，与跨 agent 回调原语一同**待对齐**（设计稿 §9.1）。留空＝该字段为空，执行器侧回调 no-op。 |
 | 跨 agent 原语连接参数 | 待定 | 形态类 `sessions_spawn`、可指定目标 agent、异步回调。具体工具名与参数待与 OpenClaw 维护者/同事对齐，见 `skills/requirement_dispatch/references/trigger_command.md` 占位块。 |
+
+## `routing.env`（多 project 路由表）
+
+git_issuer 回调把 `project`（group/project）透传回来后，req_dispatcher 据本表选目标 `req_executor` 部署 agent，再 spawn `<executor> RUN_SINGLE_ISSUE_TEST`。**一开始就做多 project 路由**：每个 project 对应一个独立的 `req_executor` 部署（GitLab token / branch 在各自 executor 侧 pin，req_dispatcher 永不持有 token）。消费方 `scripts/route_project.sh`。
+
+行格式：每行一条 `PROJECT=AGENT`。
+
+| 段 | 含义 |
+|----|------|
+| `PROJECT` | git_issuer 回调里的 `group/project`（含 `/`，故本文件**不能**被 shell `source`，由 `route_project.sh` 逐行手解）。 |
+| `AGENT` | 该 project 对应的 `req_executor` 部署 agent 名。 |
+
+匹配规则：对 `PROJECT` **整体精确相等**（无前缀 / 正则 / 大小写折叠，避免误投）；`#` 起头行与空行忽略；`PROJECT = AGENT`（等号两侧带空格）也容忍；重复键按首行（first-match wins）。
+
+**no-route 语义**：查不到 = **明确失败**（设计稿 §4.4「不臆造、不默认乱投」）。`route_project.sh` 对未命中输出 `__NO_ROUTE__` 并 `exit 0`（命中则输出 agent 名 `exit 0`），由 SKILL 判为 no-route：推用户「该 project 未接入执行器」+ 记 ledger + ops 通知 + drain。要接入新 project，就在 `routing.env` 加一行并部署对应 executor。
+
+**配置写错的退出码**：某行无 `=`、`PROJECT`/`AGENT` 为空、或 `ROUTING_FILE` 指向的文件缺失 = 部署期配置写错，`route_project.sh` `exit 2`，orchestrator 走 No-Fallback（分类 / 记录 / 停），**不**当成 no-route 处理。
 
 ## 为什么 group / project 不在这里
 
@@ -24,7 +44,8 @@
 1. `STATE_ROOT` 指向的目录在 runner 上存在且 agent 可写。
 2. `GIT_ISSUER_AGENT` 指向的下游 agent 已在同一 OpenClaw 上线、可被跨 agent 原语调用。
 3. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
-4. （衔接依赖，非本 agent 职责）目标 project 必须有对应的 `acpx_auto_tester` campaign 在 cron 上跑，否则 issue 建好却无人测——详见 `AGENTS.md` 的 acpx 衔接说明。
+4. `ROUTING_FILE` 指向的 `routing.env` 存在且可读；本链路要服务的每个 project 都在表里有 `PROJECT=AGENT` 行，且对应的 `req_executor` 部署已在同一 OpenClaw 上线（主动编排下由 req_dispatcher spawn `RUN_SINGLE_ISSUE_TEST` 即时驱动，不再依赖独立 cron 被动捞起）。表里没有的 project 会被判 no-route。
+5. （**待对齐**）`USER_NOTIFY_CHANNEL` / `DISPATCHER_CALLBACK_TARGET` 在对齐出站推送通道与跨 agent 回调原语后填好；未填时分别使 `notify_user.sh` no-op、执行器结果回调字段为空（留痕不丢，但用户收不到结果推送）。
 
 ## 与 acpx 工作区的差异
 

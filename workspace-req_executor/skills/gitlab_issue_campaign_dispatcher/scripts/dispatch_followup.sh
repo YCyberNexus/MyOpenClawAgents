@@ -204,17 +204,64 @@ CLEANUP_REASON="$(printf '%s' "${CLEANUP}" | jq -r '.reason')"
 CLEANUP_ACTION="$(printf '%s' "${CLEANUP}" | jq -r '.action')"
 CHAT_SUMMARY="${CHAT_SUMMARY} cleanup=${CLEANUP_ACTION}:${CLEANUP_REASON}"
 
-# Best-effort 测试结果回报 (result_notify_loop.md, option A). Gated by
-# campaign_state.result_note_enabled (default false; carry-forward from a
-# scheduled tick). Only terminal, user-meaningful outcomes (done/failed/
-# timeout) — never `blocked` (retryable, would re-post each attempt).
-# Isolation: stdout → /dev/null (the envelope below is the LLM's ONLY stdout),
-# and `set +e` so a notify failure NEVER aborts Phase 6. post_result_note.sh
-# is itself a no-op when the issue has no req_origin marker.
+# Best-effort 测试结果回报，仅在终态 done/failed/timeout（never `blocked` —
+# retryable, would re-post each attempt）。两条互斥路径，由本 issue 是否携带
+# driven origin 决定：
+#
+#   • driven 路径（${ISSUE_ROOT}/dispatch_origin.json 存在且含 correlation_id +
+#     dispatcher_callback_target）：req_dispatcher 经 RUN_SINGLE_ISSUE_TEST 派来的
+#     单 issue 测试。把 final_status 经 I2 信封回投给 req_dispatcher
+#     (notify_dispatcher.sh, A3)，并**跳过** post_result_note.sh —— driven 链路的
+#     用户回投由 req_dispatcher 负责，不再走 git_issuer 的 req_origin/req_result
+#     note 闭环（active-orchestration 设计稿 §I2 / docs/integration/result_notify_loop.md）。
+#
+#   • cron 路径（无 dispatch_origin.json）：保持原 result_note_enabled 门控的
+#     req_result note 回报（result_notify_loop.md, option A）。
+#
+# Isolation（两条均比照旧 post_result_note 写法）：stdout → /dev/null（下面的
+# envelope 是 LLM 的唯一 stdout），`set +e` 隔离使任一回报失败都 NEVER 中断
+# Phase 6。notify_dispatcher.sh 通道未配置即 no-op；post_result_note.sh 在 issue
+# 无 req_origin 标记时即 no-op。
+#
+# ISSUE_IID 未在本脚本 source env_paths.sh 时设置（callback 级只导出 dispatcher
+# 级路径），所以 ISSUE_ROOT 未被导出 —— 这里按 ${ISSUES_ROOT}/issue-${IID} 内联派生，
+# 与 dispatch_single_issue.sh 写入时使用的路径一致。
+DISPATCH_ORIGIN_FILE="${ISSUES_ROOT}/issue-${IID}/dispatch_origin.json"
+DRIVEN_CORRELATION_ID=""
+DRIVEN_CALLBACK_TARGET=""
+DRIVEN_PROJECT=""
+if [ -f "${DISPATCH_ORIGIN_FILE}" ]; then
+  DRIVEN_CORRELATION_ID="$(jq -r '.correlation_id // ""' "${DISPATCH_ORIGIN_FILE}" 2>/dev/null || true)"
+  DRIVEN_CALLBACK_TARGET="$(jq -r '.dispatcher_callback_target // ""' "${DISPATCH_ORIGIN_FILE}" 2>/dev/null || true)"
+  # dispatch_origin.json carries the FULL <group>/<project> name (dispatch_single_issue.sh),
+  # which is the form the I2 envelope's `project` field must use — the callback-path
+  # PROJECT env is only the bare slug.
+  DRIVEN_PROJECT="$(jq -r '.project // ""' "${DISPATCH_ORIGIN_FILE}" 2>/dev/null || true)"
+fi
+# driven iff the origin file exists AND carries a non-empty correlation_id +
+# dispatcher_callback_target. A truncated/未带 target 的 origin 退回 cron 语义。
+IS_DRIVEN=false
+if [ -n "${DRIVEN_CORRELATION_ID}" ] && [ -n "${DRIVEN_CALLBACK_TARGET}" ]; then
+  IS_DRIVEN=true
+fi
+
 RESULT_NOTE_ENABLED="$(printf '%s' "${NEW_STATE}" | jq -r '.result_note_enabled // false')"
 case "${FINAL_STATUS}" in
   done|failed|timeout)
-    if [ "${RESULT_NOTE_ENABLED}" = "true" ]; then
+    if [ "${IS_DRIVEN}" = "true" ]; then
+      # driven：回投 req_dispatcher（I2 信封），跳过 post_result_note。
+      set +e
+      CORRELATION_ID="${DRIVEN_CORRELATION_ID}" \
+      DISPATCHER_CALLBACK_TARGET="${DRIVEN_CALLBACK_TARGET}" \
+      IID="${IID}" STATUS="${FINAL_STATUS}" PROJECT="${DRIVEN_PROJECT:-${PROJECT}}" \
+      MR_URL="${MR_URL}" WIKI_URL="${WIKI_URL}" REASON="${BLOCK_REASON}" \
+      WORK_ROOT="${WORK_ROOT}" \
+      bash "${SCRIPT_DIR}/notify_dispatcher.sh" >/dev/null 2>>"${DISPATCHER_LOG_DIR}/wrapper.log"
+      ND_RC=$?
+      set -e
+      [ "${ND_RC}" -eq 0 ] || wrapper_log followup "notify-dispatcher best-effort rc=${ND_RC} iid=${IID} (non-fatal)"
+    elif [ "${RESULT_NOTE_ENABLED}" = "true" ]; then
+      # cron：原 req_origin/req_result note 回报。
       set +e
       PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
       REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
