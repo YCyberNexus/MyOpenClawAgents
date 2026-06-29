@@ -4,6 +4,18 @@ This file is for Codex-facing repository rules. Do not treat
 `workspace-acpx_auto_tester/AGENTS.md` as Codex instructions; that file is part
 of the deployed OpenClaw agent artifact.
 
+## OpenClaw Three-Zone Network Memory
+
+When reasoning about the company's OpenClaw architecture, use this network
+zone model:
+
+- Yellow zone: a fully external-isolated network environment. It can only open
+  a small number of controlled egress paths to the blue zone.
+- Blue zone: also largely isolated from the outside world. It can access
+  external large-model services only through controlled channels.
+- Green zone: a mostly open office network environment. It may access the
+  internet under safe and compliant conditions.
+
 ## Destructive Command Restriction
 
 Codex must not run `rm` in this repository, including `rm -f`, `rm -r`, or
@@ -13,8 +25,24 @@ workflow after explicit approval.
 
 ## Skill Version Bump
 
-Every repository change made by Codex must bump the dispatcher skill version in
-`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md`.
+Only changes under a `workspace-*` directory require a skill version bump.
+Changes outside `workspace-*` directories do not require any agent version bump.
+
+When Codex changes files under one or more `workspace-*` directories, bump only
+the corresponding agent skill version for each touched workspace:
+
+- `workspace-acpx_auto_tester/`:
+  `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/SKILL.md`
+- `workspace-emcp/`:
+  `workspace-emcp/skills/gitlab_issue_campaign_dispatcher/SKILL.md`
+- `workspace-req_executor/`:
+  `workspace-req_executor/skills/gitlab_issue_campaign_dispatcher/SKILL.md`
+- `workspace-req_dispatcher/`:
+  `workspace-req_dispatcher/skills/requirement_dispatch/SKILL.md`
+
+If a new `workspace-*` directory is added, use that workspace's primary skill
+file under `workspace-*/skills/*/SKILL.md`; if there is more than one plausible
+primary skill, ask the user which agent version should be bumped.
 
 The version marker format is:
 
@@ -27,5 +55,5 @@ Rules:
 - If the version date is the same as today's date, increment `N` by 1.
 - If the version date is different from today's date, change the date to today
   and reset `N` to 1.
-- Apply this rule for code, script, documentation, prompt, config, and rule-file
-  changes.
+- Within a bumped workspace, apply this rule for code, script, documentation,
+  prompt, config, and rule-file changes.
