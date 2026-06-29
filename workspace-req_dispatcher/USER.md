@@ -1,6 +1,6 @@
 # req_dispatcher User Contract
 
-把本工作区用作"企微需求 → 自动测试"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；本 agent 主动驱动整条链：派发给 `git_issuer` 建 issue → 按 project 路由选目标 `req_executor` 部署、spawn 其单测入口即时测 → 收测试结果回调 → 把结论推回发起需求的企微用户。本 agent 仍不碰 GitLab（不持 token、不调 glab、不解析 project）。
+把本工作区用作"企微需求 → 自动处理"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；本 agent 主动驱动整条链：派发给 `git_issuer` 建 issue → 按 project 路由选目标 `req_executor` 部署、spawn 其单次 issue 执行入口即时执行 → 收执行结果回调 → 把结论推回发起需求的企微用户。本 agent 仍不碰 GitLab（不持 token、不调 glab、不解析 project）。
 
 ## 114 如何调用
 
@@ -18,30 +18,30 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 - 发的就是**一段自由文本需求**，不是结构化字段。
 - **目标 project 写在需求文本里**（如"在 project X 里……"）。req_dispatcher 不解析、整段透传，由 `git_issuer` 自己从文本解析 project。
-- 若需把测试结果推回**发起需求的具体企微用户**，需在需求文本里携带 origin 元数据（channel/user/conversation）——确切约定待对齐（见 trigger_command.md §origin）。缺省则结果推送退化为留痕。
-- `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；测试结论稍后由本 agent 经出站通道**异步推回**（不在 ack 里）。
+- 若需把处理结果推回**发起需求的具体企微用户**，需在需求文本里携带 origin 元数据（channel/user/conversation）——确切约定待对齐（见 trigger_command.md §origin）。缺省则结果推送退化为留痕。
+- `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经出站通道**异步推回**（不在 ack 里）。
 
 ## 你会收到什么
 
 - **同步：来自 req_dispatcher 的最小受理 ack**，例如：
-  > 需求已受理，正在创建 issue 并自动测试，结果稍后通知。
+  > 需求已受理，正在创建 issue 并自动处理，结果稍后通知。
 
-  （ack 同步返回；issue 由 git_issuer 异步创建、随后自动测试，IID/URL/结论均不在 ack 里。）
+  （ack 同步返回；issue 由 git_issuer 异步创建、随后自动处理，IID/URL/结论均不在 ack 里。）
 - **异步：来自 req_dispatcher 的终态结论**（受理 ack 之外的实质通知，仅终态推一次）：
-  - 测试完成 → "#<iid> 测试完成，MR：<mr_url>"
-  - 测试未通过 → "#<iid> 测试未通过：<reason>，证据见 <wiki_url>"
-  - 测试超时 → "#<iid> 测试超时未完成，已停放待人工处理"
-  - 流程性失败（建 issue 失败 / 该 project 未接入执行器 / 启动测试失败）→ 对应失败说明。
+  - 处理完成 → "#<iid> 已处理完成，MR：<mr_url>"
+  - 处理未通过 → "#<iid> 处理未通过：<reason>"（有详情链接时追加"，详情见 <wiki_url>"）
+  - 处理超时 → "#<iid> 处理超时未完成，已停放待人工处理"
+  - 流程性失败（建 issue 失败 / 该 project 未接入执行器 / 启动执行失败）→ 对应失败说明。
 
 > ⚠️ ack 文案、终态结论的出站推送通道（企微回投 / 经 114）、origin 约定均待部署/对齐确认；未对齐前结论落 ledger/log 留痕，不静默丢，对齐后可回放补投。
 
 ## 预期行为
 
 - 同一个编排器 session 承接接入消息、git_issuer 回调、executor 回调三类唤醒。
-- 每条需求 → 两段异步 spawn（先 git_issuer 建 issue，回调成功后按路由起 req_executor 单测）→ 各一条 pending（各自 `run_id`）→ 各自回调 drain → 终态推用户一次。
+- 每条需求 → 两段异步 spawn（先 git_issuer 建 issue，回调成功后按路由起 req_executor 单次 issue 执行）→ 各一条 pending（各自 `run_id`）→ 各自回调 drain → 终态推用户一次。
 - 多条需求可并发在飞，互不干扰。
-- 失败（spawn 耗尽重试 / git_issuer 报失败 / 路由未接入 / 测试 failed/timeout / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 推用户对应说明 + 可选 ops 通知。**不自动重试**——重试请重发需求。
-- req_dispatcher 现在**会**把测试结论推回企微发起人（终态一次），但仍**不**做测试进度播报、**不**碰 GitLab。
+- 失败（spawn 耗尽重试 / git_issuer 报失败 / 路由未接入 / 执行 failed/timeout / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 推用户对应说明 + 可选 ops 通知。**不自动重试**——重试请重发需求。
+- req_dispatcher 现在**会**把处理结论推回企微发起人（终态一次），但仍**不**做处理进度播报、**不**碰 GitLab。
 
 ## 配置
 

@@ -204,13 +204,13 @@ CLEANUP_REASON="$(printf '%s' "${CLEANUP}" | jq -r '.reason')"
 CLEANUP_ACTION="$(printf '%s' "${CLEANUP}" | jq -r '.action')"
 CHAT_SUMMARY="${CHAT_SUMMARY} cleanup=${CLEANUP_ACTION}:${CLEANUP_REASON}"
 
-# Best-effort 测试结果回报，仅在终态 done/failed/timeout（never `blocked` —
+# Best-effort 结果回报，仅在终态 done/failed/timeout（never `blocked` —
 # retryable, would re-post each attempt）。两条互斥路径，由本 issue 是否携带
 # driven origin 决定：
 #
 #   • driven 路径（${ISSUE_ROOT}/dispatch_origin.json 存在且含 correlation_id +
-#     dispatcher_callback_target）：req_dispatcher 经 RUN_SINGLE_ISSUE_TEST 派来的
-#     单 issue 测试。把 final_status 经 I2 信封回投给 req_dispatcher
+#     dispatcher_callback_target）：req_dispatcher 经 RUN_SINGLE_ISSUE 派来的
+#     单 issue 执行。把 final_status 经 I2 信封回投给 req_dispatcher
 #     (notify_dispatcher.sh, A3)，并**跳过** post_result_note.sh —— driven 链路的
 #     用户回投由 req_dispatcher 负责，不再走 git_issuer 的 req_origin/req_result
 #     note 闭环（active-orchestration 设计稿 §I2 / docs/integration/result_notify_loop.md）。

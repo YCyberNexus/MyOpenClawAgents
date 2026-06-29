@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# notify_user.sh — best-effort 把测试结果/失败结论推回企微发起人（origin）。
+# notify_user.sh — best-effort 把执行结果/失败结论推回企微发起人（origin）。
 #
 # 由 orchestrator 在 executor 回调路径终态（result：done/failed/timeout 推结论）或
 # git_issuer 回调失败 / 路由查不到 / executor spawn 耗尽等失败路径（failure）调用，
@@ -29,7 +29,7 @@
 #   STATUS              done | failed | timeout（result 事件据此选文案；其它值按通用文案）
 #   IID                 issue IID（拼入文案）
 #   MR_URL              done 文案的 MR 链接
-#   WIKI_URL            failed 文案的证据链接
+#   WIKI_URL            failed 文案的详情链接
 #   REASON              failed 文案的原因摘要 / failure 事件的失败说明
 #   ORIGIN_JSON         origin 元数据（channel/user/conversation）紧凑 JSON；原样留痕，
 #                       供出站通道对齐后据此定向投递。
@@ -54,26 +54,26 @@ REASON="${REASON:-}"
 ORIGIN_JSON="${ORIGIN_JSON:-}"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-# IID 前缀：有则用 "#<iid>"，无则退化为通用「测试」。文案与设计稿 §4.3 逐字一致。
-issue_ref="测试"
+# IID 前缀：有则用 "#<iid>"，无则退化为通用「任务」。文案与设计稿 §4.3 逐字一致。
+issue_ref="任务"
 [ -n "${IID}" ] && issue_ref="#${IID}"
 
 # 拼人读文案（CONTENT）。result 事件按 STATUS 三态映射；failure 事件给通用失败说明。
 if [ "${EVENT}" = "result" ]; then
   case "${STATUS}" in
-    done)    CONTENT="${issue_ref} 测试完成，MR：${MR_URL}" ;;
+    done)    CONTENT="${issue_ref} 已处理完成，MR：${MR_URL}" ;;
     failed)
-      CONTENT="${issue_ref} 测试未通过：${REASON:-未说明原因}"
-      # 失败路径通常不发 Wiki（WIKI_URL 常为空）——仅当确有证据链接才追加，避免「证据见 」尾随空。
-      [ -n "${WIKI_URL}" ] && CONTENT="${CONTENT}，证据见 ${WIKI_URL}"
+      CONTENT="${issue_ref} 处理未通过：${REASON:-未说明原因}"
+      # 失败路径通常不发 Wiki（WIKI_URL 常为空）——仅当确有链接才追加，避免「详情见 」尾随空。
+      [ -n "${WIKI_URL}" ] && CONTENT="${CONTENT}，详情见 ${WIKI_URL}"
       ;;
-    timeout) CONTENT="${issue_ref} 测试超时未完成，已停放待人工处理" ;;
+    timeout) CONTENT="${issue_ref} 处理超时未完成，已停放待人工处理" ;;
     # result 事件理应带 done/failed/timeout 之一；缺/异常 STATUS 不致命（best-effort），
     # 退化为通用结论 + 留痕，绝不静默丢。
-    *)       CONTENT="${issue_ref} 测试已结束（status=${STATUS:-?}）" ;;
+    *)       CONTENT="${issue_ref} 已结束（status=${STATUS:-?}）" ;;
   esac
 else
-  # failure 事件：建 issue 失败 / 路由未接入 / 启动测试失败等流程性失败统一推这句。
+  # failure 事件：建 issue 失败 / 路由未接入 / 启动执行失败等流程性失败统一推这句。
   CONTENT="${issue_ref} 流程未能完成：${REASON:-未知原因}"
 fi
 

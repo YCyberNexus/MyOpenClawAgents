@@ -31,8 +31,8 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
-| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes spec output here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
-| `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/hulat-spec-issue{ISSUE_IID}` (inside the shared per-issue worktree) |
+| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
+| `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/output` (inside the shared per-issue worktree) |
 | `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
@@ -174,15 +174,19 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   `blocked`. Do NOT inspect or tail acpx logs after such a failure; preserve
   the logs and enter the BLOCKED_PUSH flow immediately.
 
-  TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract: agents under
+  TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract for issues
+  that drive the hulat agent chain: agents under
   ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
-  executor.md) read ${TASK_OUTPUT_DIR} to decide where to write their
+  executor.md) read ${TASK_OUTPUT_DIR} to decide where to archive their
   outputs, and the dispatcher pins it to {OUTPUT_DIR} so those writes
   land inside the shared per-issue worktree's OUTPUT_DIR and get force-added
-  by stage_and_guard.sh. {SCRIPTS_DIR}/run_acpx_attempt.sh owns that env
-  var and the acpx argv — do not construct an acpx command yourself. If
-  you ever change which agents are called, keep TASK_OUTPUT_DIR={OUTPUT_DIR}
-  inside run_acpx_attempt.sh — without it the agents fall back to a path
+  by stage_and_guard.sh. Coding / non-hulat issues do not invoke those
+  agents — their deliverables land at whatever location the issue requires
+  inside the worktree, captured by stage_and_guard.sh's `git add -A`.
+  {SCRIPTS_DIR}/run_acpx_attempt.sh owns that env var and the acpx argv —
+  do not construct an acpx command yourself. If you ever change which
+  agents are called, keep TASK_OUTPUT_DIR={OUTPUT_DIR} inside
+  run_acpx_attempt.sh — without it the hulat agents fall back to a path
   outside the worktree and their writes never make it into the commit
   (NO_CHANGES result).
 

@@ -7,7 +7,7 @@
 # agent's own state and per-issue subtrees live under the runtime root
 # (default `${REPO_PATH}/ifp-result/`). Runtime state/log files stay
 # uncommitted there; each issue's committed output is force-added from
-# its own `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/` directory.
+# its own `<runtime-root>/issue-<iid>/output/` directory.
 #
 # The repo clone parent and the basenames of the runtime root and
 # knowledge-base directory are overridable per project via optional trigger
@@ -45,7 +45,7 @@
 #                                          Claude wrote in earlier attempts survive, so
 #                                          `acpx claude exec` can pick up where it left off).
 #                   .claude/ hulat/ ${DATA_BASENAME}/    (tracked config refreshed from origin/${DEV_BRANCH})
-#                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
+#                   ${RESULT_BASENAME}/issue-<iid>/output/
 #                                                        ← OUTPUT_DIR (force-added; shared
 #                                                          across attempts of this IID)
 #                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
@@ -291,7 +291,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # the repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
-  export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
+  export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/output"
   export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"

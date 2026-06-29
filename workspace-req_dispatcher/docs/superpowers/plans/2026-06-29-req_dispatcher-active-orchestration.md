@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: 用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐 task 实现。步骤用 `- [ ]` 复选框跟踪。
 
-**Goal:** 把"企微需求→自动测试"链路从"建带标签 issue + 独立 cron 被动捞起"改为"req_dispatcher 链式 spawn git_issuer→req_executor、测试结果回流 req_dispatcher 并推回用户"。
+**Goal:** 把"企微需求→自动处理"链路从"建带标签 issue + 独立 cron 被动捞起"改为"req_dispatcher 链式 spawn git_issuer→req_executor、执行结果回流 req_dispatcher 并推回用户"。
 
-**Architecture:** req_dispatcher 升级为编排器（仍不碰 GitLab），两段异步 spawn 各按 run_id 记 pending/回调 drain；req_executor 新增 `RUN_SINGLE_ISSUE_TEST` driven 入口（配置自持）+ Phase 6 结果回调；多 project 走路由表。设计稿：[`../specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](../specs/2026-06-29-req_dispatcher-active-orchestration-design.md)。
+**Architecture:** req_dispatcher 升级为编排器（仍不碰 GitLab），两段异步 spawn 各按 run_id 记 pending/回调 drain；req_executor 新增 `RUN_SINGLE_ISSUE` driven 入口（配置自持）+ Phase 6 结果回调；多 project 走路由表。设计稿：[`../specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](../specs/2026-06-29-req_dispatcher-active-orchestration-design.md)。
 
 **Tech Stack:** OpenClaw agent 部署工件（bash + jq + flock state ops + LLM-orchestrated SKILL prose）。无 build/test runner。验证 = `/opt/homebrew/bin/bash -n` + 临时 `STATE_ROOT` 本地 state 冒烟 + `code-reviewer` 子代理审查闸门。
 
@@ -19,9 +19,9 @@
 
 ## 共享接口契约（两侧必须逐字一致 —— 锁定于此）
 
-**(I1) req_dispatcher → req_executor 的 `RUN_SINGLE_ISSUE_TEST` trigger 入参**（多行 key=value）：
+**(I1) req_dispatcher → req_executor 的 `RUN_SINGLE_ISSUE` trigger 入参**（多行 key=value）：
 ```
-RUN_SINGLE_ISSUE_TEST
+RUN_SINGLE_ISSUE
 project=<group/project 全名，git_issuer 回调透传；executor 的 dispatch_single_issue.sh 内部拆成 group+slug>
 iid=<正整数>
 correlation_id=<req_dispatcher 生成的关联 token>
@@ -61,7 +61,7 @@ group=<可选>
 **Produces:** 一份可 `source` 的 pin 配置，供 `dispatch_single_issue.sh`（A2）合成 campaign 字段。
 
 - [ ] 写 `campaign_defaults.env`：`BRANCH=master` / `DEV_BRANCH=dev` / `HOURLY_ISSUE_QUOTA=1` / `MAX_CONCURRENT_SUBAGENTS=1` / `MAX_ACCOUNTS_PER_ISSUE=14` / `UI_ACCOUNTS_RELPATH=` / `ACPX_TIMEOUT_SECONDS=18000` / `RUN_TIMEOUT_SECONDS=18120` / `RESULT_BASENAME=ifp-result` / `DATA_BASENAME=ifp-data` / `REPO_PARENT_PATH=/data`，每项带注释；token 注入方式留显式注释块标 `待对齐`（pin 值 vs env 注入）。
-- [ ] `config/README.md` 加一节说明 `campaign_defaults.env` 各字段与"driven 单测固定 quota=1/concurrency=1"。
+- [ ] `config/README.md` 加一节说明 `campaign_defaults.env` 各字段与"driven 单次 issue 执行固定 quota=1/concurrency=1"。
 - [ ] 验证：`/opt/homebrew/bin/bash -n` 不适用于 env，改用 `set -a && source config/campaign_defaults.env && set +a` 在临时 shell 跑通、echo 关键变量非空。
 - [ ] Gate：code-review（trivial 可由主 agent 酌情）。
 
@@ -103,11 +103,11 @@ group=<可选>
 
 **Files:** Modify `skills/.../SKILL.md`、`references/trigger_command.md`、`references/state_schema.md`、`SOUL.md`、`AGENTS.md`、`docs/REQ_EXECUTOR_USAGE.md`、`config/README.md`。
 
-- [ ] SKILL.md：description 增"三 trigger（scheduled/callback/single-issue）"；新增 §`RUN_SINGLE_ISSUE_TEST`（I1）与 §Phase6 dispatcher 回调（I2）；`allowed-tools` 视需要加跨 agent send 原语（占位）。bump `SKILL_VERSION` 到 `2026-06-29.2`（A 阶段同日二次，因前面 rename 已用 `.1`）。
-- [ ] trigger_command.md：RUN_SINGLE_ISSUE_TEST 入参 + I2 回调信封，待对齐处标 ⚠️。
+- [ ] SKILL.md：description 增"三 trigger（scheduled/callback/single-issue）"；新增 §`RUN_SINGLE_ISSUE`（I1）与 §Phase6 dispatcher 回调（I2）；`allowed-tools` 视需要加跨 agent send 原语（占位）。bump `SKILL_VERSION` 到 `2026-06-29.2`（A 阶段同日二次，因前面 rename 已用 `.1`）。
+- [ ] trigger_command.md：RUN_SINGLE_ISSUE 入参 + I2 回调信封，待对齐处标 ⚠️。
 - [ ] state_schema.md：issue state 增 `dispatch_origin.json`（correlation_id/dispatcher_callback_target）；Phase6 回调步骤。
-- [ ] SOUL.md/AGENTS.md：在已加的 "Pipeline role" 小节补"driven 单测入口 + 结果回调 req_dispatcher"。
-- [ ] REQ_EXECUTOR_USAGE.md：新增 `RUN_SINGLE_ISSUE_TEST` 用法节。
+- [ ] SOUL.md/AGENTS.md：在已加的 "Pipeline role" 小节补"driven 单次 issue 执行入口 + 结果回调 req_dispatcher"。
+- [ ] REQ_EXECUTOR_USAGE.md：新增 `RUN_SINGLE_ISSUE` 用法节。
 - [ ] config/README.md：已在 A1 改，确认一致。
 - [ ] Gate：code-review（契约一致性重点）。
 
@@ -154,7 +154,7 @@ group=<可选>
 
 **Files:** Modify `skills/requirement_dispatch/SKILL.md`、`SOUL.md`、`AGENTS.md`、`USER.md`、`CLAUDE.md`、`references/trigger_command.md`、`references/state_schema.md`。
 
-- [ ] SKILL.md：三路径——①接入（capture origin→spawn git_issuer→record stage=git_issuer→ack）；②git_issuer 回调（route_project→spawn executor RUN_SINGLE_ISSUE_TEST→record stage=executor→drain git_issuer；no-route/failed 推用户）；③executor 回调（按 run_id 匹配→notify_user→drain）。精确 env 行 + I1/I2/I4。bump `SKILL_VERSION` 到 `2026-06-29.2`。
+- [ ] SKILL.md：三路径——①接入（capture origin→spawn git_issuer→record stage=git_issuer→ack）；②git_issuer 回调（route_project→spawn executor RUN_SINGLE_ISSUE→record stage=executor→drain git_issuer；no-route/failed 推用户）；③executor 回调（按 run_id 匹配→notify_user→drain）。精确 env 行 + I1/I2/I4。bump `SKILL_VERSION` 到 `2026-06-29.2`。
 - [ ] SOUL.md/AGENTS.md/USER.md/CLAUDE.md：身份从"薄派发器"改述为"编排器（仍不碰 GitLab）"；两段 spawn + 路由 + 推用户;明确"驱动 req_executor、收结果"。
 - [ ] trigger_command.md：executor spawn（I1）+ executor 回调（I2）信封，待对齐 ⚠️。
 - [ ] state_schema.md：已在 B1 改，确认一致。

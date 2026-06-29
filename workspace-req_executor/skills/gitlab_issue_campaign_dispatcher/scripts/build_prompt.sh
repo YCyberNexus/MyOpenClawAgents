@@ -196,13 +196,28 @@ ${REVIEWER_BLOCK}
 EOF
   fi
 
+  # Only advertise the test-team shared config paths that ACTUALLY exist in this
+  # worktree. A task-agnostic executor may run against a repo that carries none of
+  # them (prepare_attempt.sh soft-skips missing ones); listing a path that is not
+  # there would mislead Claude into assuming a config / knowledge base it cannot read.
+  # For the hulat deployment all three exist → this block is identical to before.
+  SHARED_CONFIG_BLOCK=""
+  if [ -d "${WORKTREE_DIR}/hulat" ]; then
+    SHARED_CONFIG_BLOCK+="- Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)"$'\n'
+  fi
+  if [ -d "${WORKTREE_DIR}/.claude" ]; then
+    SHARED_CONFIG_BLOCK+="- Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)"$'\n'
+  fi
+  if [ -d "${WORKTREE_DIR}/${DATA_BASENAME}" ]; then
+    SHARED_CONFIG_BLOCK+="- Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)"$'\n'
+  fi
+  SHARED_CONFIG_BLOCK="${SHARED_CONFIG_BLOCK%$'\n'}"
+
   cat <<EOF
 # Working environment
 - Repository cwd:             ${WORKTREE_DIR} (shared per-issue linked git worktree)
-- Output directory:           ${OUTPUT_DIR} (the only place to write spec results — force-added at commit time)
-- Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
-- Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
-- Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)
+- Output directory:           ${OUTPUT_DIR} (for standalone deliverables that need to be preserved separately — force-added at commit time. Other source-code changes in the repo commit normally and do NOT need to go under this directory)
+${SHARED_CONFIG_BLOCK}
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
 - Source baseline:            prepared by dispatcher for this mode (fresh uses ${DEV_BRANCH}; continue/resume uses ${WORK_BRANCH} or the latest local prior-attempt branch; shared config paths are refreshed from latest ${DEV_BRANCH} before every run)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
@@ -230,10 +245,10 @@ EOF
   cat <<EOF
 # Rules
 - Work only on this issue.
-- **Output isolation.** Place all spec / report / artifact output for this issue under \`${OUTPUT_DIR}\`. Do NOT write spec output anywhere else. Do NOT modify files outside this subdirectory unless absolutely necessary; if you must touch a shared file (e.g. a project-level config that applies to everyone), explain why in your final summary.
+- Modify whatever files in the repository the issue requires. If the issue produces standalone artifacts (spec / report / test files), put those under \`${OUTPUT_DIR}\`; otherwise edit source files directly where they live, and note in your final summary which files you changed.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside this worktree.
 - Treat \`hulat/\`, \`.claude/\`, and \`${DATA_BASENAME}/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`${RESULT_BASENAME}/_dispatcher/\` and \`${RESULT_BASENAME}/issue-*/\`) and are not visible to you here. Keep your edits under \`${OUTPUT_DIR}\` unless the issue genuinely requires modifying the test team's shared content above.
+- The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`${RESULT_BASENAME}/_dispatcher/\` and \`${RESULT_BASENAME}/issue-*/\`) and are not visible to you here. Edit source files wherever the issue requires; only the test team's shared content above (\`hulat/\`, \`.claude/\`, \`${DATA_BASENAME}/\`) warrants extra caution.
 - Destructive deletion is forbidden. Do NOT call \`rm\`, \`/bin/rm\`, \`git rm\`, \`unlink\`, \`find -delete\`, or script file deletion through Python, Node, or another runtime. Do not delete files or directories for cleanup. If the issue seems to require deleting something, leave it in place and explain the blocker in your final summary.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did$([ "${ISSUE_MODE}" = "continue" ] && echo " differently from the prior run").

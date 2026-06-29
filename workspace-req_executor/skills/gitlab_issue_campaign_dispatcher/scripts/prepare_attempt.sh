@@ -385,16 +385,27 @@ archive_fresh_active_runtime_tree() {
 
 refresh_shared_config_from_dev() {
   local config_ref="origin/${DEV_BRANCH}"
-  local config_paths=(".claude" "hulat" "${DATA_BASENAME}")
+  local candidate_paths=(".claude" "hulat" "${DATA_BASENAME}")
+  local config_paths=()
   local path
 
-  for path in "${config_paths[@]}"; do
-    if ! git -C "${REPO_PATH}" cat-file -e "${config_ref}:${path}" 2>/dev/null; then
-      echo "prepare_attempt: required shared config path ${path} does not exist on ${config_ref}" >&2
-      echo "prepare_attempt: check dev_branch=${DEV_BRANCH} and the project config layout before retrying." >&2
-      exit 8
+  # `.claude` / `hulat` / `${DATA_BASENAME}` are the test-team's project scaffolding.
+  # A task-agnostic issue executor may run against repos that do NOT carry all (or any)
+  # of them — e.g. a pure-coding repo. So a missing path is SKIPPED with a warning rather
+  # than fatal: a deployment that relies on these still gets them refreshed; one that does
+  # not is no longer blocked. (For the hulat deployment all three exist → behavior unchanged.)
+  for path in "${candidate_paths[@]}"; do
+    if git -C "${REPO_PATH}" cat-file -e "${config_ref}:${path}" 2>/dev/null; then
+      config_paths+=("${path}")
+    else
+      echo "prepare_attempt: shared config path ${path} not present on ${config_ref}; skipping its refresh" >&2
     fi
   done
+
+  if [ "${#config_paths[@]}" -eq 0 ]; then
+    echo "prepare_attempt: no shared config paths present on ${config_ref}; nothing to refresh" >&2
+    return 0
+  fi
 
   # A prior claude_settings_path override may have marked .claude/settings.json
   # skip-worktree. Clear that bit for tracked config paths before overlaying

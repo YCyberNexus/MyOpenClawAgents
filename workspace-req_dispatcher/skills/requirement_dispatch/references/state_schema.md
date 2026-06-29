@@ -2,7 +2,7 @@
 
 `req_dispatcher` 的 state 极小：只有一张以 `run_id` 为主键的 pending 表，加一个 append-only 审计 ledger。**没有** campaign_state / worktree / glab / 标签机。所有路径由 `scripts/env_paths.sh` 从 `STATE_ROOT` 派生。
 
-编排器对一条需求做**两段异步 spawn**：先 `git_issuer` 段（建 issue），其回调成功后再起 `executor` 段（驱动 `req_executor` 单测）。每段各记一条 pending（各自 `run_id`），由 `stage` 字段区分；两段不强制重叠（git_issuer 段 drain 后再起 executor 段）。
+编排器对一条需求做**两段异步 spawn**：先 `git_issuer` 段（建 issue），其回调成功后再起 `executor` 段（驱动 `req_executor` 单次 issue 执行）。每段各记一条 pending（各自 `run_id`），由 `stage` 字段区分；两段不强制重叠（git_issuer 段 drain 后再起 executor 段）。
 
 ## 磁盘布局
 
@@ -40,11 +40,11 @@ ${STATE_ROOT}/_dispatcher/
 字段：
 
 - **`run_id`**（对象 key，且冗余进 value 便于 `to_entries` 后直接取）：跨 agent 异步 spawn 下游 agent 返回的 runtime 运行标识。**回调路径以它为主匹配键**。
-- `stage`：`git_issuer`（接入路径 spawn git_issuer 后记）或 `executor`（git_issuer 回调成功后 spawn req_executor 单测时记）。`record_pending.sh` 必填校验，仅接受这两个值。
+- `stage`：`git_issuer`（接入路径 spawn git_issuer 后记）或 `executor`（git_issuer 回调成功后 spawn req_executor 单次 issue 执行时记）。`record_pending.sh` 必填校验，仅接受这两个值。
 - `origin`：发起人元数据 `{channel,user,conversation}`，由接入路径从需求文本约定行 capture，**全程随两段 pending 携带**，executor 回调时取出用于把结果推回用户。`record_pending.sh` 经 `--argjson` 注入（`ORIGIN_JSON` 入参），缺省 `null`。
 - `project`：GitLab project slug。git_issuer 段一般为 `null`；executor 段由 git_issuer 回调透传后携带。缺省 `null`。
 - `iid`：要测的 issue IID（正整数）。git_issuer 段一般为 `null`；executor 段携带。`record_pending.sh` 给定时做正整数校验，写入为数字。
-- `correlation_id`：req_dispatcher 在 spawn executor 时生成的关联 token，随 `RUN_SINGLE_ISSUE_TEST` 入参下发、由执行器原样回显在结果回调里——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍按 `run_id`。git_issuer 段一般为 `null`。
+- `correlation_id`：req_dispatcher 在 spawn executor 时生成的关联 token，随 `RUN_SINGLE_ISSUE` 入参下发、由执行器原样回显在结果回调里——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍按 `run_id`。git_issuer 段一般为 `null`。
 - `child_session_key`：spawn 返回的子 session key（兜底匹配用；无则 `null`）。
 - `spawned_at`：epoch 秒（`date -u +%s`）。stuck 兜底据此判超时（覆盖两 stage）。
 - `req_digest`：需求文本前若干字摘要，仅供人读/审计，不参与逻辑。

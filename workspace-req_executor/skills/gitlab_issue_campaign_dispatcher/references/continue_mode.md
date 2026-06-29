@@ -67,7 +67,7 @@ Description:
 
 # Working environment
 - Repository cwd:             <worktree-dir> (shared per-issue linked git worktree)
-- Output directory:           <worktree-dir>/<RESULT_BASENAME>/issue-<iid>/hulat-spec-issue<iid>
+- Output directory:           <worktree-dir>/<RESULT_BASENAME>/issue-<iid>/output
 - Hulat materials:            <worktree-dir>/hulat   (committed in <branch>/<dev-branch>, available in this worktree)
 - Claude runtime config:      <worktree-dir>/.claude (committed in <branch>/<dev-branch>, available in this worktree)
 - Knowledge base:             <worktree-dir>/<DATA_BASENAME> (committed in <branch>/<dev-branch>, available in this worktree)
@@ -79,10 +79,10 @@ Description:
 
 # Rules
 - Work only on this issue.
-- Place spec / report / artifact output under the output directory only.
+- Modify whatever files in the repository the issue requires. If the issue produces standalone artifacts (spec / report / test files), put those under the output directory; otherwise edit source files directly where they live.
 - Modify content under <worktree-dir> only. Do NOT write outside this worktree.
 - Treat `hulat/`, `.claude/`, and `<DATA_BASENAME>/` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- The dispatcher's runtime state and other issues' subtrees live in the parent checkout's `<RESULT_BASENAME>/` and are NOT visible from inside this worktree — keep changes under your output directory unless a fix genuinely requires modifying the test team's shared content above.
+- The dispatcher's runtime state and other issues' subtrees live in the parent checkout's `<RESULT_BASENAME>/` and are NOT visible from inside this worktree — edit source files wherever the issue requires; only the test team's shared content above (`hulat/`, `.claude/`, `<DATA_BASENAME>/`) warrants extra caution.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did differently from the prior run.
 ```

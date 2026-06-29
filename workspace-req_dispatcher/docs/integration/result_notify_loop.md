@@ -1,6 +1,6 @@
 # 测试结果闭环回报（result notify loop）
 
-> ⚠️ **已被主动编排取代（driven 路径）**：本链路已改为 **req_dispatcher 主动编排**（见 [`../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)）：测试结果改走 **执行器 Phase 6 → req_dispatcher 回调 → req_dispatcher 推回用户**；`req_origin` / `req_result` note 闭环在 **driven 路径不再使用**，执行器侧机器（`post_result_note.sh` + `result_note_enabled` 开关）**保留供 cron 路径**（`RUN_SCHEDULED_ISSUE_CAMPAIGN` + 独立 cron 捞起）。下方正文描述的是 **cron 路径**（仍可用），driven 路径请以设计稿为准。
+> ⚠️ **已被主动编排取代（driven 路径）**：本链路已改为 **req_dispatcher 主动编排**（见 [`../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)）：执行结果改走 **执行器 Phase 6 → req_dispatcher 回调 → req_dispatcher 推回用户**；`req_origin` / `req_result` note 闭环在 **driven 路径不再使用**，执行器侧机器（`post_result_note.sh` + `result_note_enabled` 开关）**保留供 cron 路径**（`RUN_SCHEDULED_ISSUE_CAMPAIGN` + 独立 cron 捞起）。下方正文描述的是 **cron 路径**（仍可用），driven 路径请以设计稿为准。
 >
 > 状态：**待对齐 + 部分待实现（req_executor 侧已落地，默认 off）**。本文件定义端到端把 `req_executor` 的测试结果回报给"当初在企微发需求的那个人"的闭环。在 **cron 路径**下 **`req_dispatcher` 全程不变**（仍纯透传，不追踪结果、不回状态）；driven 路径下 req_dispatcher 升级为编排器、直接收执行器回调并推回用户（不再经本闭环）。
 

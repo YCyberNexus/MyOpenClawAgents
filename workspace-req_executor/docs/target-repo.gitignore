@@ -9,7 +9,7 @@
 # entry is belt-and-suspenders rather than strictly required.
 #
 # The ONLY exception is each issue's output directory
-# `<runtime-root>/issue-<iid>/hulat-spec-issue<iid>/`, which the agent
+# `<runtime-root>/issue-<iid>/output/`, which the agent
 # explicitly force-adds via `git add -f` in stage_and_guard.sh —
 # that bypasses this gitignore for the single allowed path.
 ifp-result/

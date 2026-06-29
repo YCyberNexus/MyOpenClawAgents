@@ -9,7 +9,7 @@
 # line in `.git/info/exclude` (default `ifp-result/`, overridable per
 # project via the `result_basename` trigger field, and repository-wide
 # so it applies to every linked worktree):
-#   - the current issue's ${OUTPUT_DIR} (the committable spec output);
+#   - the current issue's ${OUTPUT_DIR} (the committable output);
 #   - ${LOG_DIR}/prompt.txt and ${LOG_DIR}/claude_result.txt (the two
 #     human-reviewable evidence files; intentionally NOT the bulky
 #     acpx_raw.log / git_diff.patch / wiki_* / mr_description.md, which

@@ -10,9 +10,9 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 
 ## 它做什么 / 不做什么
 
-`req_dispatcher` 是"企微需求 → 自动测试"链路在 104 侧的**统一接入点 + 端到端编排器**：接收 114 转发的自由文本需求，跨 agent 异步派发给 `git_issuer` 建 issue（git_issuer 解析 project）→ 按 project 查路由表选目标 `req_executor` 部署、spawn 其 `RUN_SINGLE_ISSUE_TEST` driven 单测即时测 → 收执行器结果回调 → 把结论推回发起需求的企微用户。身份从"薄派发器"升级为"编排器"。
+`req_dispatcher` 是"企微需求 → 自动处理"链路在 104 侧的**统一接入点 + 端到端编排器**：接收 114 转发的自由文本需求，跨 agent 异步派发给 `git_issuer` 建 issue（git_issuer 解析 project）→ 按 project 查路由表选目标 `req_executor` 部署、spawn 其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行即时执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。身份从"薄派发器"升级为"编排器"。
 
-**仍明确不做**：不持 GitLab token、不碰 glab/GitLab、不解析需求/不提取 project（只在拿到回调透传的 project 后 `route_project.sh` 精确表查选 executor）、不自己跑测试、不去重、git_issuer/executor 回调失败不自动重试。**新增会做**：两段跨 agent spawn（git_issuer + 按路由选定的 executor）、按 project 路由、终态把测试结论推回企微用户（仅一次）。
+**仍明确不做**：不持 GitLab token、不碰 glab/GitLab、不解析需求/不提取 project（只在拿到回调透传的 project 后 `route_project.sh` 精确表查选 executor）、不自己跑 issue、不去重、git_issuer/executor 回调失败不自动重试。**新增会做**：两段跨 agent spawn（git_issuer + 按路由选定的 executor）、按 project 路由、终态把处理结论推回企微用户（仅一次）。
 
 > 注意：本 agent **没有** acpx/执行器的那套 worktree / UI 账号 / campaign_state / 模型档位 / GitLab token / 标签机（token 归执行器侧）。若你在改动里引入了这些概念，几乎一定是搞错了 agent。
 
@@ -21,7 +21,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 唯一 SKILL：`skills/requirement_dispatch/`，编排器固定 session `agent:req_dispatcher:main`。一条需求经历**两段异步 spawn**（git_issuer 段、executor 段，各自 `run_id` 主键、`stage` 区分、各自回调 drain），对应三条唤醒路径：
 
 - **接入路径（A）**（114 投来自由文本需求）：capture origin → `evict_stuck.sh` 兜底（覆盖两段）→ 跨 agent 异步 spawn `git_issuer`（payload `{requirement_text}`，同 payload 失败 3 次 2s 退避）→ `record_pending.sh` 记 pending（`stage=git_issuer`、主键 `run_id`、携带 origin）→ 回最小 ack → `waiting_for_callback`。
-- **git_issuer 回调路径（B）**：解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（`__NO_ROUTE__` → 推用户 + ledger + ops + drain）→ spawn `<executor> RUN_SINGLE_ISSUE_TEST`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段；失败则 `notify_user.sh` 推用户 + drain。
+- **git_issuer 回调路径（B）**：解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（`__NO_ROUTE__` → 推用户 + ledger + ops + drain）→ spawn `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段；失败则 `notify_user.sh` 推用户 + drain。
 - **executor 回调路径（C）**：解析结果信封(I2) → 按 `run_id2` 匹配 executor 段（`correlation_id` 二次校验）→ `notify_user.sh` 把结论推回 origin → drain executor 段。
 
 完整算法见 [`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。
@@ -33,7 +33,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 ## Strict no-fallback policy
 
 - 脚本非零退出 → 读 stdout/stderr、分类、记录、**stop**。不内联重写脚本逻辑、不"手动来一遍"、不换"更简单的命令"。
-- 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑测试）；不解析需求/不提取 project（只 `route_project.sh` 精确表查选 executor）；不自己跑测试；不去重；git_issuer/executor 回调失败不自动重试。
+- 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑 issue）；不解析需求/不提取 project（只 `route_project.sh` 精确表查选 executor）；不自己跑 issue；不去重；git_issuer/executor 回调失败不自动重试。
 - spawn 失败（git_issuer 段或 executor 段）只允许"同 payload 3 次 2s 退避"；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending）。
 - `route_project.sh` 输出 `__NO_ROUTE__` 是正常分支（推用户"未接入执行器"+ledger+ops+drain）；仅它 `exit 2`（`ROUTING_FILE` 缺失/格式错）才按 no-fallback 停。
 - 跨 agent spawn/回调原语、用户出站推送通道、`correlation_id` 生成、origin 约定均为**待对齐占位**：脚本以 gated 占位 + ledger/log 留痕落地，未对齐前不臆造工具名/字段名/token。

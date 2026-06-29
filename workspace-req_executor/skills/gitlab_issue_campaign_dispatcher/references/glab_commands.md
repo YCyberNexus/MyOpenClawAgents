@@ -188,7 +188,7 @@ glab api --method PUT \
 
 The subagent constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}/-/wikis/${WIKI_TITLE}` and posts those links back to the issue with G9.
 
-### G14 — Test-result回报: read `req_origin` + post `req_result` (dispatcher, Phase 6)
+### G14 — 结果回报: read `req_origin` + post `req_result` (dispatcher, Phase 6)
 
 Used by `scripts/post_result_note.sh` when `result_note_enabled` is on, after a terminal `done` / `failed` / `timeout` drains. It reuses the existing note primitives — no new API surface:
 

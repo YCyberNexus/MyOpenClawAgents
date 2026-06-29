@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # notify_dispatcher.sh — best-effort Phase 6 结果回调 (active-orchestration 设计稿).
 #
-# 在 driven 路径（req_dispatcher 经 RUN_SINGLE_ISSUE_TEST 派来的单 issue 测试）的
+# 在 driven 路径（req_dispatcher 经 RUN_SINGLE_ISSUE 派来的单 issue 执行）的
 # Phase 6 终态由 dispatch_followup.sh 调用：把执行器 final_status 经 I2 信封回投给
 # req_dispatcher，使其按 correlation_id 匹配 pending、推结果给发起需求的用户。
 #
@@ -18,7 +18,7 @@
 #
 # 入参（env，I4 契约）：
 #   必填：
-#     CORRELATION_ID                 回显 RUN_SINGLE_ISSUE_TEST 的关联 token
+#     CORRELATION_ID                 回显 RUN_SINGLE_ISSUE 的关联 token
 #     IID                            目标 issue IID（正整数）
 #     STATUS                         done | failed | timeout（= 执行器 final_status）
 #   可选：

@@ -2,7 +2,7 @@
 # route_project.sh — 多 project 路由：把 git_issuer 回调的 PROJECT 映射到目标 req_executor agent 名。
 #
 # 由 orchestrator 在 git_issuer 回调 success 路径调用：拿到 project 后查路由表，得到该 project
-# 对应的 req_executor 部署 agent 名，再据此 spawn `<executor> RUN_SINGLE_ISSUE_TEST`（见 SKILL.md
+# 对应的 req_executor 部署 agent 名，再据此 spawn `<executor> RUN_SINGLE_ISSUE`（见 SKILL.md
 # git_issuer 回调路径）。req_dispatcher 不解析需求 project（那是 git_issuer 的活），它只在拿到
 # 透传回来的 project 后做一次"精确表查"。
 #

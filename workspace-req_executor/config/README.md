@@ -29,7 +29,7 @@ This workspace assumes a single GitLab deployment per runner. If you ever need t
 
 ## `campaign_defaults.env` (driven single-issue test pin)
 
-Pins every campaign field that the **driven** `RUN_SINGLE_ISSUE_TEST` entry point needs but does NOT receive from its trigger. On the driven path, `req_dispatcher` sends only the I1 trigger inputs — `project`, `iid`, `correlation_id`, `dispatcher_callback_target`, and optional `group` — and `dispatch_single_issue.sh` (the driven entry script) sources this file to synthesize a campaign env equivalent to a `RUN_SCHEDULED_ISSUE_CAMPAIGN` over `issue_iids=[iid]`. **Trigger inputs do not override these values on the driven path.**
+Pins every campaign field that the **driven** `RUN_SINGLE_ISSUE` entry point needs but does NOT receive from its trigger. On the driven path, `req_dispatcher` sends only the I1 trigger inputs — `project`, `iid`, `correlation_id`, `dispatcher_callback_target`, and optional `group` — and `dispatch_single_issue.sh` (the driven entry script) sources this file to synthesize a campaign env equivalent to a `RUN_SCHEDULED_ISSUE_CAMPAIGN` over `issue_iids=[iid]`. **Trigger inputs do not override these values on the driven path.**
 
 Like `gitlab.env`, this file is `source`d (and may be loaded under `set -a`), so it must stay pure `KEY=value` lines — no shell logic, no command substitution, no conditionals.
 

@@ -1,6 +1,6 @@
 # req_dispatcher Workspace Notes
 
-本工作区实现 `req_dispatcher`：104 OpenClaw 上"企微需求 → 自动测试"链路的需求接入 + **端到端编排器**。它接收 114 转发来的自由文本需求，主动驱动整条链：跨 agent 异步派发给 `git_issuer` 建 issue（git_issuer 解析 project）→ 按 project 查路由表选目标 `req_executor` 部署、spawn 其 `RUN_SINGLE_ISSUE_TEST` driven 单测 → 收执行器结果回调 → 把结论推回发起需求的企微用户。
+本工作区实现 `req_dispatcher`：104 OpenClaw 上"企微需求 → 自动处理"链路的需求接入 + **端到端编排器**。它接收 114 转发来的自由文本需求，主动驱动整条链：跨 agent 异步派发给 `git_issuer` 建 issue（git_issuer 解析 project）→ 按 project 查路由表选目标 `req_executor` 部署、spawn 其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。
 
 身份从"薄派发器"升级为"编排器"，但**仍不碰 GitLab**（不持 token、不调 glab、不解析 project）：唯一 SKILL `requirement_dispatch`，flock 保护或 best-effort 的 shell 脚本（record_pending / drain_pending / evict_stuck / route_project / notify_user / ops_notify），一张 `run_id` 主键的**两段** pending 表（`stage=git_issuer|executor`）+ append-only ledger。**没有** worktree / glab / GitLab token / campaign_state / UI 账号 / 模型档位——这些 acpx/执行器专有概念在本 agent 不存在（token 归执行器侧）。
 
@@ -10,14 +10,14 @@
 - 编排器 session: `agent:req_dispatcher:main`
 - 下游目标 agent（均独立 agent，经跨 agent 原语调用，**非**本 agent 的子代理）：
   - `git_issuer`（固定，建 issue）；
-  - `<req_executor 部署>`（按 project 路由动态选定，跑 `RUN_SINGLE_ISSUE_TEST` 单测；映射见 `config/routing.env`）。
+  - `<req_executor 部署>`（按 project 路由动态选定，跑 `RUN_SINGLE_ISSUE` 单次 issue 执行；映射见 `config/routing.env`）。
 
 ## Execution Model（三路径）
 
 唯一 SKILL：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。编排器处理三类唤醒（一条需求经历**两段异步 spawn**：git_issuer 段、executor 段，各自 `run_id` 主键、各自回调 drain）：
 
 - **接入路径（A）**（114 投来自由文本需求，经 `agent run --agent req_dispatcher --deliver`）：capture origin → `evict_stuck.sh` 兜底（覆盖两段）→ 跨 agent 异步 spawn `git_issuer`（payload `{requirement_text}`）→ `record_pending.sh` 记 pending（`stage=git_issuer`、主键 `run_id`、携带 origin）→ 回最小受理 ack → `waiting_for_callback`。
-- **git_issuer 回调路径（B）**（trigger 名待对齐，占位 `RUN_GITISSUER_CALLBACK`）：解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（`__NO_ROUTE__` → 推用户 + ledger + ops + drain）→ spawn `<executor> RUN_SINGLE_ISSUE_TEST`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段；失败则推用户 + drain。
+- **git_issuer 回调路径（B）**（trigger 名待对齐，占位 `RUN_GITISSUER_CALLBACK`）：解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（`__NO_ROUTE__` → 推用户 + ledger + ops + drain）→ spawn `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段；失败则推用户 + drain。
 - **executor 回调路径（C）**（trigger 名待对齐，占位 `RUN_EXECUTOR_RESULT_CALLBACK`）：解析结果信封(I2) → 按 `run_id2` 匹配 executor 段（`correlation_id` 二次校验）→ `notify_user.sh` 推回 origin → drain executor 段。
 
 完整算法、精确 env 行、脚本入参契约：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。
@@ -49,9 +49,9 @@ schema 详见 [`skills/requirement_dispatch/references/state_schema.md`](skills/
 
 ## req_executor 衔接依赖（重要，记录在案）
 
-req_dispatcher 不再止步于"issue 已建"——它在 git_issuer 回调成功后**主动 spawn 目标 req_executor 部署的 `RUN_SINGLE_ISSUE_TEST`** 即时驱动单测（不再依赖独立 cron 被动捞起）。**前提**：目标 project 必须在 [`config/routing.env`](config/routing.env) 里有 `PROJECT=AGENT` 映射、且该 `AGENT`（per-project req_executor 部署，token/branch/`campaign_defaults.env` 在各自 executor 侧 pin）已就绪可被 spawn。由于 project 由 git_issuer 按需求解析、req_executor 是 per-project 部署，**全公司多 project 场景下，每个目标 project 都需有一行路由 + 对应 req_executor 部署**——这属于 req_executor/部署侧职责，不在 req_dispatcher 范围，但在此显式记录为依赖。路由查不到（`__NO_ROUTE__`）= 明确失败：推用户"未接入执行器" + ledger + ops + drain，不臆造乱投。
+req_dispatcher 不再止步于"issue 已建"——它在 git_issuer 回调成功后**主动 spawn 目标 req_executor 部署的 `RUN_SINGLE_ISSUE`** 即时驱动单次 issue 执行（不再依赖独立 cron 被动捞起）。**前提**：目标 project 必须在 [`config/routing.env`](config/routing.env) 里有 `PROJECT=AGENT` 映射、且该 `AGENT`（per-project req_executor 部署，token/branch/`campaign_defaults.env` 在各自 executor 侧 pin）已就绪可被 spawn。由于 project 由 git_issuer 按需求解析、req_executor 是 per-project 部署，**全公司多 project 场景下，每个目标 project 都需有一行路由 + 对应 req_executor 部署**——这属于 req_executor/部署侧职责，不在 req_dispatcher 范围，但在此显式记录为依赖。路由查不到（`__NO_ROUTE__`）= 明确失败：推用户"未接入执行器" + ledger + ops + drain，不臆造乱投。
 
-**测试结果闭环**（已改为主动编排）：req_executor Phase 6 终态把结果回调（I2 信封）回投 req_dispatcher，req_dispatcher 据 `run_id2` 匹配 executor 段 pending、取出全程携带的 origin，经 `notify_user.sh` 把结论推回发起需求的企微用户——**这条闭环现在经过 req_dispatcher**（与旧设计的 `req_origin`/`req_result` note 闭环不同；driven 路径不再依赖那套 note 机器，执行器侧机器保留供 cron 路径）。端到端契约见 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)；旧 [`docs/integration/result_notify_loop.md`](docs/integration/result_notify_loop.md) 仅适用于保留的 cron 路径。
+**执行结果闭环**（已改为主动编排）：req_executor Phase 6 终态把结果回调（I2 信封）回投 req_dispatcher，req_dispatcher 据 `run_id2` 匹配 executor 段 pending、取出全程携带的 origin，经 `notify_user.sh` 把结论推回发起需求的企微用户——**这条闭环现在经过 req_dispatcher**（与旧设计的 `req_origin`/`req_result` note 闭环不同；driven 路径不再依赖那套 note 机器，执行器侧机器保留供 cron 路径）。端到端契约见 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)；旧 [`docs/integration/result_notify_loop.md`](docs/integration/result_notify_loop.md) 仅适用于保留的 cron 路径。
 
 ## 不在本机运行
 

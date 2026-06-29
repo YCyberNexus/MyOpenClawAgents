@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# dispatch_single_issue.sh — driven single-issue entry (RUN_SINGLE_ISSUE_TEST).
+# dispatch_single_issue.sh — driven single-issue entry (RUN_SINGLE_ISSUE).
 #
 # This is the req_dispatcher-driven entry point (see
 # docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md
@@ -86,7 +86,7 @@ while IFS= read -r line || [ -n "${line}" ]; do
     *)
       # A bare non-empty token that is not a key=value line is the trigger
       # header. Record the LAST one seen; the post-loop check rejects anything
-      # other than RUN_SINGLE_ISSUE_TEST (a mis-wired scheduled trigger must NOT
+      # other than RUN_SINGLE_ISSUE (a mis-wired scheduled trigger must NOT
       # silently fall through to "missing header tolerated").
       TRIGGER_NAME="$(trim_ws "${line}")"
       ;;
@@ -95,8 +95,8 @@ done
 
 # Tolerate a missing header (the orchestrator may strip it), but reject a header
 # that names a different trigger — that is a wiring mistake, not a single-issue run.
-if [ -n "${TRIGGER_NAME}" ] && [ "${TRIGGER_NAME}" != "RUN_SINGLE_ISSUE_TEST" ]; then
-  echo "dispatch_single_issue.sh: expected RUN_SINGLE_ISSUE_TEST trigger, got: ${TRIGGER_NAME}" >&2
+if [ -n "${TRIGGER_NAME}" ] && [ "${TRIGGER_NAME}" != "RUN_SINGLE_ISSUE" ]; then
+  echo "dispatch_single_issue.sh: expected RUN_SINGLE_ISSUE trigger, got: ${TRIGGER_NAME}" >&2
   exit 2
 fi
 
@@ -179,7 +179,7 @@ DATA_BASENAME_EFF="${DATA_BASENAME:-ifp-data}"
 REPO_PARENT_EFF="${REPO_PARENT_PATH:-/data}"
 UI_ACCOUNTS_RELPATH_EFF="${UI_ACCOUNTS_RELPATH:-}"
 
-# driven single-issue test is always quota=1, concurrency=1, IID-scoped to one issue.
+# driven single-issue run is always quota=1, concurrency=1, IID-scoped to one issue.
 HOURLY_ISSUE_QUOTA_EFF=1
 MAX_CONCURRENT_SUBAGENTS_EFF=1
 
