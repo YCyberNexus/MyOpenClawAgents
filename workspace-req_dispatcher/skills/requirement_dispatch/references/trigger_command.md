@@ -14,7 +14,7 @@
 
 - 编排器需把处理结果推回**发起需求的企微用户**，故接入时要从需求文本 capture **origin 元数据** `{channel,user,conversation}`（仅供回推用，**不是**解析需求语义/project）。
 - [ ] 114 在需求文本里放 origin 的确切约定（约定行格式 / 独立信封字段名）——沿用 [`../../../docs/integration/result_notify_loop.md`](../../../docs/integration/result_notify_loop.md) §3 设想，待对齐。
-- 对齐前：capture 不到则 `ORIGIN_JSON` 不传、entry 里 origin = `null`，**不阻断**主流程（结果推送届时退化为 `notify_user.sh` 的 ledger 留痕）。
+- 对齐前：capture 不到则 `ORIGIN_JSON` 不传、entry 里 origin = `null`，**不阻断**主流程；`notify_user.sh` 仍会把 `origin:null` 放进结果信封推给 114 智伴（若 `ZHIBAN_*` pin 未配置则仅 ledger 留痕）。
 
 # §1 git_issuer 段（建 issue）
 

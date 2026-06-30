@@ -6,25 +6,26 @@
 # 在 drain/ledger 写入之后执行。这是 req_dispatcher 首次主动给用户推「实质结论」
 # （受理 ack 之外）——见设计稿 §4.3/§4.5。
 #
-# 与薄派发器红线不冲突：本脚本只经出站通道把一句人读文案投回 origin，**不碰 GitLab、
-# 不建 issue、不打标签、不解析需求**。出站通道（企微回投 / 经 114）属待对齐项（设计稿
-# §9.2），当前为显式 gated 占位：通道未配置则记 ledger 留痕、配置后落 user_notify.jsonl，
-# 真正的跨通道 send 原语待对齐后替换（见下方 TODO）。
+# 与薄派发器红线不冲突：本脚本只经反向网关把结果信封推给 114 智伴 agent，
+# 由智伴负责企微最后一跳；**不碰 GitLab、不建 issue、不打标签、不解析需求**。
 #
 # best-effort 语义（仿 ops_notify.sh / acpx post_result_note.sh）：推送是终态锦上添花，
 # 绝不能让回调路径因「推用户」再失败、也绝不静默丢结论（结论由 pending/ledger 兜底）：
-#   - USER_NOTIFY_CHANNEL 为空 → 不推，但**记一条 ledger 留痕**（user_notify_skipped），
-#     exit 0（config：留空则不推用户；留痕保证「漏推」可审计、不静默丢）。
-#   - 通道已配置 → 拼文案 + 落 ${LOG_DIR}/user_notify.jsonl，exit 0（占位实现；
-#     真正出站 send 待对齐）。
+#   - ZHIBAN_GATEWAY_URL / ZHIBAN_GATEWAY_TOKEN / ZHIBAN_AGENT 任一为空 → 不推，
+#     但**记一条 ledger 留痕**（user_notify_skipped），exit 0（config：留空则不推用户；
+#     留痕保证「漏推」可审计、不静默丢）。
+#   - 三项均配置 → 拼结构化信封 + 人读文案，用 `openclaw agent run` 投给 114 智伴；
+#     openclaw 缺失 / 非零退出均只记 user_notify_failed，exit 0。
 #   - 缺 EVENT（必填未给）→ exit 1（调用方 bug，与兄弟脚本 :? 惯例一致）。
 #   - 仅「部署配置形态错误」（EVENT 非法）→ exit 2，让运维知道配错了
 #     （这不属 best-effort 范畴，是调用点/部署期写错）。
 #
 # 入参（env）：
 #   EVENT               必填：result | failure
-#   USER_NOTIFY_CHANNEL 出站通道标识（待对齐形态）；空＝不推、仅 ledger 留痕。
-#                       来自 config/dispatcher.env（调用方 source 后透传）。
+#   ZHIBAN_GATEWAY_URL  114 OpenClaw 网关 ws:// URL；空＝不推、仅 ledger 留痕。
+#   ZHIBAN_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝不推、仅 ledger 留痕。
+#   ZHIBAN_AGENT        114 上接收结果的智伴 agent 名；空＝不推、仅 ledger 留痕。
+#                       三者来自 config/dispatcher.env（调用方 source 后透传）。
 # 可选：
 #   STATUS              done | failed | timeout（result 事件据此选文案；其它值按通用文案）
 #   IID                 issue IID（拼入文案）
@@ -45,7 +46,9 @@ case "${EVENT}" in
   *) echo "notify_user: EVENT must be result|failure, got: ${EVENT}" >&2; exit 2 ;;
 esac
 
-CHANNEL="${USER_NOTIFY_CHANNEL:-}"
+GW_URL="${ZHIBAN_GATEWAY_URL:-}"
+GW_TOKEN="${ZHIBAN_GATEWAY_TOKEN:-}"
+ZHIBAN="${ZHIBAN_AGENT:-}"
 STATUS="${STATUS:-}"
 IID="${IID:-}"
 MR_URL="${MR_URL:-}"
@@ -100,7 +103,7 @@ fi
 
 # 通道未配置：不推，但写一条 ledger 留痕（user_notify_skipped），保证漏推可审计、不静默丢。
 # ledger 为 append-only 审计（与 drain_pending.sh 一致），单行 JSON 原子追加，无需 flock。
-if [ -z "${CHANNEL}" ]; then
+if [ -z "${GW_URL}" ] || [ -z "${GW_TOKEN}" ] || [ -z "${ZHIBAN}" ]; then
   jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
      --arg content "${CONTENT}" --arg ts "${TS}" \
      --argjson origin "${ORIGIN_ARG}" \
@@ -108,31 +111,63 @@ if [ -z "${CHANNEL}" ]; then
        status:($st|select(.!="")//null),
        iid:(if $iid=="" then null else ($iid|tonumber? // $iid) end),
        content:$content, origin:$origin, skipped_at:$ts,
-       reason:"USER_NOTIFY_CHANNEL empty"}' \
+       reason:"ZhiBan gateway pins empty"}' \
      >> "${LEDGER_FILE}" \
      || { echo "notify_user: failed to write ledger (event=${EVENT})" >&2; exit 1; }
-  echo "notify_user: USER_NOTIFY_CHANNEL empty; skip push, ledger 留痕 (event=${EVENT} iid=${IID:-?})" >&2
+  echo "notify_user: ZhiBan gateway pins empty; skip push, ledger 留痕 (event=${EVENT} iid=${IID:-?})" >&2
   exit 0
 fi
 
-# 通道已配置：落 user_notify.jsonl（占位实现）。真正的出站 send 待对齐后替换此处。
-# TODO(待对齐): 企微回投 / 经 114 把 CONTENT 定向投回 ORIGIN_JSON 指向的发起人——
-#   出站通道原语（工具名/参数/鉴权）属设计稿 §9.2 待对齐项，不臆造。对齐前以「落
-#   user_notify.jsonl 留痕」代替真正推送：留痕保证结论不丢、且对齐后可回放补投。
-NOTIFY_LOG="${LOG_DIR}/user_notify.jsonl"
-jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
-   --arg content "${CONTENT}" --arg ch "${CHANNEL}" --arg ts "${TS}" \
-   --arg mr "${MR_URL}" --arg wiki "${WIKI_URL}" --arg rsn "${REASON}" \
-   --argjson origin "${ORIGIN_ARG}" \
-   '{kind:"user_notify", event:$ev,
+ENVELOPE="$(jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
+   --arg content "${CONTENT}" --arg mr "${MR_URL}" --arg wiki "${WIKI_URL}" \
+   --arg rsn "${REASON}" --arg ts "${TS}" --argjson origin "${ORIGIN_ARG}" \
+   '{kind:"req_result_push", event:$ev,
      status:($st|select(.!="")//null),
      iid:(if $iid=="" then null else ($iid|tonumber? // $iid) end),
-     content:$content, channel:$ch, origin:$origin,
+     content:$content, origin:$origin,
      mr_url:($mr|select(.!="")//null),
      wiki_url:($wiki|select(.!="")//null),
      reason:($rsn|select(.!="")//null),
-     notified_at:$ts}' \
-   >> "${NOTIFY_LOG}" \
-   || { echo "notify_user: failed to write ${NOTIFY_LOG} (event=${EVENT})" >&2; exit 1; }
-echo "notify_user: queued push (event=${EVENT} status=${STATUS:-?} iid=${IID:-?}) -> ${NOTIFY_LOG}" >&2
+     ts:$ts}')"
+
+NOTIFY_LOG="${LOG_DIR}/user_notify.jsonl"
+append_notify_log() {
+  _delivered="$1"
+  jq -nc --argjson envelope "${ENVELOPE}" --arg channel "${ZHIBAN}" --arg ts "${TS}" \
+     --arg delivered "${_delivered}" \
+     '$envelope + {kind:"user_notify", channel:$channel,
+       delivered:($delivered=="true"), notified_at:$ts}' \
+     >> "${NOTIFY_LOG}" \
+     || echo "notify_user: failed to write ${NOTIFY_LOG} (event=${EVENT}) (non-fatal)" >&2
+}
+
+append_push_failure_ledger() {
+  _reason="$1"
+  jq -nc --argjson envelope "${ENVELOPE}" --arg reason "${_reason}" --arg ts "${TS}" \
+     '$envelope + {kind:"user_notify_failed", reason:$reason, failed_at:$ts}' \
+     >> "${LEDGER_FILE}" \
+     || echo "notify_user: failed to write user_notify_failed ledger (event=${EVENT}) (non-fatal)" >&2
+}
+
+if ! command -v openclaw >/dev/null 2>&1; then
+  append_push_failure_ledger "openclaw not found"
+  echo "notify_user: openclaw not found; skip push (event=${EVENT} iid=${IID:-?})" >&2
+  exit 0
+fi
+
+set +e
+openclaw --gateway-url "${GW_URL}" --gateway-token "${GW_TOKEN}" \
+  agent run "${ENVELOPE}" --agent "${ZHIBAN}" >/dev/null
+RC=$?
+set -e
+
+if [ "${RC}" -ne 0 ]; then
+  append_notify_log false
+  append_push_failure_ledger "gateway agent run non-zero"
+  echo "notify_user: push failed rc=${RC} (event=${EVENT} iid=${IID:-?}) (non-fatal)" >&2
+  exit 0
+fi
+
+append_notify_log true
+echo "notify_user: pushed to ZhiBan (event=${EVENT} status=${STATUS:-?} iid=${IID:-?}) -> ${ZHIBAN}" >&2
 exit 0

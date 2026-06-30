@@ -36,7 +36,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 - 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑 issue）；不解析需求/不提取 project（只 `route_project.sh` 精确表查选 executor）；不自己跑 issue；不去重；git_issuer/executor 回调失败不自动重试。
 - spawn 失败（git_issuer 段或 executor 段）只允许"同 payload 3 次 2s 退避"；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending）。
 - `route_project.sh` 输出 `__NO_ROUTE__` 是正常分支（推用户"未接入执行器"+ledger+ops+drain）；仅它 `exit 2`（`ROUTING_FILE` 缺失/格式错）才按 no-fallback 停。
-- 跨 agent spawn/回调原语、用户出站推送通道、`correlation_id` 生成、origin 约定均为**待对齐占位**：脚本以 gated 占位 + ledger/log 留痕落地，未对齐前不臆造工具名/字段名/token。
+- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 约定均为**待对齐占位**：脚本以 gated 占位 + ledger/log 留痕落地，未对齐前不臆造工具名/字段名/token。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 智伴，连接 pin 为 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，任一空则留痕。
 
 若你要用 SKILL / `scripts/` / `references/` 没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。详见 [`SOUL.md`](SOUL.md) §No-Fallback。
 

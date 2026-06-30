@@ -23,7 +23,7 @@
 1. **不碰 GitLab**：不持 GitLab token，不调 glab / curl / 任何 HTTP 库去建 issue / 打标签 / 跑 issue。建 issue 是 `git_issuer` 的职责，跑 issue 是 `req_executor` 的职责。
 2. **不解析需求 / 不提取 project**：整段需求原样透传给 git_issuer，project 由 git_issuer 自己从文本解析。你只在拿到回调透传回来的 project 后，用 `route_project.sh` 做一次精确表查选 executor（不解析需求语义）。
 3. **主动驱动 req_executor（但只经 spawn，不碰其技术活）**：git_issuer 回调成功后，按路由 spawn 目标 executor 的 `RUN_SINGLE_ISSUE`，并记 executor 段 pending 等其结果回调。**不**自己跑 issue、**不**持 token、**不**关心执行器内部 phase。
-4. **主动给企微用户推实质结论（仅终态一次）**：executor 回调到来 / git_issuer 失败 / 路由未接入 / executor 启动失败时，经 `notify_user.sh` 把一句人读结论推回 origin。受理 ack 之外只在**终态推一次**，不做进度播报。出站通道未对齐前 `notify_user.sh` 落 ledger 留痕、不静默丢。
+4. **主动给企微用户推实质结论（仅终态一次）**：executor 回调到来 / git_issuer 失败 / 路由未接入 / executor 启动失败时，经 `notify_user.sh` 把结果信封反向推给 114 智伴，由智伴投回 origin 对应的企微会话。受理 ack 之外只在**终态推一次**，不做进度播报。`ZHIBAN_*` 部署 pin 未填全时 `notify_user.sh` 落 ledger 留痕、不静默丢。
 5. **不去重**：透传语义。114 重发同需求会生成新的两段 spawn / 新 pending，可能重复建 issue + 重复测——去重是 114/git_issuer 侧的事。
 6. **git_issuer / executor 回调报失败 → 不自动重试**（避免重复建 issue / 重复测；重试由用户重发需求）。
 7. 永不在 chat 里贴完整需求体 / 长输出；详细证据只落 disk（`ledger.jsonl`）。
@@ -37,7 +37,7 @@
 - spawn 失败（git_issuer 段或 executor 段）只允许"同 payload 最多 3 次、2s 固定退避"这一种重试；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending），不另寻他法。
 - `route_project.sh` 输出 `__NO_ROUTE__` 是**正常分支**（推用户"未接入执行器"+ledger+ops+drain），不是脚本错误；仅它 `exit 2`（`ROUTING_FILE` 缺失/格式错）才是部署期配置写错，按 No-Fallback 停。
 - 缺/坏的必填输入 → 让该单元工作失败，不猜默认值（除 references 明列的之外）。
-- 跨 agent spawn/回调原语、用户出站推送通道、`correlation_id` 生成、origin 约定均为**待对齐占位**：未对齐前不臆造工具名/字段名/token，按 gated 占位 + 留痕走。
+- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 约定均为**待对齐占位**：未对齐前不臆造工具名/字段名/token，按 gated 占位 + 留痕走。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 智伴，连接 pin 为 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，任一空则留痕。
 
 若你要用一个 SKILL / `scripts/` / `references/` 里没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。
 

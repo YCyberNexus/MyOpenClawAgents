@@ -8,10 +8,12 @@
 
 **Tech Stack:** OpenClaw agent 部署工件（bash + jq + flock state ops + LLM-orchestrated SKILL prose）。无 build/test runner。验证 = `/opt/homebrew/bin/bash -n` + 临时 `STATE_ROOT` 本地 state 冒烟 + `code-reviewer` 子代理审查闸门。
 
+> **更新（落地后）**：本计划提到的 `USER_NOTIFY_CHANNEL`（用户出站推送通道占位）已在 `SKILL_VERSION=2026-06-30.1` 落地为**反向网关推 114 智伴**——`notify_user.sh` 用 `openclaw agent run` 把状态信封投给智伴 agent，连接 pin 改为 `ZHIBAN_GATEWAY_URL`/`ZHIBAN_GATEWAY_TOKEN`/`ZHIBAN_AGENT`（详见 `config/dispatcher.env` + SKILL）。下文 Step 中的 `USER_NOTIFY_CHANNEL` 字样按此理解。
+
 ## Global Constraints
 
 - 本机 bash 一律用 `/opt/homebrew/bin/bash`（系统 /bin/bash 3.2.57 会误判）。
-- 跨 agent spawn/callback/用户推送原语属**待对齐**：脚本里以"显式 gated 占位 + 记 ledger 留痕"实现，**不臆造**工具名/字段名（沿用现有 git_issuer spawn 在 SKILL prose 描述、references/trigger_command.md 标 ⚠️待对齐 的做法）。
+- 跨 agent spawn/callback 原语属**待对齐**：脚本里以"显式 gated 占位 + 记 ledger 留痕"实现，**不臆造**工具名/字段名（沿用现有 git_issuer spawn 在 SKILL prose 描述、references/trigger_command.md 标 ⚠️待对齐 的做法）。用户推送原语已在 `2026-06-30.1` 落地为反向网关推 114 智伴。
 - No-Fallback：脚本非零退出→读输出/分类/记录/停；不自动重试（spawn 失败仅"同 payload 3 次 2s 退避"）。
 - best-effort 通知脚本（notify_dispatcher/notify_user）：通道未配置或发送失败一律 `exit 0` + 记 ledger，绝不打断主流程；仅配置形态写错才非零退出。
 - 每个非平凡改动走 `code-reviewer` 子代理循环至零问题；改 `workspace-X/` 下 SOUL/AGENTS/USER/config/skills 即 bump 该侧 SKILL.md 的 `SKILL_VERSION`（今天 `2026-06-29.N`，已是 `.1` 则递增）；完成后写两侧 `.claude/.review-done-sha` sentinel。
@@ -47,7 +49,7 @@ group=<可选>
 | `drain_pending.sh`（改） | `STATE_ROOT`,`RUN_ID` | `STAGE`,`OUTCOME`,`PROJECT`,`IID`,`ISSUE_URL`,`STATUS`,`MR_URL`,`REASON` |
 | `evict_stuck.sh`（改） | `STATE_ROOT`,`STUCK_AFTER_MINUTES` | —（覆盖两 stage） |
 | `route_project.sh`（新） | `PROJECT`,`ROUTING_FILE` | — →stdout 输出 executor agent 名或 `__NO_ROUTE__` |
-| `notify_user.sh`（新） | `EVENT`(`result`/`failure`) | `USER_NOTIFY_CHANNEL`(空则 no-op),`ORIGIN_JSON`,`IID`,`STATUS`,`MR_URL`,`REASON` |
+| `notify_user.sh`（新） | `EVENT`(`result`/`failure`) | `ZHIBAN_GATEWAY_URL`/`ZHIBAN_GATEWAY_TOKEN`/`ZHIBAN_AGENT`(任一空则 no-op),`ORIGIN_JSON`,`IID`,`STATUS`,`MR_URL`,`REASON` |
 | `notify_dispatcher.sh`（新, req_executor 侧） | `CORRELATION_ID`,`IID`,`STATUS` | `DISPATCHER_CALLBACK_TARGET`(空则 no-op),`PROJECT`,`MR_URL`,`WIKI_URL`,`REASON` |
 
 ---
@@ -133,7 +135,7 @@ group=<可选>
 
 **Files:** Create `scripts/route_project.sh`、`config/routing.env`；Modify `config/README.md`、`config/dispatcher.env`。
 
-- [ ] Step1 `routing.env`：注释 + 示例 `claw_gitlab/px_ifp_hulat_test=req_executor_ifp`；`dispatcher.env` 增 `ROUTING_FILE`/`USER_NOTIFY_CHANNEL`/`DISPATCHER_CALLBACK_TARGET`（后两者待对齐占位）。
+- [ ] Step1 `routing.env`：注释 + 示例 `claw_gitlab/px_ifp_hulat_test=req_executor_ifp`；`dispatcher.env` 增 `ROUTING_FILE`/`ZHIBAN_GATEWAY_URL`/`ZHIBAN_GATEWAY_TOKEN`/`ZHIBAN_AGENT`/`DISPATCHER_CALLBACK_TARGET`（结果回调目标仍待对齐占位）。
 - [ ] Step2 `route_project.sh`：读 `ROUTING_FILE`，按 `PROJECT` 精确查 → 命中输出 agent 名 exit0；未命中输出 `__NO_ROUTE__` exit0（由 SKILL 判 no-route 失败，脚本本身不报错）；文件缺失/格式错 exit2。
 - [ ] Step3 验证：`bash -n`。
 - [ ] Step4 冒烟：命中/未命中/文件缺失三例。
@@ -144,10 +146,10 @@ group=<可选>
 
 **Files:** Create `scripts/notify_user.sh`；Modify `config/README.md`。
 
-- [ ] Step1 写脚本：`EVENT∈result/failure` 校验 → `USER_NOTIFY_CHANNEL` 空则 `exit 0`（记 ledger 留痕）→ 按 STATUS 拼用户文案（done/failed/timeout，文案同设计稿 §4.3）→ **推送占位**：`# TODO(待对齐): 企微回投/经114` + 当前落 `${STATE...}/log/user_notify.jsonl` exit0；通道形态写错 exit2。
+- [ ] Step1 写脚本：`EVENT∈result/failure` 校验 → `ZHIBAN_*` 任一空则 `exit 0`（记 ledger 留痕）→ 按 STATUS 拼用户文案（done/failed/timeout，文案同设计稿 §4.3）→ 经反向网关 `openclaw agent run` 把状态信封投给 114 智伴；投递失败仅记 ledger/log，exit0。
 - [ ] Step2 验证：`bash -n`。
 - [ ] Step3 冒烟：channel 空 no-op、非空落行、EVENT 非法非零。
-- [ ] Step4 README 记 `USER_NOTIFY_CHANNEL`。
+- [ ] Step4 README 记 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`。
 - [ ] Gate：code-review。
 
 ### Task B4: req_dispatcher 契约（SKILL 三路径 + SOUL/AGENTS/USER/CLAUDE + references）+ bump

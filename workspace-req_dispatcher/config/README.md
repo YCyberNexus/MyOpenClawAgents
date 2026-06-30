@@ -12,7 +12,9 @@
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
 | `ROUTING_FILE` | 是 | 多 project 路由表文件路径（见下「`routing.env`」）。git_issuer 回调透传回 project 后据此选目标 `req_executor` agent。消费方 `scripts/route_project.sh`。默认相对 SKILL_DIR 的 `../../config/routing.env`，也可改绝对路径。 |
-| `USER_NOTIFY_CHANNEL` | 否（**待对齐**） | 用户出站推送通道：req_dispatcher 主动给企微发起人（origin）推实质结果（受理 ack 之外）。确切机制**待对齐**（企微 webhook 回投 / 经 114，设计稿 §9.2）。留空＝`scripts/notify_user.sh` no-op（仅记 ledger 留痕、不静默丢）。 |
+| `ZHIBAN_GATEWAY_URL` | 否 | 114 OpenClaw 网关 URL。用户结果推送机制已对齐为 104 反向网关调用 114 智伴；本字段与 `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` 任一留空＝`scripts/notify_user.sh` no-op（仅记 ledger 留痕、不静默丢）。 |
+| `ZHIBAN_GATEWAY_TOKEN` | 否 | 114 OpenClaw 网关 token。仅由 `notify_user.sh` 用于 `openclaw agent run` 投递结果信封；不要写入日志。 |
+| `ZHIBAN_AGENT` | 否 | 114 上接收结果信封的智伴 agent 名。智伴负责根据信封里的 `origin` 完成企微最后一跳。 |
 | `DISPATCHER_CALLBACK_TARGET` | 否（**待对齐**） | 结果回调目标：spawn `req_executor` 的 `RUN_SINGLE_ISSUE` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。确切形态 = req_dispatcher 的 agent/session 标识，与跨 agent 回调原语一同**待对齐**（设计稿 §9.1）。留空＝该字段为空，执行器侧回调 no-op。 |
 | 跨 agent 原语连接参数 | 待定 | 形态类 `sessions_spawn`、可指定目标 agent、异步回调。具体工具名与参数待与 OpenClaw 维护者/同事对齐，见 `skills/requirement_dispatch/references/trigger_command.md` 占位块。 |
 
@@ -45,7 +47,8 @@ git_issuer 回调把 `project`（group/project）透传回来后，req_dispatche
 2. `GIT_ISSUER_AGENT` 指向的下游 agent 已在同一 OpenClaw 上线、可被跨 agent 原语调用。
 3. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
 4. `ROUTING_FILE` 指向的 `routing.env` 存在且可读；本链路要服务的每个 project 都在表里有 `PROJECT=AGENT` 行，且对应的 `req_executor` 部署已在同一 OpenClaw 上线（主动编排下由 req_dispatcher spawn `RUN_SINGLE_ISSUE` 即时驱动，不再依赖独立 cron 被动捞起）。表里没有的 project 会被判 no-route。
-5. （**待对齐**）`USER_NOTIFY_CHANNEL` / `DISPATCHER_CALLBACK_TARGET` 在对齐出站推送通道与跨 agent 回调原语后填好；未填时分别使 `notify_user.sh` no-op、执行器结果回调字段为空（留痕不丢，但用户收不到结果推送）。
+5. `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` 按 114 智伴部署值填好；未填时 `notify_user.sh` 只留痕、不推送用户结果。
+6. （**待对齐**）`DISPATCHER_CALLBACK_TARGET` 在对齐 executor 结果回调原语后填好；未填时执行器结果回调字段为空。
 
 ## 与 acpx 工作区的差异
 

@@ -26,7 +26,8 @@
 
 req_dispatcher 经 OpenClaw **原生跨 agent spawn 原语**（形态类 `sessions_spawn`、可指定目标 agent、异步回调）做**两段 spawn**：→ `git_issuer`（固定目标）与 → 按路由选定的 `<req_executor 部署>`（动态目标）。两类回调（git_issuer 完成、executor 结果 I2）的确切工具名、参数、信封字段**待与 OpenClaw 维护者/同事对齐**——契约、I1 入参、I2 信封与对齐清单见 [`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)。
 
-**两段匹配各以自己的 `run_id` 为主**，故即便对齐前也能推进；不要求下游 agent 回显 token 作主匹配（零侵入），executor 段额外用 `correlation_id` 作二次校验。用户出站推送通道、`correlation_id` 生成、origin 约定亦为待对齐占位（脚本 gated + 留痕）。
+**两段匹配各以自己的 `run_id` 为主**，故即便对齐前也能推进；不要求下游 agent 回显 token 作主匹配（零侵入），executor 段额外用 `correlation_id` 作二次校验。用户出站推送通道**已对齐**：`notify_user.sh` 反向网关推 114 智伴（`openclaw agent run`，连接 pin `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`；任一空则留痕）。
+`correlation_id` 生成、origin 约定仍为待对齐占位。
 
 ## State 布局
 
@@ -45,7 +46,7 @@ schema 详见 [`skills/requirement_dispatch/references/state_schema.md`](skills/
 
 ## Deployment Pin
 
-部署期配置在 [`config/dispatcher.env`](config/dispatcher.env)：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表路径）、可选 `OPS_NOTIFY_CHANNEL` / `DEFAULT_ENTRY_LABEL`、待对齐占位 `USER_NOTIFY_CHANNEL`（用户出站推送通道）/ `DISPATCHER_CALLBACK_TARGET`（executor 结果回调目标）、跨 agent 原语连接参数（待对齐）。多 project 路由表本体在 [`config/routing.env`](config/routing.env)（`PROJECT=AGENT` 行）。**group / project 不在此处**——随需求文本传入，由 git_issuer 解析；project→executor 映射由路由表维护。**GitLab token 不在此处**——归执行器侧 pin。详见 [`config/README.md`](config/README.md)。
+部署期配置在 [`config/dispatcher.env`](config/dispatcher.env)：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表路径）、可选 `OPS_NOTIFY_CHANNEL` / `DEFAULT_ENTRY_LABEL`、用户结果推送 pin `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`、待对齐占位 `DISPATCHER_CALLBACK_TARGET`（executor 结果回调目标）、跨 agent 原语连接参数（待对齐）。多 project 路由表本体在 [`config/routing.env`](config/routing.env)（`PROJECT=AGENT` 行）。**group / project 不在此处**——随需求文本传入，由 git_issuer 解析；project→executor 映射由路由表维护。**GitLab token 不在此处**——归执行器侧 pin。详见 [`config/README.md`](config/README.md)。
 
 ## req_executor 衔接依赖（重要，记录在案）
 
