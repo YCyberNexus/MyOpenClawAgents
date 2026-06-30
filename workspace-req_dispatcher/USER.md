@@ -33,7 +33,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
   - 处理超时 → "#<iid> 处理超时未完成，已停放待人工处理"
   - 流程性失败（建 issue 失败 / 该 project 未接入执行器 / 启动执行失败）→ 对应失败说明。
 
-> ⚠️ ack 文案已固定；终态结论的推送机制已对齐为反向网关推 114 智伴。部署期需填 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`；三项任一为空时结论只落 ledger/log 留痕。origin 编码约定仍需与 114 对齐。
+> ⚠️ ack 文案已固定；终态结论的推送机制已对齐为反向网关推 114 智伴。部署期需填 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`；三项任一为空时结论只落 ledger/log 留痕。`ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 控制该 best-effort 推送的超时。origin 编码约定仍需与 114 对齐。
 
 ## 预期行为
 
@@ -45,7 +45,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 ## 配置
 
-部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表）、`ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`（用户结果推送 pin）；待对齐占位 `DISPATCHER_CALLBACK_TARGET`（结果回调目标）。多 project 路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不在配置里**（随需求文本传入）；**GitLab token 不在配置里**（归执行器侧）。
+部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表）、`ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin）；待对齐占位 `DISPATCHER_CALLBACK_TARGET`（结果回调目标）。多 project 路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不在配置里**（随需求文本传入）；**GitLab token 不在配置里**（归执行器侧）。
 
 ## 依赖与对齐项
 

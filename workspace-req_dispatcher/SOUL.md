@@ -37,7 +37,7 @@
 - spawn 失败（git_issuer 段或 executor 段）只允许"同 payload 最多 3 次、2s 固定退避"这一种重试；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending），不另寻他法。
 - `route_project.sh` 输出 `__NO_ROUTE__` 是**正常分支**（推用户"未接入执行器"+ledger+ops+drain），不是脚本错误；仅它 `exit 2`（`ROUTING_FILE` 缺失/格式错）才是部署期配置写错，按 No-Fallback 停。
 - 缺/坏的必填输入 → 让该单元工作失败，不猜默认值（除 references 明列的之外）。
-- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 约定均为**待对齐占位**：未对齐前不臆造工具名/字段名/token，按 gated 占位 + 留痕走。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 智伴，连接 pin 为 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，任一空则留痕。
+- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 约定均为**待对齐占位**：未对齐前不臆造工具名/字段名/token，按 gated 占位 + 留痕走。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 智伴，连接 pin 为 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，任一空则留痕；`ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
 
 若你要用一个 SKILL / `scripts/` / `references/` 里没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。
 

@@ -15,6 +15,7 @@
 | `ZHIBAN_GATEWAY_URL` | 否 | 114 OpenClaw 网关 URL。用户结果推送机制已对齐为 104 反向网关调用 114 智伴；本字段与 `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` 任一留空＝`scripts/notify_user.sh` no-op（仅记 ledger 留痕、不静默丢）。 |
 | `ZHIBAN_GATEWAY_TOKEN` | 否 | 114 OpenClaw 网关 token。仅由 `notify_user.sh` 用于 `openclaw agent run` 投递结果信封；不要写入日志。 |
 | `ZHIBAN_AGENT` | 否 | 114 上接收结果信封的智伴 agent 名。智伴负责根据信封里的 `origin` 完成企微最后一跳。 |
+| `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` | 否 | 104 反向调用 114 智伴的超时秒数，默认 `30`；必须为正整数，配置形态错误时 `notify_user.sh` 以 `2` 退出。实际投递超时只写 `user_notify_failed` 留痕并 `exit 0`，不阻断终态回调路径。 |
 | `DISPATCHER_CALLBACK_TARGET` | 否（**待对齐**） | 结果回调目标：spawn `req_executor` 的 `RUN_SINGLE_ISSUE` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。确切形态 = req_dispatcher 的 agent/session 标识，与跨 agent 回调原语一同**待对齐**（设计稿 §9.1）。留空＝该字段为空，执行器侧回调 no-op。 |
 | 跨 agent 原语连接参数 | 待定 | 形态类 `sessions_spawn`、可指定目标 agent、异步回调。具体工具名与参数待与 OpenClaw 维护者/同事对齐，见 `skills/requirement_dispatch/references/trigger_command.md` 占位块。 |
 
@@ -47,7 +48,7 @@ git_issuer 回调把 `project`（group/project）透传回来后，req_dispatche
 2. `GIT_ISSUER_AGENT` 指向的下游 agent 已在同一 OpenClaw 上线、可被跨 agent 原语调用。
 3. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
 4. `ROUTING_FILE` 指向的 `routing.env` 存在且可读；本链路要服务的每个 project 都在表里有 `PROJECT=AGENT` 行，且对应的 `req_executor` 部署已在同一 OpenClaw 上线（主动编排下由 req_dispatcher spawn `RUN_SINGLE_ISSUE` 即时驱动，不再依赖独立 cron 被动捞起）。表里没有的 project 会被判 no-route。
-5. `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` 按 114 智伴部署值填好；未填时 `notify_user.sh` 只留痕、不推送用户结果。
+5. `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` 按 114 智伴部署值填好；未填时 `notify_user.sh` 只留痕、不推送用户结果。`ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
 6. （**待对齐**）`DISPATCHER_CALLBACK_TARGET` 在对齐 executor 结果回调原语后填好；未填时执行器结果回调字段为空。
 
 ## 与 acpx 工作区的差异

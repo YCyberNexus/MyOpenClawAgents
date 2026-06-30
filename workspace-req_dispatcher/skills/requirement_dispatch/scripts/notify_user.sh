@@ -15,9 +15,9 @@
 #     但**记一条 ledger 留痕**（user_notify_skipped），exit 0（config：留空则不推用户；
 #     留痕保证「漏推」可审计、不静默丢）。
 #   - 三项均配置 → 拼结构化信封 + 人读文案，用 `openclaw agent run` 投给 114 智伴；
-#     openclaw 缺失 / 非零退出均只记 user_notify_failed，exit 0。
+#     openclaw 缺失 / 非零退出 / 超时均只记 user_notify_failed，exit 0。
 #   - 缺 EVENT（必填未给）→ exit 1（调用方 bug，与兄弟脚本 :? 惯例一致）。
-#   - 仅「部署配置形态错误」（EVENT 非法）→ exit 2，让运维知道配错了
+#   - 仅「部署配置形态错误」（EVENT 非法 / 超时配置非正整数）→ exit 2，让运维知道配错了
 #     （这不属 best-effort 范畴，是调用点/部署期写错）。
 #
 # 入参（env）：
@@ -34,6 +34,8 @@
 #   REASON              failed 文案的原因摘要 / failure 事件的失败说明
 #   ORIGIN_JSON         origin 元数据（channel/user/conversation）紧凑 JSON；原样留痕，
 #                       供出站通道对齐后据此定向投递。
+#   ZHIBAN_NOTIFY_TIMEOUT_SECONDS
+#                       openclaw 反向投递超时秒数，默认 30；须为正整数。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
@@ -49,6 +51,7 @@ esac
 GW_URL="${ZHIBAN_GATEWAY_URL:-}"
 GW_TOKEN="${ZHIBAN_GATEWAY_TOKEN:-}"
 ZHIBAN="${ZHIBAN_AGENT:-}"
+NOTIFY_TIMEOUT_SECONDS="${ZHIBAN_NOTIFY_TIMEOUT_SECONDS:-30}"
 STATUS="${STATUS:-}"
 IID="${IID:-}"
 MR_URL="${MR_URL:-}"
@@ -56,6 +59,14 @@ WIKI_URL="${WIKI_URL:-}"
 REASON="${REASON:-}"
 ORIGIN_JSON="${ORIGIN_JSON:-}"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+case "${NOTIFY_TIMEOUT_SECONDS}" in
+  ''|*[!0-9]*) echo "notify_user: ZHIBAN_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+case "${NOTIFY_TIMEOUT_SECONDS}" in
+  *[1-9]*) ;;
+  *) echo "notify_user: ZHIBAN_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
 
 # IID 前缀：有则用 "#<iid>"，无则退化为通用「任务」。文案与设计稿 §4.3 逐字一致。
 issue_ref="任务"
@@ -149,6 +160,40 @@ append_push_failure_ledger() {
      || echo "notify_user: failed to write user_notify_failed ledger (event=${EVENT}) (non-fatal)" >&2
 }
 
+run_openclaw_with_timeout() {
+  _start_seconds=${SECONDS}
+  openclaw --gateway-url "${GW_URL}" --gateway-token "${GW_TOKEN}" \
+    agent run "${ENVELOPE}" --agent "${ZHIBAN}" >/dev/null &
+  _pid=$!
+  (
+    sleep "${NOTIFY_TIMEOUT_SECONDS}"
+    kill "${_pid}" >/dev/null 2>&1 || exit 0
+    sleep 2
+    kill -KILL "${_pid}" >/dev/null 2>&1 || true
+  ) &
+  _watchdog_pid=$!
+
+  wait "${_pid}"
+  _rc=$?
+  _elapsed=$((SECONDS - _start_seconds))
+  if kill -0 "${_watchdog_pid}" >/dev/null 2>&1; then
+    kill "${_watchdog_pid}" >/dev/null 2>&1 || true
+    wait "${_watchdog_pid}" >/dev/null 2>&1 || true
+  else
+    wait "${_watchdog_pid}" >/dev/null 2>&1 || true
+  fi
+
+  case "${_rc}" in
+    137|143)
+      if [ "${_elapsed}" -ge "${NOTIFY_TIMEOUT_SECONDS}" ]; then
+        return 124
+      fi
+      return "${_rc}"
+      ;;
+    *) return "${_rc}" ;;
+  esac
+}
+
 if ! command -v openclaw >/dev/null 2>&1; then
   append_push_failure_ledger "openclaw not found"
   echo "notify_user: openclaw not found; skip push (event=${EVENT} iid=${IID:-?})" >&2
@@ -156,14 +201,17 @@ if ! command -v openclaw >/dev/null 2>&1; then
 fi
 
 set +e
-openclaw --gateway-url "${GW_URL}" --gateway-token "${GW_TOKEN}" \
-  agent run "${ENVELOPE}" --agent "${ZHIBAN}" >/dev/null
+run_openclaw_with_timeout
 RC=$?
 set -e
 
 if [ "${RC}" -ne 0 ]; then
   append_notify_log false
-  append_push_failure_ledger "gateway agent run non-zero"
+  if [ "${RC}" -eq 124 ]; then
+    append_push_failure_ledger "gateway agent run timeout"
+  else
+    append_push_failure_ledger "gateway agent run non-zero"
+  fi
   echo "notify_user: push failed rc=${RC} (event=${EVENT} iid=${IID:-?}) (non-fatal)" >&2
   exit 0
 fi
