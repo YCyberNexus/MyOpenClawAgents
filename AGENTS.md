@@ -16,6 +16,12 @@ zone model:
 - Green zone: a mostly open office network environment. It may access the
   internet under safe and compliant conditions.
 
+OpenClaw blue-zone server addresses currently known for this project:
+
+- `req_dispatcher`, `req_executor`, and `git_issuer` run on `10.64.5.104`.
+- ZhiBan runs on `10.64.5.114`.
+- Both `10.64.5.104` and `10.64.5.114` are company blue-zone servers.
+
 ## Destructive Command Restriction
 
 Codex must not run `rm` in this repository, including `rm -f`, `rm -r`, or
