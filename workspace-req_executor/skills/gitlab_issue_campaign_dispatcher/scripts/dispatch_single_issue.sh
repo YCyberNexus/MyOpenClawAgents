@@ -14,7 +14,7 @@
 #      Optional: dispatcher_callback_target, group.
 #   2. Validates project / iid (positive integer) / correlation_id.
 #   3. Sources config/gitlab.env (host pin) + config/campaign_defaults.env (campaign
-#      pin) to obtain the pinned campaign fields and (待对齐) the GitLab token.
+#      pin) to obtain the pinned campaign fields and the GitLab token.
 #   4. Synthesizes the equivalent RUN_SCHEDULED_ISSUE_CAMPAIGN trigger for a single
 #      IID (issue_iids=[iid], issue_min_iid=issue_max_iid=iid, hourly_issue_quota=1,
 #      max_concurrent_subagents=1, …) and exports the dispatcher bootstrap env.
@@ -50,10 +50,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-# CONFIG_DIR defaults to the deployment-pinned config/ next to the skill. It is
+# CONFIG_DIR defaults to the workspace-level deployment-pinned config/. It is
 # overridable so smoke tests can point at a throwaway config tree without
 # touching the real pins (the production deployment never sets this).
-CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/.." && pwd)/config}"
+CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
 
 # ─── 1. Parse the I1 trigger from stdin ────────────────────────────
 # Same line discipline as dispatch_prepare_tick.sh: tolerate CRLF, skip blank /
@@ -158,11 +158,10 @@ case "${PROJECT_IN}" in
   *)   PROJECT_FULL="${GROUP_EFF}/${PROJECT_SLUG}" ;;
 esac
 
-# GITLAB_TOKEN: env override wins, else the pin (token injection method is 待对齐,
-# §9 of the design — for now it is read from campaign_defaults.env / env). req_dispatcher
-# never sends the token; it always comes from the executor-side deployment.
+# GITLAB_TOKEN: env override wins, else the pin. req_dispatcher never sends the
+# token; it always comes from the executor-side deployment.
 GITLAB_TOKEN_EFF="${GITLAB_TOKEN:-}"
-[ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in campaign_defaults.env; token injection 待对齐)" >&2; exit 2; }
+[ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in campaign_defaults.env)" >&2; exit 2; }
 
 # Pinned campaign fields with safe defaults (campaign_defaults.env should set
 # these; defaults mirror dispatch_prepare_tick.sh's own fallbacks so a partial
@@ -205,7 +204,6 @@ DISPATCH_ORIGIN_FILE="${ISSUE_ROOT_FOR_IID}/dispatch_origin.json"
 
 mkdir -p "${ISSUE_ROOT_FOR_IID}"
 ORIGIN_TMP="$(mktemp "${DISPATCH_ORIGIN_FILE}.tmp.XXXXXX")"
-trap 'rm -f "${ORIGIN_TMP}"' EXIT
 jq -nc \
   --arg correlation_id "${CORRELATION_ID}" \
   --arg dispatcher_callback_target "${DISPATCHER_CALLBACK_TARGET}" \
@@ -216,7 +214,6 @@ jq -nc \
    project: $project,
    iid: $iid}' >"${ORIGIN_TMP}"
 mv -f "${ORIGIN_TMP}" "${DISPATCH_ORIGIN_FILE}"
-trap - EXIT
 echo "dispatch_single_issue.sh: wrote dispatch_origin.json for #${IID_IN} (correlation_id=${CORRELATION_ID})" >&2
 
 # ─── 6. Synthesize the equivalent single-IID scheduled trigger ─────

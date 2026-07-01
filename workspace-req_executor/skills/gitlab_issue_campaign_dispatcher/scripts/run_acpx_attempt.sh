@@ -86,12 +86,19 @@ if [ ! -x "${safety_bin}/rm" ]; then
   exit 2
 fi
 
+# ACPx's built-in Claude adapter isolates user settings by default. The
+# OpenClaw runner needs the user's Claude Code auth/model provider config
+# (for example third-party DeepSeek settings) to reach the inner agent.
+: "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS:=1}"
+
 {
   printf 'cwd=%s\n' "${WORKTREE_DIR}"
   printf 'TASK_OUTPUT_DIR=%s\n' "${OUTPUT_DIR}"
   printf 'PATH_PREFIX=%s\n' "${safety_bin}"
+  printf 'ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s\n' "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
   printf 'timeout=%ss (kill-after=30s)\n' "${ACPX_TIMEOUT_SECONDS}"
-  printf 'command=timeout --kill-after=30s %ss acpx --auth-policy skip claude exec -f %s\n' \
+  printf 'command=ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s timeout --kill-after=30s %ss acpx --auth-policy skip claude exec -f %s\n' \
+    "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
     "${ACPX_TIMEOUT_SECONDS}" "${prompt_file}"
 } > "${LOG_DIR}/acpx_command.txt"
 
@@ -136,6 +143,7 @@ cleanup() {
 
 set +e
 set -m
+ACPX_CLAUDE_INCLUDE_USER_SETTINGS="${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
 PATH="${safety_bin}:${PATH}" \
 TASK_OUTPUT_DIR="${OUTPUT_DIR}" \
   timeout --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s" \

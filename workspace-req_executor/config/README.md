@@ -51,11 +51,11 @@ The driven path tests exactly **one** issue per trigger and must stay determinis
 | `RUN_TIMEOUT_SECONDS` | `18120` | Subagent runtime cap forwarded to `sessions_spawn` as `runTimeoutSeconds`; kept just above `ACPX_TIMEOUT_SECONDS` (acpx cap + 120) so the runtime never kills the subagent before acpx's own timeout flow runs. |
 | `RESULT_BASENAME` | `ifp-result` | Basename of the agent runtime root inside the checkout; `env_paths.sh` derives `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}`. |
 | `DATA_BASENAME` | `ifp-data` | Basename of the test team's knowledge-base directory; `env_paths.sh` derives `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`. |
-| `REPO_PARENT_PATH` | `/data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. |
+| `REPO_PARENT_PATH` | `/Users/yuanchenxiang/openclaw-local-data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. |
 
-### Token injection — 待对齐
+### Token pin
 
-`GITLAB_TOKEN` is **not** pinned in this file, and the driven trigger (I1) does not carry one either. How the token reaches `dispatch_single_issue.sh` on the driven path is a deployment-integration decision still **待对齐** — see the explicit `待对齐` comment block at the bottom of `campaign_defaults.env` for the candidate options (pin in-file / out-of-band env injection / runner-local secret file). Until that is aligned, the driven entry script reads `GITLAB_TOKEN` from the environment (as the scheduled path already does) and fails loudly when it is absent.
+For this local runner, `GITLAB_TOKEN` may be pinned in `campaign_defaults.env` so the driven trigger (I1) can remain secret-free while `dispatch_single_issue.sh` still authenticates to the local GitLab. Keep the committed value empty; fill the real token only in the runner-local working tree or inject it through the execution environment.
 
 ## UI account pool: `${UI_ACCOUNTS_RELPATH}` (optional — no default)
 

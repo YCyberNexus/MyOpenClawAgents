@@ -40,3 +40,6 @@ workspace-req_dispatcher/.claude/.review-done-sha
 workspace-req_dispatcher/.claude/.review-baseline
 workspace-req_executor/.claude/.review-done-sha
 workspace-req_executor/.claude/.review-baseline
+
+# Local GitLab runner secrets
+workspace-git_issuer/config/gitlab.env
