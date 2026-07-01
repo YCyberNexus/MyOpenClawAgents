@@ -6,15 +6,15 @@
 # 在 drain/ledger 写入之后执行。这是 req_dispatcher 首次主动给用户推「实质结论」
 # （受理 ack 之外）——见设计稿 §4.3/§4.5。
 #
-# 与薄派发器红线不冲突：本脚本只经反向网关把结果信封推给 114 智伴 agent，
-# 由智伴负责企微最后一跳；**不碰 GitLab、不建 issue、不打标签、不解析需求**。
+# 与薄派发器红线不冲突：本脚本只经反向网关把结果信封推给 114 接收 agent，
+# 由接收 agent 负责企微最后一跳；**不碰 GitLab、不建 issue、不打标签、不解析需求**。
 #
 # best-effort 语义（仿 ops_notify.sh / acpx post_result_note.sh）：推送是终态锦上添花，
 # 绝不能让回调路径因「推用户」再失败、也绝不静默丢结论（结论由 pending/ledger 兜底）：
-#   - ZHIBAN_GATEWAY_URL / ZHIBAN_GATEWAY_TOKEN / ZHIBAN_AGENT 任一为空 → 不推，
+#   - REPLY_GATEWAY_URL / REPLY_GATEWAY_TOKEN / 目标 agent 任一为空 → 不推，
 #     但**记一条 ledger 留痕**（user_notify_skipped），exit 0（config：留空则不推用户；
 #     留痕保证「漏推」可审计、不静默丢）。
-#   - 三项均配置 → 拼结构化信封 + 人读文案，用 `openclaw agent run` 投给 114 智伴；
+#   - 三项均配置 → 拼结构化信封 + 人读文案，用 `openclaw agent run` 投给 114 接收 agent；
 #     openclaw 缺失 / 非零退出 / 超时均只记 user_notify_failed，exit 0。
 #   - 缺 EVENT（必填未给）→ exit 1（调用方 bug，与兄弟脚本 :? 惯例一致）。
 #   - 仅「部署配置形态错误」（EVENT 非法 / 超时配置非正整数）→ exit 2，让运维知道配错了
@@ -22,19 +22,19 @@
 #
 # 入参（env）：
 #   EVENT               必填：result | failure
-#   ZHIBAN_GATEWAY_URL  114 OpenClaw 网关 ws:// URL；空＝不推、仅 ledger 留痕。
-#   ZHIBAN_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝不推、仅 ledger 留痕。
-#   ZHIBAN_AGENT        114 上接收结果的智伴 agent 名；空＝不推、仅 ledger 留痕。
-#                       三者来自 config/dispatcher.env（调用方 source 后透传）。
+#   REPLY_GATEWAY_URL  114 OpenClaw 网关 ws:// URL；空＝不推、仅 ledger 留痕。
+#   REPLY_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝不推、仅 ledger 留痕。
+#   DEFAULT_REPLY_AGENT 默认接收结果的 114 agent 名；ORIGIN_JSON.reply_agent 为空时使用。
+#                       这些字段来自 config/dispatcher.env（调用方 source 后透传）。
 # 可选：
 #   STATUS              done | failed | timeout（result 事件据此选文案；其它值按通用文案）
 #   IID                 issue IID（拼入文案）
 #   MR_URL              done 文案的 MR 链接
 #   WIKI_URL            failed 文案的详情链接
 #   REASON              failed 文案的原因摘要 / failure 事件的失败说明
-#   ORIGIN_JSON         origin 元数据（channel/user/conversation）紧凑 JSON；原样留痕，
-#                       供出站通道对齐后据此定向投递。
-#   ZHIBAN_NOTIFY_TIMEOUT_SECONDS
+#   ORIGIN_JSON         origin 元数据（channel/user/conversation/reply_agent）紧凑 JSON；
+#                       reply_agent 优先作为 114 接收结果的 agent 名，其余字段原样留痕。
+#   REPLY_NOTIFY_TIMEOUT_SECONDS
 #                       openclaw 反向投递超时秒数，默认 30；须为正整数。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -48,10 +48,10 @@ case "${EVENT}" in
   *) echo "notify_user: EVENT must be result|failure, got: ${EVENT}" >&2; exit 2 ;;
 esac
 
-GW_URL="${ZHIBAN_GATEWAY_URL:-}"
-GW_TOKEN="${ZHIBAN_GATEWAY_TOKEN:-}"
-ZHIBAN="${ZHIBAN_AGENT:-}"
-NOTIFY_TIMEOUT_SECONDS="${ZHIBAN_NOTIFY_TIMEOUT_SECONDS:-30}"
+GW_URL="${REPLY_GATEWAY_URL:-}"
+GW_TOKEN="${REPLY_GATEWAY_TOKEN:-}"
+DEFAULT_AGENT="${DEFAULT_REPLY_AGENT:-}"
+NOTIFY_TIMEOUT_SECONDS="${REPLY_NOTIFY_TIMEOUT_SECONDS:-30}"
 STATUS="${STATUS:-}"
 IID="${IID:-}"
 MR_URL="${MR_URL:-}"
@@ -61,11 +61,11 @@ ORIGIN_JSON="${ORIGIN_JSON:-}"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 case "${NOTIFY_TIMEOUT_SECONDS}" in
-  ''|*[!0-9]*) echo "notify_user: ZHIBAN_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
+  ''|*[!0-9]*) echo "notify_user: REPLY_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
 case "${NOTIFY_TIMEOUT_SECONDS}" in
   *[1-9]*) ;;
-  *) echo "notify_user: ZHIBAN_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
+  *) echo "notify_user: REPLY_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
 
 # IID 前缀：有则用 "#<iid>"，无则退化为通用「任务」。文案与设计稿 §4.3 逐字一致。
@@ -112,20 +112,25 @@ else
   ORIGIN_ARG="$(jq -nc --arg raw "${ORIGIN_JSON}" '{raw:$raw}')"
 fi
 
+REPLY_AGENT="$(jq -r 'if type=="object" and (.reply_agent|type=="string") then .reply_agent else "" end' <<<"${ORIGIN_ARG}")"
+TARGET_AGENT="${REPLY_AGENT:-${DEFAULT_AGENT}}"
+
 # 通道未配置：不推，但写一条 ledger 留痕（user_notify_skipped），保证漏推可审计、不静默丢。
 # ledger 为 append-only 审计（与 drain_pending.sh 一致），单行 JSON 原子追加，无需 flock。
-if [ -z "${GW_URL}" ] || [ -z "${GW_TOKEN}" ] || [ -z "${ZHIBAN}" ]; then
+if [ -z "${GW_URL}" ] || [ -z "${GW_TOKEN}" ] || [ -z "${TARGET_AGENT}" ]; then
   jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
-     --arg content "${CONTENT}" --arg ts "${TS}" \
+     --arg content "${CONTENT}" --arg ts "${TS}" --arg channel "${TARGET_AGENT}" \
      --argjson origin "${ORIGIN_ARG}" \
      '{kind:"user_notify_skipped", event:$ev,
        status:($st|select(.!="")//null),
        iid:(if $iid=="" then null else ($iid|tonumber? // $iid) end),
-       content:$content, origin:$origin, skipped_at:$ts,
-       reason:"ZhiBan gateway pins empty"}' \
+       content:$content, origin:$origin,
+       channel:($channel|select(.!="")//null),
+       skipped_at:$ts,
+       reason:"114 gateway pins empty or reply agent empty"}' \
      >> "${LEDGER_FILE}" \
      || { echo "notify_user: failed to write ledger (event=${EVENT})" >&2; exit 1; }
-  echo "notify_user: ZhiBan gateway pins empty; skip push, ledger 留痕 (event=${EVENT} iid=${IID:-?})" >&2
+  echo "notify_user: 114 gateway pins or reply agent empty; skip push, ledger 留痕 (event=${EVENT} iid=${IID:-?})" >&2
   exit 0
 fi
 
@@ -144,7 +149,7 @@ ENVELOPE="$(jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
 NOTIFY_LOG="${LOG_DIR}/user_notify.jsonl"
 append_notify_log() {
   _delivered="$1"
-  jq -nc --argjson envelope "${ENVELOPE}" --arg channel "${ZHIBAN}" --arg ts "${TS}" \
+  jq -nc --argjson envelope "${ENVELOPE}" --arg channel "${TARGET_AGENT}" --arg ts "${TS}" \
      --arg delivered "${_delivered}" \
      '$envelope + {kind:"user_notify", channel:$channel,
        delivered:($delivered=="true"), notified_at:$ts}' \
@@ -163,7 +168,7 @@ append_push_failure_ledger() {
 run_openclaw_with_timeout() {
   _start_seconds=${SECONDS}
   openclaw --gateway-url "${GW_URL}" --gateway-token "${GW_TOKEN}" \
-    agent run "${ENVELOPE}" --agent "${ZHIBAN}" >/dev/null &
+    agent run "${ENVELOPE}" --agent "${TARGET_AGENT}" >/dev/null &
   _pid=$!
   (
     sleep "${NOTIFY_TIMEOUT_SECONDS}"
@@ -217,5 +222,5 @@ if [ "${RC}" -ne 0 ]; then
 fi
 
 append_notify_log true
-echo "notify_user: pushed to ZhiBan (event=${EVENT} status=${STATUS:-?} iid=${IID:-?}) -> ${ZHIBAN}" >&2
+echo "notify_user: pushed to 114 agent (event=${EVENT} status=${STATUS:-?} iid=${IID:-?}) -> ${TARGET_AGENT}" >&2
 exit 0

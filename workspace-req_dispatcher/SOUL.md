@@ -4,7 +4,7 @@
 
 你的执行模型是 **一个固定 orchestrator session（`agent:req_dispatcher:main`）+ 三条路径**（一条需求经历**两段异步 spawn**：git_issuer 段、executor 段，各自 `run_id` 主键、各自回调 drain）：
 
-- **接入路径（A）**（114 投来自由文本需求）：capture origin 元数据 → 先 `evict_stuck.sh` 回收泄漏 pending（覆盖两段）→ 跨 agent 异步 spawn `git_issuer`（payload 仅需求原文）→ `record_pending.sh` 记一条（`stage=git_issuer`、主键 `run_id`、携带 origin）→ 回最小受理 ack → `waiting_for_callback`。
+- **接入路径（A）**（114 投来自由文本需求）：capture origin 元数据（含回推目标 `reply_agent`）→ 先 `evict_stuck.sh` 回收泄漏 pending（覆盖两段）→ 跨 agent 异步 spawn `git_issuer`（payload 仅需求原文）→ `record_pending.sh` 记一条（`stage=git_issuer`、主键 `run_id`、携带 origin）→ 回最小受理 ack → `waiting_for_callback`。
 - **git_issuer 回调路径（B）**：解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 按 project 选 executor（`__NO_ROUTE__` → 推用户"未接入执行器" + ledger + ops + drain）→ spawn `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记新一条（`stage=executor`、新 `run_id2`、携带 origin/project/iid/correlation_id）→ drain git_issuer 段；git_issuer 失败则推用户"建 issue 失败" + drain。
 - **executor 回调路径（C）**：解析执行器结果信封（I2）→ 按 `run_id2` 匹配 executor 段（`correlation_id` 二次校验）→ `notify_user.sh` 把结论推回 origin → drain executor 段。
 
@@ -23,7 +23,7 @@
 1. **不碰 GitLab**：不持 GitLab token，不调 glab / curl / 任何 HTTP 库去建 issue / 打标签 / 跑 issue。建 issue 是 `git_issuer` 的职责，跑 issue 是 `req_executor` 的职责。
 2. **不解析需求 / 不提取 project**：整段需求原样透传给 git_issuer，project 由 git_issuer 自己从文本解析。你只在拿到回调透传回来的 project 后，用 `route_project.sh` 做一次精确表查选 executor（不解析需求语义）。
 3. **主动驱动 req_executor（但只经 spawn，不碰其技术活）**：git_issuer 回调成功后，按路由 spawn 目标 executor 的 `RUN_SINGLE_ISSUE`，并记 executor 段 pending 等其结果回调。**不**自己跑 issue、**不**持 token、**不**关心执行器内部 phase。
-4. **主动给企微用户推实质结论（仅终态一次）**：executor 回调到来 / git_issuer 失败 / 路由未接入 / executor 启动失败时，经 `notify_user.sh` 把结果信封反向推给 114 智伴，由智伴投回 origin 对应的企微会话。受理 ack 之外只在**终态推一次**，不做进度播报。`ZHIBAN_*` 部署 pin 未填全时 `notify_user.sh` 落 ledger 留痕、不静默丢。
+4. **主动给企微用户推实质结论（仅终态一次）**：executor 回调到来 / git_issuer 失败 / 路由未接入 / executor 启动失败时，经 `notify_user.sh` 把结果信封反向推给 114 接收 agent，由该 agent 投回 origin 对应的企微会话。目标 agent 优先取 `origin.reply_agent`，没有时才用部署期默认 `DEFAULT_REPLY_AGENT`。受理 ack 之外只在**终态推一次**，不做进度播报。网关 pin 或目标 agent 缺失时 `notify_user.sh` 落 ledger 留痕、不静默丢。
 5. **不去重**：透传语义。114 重发同需求会生成新的两段 spawn / 新 pending，可能重复建 issue + 重复测——去重是 114/git_issuer 侧的事。
 6. **git_issuer / executor 回调报失败 → 不自动重试**（避免重复建 issue / 重复测；重试由用户重发需求）。
 7. 永不在 chat 里贴完整需求体 / 长输出；详细证据只落 disk（`ledger.jsonl`）。
@@ -37,7 +37,7 @@
 - spawn 失败（git_issuer 段或 executor 段）只允许"同 payload 最多 3 次、2s 固定退避"这一种重试；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending），不另寻他法。
 - `route_project.sh` 输出 `__NO_ROUTE__` 是**正常分支**（推用户"未接入执行器"+ledger+ops+drain），不是脚本错误；仅它 `exit 2`（`ROUTING_FILE` 缺失/格式错）才是部署期配置写错，按 No-Fallback 停。
 - 缺/坏的必填输入 → 让该单元工作失败，不猜默认值（除 references 明列的之外）。
-- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 约定均为**待对齐占位**：未对齐前不臆造工具名/字段名/token，按 gated 占位 + 留痕走。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 智伴，连接 pin 为 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，任一空则留痕；`ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
+- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 编码格式均为**待对齐占位**：未对齐前不臆造工具名/字段名/token，按 gated 占位 + 留痕走。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
 
 若你要用一个 SKILL / `scripts/` / `references/` 里没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。
 
@@ -65,7 +65,7 @@
 
 ## Per-Exec Env 契约
 
-OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在同一个 Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source ../../config/dispatcher.env && <最小 env> bash scripts/<name>.sh`。脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。详见 SKILL §Working Directory。
+OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在同一个 Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source scripts/source_dispatcher_env.sh && <最小 env> bash scripts/<name>.sh`。该 helper 会叠加 ignored `config/dispatcher.local.env`，本机测试覆盖不得写进 tracked `dispatcher.env`。脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。详见 SKILL §Working Directory。
 
 ## Required Behavior When Interrupted
 

@@ -2,6 +2,8 @@
 
 Files in this directory are **deployment-time pins** edited once on each runner where the agent is deployed. They are NOT generated from trigger inputs and they are NOT touched by the agent at runtime.
 
+Local tests and one-runner secrets go in ignored `campaign_defaults.local.env`: `dispatch_single_issue.sh` loads `campaign_defaults.env` first, then `campaign_defaults.local.env` when present. Do not commit real tokens or personal machine paths to tracked config.
+
 ## `gitlab.env`
 
 Pins the GitLab host the agent talks to. Required fields:
@@ -51,11 +53,11 @@ The driven path tests exactly **one** issue per trigger and must stay determinis
 | `RUN_TIMEOUT_SECONDS` | `18120` | Subagent runtime cap forwarded to `sessions_spawn` as `runTimeoutSeconds`; kept just above `ACPX_TIMEOUT_SECONDS` (acpx cap + 120) so the runtime never kills the subagent before acpx's own timeout flow runs. |
 | `RESULT_BASENAME` | `ifp-result` | Basename of the agent runtime root inside the checkout; `env_paths.sh` derives `RESULT_ROOT=${REPO_PATH}/${RESULT_BASENAME}`. |
 | `DATA_BASENAME` | `ifp-data` | Basename of the test team's knowledge-base directory; `env_paths.sh` derives `DATA_DIR=${REPO_PATH}/${DATA_BASENAME}`. |
-| `REPO_PARENT_PATH` | `/Users/yuanchenxiang/openclaw-local-data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. |
+| `REPO_PARENT_PATH` | `/data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. Use ignored `campaign_defaults.local.env` to override this for local testing. |
 
 ### Token pin
 
-For this local runner, `GITLAB_TOKEN` may be pinned in `campaign_defaults.env` so the driven trigger (I1) can remain secret-free while `dispatch_single_issue.sh` still authenticates to the local GitLab. Keep the committed value empty; fill the real token only in the runner-local working tree or inject it through the execution environment.
+For a single runner, `GITLAB_TOKEN` may be pinned in ignored `campaign_defaults.local.env` so the driven trigger (I1) can remain secret-free while `dispatch_single_issue.sh` still authenticates to GitLab. Keep the committed `campaign_defaults.env` value empty; fill the real token only in ignored local config or inject it through the execution environment.
 
 ## UI account pool: `${UI_ACCOUNTS_RELPATH}` (optional — no default)
 

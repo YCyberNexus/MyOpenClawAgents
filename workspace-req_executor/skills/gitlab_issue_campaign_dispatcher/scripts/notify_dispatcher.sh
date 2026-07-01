@@ -12,9 +12,9 @@
 # 文件、不碰 glab、不打标签、不碰 MR。通道未配置或发送失败一律 exit 0 + 留痕，绝不
 # 静默丢；仅入参/发送形态写错才非零退出（status 非法 exit 2）。
 #
-# 跨 agent send 原语 = 待对齐：当前实现把信封 JSON 追加到 dispatcher_callbacks.jsonl
-# 留痕并 exit 0（仿 post_result_note.sh 的 best-effort 语义）。对齐后把那一处占位换成
-# 真正的跨 agent send 调用即可，其余逻辑不变。
+# 跨 agent send 原语：当前本地对齐形态使用 `openclaw agent` 把
+# RUN_EXECUTOR_RESULT_CALLBACK 投回 dispatcher 目标 session；同时继续把信封 JSON
+# 追加到 dispatcher_callbacks.jsonl 留痕（仿 post_result_note.sh 的 best-effort 语义）。
 #
 # 入参（env，I4 契约）：
 #   必填：
@@ -22,7 +22,9 @@
 #     IID                            目标 issue IID（正整数）
 #     STATUS                         done | failed | timeout（= 执行器 final_status）
 #   可选：
-#     DISPATCHER_CALLBACK_TARGET     回调目标（待对齐占位）；空则 no-op exit 0
+#     DISPATCHER_CALLBACK_TARGET     回调目标；空则 no-op exit 0
+#                                    支持 agent:req_dispatcher:main 或裸 agent 名
+#     DISPATCHER_CALLBACK_TIMEOUT_SECONDS  openclaw agent 超时，默认 300
 #     PROJECT                        group/project（信封 project 字段）
 #     MR_URL                         成功时的 MR URL（信封 mr_url）
 #     WIKI_URL                       Wiki URL（信封 wiki_url）
@@ -77,17 +79,53 @@ ENVELOPE="$(jq -nc \
    wiki_url:($wiki_url|select(.!="")//null),
    reason:($reason|select(.!="")//null)}')"
 
-# ─── 4. 跨 agent send（待对齐占位 + 留痕，绝不静默丢） ───────────────
+# ─── 4. 跨 agent send（openclaw agent + 留痕，绝不静默丢） ───────────
 # 日志目录：优先复用调用方透传的 WORK_ROOT（dispatch_followup.sh 已 source
 # env_paths.sh → WORK_ROOT=${RESULT_ROOT}/_dispatcher），缺失时退回 /tmp。
 LOG_DIR="${WORK_ROOT:-/tmp}/log"
 mkdir -p "${LOG_DIR}"
 CALLBACK_LOG="${LOG_DIR}/dispatcher_callbacks.jsonl"
 
-# TODO(待对齐): 实际跨 agent send 原语 —— 把 ${ENVELOPE} 经待对齐的跨 agent
-# 回调信封字段发往 ${DISPATCHER_CALLBACK_TARGET}（承载 JSON 的字段名 = 待对齐）。
-# 对齐前以"留痕到 jsonl + exit 0"占位，确保信封不丢、可回放；发送本身的失败也按
-# best-effort 吞掉（仅记一行）。绝不静默丢。
 printf '%s\n' "${ENVELOPE}" >>"${CALLBACK_LOG}"
-echo "notify_dispatcher: callback envelope recorded (待对齐 send) iid=${IID} status=${STATUS} target=${DISPATCHER_CALLBACK_TARGET} -> ${CALLBACK_LOG}" >&2
+echo "notify_dispatcher: callback envelope recorded iid=${IID} status=${STATUS} target=${DISPATCHER_CALLBACK_TARGET} -> ${CALLBACK_LOG}" >&2
+
+DISPATCHER_CALLBACK_TIMEOUT_SECONDS="${DISPATCHER_CALLBACK_TIMEOUT_SECONDS:-300}"
+case "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}" in
+  *[!0-9]*|"") echo "notify_dispatcher: DISPATCHER_CALLBACK_TIMEOUT_SECONDS must be a positive integer, got: ${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}" >&2; exit 2 ;;
+  0) echo "notify_dispatcher: DISPATCHER_CALLBACK_TIMEOUT_SECONDS must be positive" >&2; exit 2 ;;
+esac
+
+TARGET_AGENT="${DISPATCHER_CALLBACK_TARGET}"
+TARGET_SESSION_KEY=""
+case "${DISPATCHER_CALLBACK_TARGET}" in
+  agent:*:*)
+    TARGET_SESSION_KEY="${DISPATCHER_CALLBACK_TARGET}"
+    rest="${DISPATCHER_CALLBACK_TARGET#agent:}"
+    TARGET_AGENT="${rest%%:*}"
+    ;;
+esac
+
+if [ -z "${TARGET_AGENT}" ]; then
+  echo "notify_dispatcher: empty callback target agent in DISPATCHER_CALLBACK_TARGET=${DISPATCHER_CALLBACK_TARGET}" >&2
+  exit 2
+fi
+
+if ! command -v openclaw >/dev/null 2>&1; then
+  echo "notify_dispatcher: openclaw command not found; callback recorded only" >&2
+  exit 0
+fi
+
+CALLBACK_MESSAGE="$(printf 'RUN_EXECUTOR_RESULT_CALLBACK\nworker_result_json=%s\n' "${ENVELOPE}")"
+openclaw_args=(agent --agent "${TARGET_AGENT}")
+if [ -n "${TARGET_SESSION_KEY}" ]; then
+  openclaw_args+=(--session-key "${TARGET_SESSION_KEY}")
+fi
+openclaw_args+=(--message "${CALLBACK_MESSAGE}" --timeout "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}")
+
+if ! openclaw "${openclaw_args[@]}" >/dev/null; then
+  echo "notify_dispatcher: openclaw callback failed; envelope remains recorded in ${CALLBACK_LOG}" >&2
+  exit 0
+fi
+
+echo "notify_dispatcher: callback sent iid=${IID} status=${STATUS} target=${DISPATCHER_CALLBACK_TARGET}" >&2
 exit 0

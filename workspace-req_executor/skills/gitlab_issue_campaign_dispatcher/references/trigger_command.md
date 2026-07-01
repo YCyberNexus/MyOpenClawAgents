@@ -182,20 +182,20 @@ RUN_SINGLE_ISSUE
 project=<group/project 全名>
 iid=<iid>
 correlation_id=<correlation_id>
-dispatcher_callback_target=<dispatcher_callback_target>   # ⚠️ 待对齐 form
+dispatcher_callback_target=<dispatcher_callback_target>
 group=<group>            # optional; falls back to the config pin when omitted
 ```
 
 ### Inputs (I1)
 
-Only the fields below are accepted. **Every other campaign field is read from the deployment pin (`config/gitlab.env` + `config/campaign_defaults.env`), NEVER from this trigger** — `gitlab_token` / `branch` / `dev_branch` / `hourly_issue_quota` / `max_concurrent_subagents` / `max_accounts_per_issue` / `ui_accounts_relpath` / `acpx_timeout_seconds` / `run_timeout_seconds` / `result_basename` / `data_basename` / `repo_path` are all pinned. The driven path is always `hourly_issue_quota=1`, `max_concurrent_subagents=1`, scoped to one IID.
+Only the fields below are accepted. **Every other campaign field is read from the deployment pin (`config/gitlab.env` + `config/campaign_defaults.env`, with ignored `config/campaign_defaults.local.env` overriding when present), NEVER from this trigger** — `gitlab_token` / `branch` / `dev_branch` / `hourly_issue_quota` / `max_concurrent_subagents` / `max_accounts_per_issue` / `ui_accounts_relpath` / `acpx_timeout_seconds` / `run_timeout_seconds` / `result_basename` / `data_basename` / `repo_path` are all pinned. The driven path is always `hourly_issue_quota=1`, `max_concurrent_subagents=1`, scoped to one IID.
 
 | Field                         | Required | Notes                                                                                          |
 | ----------------------------- | -------- | ---------------------------------------------------------------------------------------------- |
 | `project`                     | yes      | Full `<group>/<project>` name to process (the `git_issuer` callback form, forwarded verbatim by `req_dispatcher` — it is also `req_dispatcher`'s routing key). `dispatch_single_issue.sh` **splits** it into a bare project slug (exported `PROJECT`, used by `env_paths.sh` to build `REPO_PATH`/`PROJECT_FULL`) + group (exported `GROUP`). A bare slug with no slash is also accepted when `group` is supplied separately. Feeding `env_paths.sh` an unsplit `group/project` would double the group and mis-locate the clone — hence the split. |
 | `iid`                         | yes      | The single issue IID to process. Must be a positive integer (`>= 1`); a non-integer / `0` / missing value aborts `dispatch_single_issue.sh` with exit 2 (CONFIG-shape error — surface and stop per §No-Fallback). |
 | `correlation_id`              | yes      | `req_dispatcher`'s关联 token. Persisted into `dispatch_origin.json` and echoed back verbatim in the I2 result envelope so `req_dispatcher` matches its pending entry. Missing → exit 2. |
-| `dispatcher_callback_target`  | yes for I2 | ⚠️ **待对齐** — the exact form of the result-callback target (`req_dispatcher`'s agent/session identifier) is an open integration item (design §9). Carried opaquely into `dispatch_origin.json`; when empty the Phase 6 callback is a no-op (`notify_dispatcher.sh exit 0`). |
+| `dispatcher_callback_target`  | yes for I2 | The result-callback target (`req_dispatcher`'s agent/session identifier). Supports `agent:req_dispatcher:main` or a bare agent id. Carried opaquely into `dispatch_origin.json`; when empty the Phase 6 callback is a no-op (`notify_dispatcher.sh exit 0`). |
 | `group`                       | no       | GitLab group slug. When omitted, falls back to the `GROUP` env override or the pin; `dispatch_single_issue.sh` aborts (exit 2) only if no source supplies one (the synthesized tick still requires `group`). |
 
 `dispatch_single_issue.sh` writes `{correlation_id, dispatcher_callback_target, project, iid}` to `${ISSUE_ROOT}/dispatch_origin.json` (= `${ISSUES_ROOT}/issue-<iid>/dispatch_origin.json`) before delegating; that file is the ONLY driven-specific artifact and is what Phase 6 consults to choose the result-callback path. See [`state_schema.md`](state_schema.md) §dispatch_origin.json.
@@ -213,7 +213,7 @@ On a Phase 6 terminal `done` / `failed` / `timeout` for a driven issue, `dispatc
 - The driven path **skips** `post_result_note.sh` entirely (no `req_origin`/`req_result` note — the user-facing回投 is `req_dispatcher`'s job on this path). The cron path (`result_note_enabled`) is unaffected. A driven issue is detected solely by `dispatch_origin.json` carrying a non-empty `correlation_id` + `dispatcher_callback_target`; a truncated origin falls back to cron semantics.
 - Isolation mirrors `post_result_note.sh`: `set +e`, stdout → `/dev/null`, failure logged to `wrapper.log`, NEVER aborts Phase 6.
 
-⚠️ **待对齐** (design §9): the cross-agent send 原语 that carries this envelope to `req_dispatcher` — the actual send tool and the field name that wraps the JSON inside the cross-agent callback envelope — is an open integration item. Until aligned, `notify_dispatcher.sh` appends the I2 JSON line to `${WORK_ROOT}/log/dispatcher_callbacks.jsonl` and exits 0 (留痕, never silently dropped); only a malformed send shape (illegal `STATUS` value) exits non-zero. The req_dispatcher-side matching contract (`run_id` primary key, `correlation_id` secondary check) lives in the req_dispatcher workspace's `references/trigger_command.md` and the active-orchestration design.
+`notify_dispatcher.sh` appends the I2 JSON line to `${WORK_ROOT}/log/dispatcher_callbacks.jsonl`, then best-effort calls `openclaw agent` to send `RUN_EXECUTOR_RESULT_CALLBACK` with `worker_result_json=<I2>` to `dispatcher_callback_target`. A target like `agent:req_dispatcher:main` is sent with the matching `--session-key`; a bare target is used as `--agent`. Send failure exits 0 after local recording; malformed send shape (illegal `STATUS` or timeout value) exits non-zero. The req_dispatcher-side matching contract (`run_id` primary key when available, `correlation_id` lookup when the callback has no runtime run_id) lives in the req_dispatcher workspace's `references/trigger_command.md` and the active-orchestration design.
 
 ### What the driven path does NOT change
 

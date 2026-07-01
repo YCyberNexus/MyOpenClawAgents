@@ -18,8 +18,8 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 - 发的就是**一段自由文本需求**，不是结构化字段。
 - **目标 project 写在需求文本里**（如"在 project X 里……"）。req_dispatcher 不解析、整段透传，由 `git_issuer` 自己从文本解析 project。
-- 若需把处理结果推回**发起需求的具体企微用户**，需在需求文本里携带 origin 元数据（channel/user/conversation）——确切约定待对齐（见 trigger_command.md §origin）。缺省时结果信封里的 `origin` 为 `null`，智伴侧可能无法定向投递；`ZHIBAN_*` 未配置时才退化为留痕。
-- `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 智伴，再由智伴投回企微（不在 ack 里）。
+- 若需把处理结果推回**发起需求的具体企微用户**，需在需求文本里携带 origin 元数据（`channel`/`user`/`conversation`/`reply_agent`）——确切编码格式待对齐（见 trigger_command.md §origin）。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；缺省时退回部署期默认 `DEFAULT_REPLY_AGENT`，两者都没有则结果只落 ledger/log 留痕，无法定向投递。
+- `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 接收 agent，再由该 agent 投回企微（不在 ack 里）。
 
 ## 你会收到什么
 
@@ -33,7 +33,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
   - 处理超时 → "#<iid> 处理超时未完成，已停放待人工处理"
   - 流程性失败（建 issue 失败 / 该 project 未接入执行器 / 启动执行失败）→ 对应失败说明。
 
-> ⚠️ ack 文案已固定；终态结论的推送机制已对齐为反向网关推 114 智伴。部署期需填 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`；三项任一为空时结论只落 ledger/log 留痕。`ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 控制该 best-effort 推送的超时。origin 编码约定仍需与 114 对齐。
+> ⚠️ ack 文案已固定；终态结论的推送机制已对齐为反向网关推 114 接收 agent。部署期需填 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`；目标 agent 优先取 `origin.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`。网关 pin 或目标 agent 缺失时结论只落 ledger/log 留痕。`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制该 best-effort 推送的超时。origin 编码约定仍需与 114 对齐。
 
 ## 预期行为
 
@@ -45,12 +45,12 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 ## 配置
 
-部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表）、`ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin）；待对齐占位 `DISPATCHER_CALLBACK_TARGET`（结果回调目标）。多 project 路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不在配置里**（随需求文本传入）；**GitLab token 不在配置里**（归执行器侧）。
+部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（多 project 路由表）、`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin，其中 `DEFAULT_REPLY_AGENT` 只是缺少 `origin.reply_agent` 时的默认目标）、`DISPATCHER_CALLBACK_TARGET`（结果回调目标）。多 project 路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不在配置里**（随需求文本传入）；**GitLab token 不在配置里**（归执行器侧）。
 
 ## 依赖与对齐项
 
 - 两段跨 agent 调用原语 + 两类回调字段 + executor spawn(I1)/结果回调(I2) 信封：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)（待对齐）。
-- origin 约定、`correlation_id` 生成：同上 + [`config/README.md`](config/README.md)（待对齐占位）。
-- 用户结果推送 pin：`ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，机制已对齐为反向网关推 114 智伴；部署期填值。
+- origin 约定、`correlation_id` 生成：同上 + [`config/README.md`](config/README.md)（origin 需能携带 `reply_agent`；编码格式仍待对齐）。
+- 用户结果推送 pin：`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / 默认 `DEFAULT_REPLY_AGENT`，机制已对齐为反向网关推 114 接收 agent；目标 agent 优先来自 `origin.reply_agent`。
 - git_issuer 对接文档（跨团队，待与同事对齐）：创建契约 [`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)、变更请求契约 [`docs/integration/gitissuer_change_request.md`](docs/integration/gitissuer_change_request.md)。
 - req_executor 衔接前提（目标 project 需有路由 + 对应 req_executor 部署可被 spawn）：[`AGENTS.md`](AGENTS.md) §req_executor 衔接依赖；主动编排设计稿 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)。

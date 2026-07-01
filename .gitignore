@@ -43,3 +43,5 @@ workspace-req_executor/.claude/.review-baseline
 
 # Local GitLab runner secrets
 workspace-git_issuer/config/gitlab.env
+workspace-req_dispatcher/config/dispatcher.local.env
+workspace-req_executor/config/campaign_defaults.local.env

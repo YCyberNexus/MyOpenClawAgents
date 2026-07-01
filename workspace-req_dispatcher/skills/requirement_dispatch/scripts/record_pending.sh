@@ -3,7 +3,7 @@
 # 一条需求经历两段异步 spawn：先 git_issuer 段、再 executor 段，各记一条 pending（各自 run_id）。
 # 入参（env）：
 #   RUN_ID(必), STAGE(必: git_issuer|executor),
-#   ORIGIN_JSON?(紧凑 JSON 对象 {channel,user,conversation}，经 --argjson 注入；空则 null),
+#   ORIGIN_JSON?(紧凑 JSON 对象 {channel,user,conversation,reply_agent}，经 --argjson 注入；空则 null),
 #   PROJECT?, IID?(正整数), CORRELATION_ID?, CHILD_SESSION_KEY?, REQ_DIGEST?
 # entry 形状（I3）见 references/state_schema.md。
 set -euo pipefail

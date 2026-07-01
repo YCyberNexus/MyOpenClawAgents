@@ -20,7 +20,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 
 唯一 SKILL：`skills/requirement_dispatch/`，编排器固定 session `agent:req_dispatcher:main`。一条需求经历**两段异步 spawn**（git_issuer 段、executor 段，各自 `run_id` 主键、`stage` 区分、各自回调 drain），对应三条唤醒路径：
 
-- **接入路径（A）**（114 投来自由文本需求）：capture origin → `evict_stuck.sh` 兜底（覆盖两段）→ 跨 agent 异步 spawn `git_issuer`（payload `{requirement_text}`，同 payload 失败 3 次 2s 退避）→ `record_pending.sh` 记 pending（`stage=git_issuer`、主键 `run_id`、携带 origin）→ 回最小 ack → `waiting_for_callback`。
+- **接入路径（A）**（114 投来自由文本需求）：capture origin（含回推目标 `reply_agent`）→ `evict_stuck.sh` 兜底（覆盖两段）→ 跨 agent 异步 spawn `git_issuer`（payload `{requirement_text}`，同 payload 失败 3 次 2s 退避）→ `record_pending.sh` 记 pending（`stage=git_issuer`、主键 `run_id`、携带 origin）→ 回最小 ack → `waiting_for_callback`。
 - **git_issuer 回调路径（B）**：解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（`__NO_ROUTE__` → 推用户 + ledger + ops + drain）→ spawn `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段；失败则 `notify_user.sh` 推用户 + drain。
 - **executor 回调路径（C）**：解析结果信封(I2) → 按 `run_id2` 匹配 executor 段（`correlation_id` 二次校验）→ `notify_user.sh` 把结论推回 origin → drain executor 段。
 
@@ -36,13 +36,13 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 - 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑 issue）；不解析需求/不提取 project（只 `route_project.sh` 精确表查选 executor）；不自己跑 issue；不去重；git_issuer/executor 回调失败不自动重试。
 - spawn 失败（git_issuer 段或 executor 段）只允许"同 payload 3 次 2s 退避"；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending）。
 - `route_project.sh` 输出 `__NO_ROUTE__` 是正常分支（推用户"未接入执行器"+ledger+ops+drain）；仅它 `exit 2`（`ROUTING_FILE` 缺失/格式错）才按 no-fallback 停。
-- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 约定均为**待对齐占位**：脚本以 gated 占位 + ledger/log 留痕落地，未对齐前不臆造工具名/字段名/token。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 智伴，连接 pin 为 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT`，任一空则留痕；`ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
+- 跨 agent spawn/回调原语、`correlation_id` 生成、origin 编码格式均为**待对齐占位**：脚本以 gated 占位 + ledger/log 留痕落地，未对齐前不臆造工具名/字段名/token。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
 
 若你要用 SKILL / `scripts/` / `references/` 没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。详见 [`SOUL.md`](SOUL.md) §No-Fallback。
 
 ## Per-exec environment contract
 
-OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在**同一个** Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source ../../config/dispatcher.env && <最小 env> bash scripts/<name>.sh`。脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。脚本入参契约见 SKILL §Working Directory 的表。
+OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在**同一个** Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source scripts/source_dispatcher_env.sh && <最小 env> bash scripts/<name>.sh`。该 helper 先加载 tracked `config/dispatcher.env`，再加载 ignored `config/dispatcher.local.env`（若存在）；脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。脚本入参契约见 SKILL §Working Directory 的表。
 
 ## Sanity-checking shell changes
 

@@ -13,8 +13,10 @@
 #      dispatch_prepare_tick.sh). Required keys: project, iid, correlation_id.
 #      Optional: dispatcher_callback_target, group.
 #   2. Validates project / iid (positive integer) / correlation_id.
-#   3. Sources config/gitlab.env (host pin) + config/campaign_defaults.env (campaign
-#      pin) to obtain the pinned campaign fields and the GitLab token.
+#   3. Sources config/gitlab.env (host pin), config/campaign_defaults.env
+#      (campaign pin), then optional config/campaign_defaults.local.env
+#      (ignored local override) to obtain the pinned campaign fields and the
+#      GitLab token.
 #   4. Synthesizes the equivalent RUN_SCHEDULED_ISSUE_CAMPAIGN trigger for a single
 #      IID (issue_iids=[iid], issue_min_iid=issue_max_iid=iid, hourly_issue_quota=1,
 #      max_concurrent_subagents=1, …) and exports the dispatcher bootstrap env.
@@ -54,6 +56,7 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # overridable so smoke tests can point at a throwaway config tree without
 # touching the real pins (the production deployment never sets this).
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
+GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
 
 # ─── 1. Parse the I1 trigger from stdin ────────────────────────────
 # Same line discipline as dispatch_prepare_tick.sh: tolerate CRLF, skip blank /
@@ -125,6 +128,10 @@ esac
 source "${CONFIG_DIR}/gitlab.env"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/campaign_defaults.env"
+if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
+  # shellcheck disable=SC1091
+  source "${CONFIG_DIR}/campaign_defaults.local.env"
+fi
 
 # I1 `project` carries the FULL name <group>/<project> (git_issuer's callback form,
 # which req_dispatcher transparently forwards and uses as its routing key). The
@@ -160,7 +167,7 @@ esac
 
 # GITLAB_TOKEN: env override wins, else the pin. req_dispatcher never sends the
 # token; it always comes from the executor-side deployment.
-GITLAB_TOKEN_EFF="${GITLAB_TOKEN:-}"
+GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN:-}}"
 [ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in campaign_defaults.env)" >&2; exit 2; }
 
 # Pinned campaign fields with safe defaults (campaign_defaults.env should set

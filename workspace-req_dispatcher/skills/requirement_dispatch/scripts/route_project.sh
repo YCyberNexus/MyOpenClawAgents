@@ -20,7 +20,7 @@
 #
 # 入参（env）：
 #   PROJECT       必填：要路由的 group/project（git_issuer 回调透传）。
-#   ROUTING_FILE  必填：路由表文件路径（config/routing.env；调用方 source dispatcher.env 后透传）。
+#   ROUTING_FILE  必填：路由表文件路径（config/routing.env；调用方 source_dispatcher_env.sh 后透传）。
 set -euo pipefail
 
 : "${PROJECT:?route_project: PROJECT required}"

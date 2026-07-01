@@ -23,7 +23,7 @@ ${STATE_ROOT}/_dispatcher/
     "<run_id>": {
       "run_id": "<run_id>",
       "stage": "git_issuer|executor",
-      "origin": { "channel": "..", "user": "..", "conversation": ".." },
+      "origin": { "channel": "..", "user": "..", "conversation": "..", "reply_agent": ".." },
       "project": "string|null",
       "iid": 0,
       "correlation_id": "string|null",
@@ -41,7 +41,7 @@ ${STATE_ROOT}/_dispatcher/
 
 - **`run_id`**（对象 key，且冗余进 value 便于 `to_entries` 后直接取）：跨 agent 异步 spawn 下游 agent 返回的 runtime 运行标识。**回调路径以它为主匹配键**。
 - `stage`：`git_issuer`（接入路径 spawn git_issuer 后记）或 `executor`（git_issuer 回调成功后 spawn req_executor 单次 issue 执行时记）。`record_pending.sh` 必填校验，仅接受这两个值。
-- `origin`：发起人元数据 `{channel,user,conversation}`，由接入路径从需求文本约定行 capture，**全程随两段 pending 携带**，executor 回调时取出用于把结果推回用户。`record_pending.sh` 经 `--argjson` 注入（`ORIGIN_JSON` 入参），缺省 `null`。
+- `origin`：发起人元数据 `{channel,user,conversation,reply_agent}`，由接入路径从需求文本约定行 capture，**全程随两段 pending 携带**，executor 回调时取出用于把结果推回用户。`reply_agent` 是 114 上接收终态结果的 agent 名；`notify_user.sh` 优先使用它，缺省才用默认 `DEFAULT_REPLY_AGENT`。`record_pending.sh` 经 `--argjson` 注入（`ORIGIN_JSON` 入参），缺省 `null`。
 - `project`：GitLab project slug。git_issuer 段一般为 `null`；executor 段由 git_issuer 回调透传后携带。缺省 `null`。
 - `iid`：要测的 issue IID（正整数）。git_issuer 段一般为 `null`；executor 段携带。`record_pending.sh` 给定时做正整数校验，写入为数字。
 - `correlation_id`：req_dispatcher 在 spawn executor 时生成的关联 token，随 `RUN_SINGLE_ISSUE` 入参下发、由执行器原样回显在结果回调里——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍按 `run_id`。git_issuer 段一般为 `null`。
