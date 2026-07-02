@@ -22,6 +22,17 @@ OpenClaw blue-zone server addresses currently known for this project:
 - ZhiBan runs on `10.64.5.114`.
 - Both `10.64.5.104` and `10.64.5.114` are company blue-zone servers.
 
+## Local Testing Config Safety
+
+When adapting this project for local testing, Codex must not modify tracked
+configuration values that are intended for the `10.64.5.104` blue-zone server.
+Keep blue-zone defaults such as GitLab host/protocol, GitLab token injection
+contract, clone roots under `/data`, callback targets, and persistent state
+roots intact in tracked files. Put workstation-specific overrides only in
+ignored `*.local.env` files or process environment variables, and verify before
+committing that local-only paths, temporary sessions, and test GitLab endpoints
+did not leak into tracked config.
+
 ## Destructive Command Restriction
 
 Codex must not run `rm` in this repository, including `rm -f`, `rm -r`, or
