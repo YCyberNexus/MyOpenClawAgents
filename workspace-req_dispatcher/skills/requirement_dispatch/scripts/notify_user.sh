@@ -2,7 +2,7 @@
 # notify_user.sh — best-effort 把执行结果/失败结论推回企微发起人（origin）。
 #
 # 由 orchestrator 在 executor 回调路径终态（result：done/failed/timeout 推结论）或
-# git_issuer 回调失败 / 路由查不到 / executor spawn 耗尽等失败路径（failure）调用，
+# git_issuer 返回失败 / 路由查不到 / executor 调用耗尽等失败路径（failure）调用，
 # 在 drain/ledger 写入之后执行。这是 req_dispatcher 首次主动给用户推「实质结论」
 # （受理 ack 之外）——见设计稿 §4.3/§4.5。
 #

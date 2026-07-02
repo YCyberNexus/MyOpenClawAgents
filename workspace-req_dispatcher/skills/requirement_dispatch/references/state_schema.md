@@ -2,7 +2,7 @@
 
 `req_dispatcher` 的 state 极小：只有一张以 `run_id` 为主键的 pending 表，加一个 append-only 审计 ledger。**没有** campaign_state / worktree / glab / 标签机。所有路径由 `scripts/env_paths.sh` 从 `STATE_ROOT` 派生。
 
-编排器对一条需求做**两段异步 spawn**：先 `git_issuer` 段（建 issue），其回调成功后再起 `executor` 段（驱动 `req_executor` 单次 issue 执行）。每段各记一条 pending（各自 `run_id`），由 `stage` 字段区分；两段不强制重叠（git_issuer 段 drain 后再起 executor 段）。
+编排器对一条需求做两段下游 agent 调用：先 `git_issuer` 段（建 issue），成功后再起 `executor` 段（驱动 `req_executor` 单次 issue 执行）。`git_issuer` 段用 `run_agent_turn.sh` envelope 的 `run_id` 做同轮审计 record/drain；`executor` 段用自己的 `run_id` 进入 pending，等待后续 I2 结果回调。
 
 ## 磁盘布局
 
@@ -10,7 +10,7 @@
 ${STATE_ROOT}/_dispatcher/
     pending.json        ← 唯一可变状态；flock(pending.lock) 保护
     ledger.jsonl        ← append-only 终态审计（每行一条 JSON）
-    seq                 ← 可选单调递增序号（仅当启用 correlation_id 回显时用）
+    seq                 ← correlation_id 单调递增序号
     pending.lock        ← flock 目标
     log/                ← best-effort 通知留痕（notify_user / ops_notify 等）
 ```
@@ -35,17 +35,17 @@ ${STATE_ROOT}/_dispatcher/
 }
 ```
 
-> 与跨 agent spawn/回调对齐项配套——此 entry 形状即设计稿 §4.6 / 计划 I3，两侧（编排器内的两段）逐字一致。`iid` 在没有时为 `null`，executor 段有时为正整数。
+> 与 `run_agent_turn.sh` envelope 和 executor I2 回调配套。`iid` 在没有时为 `null`，executor 段有时为正整数。
 
 字段：
 
-- **`run_id`**（对象 key，且冗余进 value 便于 `to_entries` 后直接取）：跨 agent 异步 spawn 下游 agent 返回的 runtime 运行标识。**回调路径以它为主匹配键**。
-- `stage`：`git_issuer`（接入路径 spawn git_issuer 后记）或 `executor`（git_issuer 回调成功后 spawn req_executor 单次 issue 执行时记）。`record_pending.sh` 必填校验，仅接受这两个值。
+- **`run_id`**（对象 key，且冗余进 value 便于 `to_entries` 后直接取）：`run_agent_turn.sh` envelope 里的运行审计标识。executor 回调路径优先以它为主匹配键；回调缺 run_id 时按 `correlation_id` 反查。
+- `stage`：`git_issuer`（接入路径调用 git_issuer 后同轮审计）或 `executor`（调用 req_executor 单次 issue 执行后记 pending）。`record_pending.sh` 必填校验，仅接受这两个值。
 - `origin`：发起人元数据 `{channel,user,conversation,reply_agent}`，由接入路径从需求文本约定行 capture，**全程随两段 pending 携带**，executor 回调时取出用于把结果推回用户。`reply_agent` 是 114 上接收终态结果的 agent 名；`notify_user.sh` 优先使用它，缺省才用默认 `DEFAULT_REPLY_AGENT`。`record_pending.sh` 经 `--argjson` 注入（`ORIGIN_JSON` 入参），缺省 `null`。
-- `project`：GitLab project slug。git_issuer 段一般为 `null`；executor 段由 git_issuer 回调透传后携带。缺省 `null`。
+- `project`：GitLab `group/project`。git_issuer 段一般为 `null`；executor 段由 git_issuer JSON 透传后携带。缺省 `null`。
 - `iid`：要测的 issue IID（正整数）。git_issuer 段一般为 `null`；executor 段携带。`record_pending.sh` 给定时做正整数校验，写入为数字。
-- `correlation_id`：req_dispatcher 在 spawn executor 时生成的关联 token，随 `RUN_SINGLE_ISSUE` 入参下发、由执行器原样回显在结果回调里——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍按 `run_id`。git_issuer 段一般为 `null`。
-- `child_session_key`：spawn 返回的子 session key（兜底匹配用；无则 `null`）。
+- `correlation_id`：req_dispatcher 在调用 executor 时生成的关联 token，随 `RUN_SINGLE_ISSUE` 入参下发、由执行器原样回显在结果回调里——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍按 `run_id`，回调缺 run_id 时也用它反查 pending。git_issuer 段一般为 `null`。
+- `child_session_key`：`run_agent_turn.sh` 调用目标 agent 时使用的 session key（审计用；无则 `null`）。
 - `spawned_at`：epoch 秒（`date -u +%s`）。stuck 兜底据此判超时（覆盖两 stage）。
 - `req_digest`：需求文本前若干字摘要，仅供人读/审计，不参与逻辑。
 
@@ -61,11 +61,11 @@ ${STATE_ROOT}/_dispatcher/
 
 字段：
 
-- `outcome`：终态枚举。`success`（git_issuer 建成 issue / executor 段成功收尾）/ `failed`（下游回调报失败）/ `launch_failed`（spawn 3 次重试仍失败，从未进 pending，`RUN_ID` 形如 `launch-fail-<epoch>`）/ `stuck_evicted`（超 `STUCK_AFTER_MINUTES` 没等到回调被兜底驱逐）。
+- `outcome`：终态枚举。`success`（git_issuer 建成 issue / executor 段成功收尾）/ `failed`（下游业务结果失败）/ `launch_failed`（`run_agent_turn.sh` 三次重试仍失败，从未进 pending 或只写审计，`RUN_ID` 取最后一次 envelope.run_id）/ `stuck_evicted`（executor pending 超 `STUCK_AFTER_MINUTES` 没等到回调被兜底驱逐）。
 - `stage`：该终态属哪段（`git_issuer`/`executor`）。drain 由 `STAGE` 入参写；`stuck_evicted` 由 `evict_stuck.sh` 从对应 pending entry 的 `.value.stage` 读出。未给定则 `null`（如旧 launch_failed 不带 stage）。
 - `project`：drain 时由 `PROJECT` 入参写（executor 段沿用透传值）；缺省 `null`。
-- `issue_iid`：成功时由回调带回（drain 的 `IID`/旧 `ISSUE_IID` 入参），写入时 `tonumber` 规整为数字（IID 是正整数、无前导零，故安全）；非数字串则原样保留为字符串；否则 `null`。
-- `issue_url`：成功时由回调带回；否则 `null`。
+- `issue_iid`：成功时由 git_issuer JSON 或 executor I2 带回（drain 的 `IID`/旧 `ISSUE_IID` 入参），写入时 `tonumber` 规整为数字（IID 是正整数、无前导零，故安全）；非数字串则原样保留为字符串；否则 `null`。
+- `issue_url`：git_issuer 成功时由其 JSON 带回；否则 `null`。
 - `status`：executor 回调终态（`done`/`failed`/`timeout`，源自执行器 `final_status`），drain 由 `STATUS` 入参写并做枚举校验；git_issuer 段终态此项 `null`。
 - `mr_url`：executor `done` 时回调带回的 MR 链接，drain 由 `MR_URL` 入参写；否则 `null`。
 - `reason`：失败/驱逐原因；成功时 `null`。

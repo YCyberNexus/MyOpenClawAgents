@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ops_notify.sh — best-effort 运维失败告警。
 #
-# 由 orchestrator 在失败路径、drain/ledger 写入之后调用：接入路径 spawn 三次仍败
-# (launch_failed)、回调路径 git_issuer 报失败 (git_issuer_failed)、接入路径开头
+# 由 orchestrator 在失败路径、drain/ledger 写入之后调用：接入路径下游调用三次仍败
+# (launch_failed)、git_issuer 返回失败 (git_issuer_failed)、接入路径开头
 # evict_stuck 驱逐到超时 pending (stuck_evicted)。把失败事件推给运维 channel。
 #
 # 与 Global Rule #1 不冲突：本脚本用 curl 仅向 OPS_NOTIFY_CHANNEL（企业微信群机器人
