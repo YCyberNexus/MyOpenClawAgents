@@ -10,10 +10,14 @@
 - req_dispatcher 收到的就是一段需求文本，**不是结构化 trigger 信封**。orchestrator 据"路径判定"识别为接入路径。
 - `req_dispatcher` 整段原样透传给 git_issuer，不解析需求语义。
 
-## origin 元数据（114 在需求文本里携带）
+## origin 元数据（运行时来源优先，文本兜底）
 
-- 编排器需把处理结果推回**发起需求的企微用户**，故接入时要从需求文本 capture **origin 元数据** `{channel,user,conversation,reply_agent}`（仅供回推用，**不是**解析需求语义/project）。`reply_agent` 是 114 上接收终态结果的 agent 名，用来支持任意 114 agent 作为调用方。
-- 推荐行格式：需求文本开头可带一行 `[origin] channel=<channel> user=<user> conversation=<conversation> reply_agent=<agent>`。当前实现不因 capture 不到 origin 而阻断主流程；`ORIGIN_JSON` 不传时 entry 里 origin = `null`，`notify_user.sh` 仍会把 `origin:null` 放进结果信封。目标 agent 优先取 `origin.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 时仅 ledger 留痕。
+- 编排器需把处理结果推回**发起需求的企微用户**，故接入时要 capture **origin 元数据** `{channel,user,conversation,reply_agent}`（仅供回推用，**不是**解析需求语义/project）。`reply_agent` 是 114 上接收终态结果的 agent 名，用来支持任意 114 agent 作为调用方。
+- 捕获入口固定为 `scripts/capture_origin.sh`。优先级：
+  1. OpenClaw 网关/运行时给出的结构化 origin JSON，例如 `OPENCLAW_DELIVER_ORIGIN_JSON` / `OPENCLAW_SOURCE_ORIGIN_JSON`。
+  2. OpenClaw 网关/运行时给出的离散来源字段，例如 `OPENCLAW_SOURCE_AGENT` / `OPENCLAW_SOURCE_SESSION` / `OPENCLAW_DELIVER_USER` / `OPENCLAW_DELIVER_CONVERSATION`。只有 session key 且形如 `agent:<agent>:<session>` 时，脚本会推导 `reply_agent=<agent>`。
+  3. 需求文本里的显式 fallback 行：`[origin] channel=<channel> user=<user> conversation=<conversation> reply_agent=<agent>`。
+- 当前实现不因 capture 不到 origin 而阻断主流程；`ORIGIN_JSON` 不传时 entry 里 origin = `null`，`notify_user.sh` 仍会把 `origin:null` 放进结果信封。目标 agent 优先取 `origin.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 时仅 ledger 留痕。
 
 # §1 git_issuer 段（建 issue）
 

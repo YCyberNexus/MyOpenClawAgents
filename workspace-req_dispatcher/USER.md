@@ -18,7 +18,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 - 发的就是**一段自由文本需求**，不是结构化字段。
 - **目标 project 写在需求文本里**（如"在 project X 里……"）。req_dispatcher 不解析、整段透传，由 `git_issuer` 自己从文本解析 project。
-- 若需把处理结果推回**发起需求的具体企微用户**，需在需求文本里携带 origin 元数据（`channel`/`user`/`conversation`/`reply_agent`；推荐行格式见 trigger_command.md §origin）。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；缺省时退回部署期默认 `DEFAULT_REPLY_AGENT`，两者都没有则结果只落 ledger/log 留痕，无法定向投递。
+- 若需把处理结果推回**发起需求的具体企微用户**，`req_dispatcher` 会先从 OpenClaw 网关/运行时来源元数据捕获 origin（如 source agent/session、deliver origin），再 fallback 到需求文本里的 `[origin] channel=... user=... conversation=... reply_agent=...` 行。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；缺省时退回部署期默认 `DEFAULT_REPLY_AGENT`，两者都没有则结果只落 ledger/log 留痕，无法定向投递。
 - `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 接收 agent，再由该 agent 投回企微（不在 ack 里）。
 
 ## 你会收到什么
@@ -50,7 +50,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 ## 依赖与对齐项
 
 - `run_agent_turn.sh` 调用契约 + executor RUN_SINGLE_ISSUE(I1)/结果回调(I2) 信封：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)。
-- origin 约定、`correlation_id` 生成：同上 + [`config/README.md`](config/README.md)（origin 需能携带 `reply_agent`）。
+- origin 捕获、`correlation_id` 生成：同上 + [`config/README.md`](config/README.md)（origin 优先来自 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 行是 fallback；最终需能携带或推导 `reply_agent`）。
 - 用户结果推送 pin：`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / 默认 `DEFAULT_REPLY_AGENT`，机制已对齐为反向网关推 114 接收 agent；目标 agent 优先来自 `origin.reply_agent`。
 - git_issuer 对接文档（跨团队，待与同事对齐）：创建契约 [`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)、变更请求契约 [`docs/integration/gitissuer_change_request.md`](docs/integration/gitissuer_change_request.md)。
 - req_executor 衔接前提（默认执行器部署可处理蓝区目标 GitLab project，专属覆盖按需配置）：[`AGENTS.md`](AGENTS.md) §req_executor 衔接依赖；主动编排设计稿 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)。

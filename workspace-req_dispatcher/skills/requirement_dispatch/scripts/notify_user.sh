@@ -22,10 +22,13 @@
 #
 # 入参（env）：
 #   EVENT               必填：result | failure
-#   REPLY_GATEWAY_URL  114 OpenClaw 网关 ws:// URL；空＝不推、仅 ledger 留痕。
-#   REPLY_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝不推、仅 ledger 留痕。
+#   REPLY_GATEWAY_URL  114 OpenClaw 网关 ws:// URL；空＝回落到旧 ZHIBAN_GATEWAY_URL，
+#                      仍空则不推、仅 ledger 留痕。
+#   REPLY_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝回落到旧 ZHIBAN_GATEWAY_TOKEN，
+#                       仍空则不推、仅 ledger 留痕。
 #   DEFAULT_REPLY_AGENT 默认接收结果的 114 agent 名；ORIGIN_JSON.reply_agent 为空时使用。
-#                       这些字段来自 config/dispatcher.env（调用方 source 后透传）。
+#                       空＝回落到旧 ZHIBAN_AGENT。这些字段来自 config/dispatcher.env
+#                       或部署期 local env（调用方 source 后透传）。
 # 可选：
 #   STATUS              done | failed | timeout（result 事件据此选文案；其它值按通用文案）
 #   IID                 issue IID（拼入文案）
@@ -35,7 +38,8 @@
 #   ORIGIN_JSON         origin 元数据（channel/user/conversation/reply_agent）紧凑 JSON；
 #                       reply_agent 优先作为 114 接收结果的 agent 名，其余字段原样留痕。
 #   REPLY_NOTIFY_TIMEOUT_SECONDS
-#                       openclaw 反向投递超时秒数，默认 30；须为正整数。
+#                       openclaw 反向投递超时秒数；空＝回落到旧
+#                       ZHIBAN_NOTIFY_TIMEOUT_SECONDS，再空默认 30；须为正整数。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
@@ -48,10 +52,10 @@ case "${EVENT}" in
   *) echo "notify_user: EVENT must be result|failure, got: ${EVENT}" >&2; exit 2 ;;
 esac
 
-GW_URL="${REPLY_GATEWAY_URL:-}"
-GW_TOKEN="${REPLY_GATEWAY_TOKEN:-}"
-DEFAULT_AGENT="${DEFAULT_REPLY_AGENT:-}"
-NOTIFY_TIMEOUT_SECONDS="${REPLY_NOTIFY_TIMEOUT_SECONDS:-30}"
+GW_URL="${REPLY_GATEWAY_URL:-${ZHIBAN_GATEWAY_URL:-}}"
+GW_TOKEN="${REPLY_GATEWAY_TOKEN:-${ZHIBAN_GATEWAY_TOKEN:-}}"
+DEFAULT_AGENT="${DEFAULT_REPLY_AGENT:-${ZHIBAN_AGENT:-}}"
+NOTIFY_TIMEOUT_SECONDS="${REPLY_NOTIFY_TIMEOUT_SECONDS:-${ZHIBAN_NOTIFY_TIMEOUT_SECONDS:-30}}"
 STATUS="${STATUS:-}"
 IID="${IID:-}"
 MR_URL="${MR_URL:-}"

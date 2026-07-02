@@ -67,4 +67,27 @@ if ! grep -q -- '--agent fallback_agent' "${OPENCLAW_LOG}"; then
   exit 1
 fi
 
+: > "${OPENCLAW_LOG}"
+
+PATH="${FAKE_BIN}:${PATH}" \
+OPENCLAW_LOG="${OPENCLAW_LOG}" \
+STATE_ROOT="${TEST_ROOT}/state-legacy-zhiban" \
+ZHIBAN_GATEWAY_URL="ws://legacy.example.invalid:8080" \
+ZHIBAN_GATEWAY_TOKEN="legacy-token" \
+ZHIBAN_AGENT="legacy_zhiban_agent" \
+ZHIBAN_NOTIFY_TIMEOUT_SECONDS="5" \
+EVENT="result" \
+STATUS="done" \
+IID="44" \
+MR_URL="https://gitlab.example/mr/3" \
+ORIGIN_JSON='{"channel":"wecom","user":"u3","conversation":"c3"}' \
+bash "${SKILL_DIR}/scripts/notify_user.sh" >/dev/null 2>"${TEST_ROOT}/notify-legacy-zhiban.err"
+
+if ! grep -q -- '--agent legacy_zhiban_agent' "${OPENCLAW_LOG}"; then
+  echo "expected notify_user.sh to honor legacy ZHIBAN_* pins when REPLY_* pins are absent" >&2
+  echo "openclaw args:" >&2
+  sed -n '1,20p' "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
 echo "ok notify_user selects reply agent"
