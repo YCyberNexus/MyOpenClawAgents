@@ -44,7 +44,7 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 
 `req_dispatcher` 是**全公司共用**的需求接入链路。不同员工/团队的需求会落到不同的 GitLab project。把 project 写死在 config 里会让这个 agent 变成单租户、违背"共用接入点"的目标。
 
-因此：**114 只发自由文本需求，project 信息夹在文本里**；`req_dispatcher` 整段原样透传给 git_issuer，由 **git_issuer 自己从文本解析 project**。`req_dispatcher` 不解析自然语言、不碰 GitLab。
+因此：**114 只发自由文本需求，但必须在文本里明确写出 GitLab `group/project`**。`req_dispatcher` 会用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装并生成带 `repo=<group/project>` 的 `git_issuer_payload`；若 project 缺失则在调用 git_issuer 前失败并通知用户。`req_dispatcher` 仍不碰 GitLab，issue 事实仍以 git_issuer 返回 JSON 为准。
 
 ## 部署校验清单
 

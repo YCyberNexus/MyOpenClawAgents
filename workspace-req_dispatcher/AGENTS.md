@@ -1,8 +1,8 @@
 # req_dispatcher Workspace Notes
 
-本工作区实现 `req_dispatcher`：104 OpenClaw 上"企微需求 → 自动处理"链路的需求接入 + **端到端编排器**。它接收 114 转发来的自由文本需求，主动驱动整条链：通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 issue（git_issuer 解析 project）→ 按 project 选择目标 `req_executor` 部署（所有合法 `group/project` 默认路由到 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）→ 通过同一包装脚本调用其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。
+本工作区实现 `req_dispatcher`：104 OpenClaw 上"企微需求 → 自动处理"链路的需求接入 + **端到端编排器**。它接收 114 转发来的自由文本需求，先用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装、要求文本里有明确 GitLab `group/project`、生成面向 `git_issuer` 的建单消息；然后主动驱动整条链：通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 issue → 按 project 选择目标 `req_executor` 部署（所有合法 `group/project` 默认路由到 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）→ 用 `build_executor_payload.sh` 生成并调用其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。
 
-身份从"薄派发器"升级为"编排器"，但**仍不碰 GitLab**（不持 token、不调 glab、不解析 project）：唯一 SKILL `requirement_dispatch`，flock 保护或 best-effort 的 shell 脚本（capture_origin / run_agent_turn / record_pending / drain_pending / evict_stuck / route_project / notify_user / ops_notify），一张 `run_id` 主键的 pending 表（executor 段长期 pending，git_issuer 段同轮审计 record/drain）+ append-only ledger。**没有** worktree / glab / GitLab token / campaign_state / UI 账号 / 模型档位——这些 acpx/执行器专有概念在本 agent 不存在（token 归执行器侧）。
+身份从"薄派发器"升级为"编排器"，但**仍不碰 GitLab**（不持 token、不调 glab、不建 issue、不打标签）。它只做受控入口分析和消息准备，不语义猜 project，issue 事实仍以 `git_issuer` 返回 JSON 为准。唯一 SKILL `requirement_dispatch`，flock 保护或 best-effort 的 shell 脚本（capture_origin / prepare_downstream_payloads / run_agent_turn / build_executor_payload / record_pending / drain_pending / evict_stuck / route_project / notify_user / ops_notify），一张 `run_id` 主键的 pending 表（executor 段长期 pending，git_issuer 段同轮审计 record/drain）+ append-only ledger。**没有** worktree / glab / GitLab token / campaign_state / UI 账号 / 模型档位——这些 acpx/执行器专有概念在本 agent 不存在（token 归执行器侧）。
 
 ## Agent Identity
 
@@ -16,7 +16,7 @@
 
 唯一 SKILL：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。编排器处理两类唤醒：自由文本接入，以及 executor 结果回调。
 
-- **接入路径（A）**（114 投来自由文本需求，经 `agent run --agent req_dispatcher --deliver`）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ `evict_stuck.sh` 兜底 → `run_agent_turn.sh` 调用蓝区 `git_issuer`（payload 为需求原文）→ 记录并 drain git_issuer 审计 stage → 解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（默认执行器覆盖所有合法 project）→ `run_agent_turn.sh` 调 `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → 回最小受理 ack → `waiting_for_executor_callback`；失败则推用户 + drain。
+- **接入路径（A）**（114 投来自由文本需求，经 `agent run --agent req_dispatcher --deliver`）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ `prepare_downstream_payloads.sh` 准备 `git_issuer_payload` → `evict_stuck.sh` 兜底 → `run_agent_turn.sh` 调用蓝区 `git_issuer`（payload 为准备后的建单消息）→ 记录并 drain git_issuer 审计 stage → 解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（默认执行器覆盖所有合法 project）→ `build_executor_payload.sh` 生成并调 `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → 回最小受理 ack → `waiting_for_executor_callback`；失败则推用户 + drain。
 - **executor 回调路径（B）**（trigger 名 `RUN_EXECUTOR_RESULT_CALLBACK`）：解析结果信封(I2) → 按 `run_id2` 匹配 executor 段，回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user.sh` 推回 origin → drain executor 段。
 
 完整算法、精确 env 行、脚本入参契约：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。

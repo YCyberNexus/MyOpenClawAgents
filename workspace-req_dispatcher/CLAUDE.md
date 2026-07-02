@@ -10,9 +10,9 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 
 ## 它做什么 / 不做什么
 
-`req_dispatcher` 是"企微需求 → 自动处理"链路在 104 侧的**统一接入点 + 端到端编排器**：接收 114 转发的自由文本需求，通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 issue（git_issuer 解析 project）→ 按 project 选择目标 `req_executor` 部署（所有合法 `group/project` 默认路由到 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做覆盖）→ 通过同一包装脚本调用其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行即时执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。身份从"薄派发器"升级为"编排器"。
+`req_dispatcher` 是"企微需求 → 自动处理"链路在 104 侧的**统一接入点 + 端到端编排器**：接收 114 转发的自由文本需求，先用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装、要求文本里明确写出 GitLab `group/project`、生成给 `git_issuer` 的建单消息；再通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 issue → 按 project 选择目标 `req_executor` 部署（所有合法 `group/project` 默认路由到 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做覆盖）→ 通过 `build_executor_payload.sh` 生成并调用其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行即时执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。身份从"薄派发器"升级为"编排器"。
 
-**仍明确不做**：不持 GitLab token、不碰 glab/GitLab、不解析需求/不提取 project（只在拿到 git_issuer 返回的 project 后 `route_project.sh` 选 executor）、不自己跑 issue、不去重、git_issuer/executor 业务失败不自动重试。**新增会做**：两段下游 agent 调用（git_issuer + 按路由选定的 executor）、按 project 路由、终态把处理结论推回企微用户（仅一次）。
+**仍明确不做**：不持 GitLab token、不碰 glab/GitLab、不建 issue、不打标签、不自己跑 issue、不去重、git_issuer/executor 业务失败不自动重试。**新增会做**：受控入口分析和下游消息准备、两段下游 agent 调用（git_issuer + 按路由选定的 executor）、按 project 路由、终态把处理结论推回企微用户（仅一次）。project 不能靠语义猜测，issue 事实仍以 git_issuer 返回 JSON 为准。
 
 > 注意：本 agent **没有** acpx/执行器的那套 worktree / UI 账号 / campaign_state / 模型档位 / GitLab token / 标签机（token 归执行器侧）。若你在改动里引入了这些概念，几乎一定是搞错了 agent。
 
@@ -20,7 +20,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 
 唯一 SKILL：`skills/requirement_dispatch/`，编排器固定 session `agent:req_dispatcher:main`。一条需求经历两段下游 agent 调用：git_issuer 段同轮 record/drain 作审计，executor 段记录 pending 等待后续结果回调。
 
-- **接入路径（A）**（114 投来自由文本需求）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ `evict_stuck.sh` 兜底 → `run_agent_turn.sh` 调用蓝区 `git_issuer`（payload 为需求原文，同 payload 失败 3 次 2s 退避）→ `record_pending.sh` 记 git_issuer 审计 stage → 解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（默认执行器覆盖所有合法 project）→ `run_agent_turn.sh` 调 `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段 → 回最小 ack → `waiting_for_executor_callback`。
+- **接入路径（A）**（114 投来自由文本需求）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ `prepare_downstream_payloads.sh` 准备 `git_issuer_payload`（缺明确 project 则推用户失败并停）→ `evict_stuck.sh` 兜底 → `run_agent_turn.sh` 调用蓝区 `git_issuer`（payload 为准备后的建单消息，同 payload 失败 3 次 2s 退避）→ `record_pending.sh` 记 git_issuer 审计 stage → 解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（默认执行器覆盖所有合法 project）→ `build_executor_payload.sh` 生成并调 `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → drain git_issuer 段 → 回最小 ack → `waiting_for_executor_callback`。
 - **executor 回调路径（C）**：解析结果信封(I2) → 按 `run_id2` 匹配 executor 段，回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user.sh` 把结论推回 origin → drain executor 段。
 
 完整算法见 [`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。
@@ -32,10 +32,10 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 ## Strict no-fallback policy
 
 - 脚本非零退出 → 读 stdout/stderr、分类、记录、**stop**。不内联重写脚本逻辑、不"手动来一遍"、不换"更简单的命令"。
-- 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑 issue）；不解析需求/不提取 project（只 `route_project.sh` 选 executor）；不自己跑 issue；不去重；git_issuer/executor 业务失败不自动重试。
+- 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑 issue）；只做受控入口分析，不语义猜 project；不自己跑 issue；不去重；git_issuer/executor 业务失败不自动重试。
 - 下游调用失败（`run_agent_turn.sh` envelope `status=failed`）只允许"同 payload 3 次 2s 退避"；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending）。
 - `route_project.sh` 未命中覆盖表时必须返回 `DEFAULT_EXECUTOR_AGENT`；只有默认执行器未配置时才输出 `__NO_ROUTE__`。project 形态错、`ROUTING_FILE` 缺失/格式错才按 no-fallback 停。
-- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>`。origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
+- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>`。origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback。入口消息准备固定为 `prepare_downstream_payloads.sh`；executor 触发文本固定由 `build_executor_payload.sh` 生成。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
 
 若你要用 SKILL / `scripts/` / `references/` 没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。详见 [`SOUL.md`](SOUL.md) §No-Fallback。
 

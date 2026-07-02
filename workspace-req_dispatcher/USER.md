@@ -1,6 +1,6 @@
 # req_dispatcher User Contract
 
-把本工作区用作"企微需求 → 自动处理"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；本 agent 主动驱动整条链：调用蓝区 `git_issuer` 建 issue → 按 project 选择目标 `req_executor` 部署（合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，覆盖项见 `routing.env`）→ 调用其单次 issue 执行入口即时执行 → 收执行结果回调 → 把结论推回发起需求的企微用户。本 agent 仍不碰 GitLab（不持 token、不调 glab、不解析 project）。
+把本工作区用作"企微需求 → 自动处理"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；本 agent 先分析并整理文本，剥离 114/origin 包装，要求需求里明确写出 GitLab `group/project`，再主动驱动整条链：调用蓝区 `git_issuer` 建 issue → 按 project 选择目标 `req_executor` 部署（合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，覆盖项见 `routing.env`）→ 调用其单次 issue 执行入口即时执行 → 收执行结果回调 → 把结论推回发起需求的企微用户。本 agent 仍不碰 GitLab（不持 token、不调 glab、不建 issue、不打标签）。
 
 ## 114 如何调用
 
@@ -17,7 +17,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 或等价 HTTP 桥接（方式 B）。要点：
 
 - 发的就是**一段自由文本需求**，不是结构化字段。
-- **目标 project 写在需求文本里**（如"在 project X 里……"）。req_dispatcher 不解析、整段透传，由 `git_issuer` 自己从文本解析 project。
+- **目标 project 必须以 `group/project` 写在需求文本里**（如"在 GitLab ai-infra/veqp_server_v3 里……"）。req_dispatcher 会先提取这个显式 project 并生成给 `git_issuer` 的 `repo=<group/project>` 标准化消息；如果需求里没有明确 project，会在调用 git_issuer 前直接返回失败说明。
 - 若需把处理结果推回**发起需求的具体企微用户**，`req_dispatcher` 会先从 OpenClaw 网关/运行时来源元数据捕获 origin（如 source agent/session、deliver origin），再 fallback 到需求文本里的 `[origin] channel=... user=... conversation=... reply_agent=...` 行。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；缺省时退回部署期默认 `DEFAULT_REPLY_AGENT`，两者都没有则结果只落 ledger/log 留痕，无法定向投递。
 - `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 接收 agent，再由该 agent 投回企微（不在 ack 里）。
 
@@ -41,6 +41,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 - 每条需求 → `run_agent_turn.sh` 调蓝区 git_issuer 建 issue → 按路由起 req_executor 单次 issue 执行 → 记录 executor pending → executor 回调 drain → 终态推用户一次。
 - 多条需求可并发在飞，互不干扰。
 - 失败（下游调用耗尽重试 / git_issuer 报失败 / 默认执行器未配置 / 执行 failed/timeout / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 推用户对应说明 + 可选 ops 通知。**不自动重试业务**——重试请重发需求。
+- 需求缺少明确 GitLab `group/project` 时，不会调用 git_issuer 或 executor；会直接提示补充 repo 地址。
 - req_dispatcher 现在**会**把处理结论推回企微发起人（终态一次），但仍**不**做处理进度播报、**不**碰 GitLab。
 
 ## 配置

@@ -2,13 +2,13 @@
 
 > 状态：**已落成明确契约**。`req_dispatcher` 发起下游 agent turn 固定通过 `scripts/run_agent_turn.sh` 包装 `openclaw agent`；executor 结果回调固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。不再使用未确认参数名的旧占位原语。
 >
-> 编排器对一条需求做两段下游调用：先调用蓝区 `git_issuer` 建 issue 并读取其最后一行 JSON；成功后按 project 路由选 executor，再调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段记录 pending，等待后续 I2 结果回调。
+> 编排器对一条需求做两段下游调用：先用 `prepare_downstream_payloads.sh` 将 114 自由文本整理成面向 `git_issuer` 的标准化建单消息，再调用蓝区 `git_issuer` 建 issue 并读取其最后一行 JSON；成功后按 project 路由选 executor，再用 `build_executor_payload.sh` 生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段记录 pending，等待后续 I2 结果回调。
 
 ## 接入消息（114 → req_dispatcher）
 
 - 形态：自由文本，经网关 `agent run --agent req_dispatcher "<需求原文>" --deliver`（架构图"114 侧调用特定 agent"方式 A）或等价 HTTP 桥接（方式 B）。
 - req_dispatcher 收到的就是一段需求文本，**不是结构化 trigger 信封**。orchestrator 据"路径判定"识别为接入路径。
-- `req_dispatcher` 整段原样透传给 git_issuer，不解析需求语义。
+- `req_dispatcher` 不再把这段文本原样透传给 git_issuer。它先调用 `scripts/prepare_downstream_payloads.sh` 剥离 114/origin 包装、要求文本里明确出现 GitLab `group/project`，并生成带 `repo=<group/project>` 的 `git_issuer_payload`。若项目缺失，req_dispatcher 直接推用户失败说明，不调用 git_issuer。
 
 ## origin 元数据（运行时来源优先，文本兜底）
 
@@ -21,6 +21,30 @@
 
 # §1 git_issuer 段（建 issue）
 
+## 消息准备（req_dispatcher 本地）
+
+固定脚本契约：
+
+```bash
+cd "<SKILL_DIR>" && \
+MESSAGE="<需求原文>" \
+bash scripts/prepare_downstream_payloads.sh
+```
+
+成功输出：
+
+```json
+{"status":"success","project":"ai-infra/veqp_server_v3","requirement_text":"开发虚拟机台状态机...","git_issuer_payload":"CREATE_GITLAB_ISSUE\nrepo=ai-infra/veqp_server_v3\n...","reason":null}
+```
+
+失败输出：
+
+```json
+{"status":"failed","project":null,"requirement_text":"开发虚拟机台状态机...","git_issuer_payload":null,"reason":"需求文本未包含可识别的 GitLab project（格式 group/project）"}
+```
+
+`status=failed` 是入口信息不足，不是 git_issuer 失败；req_dispatcher 应推用户失败说明并停止本路径。
+
 ## 下游 agent 调用（req_dispatcher → git_issuer）
 
 固定脚本契约：
@@ -32,7 +56,7 @@ TARGET_AGENT="${GIT_ISSUER_AGENT}" \
 TARGET_SESSION_ID="agent:${GIT_ISSUER_AGENT}:main" \
 AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
 bash scripts/run_agent_turn.sh <<'EOF'
-<需求原文>
+<prepare_downstream_payloads.sh 的 git_issuer_payload>
 EOF
 ```
 
@@ -88,15 +112,22 @@ git_issuer 返回成功 JSON 后，编排器按 `project` 调 `route_project.sh`
 ```bash
 cd "<SKILL_DIR>" && \
 source scripts/source_dispatcher_env.sh && \
+PROJECT="<group/project>" IID="<issue_iid>" \
+CORRELATION_ID="<reqd-n>" \
+DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET}" \
+bash scripts/build_executor_payload.sh
+```
+
+然后把上一条命令的 stdout 作为 payload 调用目标 executor：
+
+```bash
+cd "<SKILL_DIR>" && \
+source scripts/source_dispatcher_env.sh && \
 TARGET_AGENT="<route_project.sh stdout>" \
 TARGET_SESSION_ID="agent:<executor>:main" \
 AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
 bash scripts/run_agent_turn.sh <<EOF
-RUN_SINGLE_ISSUE
-project=<group/project>
-iid=<issue_iid>
-correlation_id=<reqd-n>
-dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}
+<build_executor_payload.sh stdout>
 EOF
 ```
 
@@ -174,5 +205,5 @@ executor 回调路径从 I2 取值，分别填 `notify_user.sh`（推用户）�
 
 ## 三条逻辑路径（已定，详见 SKILL.md）
 
-- **接入路径（A）**：capture origin → evict_stuck → `run_agent_turn(git_issuer)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `run_agent_turn(<executor>, RUN_SINGLE_ISSUE)` → `record_pending(run_id2, stage=executor, project/iid/correlation_id/origin)` → drain git_issuer 段 → 最小 ack。
+- **接入路径（A）**：capture origin → `prepare_downstream_payloads` → evict_stuck → `run_agent_turn(git_issuer, git_issuer_payload)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `build_executor_payload` → `run_agent_turn(<executor>, RUN_SINGLE_ISSUE)` → `record_pending(run_id2, stage=executor, project/iid/correlation_id/origin)` → drain git_issuer 段 → 最小 ack。
 - **executor 回调路径（C）**：解析 I2 → 按 `run_id2` 匹配 executor 段，或在回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user(result)` 推回 origin → drain executor 段。

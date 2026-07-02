@@ -2,7 +2,7 @@
 
 > ⚠️ **已被主动编排取代（driven 路径）**：本链路已改为 **req_dispatcher 主动编排**（见 [`../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)）：执行结果改走 **执行器 Phase 6 → req_dispatcher 回调 → req_dispatcher 推回用户**；`req_origin` / `req_result` note 闭环在 **driven 路径不再使用**，执行器侧机器（`post_result_note.sh` + `result_note_enabled` 开关）**保留供 cron 路径**（`RUN_SCHEDULED_ISSUE_CAMPAIGN` + 独立 cron 捞起）。下方正文描述的是 **cron 路径**（仍可用），driven 路径请以设计稿为准。
 >
-> 状态：**待对齐 + 部分待实现（req_executor 侧已落地，默认 off）**。本文件定义端到端把 `req_executor` 的测试结果回报给"当初在企微发需求的那个人"的闭环。在 **cron 路径**下 **`req_dispatcher` 全程不变**（仍纯透传，不追踪结果、不回状态）；driven 路径下 req_dispatcher 升级为编排器、直接收执行器回调并推回用户（不再经本闭环）。
+> 状态：**待对齐 + 部分待实现（req_executor 侧已落地，默认 off）**。本文件定义端到端把 `req_executor` 的测试结果回报给"当初在企微发需求的那个人"的闭环。在 **cron 路径**下，本闭环仍依赖 issue 上的 `req_origin`/`req_result` note；driven 路径下 req_dispatcher 升级为编排器、直接收执行器回调并推回用户（不再经本闭环）。
 
 ## 1. 目标
 
@@ -20,7 +20,7 @@ issue #N 被 req_executor 处理到终态（`pr` 成功 / `failed-*` / `timeout`
 
 ```
 企微用户 → 114（转发需求，带上 origin 标识）
-            → req_dispatcher（不变：整段透传，不解析 project 也不解析 origin）
+            → req_dispatcher（driven 路径先准备下游消息；cron 旧闭环不消费 dispatcher state）
             → git_issuer（解析 project + origin；建 issue；把 origin 写成隐藏标记 note）
             → GitLab issue #N（带执行器入口标签 + req_origin 标记 note）
             → req_executor cron 捞起 → 跑测试 → 终态(pr/failed-*/timeout)
@@ -32,7 +32,7 @@ issue #N 被 req_executor 处理到终态（`pr` 成功 / `failed-*` / `timeout`
 
 1. **114（发起侧）**：转发需求时带上发起人的 **origin 标识**（channel / user / conversation id）。由于 req_dispatcher 的接入是自由文本，114 把 origin 以一段**可被 git_issuer 稳定解析**的元数据放进文本（例如开头一行 `[origin] channel=<c> user=<u> conv=<id>`，或一个 fenced 元数据块）。
    - 若将来把接入契约升级为结构化 payload，则改用显式的 opaque `origin` 字段，**req_dispatcher 仍只透传**（见 [`trigger_command.md`](../../skills/requirement_dispatch/references/trigger_command.md) 的 payload 待对齐项）。
-2. **req_dispatcher**：**不变**。整段透传给 git_issuer，既不解析 project 也不解析 origin。
+2. **req_dispatcher**：driven 路径会先用 `prepare_downstream_payloads.sh` 整理给 git_issuer 的消息；本 cron 闭环不依赖 req_dispatcher 追踪结果，仍以 issue 上的 `req_origin` 标记作为后续通知锚点。
 3. **git_issuer（创建流程新增一步）**：从文本解析出 origin（和解析 project 一样）；建好 issue 后，把 origin 以**隐藏标记 note** 写到 issue 上（§4）。**不要写进 description**——description 是给 Claude Code 读的需求正文，混入元数据会污染它。
 4. **req_executor（新增能力，在 `workspace-req_executor`）**：Phase 6 到达终态时，读 issue 的 `req_origin` 标记（req_executor 本就用 `glab` 读 issue notes / G1b），把结果回报出去。
    - ⚠️ **事实纠正（历史背景）**：该能力是**从零新增**，不是"复用既有基建"——执行器骨架（acpx_auto_tester 原版）当时并无任何 notify 实现（`SOUL.md`/`CLAUDE.md` 里的 "optional notify_channel" 只是字面提法，`scripts/` 里 grep `notify` 为空），req_executor 这份实现是随整份复制带过来的。

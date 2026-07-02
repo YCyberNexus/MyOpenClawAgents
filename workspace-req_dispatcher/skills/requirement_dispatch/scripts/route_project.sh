@@ -3,7 +3,7 @@
 #
 # 由 orchestrator 在 git_issuer 返回 success 后调用：拿到 project 后查覆盖路由或默认执行器，得到
 # 目标 executor agent 名，再据此通过 run_agent_turn.sh 调用 `<executor> RUN_SINGLE_ISSUE`。req_dispatcher
-# 不解析需求 project（那是 git_issuer 的活），它只在拿到透传回来的 project 后做一次路由决策。
+# 不用需求文本做路由决策；它只在拿到 git_issuer 透传回来的 project 后做一次路由决策。
 #
 # 路由来源 = DEFAULT_EXECUTOR_AGENT + 可选 ROUTING_FILE（config/routing.env）。默认执行器覆盖所有
 # 形态合法的 GitLab project；路由表只用于少数 project 需要专属 executor 的覆盖项。每行 `PROJECT=AGENT`：

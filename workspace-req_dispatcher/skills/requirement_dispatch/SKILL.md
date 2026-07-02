@@ -1,14 +1,14 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-02.5] Orchestrate the WeChat-requirement → auto-processing pipeline end to end from the 104 side: receive a free-text requirement forwarded from the 114 OpenClaw (via gateway `agent run --agent req_dispatcher --deliver`), call blue-zone `git_issuer` through the explicit `scripts/run_agent_turn.sh` contract to create the GitLab issue, route every valid `group/project` to `DEFAULT_EXECUTOR_AGENT` unless `routing.env` has a project-specific override, call that executor's `RUN_SINGLE_ISSUE` driven entry through the same wrapper, then receive the executor's `RUN_EXECUTOR_RESULT_CALLBACK` and push the conclusion back to the originating user. req_dispatcher is an ORCHESTRATOR but STILL does NOT touch GitLab: it holds no token, never calls glab, and never parses the requirement or extracts the project (git_issuer parses the project; the executor holds the GitLab token). Main execution paths over shell helpers (source_dispatcher_env.sh, capture_origin.sh, run_agent_turn.sh, next_correlation_id.sh, find_pending.sh, record_pending.sh, drain_pending.sh, evict_stuck.sh, route_project.sh, notify_user.sh, ops_notify.sh): (A) intake path (capture origin metadata including reply_agent from runtime/gateway metadata first and message [origin] second → evict_stuck backstop → call git_issuer via `openclaw agent` wrapper → record/drain git_issuer audit stage → route project → call executor RUN_SINGLE_ISSUE → record pending stage=executor → minimal ack); (B) executor callback path (parse I2 {correlation_id,iid,project,status,mr_url,wiki_url,reason} → match pending stage=executor by run_id when present, otherwise by correlation_id via find_pending.sh → notify user result → drain). Downstream call failures retry the identical payload up to 3 times with 2s backoff; executor pending past STUCK_AFTER_MINUTES with no callback is synthesized as stuck_evicted and best-effort notified to the user as timeout when origin is available. Cross-agent calls use `run_agent_turn.sh`, which wraps `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>` and returns a structured envelope. The user-push channel is resolved as reverse gateway delivery to the 114 receiving agent via `notify_user.sh`: target agent comes from origin.reply_agent first and falls back to DEFAULT_REPLY_AGENT, with ledger trace when gateway pins, target agent, or delivery are unavailable. `source_dispatcher_env.sh` always loads `config/dispatcher.env` and then ignored `config/dispatcher.local.env` when present, so local tests can override pins without changing tracked blue-zone defaults."
+description: "[SKILL_VERSION=2026-07-02.7] Orchestrate the WeChat-requirement → auto-processing pipeline end to end from the 104 side: receive a free-text requirement forwarded from the 114 OpenClaw (via gateway `agent run --agent req_dispatcher --deliver`), first analyze and normalize the text with `scripts/prepare_downstream_payloads.sh` (strip transport/origin wrappers, require an explicit GitLab `group/project`, and compose the tailored git_issuer message), call blue-zone `git_issuer` through the explicit `scripts/run_agent_turn.sh` contract to create the GitLab issue, route every valid returned `group/project` to `DEFAULT_EXECUTOR_AGENT` unless `routing.env` has a project-specific override, build the executor trigger with `scripts/build_executor_payload.sh`, call that executor's `RUN_SINGLE_ISSUE` driven entry through the same wrapper, then receive the executor's `RUN_EXECUTOR_RESULT_CALLBACK` and push the conclusion back to the originating user. req_dispatcher is an ORCHESTRATOR but STILL does NOT touch GitLab: it holds no token and never calls glab; its only requirement analysis is the bounded preflight needed to prepare downstream messages and fail early when the request lacks an explicit project. Main execution paths over shell helpers (source_dispatcher_env.sh, capture_origin.sh, prepare_downstream_payloads.sh, run_agent_turn.sh, build_executor_payload.sh, next_correlation_id.sh, find_pending.sh, record_pending.sh, drain_pending.sh, evict_stuck.sh, route_project.sh, notify_user.sh, ops_notify.sh): (A) intake path (capture origin metadata including reply_agent from runtime/gateway metadata first and message [origin] second → prepare downstream payloads → evict_stuck backstop → call git_issuer with the prepared message via `openclaw agent` wrapper → record/drain git_issuer audit stage → route project → build and call executor RUN_SINGLE_ISSUE → record pending stage=executor → minimal ack); (B) executor callback path (parse I2 {correlation_id,iid,project,status,mr_url,wiki_url,reason} → match pending stage=executor by run_id when present, otherwise by correlation_id via find_pending.sh → notify user result → drain). Downstream call failures retry the identical prepared payload up to 3 times with 2s backoff; executor pending past STUCK_AFTER_MINUTES with no callback is synthesized as stuck_evicted and best-effort notified to the user as timeout when origin is available. Cross-agent calls use `run_agent_turn.sh`, which wraps `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>` and returns a structured envelope. The user-push channel is resolved as reverse gateway delivery to the 114 receiving agent via `notify_user.sh`: target agent comes from origin.reply_agent first and falls back to DEFAULT_REPLY_AGENT, with ledger trace when gateway pins, target agent, or delivery are unavailable. `source_dispatcher_env.sh` always loads `config/dispatcher.env` and then ignored `config/dispatcher.local.env` when present, so local tests can override pins without changing tracked blue-zone defaults."
 allowed-tools: Bash, Read
 ---
 
 # Requirement Dispatch Skill
 
-这是一个 **端到端编排契约**。`req_dispatcher` 把 114 转发来的自由文本需求主动驱动整条「需求 → 自动处理」链路：通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer`（由 git_issuer 解析 project、建 GitLab issue），拿到最后一行 JSON 后按 project 选择执行器（所有合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖），再通过同一包装脚本调用目标执行器的 `RUN_SINGLE_ISSUE` driven 单次 issue 执行，最后收执行器结果回调、把结论推回发起需求的企微用户。所有确定性的 state 写入（pending 记录、drain、超时驱逐）与本地决策（路由查表、推送留痕）都在 `scripts/` 下 flock 保护或 best-effort 的 shell 脚本里；LLM 只做脚本干不了的事：按脚本契约组织两段下游调用、读执行器回调、可选 ops 通知。
+这是一个 **端到端编排契约**。`req_dispatcher` 把 114 转发来的自由文本需求主动驱动整条「需求 → 自动处理」链路：先用 `scripts/prepare_downstream_payloads.sh` 清理 114 包装文本、要求文本里有明确 GitLab `group/project`、生成适合 `git_issuer` 的建单消息；再通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 GitLab issue；拿到最后一行 JSON 后按 project 选择执行器（所有合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）；再用 `scripts/build_executor_payload.sh` 生成 `RUN_SINGLE_ISSUE` 触发消息并调用目标执行器；最后收执行器结果回调、把结论推回发起需求的企微用户。所有确定性的 state 写入（pending 记录、drain、超时驱逐）、消息准备与本地决策（路由查表、推送留痕）都在 `scripts/` 下 flock 保护或 best-effort 的 shell 脚本里；LLM 只做脚本干不了的事：按脚本契约组织两段下游调用、读执行器回调、可选 ops 通知。
 
-**职责边界（HARD）**：身份从「薄派发器」升级为「编排器」，但**仍不碰 GitLab**——不持 token、不调 glab/curl、不解析需求/不提取 project（蓝区 git_issuer 解析 project，执行器持 GitLab token）。编排器只多做两步：git_issuer 成功 → 路由 + 调用 executor；executor 回调 → 推用户结论。不去重；git_issuer / executor 返回失败均不自动重试业务（重试由用户重发需求）。详见 [`../../SOUL.md`](../../SOUL.md) §Global Rules 与下方 §No-Fallback。
+**职责边界（HARD）**：身份从「薄派发器」升级为「编排器」，但**仍不碰 GitLab**——不持 token、不调 glab/curl、不建 issue、不打标签、不跑 issue。编排器可以做受控入口分析：剥离 114/origin 包装、从文本中提取明确写出的 `group/project`、生成下游消息；但不能语义猜测项目，不能替代 `git_issuer` 的建单/校验职责，issue 事实仍以 `git_issuer` 返回 JSON 为准。编排器只多做三步：入口分析并编辑下游消息；git_issuer 成功 → 路由 + 调用 executor；executor 回调 → 推用户结论。不去重；git_issuer / executor 返回失败均不自动重试业务（重试由用户重发需求）。详见 [`../../SOUL.md`](../../SOUL.md) §Global Rules 与下方 §No-Fallback。
 
 state 与磁盘布局（executor pending、git_issuer 审计 stage、I3 entry）：[`references/state_schema.md`](references/state_schema.md)。`run_agent_turn.sh` 调用契约、git_issuer JSON 字段→drain env 映射、executor RUN_SINGLE_ISSUE(I1) 入参与 executor 结果回调(I2) 信封：[`references/trigger_command.md`](references/trigger_command.md)。git_issuer 的产出/变更规格（跨团队对接文档，orchestrator 运行时不必读）：[`../../docs/integration/gitissuer_contract.md`](../../docs/integration/gitissuer_contract.md)。
 
@@ -21,7 +21,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
 ## 路径 A：接入路径（自由文本需求进来）
 
-1. **取需求原文 + capture origin**：114 经 `agent run --agent req_dispatcher "<需求原文>" --deliver` 投来。整段保留，**不解析需求语义、不改写、不提取 project**。调用 `capture_origin.sh` 只提取回推元数据：优先读 OpenClaw 网关/运行时提供的结构化来源（如 `OPENCLAW_DELIVER_ORIGIN_JSON`、`OPENCLAW_SOURCE_AGENT`、`OPENCLAW_SOURCE_SESSION` 等），其次才读需求文本里的显式 `[origin] ...` 行；这是 req_dispatcher 自己回推结果用的，**不是**解析需求。拿不到则 origin 留空（`ORIGIN_JSON` 不传，entry 里为 `null`），不阻断主流程。
+1. **取需求原文 + capture origin**：114 经 `agent run --agent req_dispatcher "<需求原文>" --deliver` 投来。先保留原文供 origin 捕获和消息准备使用。调用 `capture_origin.sh` 只提取回推元数据：优先读 OpenClaw 网关/运行时提供的结构化来源（如 `OPENCLAW_DELIVER_ORIGIN_JSON`、`OPENCLAW_SOURCE_AGENT`、`OPENCLAW_SOURCE_SESSION` 等），其次才读需求文本里的显式 `[origin] ...` 行；这是 req_dispatcher 自己回推结果用的，**不是**业务需求解析。拿不到则 origin 留空（`ORIGIN_JSON` 不传，entry 里为 `null`），不阻断主流程。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -30,7 +30,40 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    ```
 
    stdout 若非空即为紧凑 `origin_json`，形如 `{"channel":"..","user":"..","conversation":"..","reply_agent":".."}`；其中 `reply_agent` 是 114 上接收终态结果的 agent 名。
-2. **stuck 兜底**（先跑，回收泄漏的 pending；覆盖两段 git_issuer/executor）：
+
+2. **准备下游消息**：调用 `prepare_downstream_payloads.sh` 对需求文本做受控入口分析：剥离 114 包装和 `[origin]`/`origin={...}` 行，要求文本里明确出现 GitLab `group/project`，并生成给 `git_issuer` 的标准化消息。`status=failed` 表示信息不足或形态不合格，**不要调用 git_issuer**；应推用户失败说明并结束本路径。
+
+   ```bash
+   cd "<SKILL_DIR 绝对路径>" && \
+   MESSAGE="<需求原文>" \
+   bash scripts/prepare_downstream_payloads.sh
+   ```
+
+   成功输出形如：
+
+   ```json
+   {"status":"success","project":"ai-infra/veqp_server_v3","requirement_text":"开发虚拟机台状态机...","git_issuer_payload":"CREATE_GITLAB_ISSUE\nrepo=ai-infra/veqp_server_v3\n...","reason":null}
+   ```
+
+   失败输出形如：
+
+   ```json
+   {"status":"failed","project":null,"requirement_text":"开发虚拟机台状态机...","git_issuer_payload":null,"reason":"需求文本未包含可识别的 GitLab project（格式 group/project）"}
+   ```
+
+   失败处置：
+
+   ```bash
+   cd "<SKILL_DIR 绝对路径>" && \
+   source scripts/source_dispatcher_env.sh && \
+   EVENT="failure" ORIGIN_JSON="<origin_json 或空>" \
+   REASON="<prepare_downstream_payloads.sh reason>" \
+   bash scripts/notify_user.sh
+   ```
+
+   然后返回 `{path:"intake", outcome:"rejected", reason:"<reason>"}`。这不是下游失败，不写 pending。
+
+3. **stuck 兜底**（先跑，回收泄漏的 pending；覆盖两段 git_issuer/executor）：
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -40,7 +73,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
    其 stdout `evicted <N> stuck pending`：若 `N > 0`，**可选 ops 通知**（见 §可选 ops 通知，`EVENT=stuck_evicted COUNT=<N>`）。
 
-3. **调用蓝区 `git_issuer`**：用 `scripts/run_agent_turn.sh` 包装 `openclaw agent`，payload 是完整需求原文。该脚本返回结构化 envelope：`{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；`worker_result_json` 是 git_issuer 最后一行紧凑 JSON（成功时含 `project`/`issue_iid`/`issue_url`）。
+4. **调用蓝区 `git_issuer`**：用 `scripts/run_agent_turn.sh` 包装 `openclaw agent`，payload 是第 2 步生成的 `git_issuer_payload`，不是 114 原文。该脚本返回结构化 envelope：`{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；`worker_result_json` 是 git_issuer 最后一行紧凑 JSON（成功时含 `project`/`issue_iid`/`issue_url`）。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -49,14 +82,14 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    TARGET_SESSION_ID="agent:${GIT_ISSUER_AGENT}:main" \
    AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
    bash scripts/run_agent_turn.sh <<'EOF'
-   <需求原文>
+   <prepare_downstream_payloads.sh 的 git_issuer_payload>
    EOF
    ```
 
    - **失败重试**（no-fallback）：若 envelope `status=failed`，同 payload 最多 3 次、2s 固定退避。三次仍失败 → 视为 `launch_failed`：调 `drain_pending.sh`（`OUTCOME=launch_failed`、`STAGE=git_issuer`、`REASON=<最后一次 raw_output>`、`RUN_ID="<最后一次 envelope.run_id>"`）写 ledger，不写 pending；随后可选 ops 通知。本路径结束。
    - **成功但 `worker_result_json` 为空/非对象** → 视为 `failed`，推用户"建 issue 失败：git_issuer 未返回有效 JSON"并 drain git_issuer 审计行。
 
-4. **记录 git_issuer 审计 stage**：拿 envelope 的 `run_id` / `child_session_key` 记一条 `STAGE=git_issuer`，随后在第 9 步 drain。它是本轮审计键，不要求蓝区 git_issuer 回显任何 token。
+5. **记录 git_issuer 审计 stage**：拿 envelope 的 `run_id` / `child_session_key` 记一条 `STAGE=git_issuer`，随后在成功收尾时 drain。它是本轮审计键，不要求蓝区 git_issuer 回显任何 token。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -64,11 +97,11 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    RUN_ID="<git_issuer envelope.run_id>" STAGE="git_issuer" \
    ORIGIN_JSON="<origin_json 或不传>" \
    CHILD_SESSION_KEY="<git_issuer envelope.child_session_key>" \
-   REQ_DIGEST="<需求前80字>" \
+   REQ_DIGEST="<prepare_downstream_payloads.sh 的 requirement_text 前80字>" \
    bash scripts/record_pending.sh
    ```
 
-5. **解析 git_issuer 结果 JSON**：成功（`status=success`，带 `project`、`issue_iid`、`issue_url`）进入路由；失败（`status=failed`，带 reason）推用户"建 issue 失败" + drain git_issuer stage，本路径结束。
+6. **解析 git_issuer 结果 JSON**：成功（`status=success`，带 `project`、`issue_iid`、`issue_url`）进入路由；失败（`status=failed`，带 reason）推用户"建 issue 失败" + drain git_issuer stage，本路径结束。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -85,7 +118,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    ```
 
    随后**可选 ops 通知**（`EVENT=git_issuer_failed RUN_ID=<run_id> REASON=<失败原因>`）。**不自动重试**。
-6. **git_issuer 成功** → **按 project 路由选 executor**：
+7. **git_issuer 成功** → **按 project 路由选 executor**：
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -102,7 +135,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
      - drain：`RUN_ID="<run_id>" OUTCOME="failed" STAGE="git_issuer" PROJECT="<project>" IID="<issue_iid>" ISSUE_URL="<issue_url>" REASON="no_route" bash scripts/drain_pending.sh`。
      - 可选 ops 通知：`EVENT=git_issuer_failed RUN_ID=<run_id> REASON=no_route`（复用 ops 失败枚举留痕）。
    - 脚本 `exit 2`（project 不是 `group/project`、`ROUTING_FILE` 缺失/格式错）→ **部署期或 git_issuer 返回形态错误**：按 No-Fallback 读 stderr、分类、记录、**停**（不当成 no-route，不臆造投递）。
-7. **调用 `<executor>` RUN_SINGLE_ISSUE（I1）**：先生成 `correlation_id`，再用 `run_agent_turn.sh` 调目标 executor。I1 入参：`project=<project>`、`iid=<issue_iid>`、`correlation_id=<correlation_id>`、`dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}`（可选 `group`）。
+8. **调用 `<executor>` RUN_SINGLE_ISSUE（I1）**：先生成 `correlation_id`，再用 `build_executor_payload.sh` 生成目标 executor 的触发文本，最后用 `run_agent_turn.sh` 调目标 executor。I1 入参：`project=<project>`、`iid=<issue_iid>`、`correlation_id=<correlation_id>`、`dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}`（可选 `group`）。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -113,20 +146,25 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
    source scripts/source_dispatcher_env.sh && \
+   PROJECT="<project>" IID="<issue_iid>" \
+   CORRELATION_ID="<correlation_id>" \
+   DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET}" \
+   bash scripts/build_executor_payload.sh
+   ```
+
+   ```bash
+   cd "<SKILL_DIR 绝对路径>" && \
+   source scripts/source_dispatcher_env.sh && \
    TARGET_AGENT="<route_project.sh stdout>" \
    TARGET_SESSION_ID="agent:<executor>:main" \
    AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
    bash scripts/run_agent_turn.sh <<EOF
-   RUN_SINGLE_ISSUE
-   project=<project>
-   iid=<issue_iid>
-   correlation_id=<correlation_id>
-   dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}
+   <build_executor_payload.sh stdout>
    EOF
    ```
 
    - **失败重试**（no-fallback）：若 envelope `status=failed`，同 payload 最多 3 次、2s 固定退避。三次仍失败 → `launch_failed`：推用户"已建 issue #<iid> 但未能启动处理"（`EVENT="failure" ORIGIN_JSON="<origin>" IID="<issue_iid>" REASON="启动执行失败"`）→ drain git_issuer 段（`OUTCOME=launch_failed STAGE=git_issuer PROJECT=<project> IID=<issue_iid>`）→ 可选 ops 通知。本路径结束（issue 已建，executor 段从未进 pending）。
-8. **executor 调用成功** → 拿到 wrapper 返回的 `run_id2`（+ `child_session_key2`）。记 pending（**新 run_id2 主键**、`STAGE=executor`、携带 origin/project/iid/correlation_id），等待执行器后续 `RUN_EXECUTOR_RESULT_CALLBACK`。
+9. **executor 调用成功** → 拿到 wrapper 返回的 `run_id2`（+ `child_session_key2`）。记 pending（**新 run_id2 主键**、`STAGE=executor`、携带 origin/project/iid/correlation_id），等待执行器后续 `RUN_EXECUTOR_RESULT_CALLBACK`。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -134,11 +172,11 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    RUN_ID="<run_id2>" STAGE="executor" \
    ORIGIN_JSON="<取自 git_issuer 段 pending 的 origin 或空>" \
    PROJECT="<project>" IID="<issue_iid>" CORRELATION_ID="<correlation_id>" \
-   CHILD_SESSION_KEY="<child_session_key2>" REQ_DIGEST="<需求前80字 或空>" \
+   CHILD_SESSION_KEY="<child_session_key2>" REQ_DIGEST="<prepare_downstream_payloads.sh 的 requirement_text 前80字 或空>" \
    bash scripts/record_pending.sh
    ```
 
-9. **drain git_issuer 段**（成功收尾该段；executor 段已另起新 pending）：
+10. **drain git_issuer 段**（成功收尾该段；executor 段已另起新 pending）：
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -148,7 +186,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    bash scripts/drain_pending.sh
    ```
 
-10. **回最小受理 ack** 给 114（文案见 [`../../USER.md`](../../USER.md)，如"需求已受理，正在创建 issue 并自动处理，结果稍后通知"），返回 `waiting_for_executor_callback`。issue 创建和 executor 启动已经完成；处理结果仍经 executor 回调异步返回。
+11. **回最小受理 ack** 给 114（文案见 [`../../USER.md`](../../USER.md)，如"需求已受理，正在创建 issue 并自动处理，结果稍后通知"），返回 `waiting_for_executor_callback`。issue 创建和 executor 启动已经完成；处理结果仍经 executor 回调异步返回。
 
 ## 路径 B：executor 回调路径（执行结果回来 → 推用户）
 
@@ -217,7 +255,9 @@ OpenClaw 每个 Bash tool call 是**全新 shell**，`export`/`cd` 不跨 exec �
 |------|---------|---------|
 | `source_dispatcher_env.sh` | — | `DISPATCHER_CONFIG_DIR`（测试用；默认工作区 `config/`。必须用 `source` 调用；先加载 `dispatcher.env`，再加载被 git 忽略的 `dispatcher.local.env`） |
 | `capture_origin.sh` | — | `MESSAGE` 或 `MESSAGE_FILE` 或 stdin；结构化运行时来源 env：`OPENCLAW_DELIVER_ORIGIN_JSON` / `OPENCLAW_DELIVER_ORIGIN` / `OPENCLAW_SOURCE_ORIGIN_JSON` / `OPENCLAW_SOURCE_ORIGIN` / `DELIVER_ORIGIN_JSON` / `DELIVER_ORIGIN` / `SOURCE_ORIGIN_JSON` / `SOURCE_ORIGIN`；离散运行时来源 env：`OPENCLAW_SOURCE_AGENT` / `OPENCLAW_SOURCE_SESSION` / `OPENCLAW_DELIVER_CHANNEL` / `OPENCLAW_DELIVER_USER` / `OPENCLAW_DELIVER_CONVERSATION` 等。stdout：有 origin 时输出紧凑 JSON；没有时输出空。优先级：结构化 JSON → 离散运行时 env → 文本 `[origin]` 行。 |
+| `prepare_downstream_payloads.sh` | — | `MESSAGE` 或 `MESSAGE_FILE` 或 stdin。stdout：`{status,project,requirement_text,git_issuer_payload,reason}`；`status=success` 时 `project` 是从文本明确提取的 `group/project`，`git_issuer_payload` 是发给 git_issuer 的标准化消息；`status=failed` 时不调用 git_issuer，推用户失败说明后结束。入参文件缺失 exit 2。 |
 | `run_agent_turn.sh` | `TARGET_AGENT` + (`MESSAGE` 或 `MESSAGE_FILE` 或 stdin) | `TARGET_SESSION_ID`(默认 `agent:${TARGET_AGENT}:main`), `AGENT_TIMEOUT_SECONDS`(默认 600), `OPENCLAW_BIN`(默认 `openclaw`), `RUN_ID`(测试/审计覆盖)。stdout：`{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；入参形态错 exit 2；openclaw 调用失败返回 `status=failed` 且 exit 0 |
+| `build_executor_payload.sh` | `PROJECT`, `IID`, `CORRELATION_ID` | `DISPATCHER_CALLBACK_TARGET`。stdout：完整 `RUN_SINGLE_ISSUE` 多行触发文本；project 形态错、IID 非正整数或缺必填项 exit 2。 |
 | `evict_stuck.sh` | `STATE_ROOT`, `STUCK_AFTER_MINUTES` | `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（仅 executor stuck 且带 origin 的 timeout 用户通知路径使用；覆盖两段 git_issuer/executor） |
 | `next_correlation_id.sh` | `STATE_ROOT` | —（stdout：`reqd-<n>`，flock 保护 `${STATE_ROOT}/_dispatcher/seq`） |
 | `find_pending.sh` | `STATE_ROOT` + (`RUN_ID` 或 `CORRELATION_ID`) | —（stdout：pending entry JSON；找不到 exit 1，参数缺失 exit 2） |
@@ -227,13 +267,13 @@ OpenClaw 每个 Bash tool call 是**全新 shell**，`export`/`cd` 不跨 exec �
 | `notify_user.sh` | `EVENT`(`result`\|`failure`) | `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT`（默认兜底目标；优先使用 `ORIGIN_JSON.reply_agent`）, `REPLY_NOTIFY_TIMEOUT_SECONDS`(默认 30), `ORIGIN_JSON`, `STATUS`, `IID`, `MR_URL`, `WIKI_URL`, `REASON` |
 | `ops_notify.sh` | `EVENT` | `OPS_NOTIFY_CHANNEL`(空则 no-op), `RUN_ID`, `REASON`, `COUNT` |
 
-`STATE_ROOT` / `GIT_ISSUER_AGENT` / `DEFAULT_EXECUTOR_AGENT` / `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` / `STUCK_AFTER_MINUTES` / `OPS_NOTIFY_CHANNEL` / `ROUTING_FILE` / `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS` / `DISPATCHER_CALLBACK_TARGET` 由 `source scripts/source_dispatcher_env.sh` 注入：先读 tracked `config/dispatcher.env`，再读 ignored `config/dispatcher.local.env`（若存在，本机测试覆盖只写这里）。`capture_origin.sh` 只规范化来源元数据，不碰 state、不解析需求/project；`run_agent_turn.sh` 只调用 `openclaw agent` 并输出 envelope，不碰 GitLab；`route_project.sh` / `ops_notify.sh` 不碰 state（不读写 pending/ledger/锁）：前者只做 project→executor 查表/默认路由，后者只发 best-effort 告警。`notify_user.sh` 不碰 GitLab、不建 issue、不打标签——只经反向网关把结果信封投给 114 接收 agent；目标 agent 优先取 `ORIGIN_JSON.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`（网关 pin 未配置、目标 agent 缺失、投递失败或超时则记 ledger 留痕、不静默丢）。
+`STATE_ROOT` / `GIT_ISSUER_AGENT` / `DEFAULT_EXECUTOR_AGENT` / `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` / `STUCK_AFTER_MINUTES` / `OPS_NOTIFY_CHANNEL` / `ROUTING_FILE` / `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS` / `DISPATCHER_CALLBACK_TARGET` 由 `source scripts/source_dispatcher_env.sh` 注入：先读 tracked `config/dispatcher.env`，再读 ignored `config/dispatcher.local.env`（若存在，本机测试覆盖只写这里）。`capture_origin.sh` 只规范化来源元数据，不碰 state；`prepare_downstream_payloads.sh` 只做受控入口分析与消息准备，不碰 state、不碰 GitLab；`build_executor_payload.sh` 只生成 executor trigger 文本；`run_agent_turn.sh` 只调用 `openclaw agent` 并输出 envelope，不碰 GitLab；`route_project.sh` / `ops_notify.sh` 不碰 state（不读写 pending/ledger/锁）：前者只做 project→executor 查表/默认路由，后者只发 best-effort 告警。`notify_user.sh` 不碰 GitLab、不建 issue、不打标签——只经反向网关把结果信封投给 114 接收 agent；目标 agent 优先取 `ORIGIN_JSON.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`（网关 pin 未配置、目标 agent 缺失、投递失败或超时则记 ledger 留痕、不静默丢）。
 
 ## No-Fallback（HARD）
 
 - 脚本非零退出 → 读 stdout/stderr、分类、记录、**stop**。不内联重写脚本逻辑、不"手动来一遍"、不换"更简单的命令"。
 - **不碰 GitLab**：不持 GitLab token，不调 glab/curl/任何 HTTP 库去建 issue / 打标签 / 跑 issue——建 issue 是 git_issuer 的事、跑 issue 是 req_executor 的事。
-- **不解析需求 / 不提取 project**：整段透传，project 由蓝区 git_issuer 从文本解析；编排器只在拿到 git_issuer 返回的 project 后做一次 `route_project.sh`。
+- **只做受控入口分析**：必须先用 `prepare_downstream_payloads.sh` 生成 `git_issuer_payload`；若文本没有明确 `group/project`，推用户失败说明并停止，不调用 git_issuer。不语义猜 project、不补写 project、不把 114/origin 包装原样发给 git_issuer。最终 issue 事实仍以 git_issuer 返回的 `project`/`issue_iid`/`issue_url` 为准。
 - **所有合法 GitLab project 默认可路由**：`route_project.sh` 先查覆盖表，未命中时返回 `DEFAULT_EXECUTOR_AGENT`。`__NO_ROUTE__` 只表示默认执行器未配置且无覆盖；project 形态错、路由表文件缺失/格式错（exit 2）才是部署/回调形态错误，按 No-Fallback 停。
 - **不去重**：透传语义；114 重发同需求会生成新两段下游调用/新 pending，可能重复建 issue + 重复测（去重是 114/git_issuer 侧的事）。
 - **git_issuer / executor 业务结果失败 → 不自动重试**（避免重复建 issue / 重复测；重试由用户重发需求）。

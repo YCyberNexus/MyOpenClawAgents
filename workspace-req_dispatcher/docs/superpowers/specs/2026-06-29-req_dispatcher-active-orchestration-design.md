@@ -10,6 +10,8 @@
 > **更新（2026-06-30.5 落地）**：§4.5/§9.2 的"用户出站推送通道（`USER_NOTIFY_CHANNEL`）"已对齐并实现——`notify_user.sh` 经**反向网关**把状态信封推给 114 接收 agent（`openclaw agent run`，连接 pin `REPLY_GATEWAY_URL`/`REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`，超时 pin `REPLY_NOTIFY_TIMEOUT_SECONDS`；缺少网关 pin 或目标 agent 则 ledger 留痕），由接收 agent 负责企微最后一跳。下文所有 `USER_NOTIFY_CHANNEL` / "出站推送通道待对齐" 字样就此条目而言均已被取代。
 >
 > **更新（2026-07-02.1 落地）**：§6 的"超时零回调不推用户"缺口已闭合：`evict_stuck.sh` 对 `stage=executor` 且携带 `origin` 的驱逐条目，在写 `stuck_evicted` ledger 并删除 pending、释放 flock 后，best-effort 调 `notify_user.sh` 以 `STATUS=timeout` 推送用户。
+>
+> **更新（2026-07-02.6 落地）**：接入路径不再把 114 原文无脑透传给 `git_issuer`。`req_dispatcher` 先用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装、要求文本里明确写出 GitLab `group/project`、生成带 `repo=<group/project>` 的 `git_issuer_payload`；缺 project 时直接推用户失败并停止。executor 的 `RUN_SINGLE_ISSUE` 触发文本改由 `build_executor_payload.sh` 统一生成。`req_dispatcher` 仍不碰 GitLab，issue 事实仍以 `git_issuer` 返回 JSON 为准。
 
 ## 1. 背景与已定决策
 
@@ -24,7 +26,7 @@
 | 项目范围 | **一开始就做多 project 路由**（`project → executor agent` 路由表） |
 | 结果闭环 | 执行结果由执行器 Phase 6 **回调 req_dispatcher**，再由 req_dispatcher 推回 origin（用户） |
 
-req_dispatcher 仍**不碰 GitLab**（不持 token、不调 glab、不解析需求 project），但身份从"薄派发器"升级为"**编排器**"。
+req_dispatcher 仍**不碰 GitLab**（不持 token、不调 glab、不建 issue、不打标签），但身份从"薄派发器"升级为"**编排器**"。它现在只做受控入口分析和消息准备，不语义猜 project；最终 issue 事实仍以 git_issuer 返回 JSON 为准。
 
 ## 2. 架构总览
 
@@ -62,7 +64,7 @@ req_dispatcher 仍**不碰 GitLab**（不持 token、不调 glab、不解析需�
 
 | 字段 | 必填 | 含义 |
 |---|---|---|
-| `project` | 是 | GitLab project 全名 `<group>/<project>`（git_issuer 回调形态，req_dispatcher 原样透传、亦作路由键）；`dispatch_single_issue.sh` 内部拆成裸 slug + group 喂 `env_paths.sh`（直接喂 `group/project` 会让 group 翻倍、clone 路径错位） |
+| `project` | 是 | GitLab project 全名 `<group>/<project>`（来自 git_issuer 回调 JSON，req_dispatcher 作为 issue 事实传给 executor、亦作路由键）；`dispatch_single_issue.sh` 内部拆成裸 slug + group 喂 `env_paths.sh`（直接喂 `group/project` 会让 group 翻倍、clone 路径错位） |
 | `iid` | 是 | 要测的 issue IID（单个，正整数） |
 | `correlation_id` | 是 | req_dispatcher 生成的关联 token，原样回显在结果回调里供 req_dispatcher 匹配 |
 | `dispatcher_callback_target` | 是 | 结果回调的目标（req_dispatcher 的 agent/session 标识；确切形态待对齐，§9） |
@@ -122,9 +124,10 @@ token 归执行器侧（每个 per-project 部署各自 pin / env 注入）。re
 
 ### 4.1 接入路径
 
-1. 取需求原文；**capture origin 元数据**（`channel`/`user`/`conversation`/`reply_agent`，从文本约定行解析——仅供 req_dispatcher 自己回推结果用，不解析需求语义；`reply_agent` 指定 114 上接收终态结果的 agent）。
-2. `evict_stuck.sh` 兜底（覆盖两段 pending）。
-3. spawn `git_issuer {requirement_text}`（同 payload 失败 3 次 2s 退避）。
+1. 取需求原文；**capture origin 元数据**（`channel`/`user`/`conversation`/`reply_agent`，从文本约定行解析——仅供 req_dispatcher 自己回推结果用；`reply_agent` 指定 114 上接收终态结果的 agent）。
+2. `prepare_downstream_payloads.sh` 准备下游消息：剥离 114/origin 包装，要求显式 `group/project`，输出 `git_issuer_payload`；失败则推用户说明并停止。
+3. `evict_stuck.sh` 兜底（覆盖两段 pending）。
+4. spawn `git_issuer {git_issuer_payload}`（同 payload 失败 3 次 2s 退避）。
 4. `record_pending.sh`（`stage=git_issuer`、`run_id` 主键、携带 `origin`）。
 5. 回最小受理 ack（"需求已受理，正在创建 issue 并自动处理，结果稍后通知"）。
 
@@ -204,7 +207,7 @@ req_dispatcher 首次需要**主动给用户推实质结论**（受理 ack 之�
 | 独立 cron（本链路） | **去掉**，改 req_dispatcher 即时驱动；`RUN_SCHEDULED_ISSUE_CAMPAIGN`+cron 保留供他用 |
 | `req_origin`/`req_result` note 闭环 | 本链路**不再依赖**（结果走回调）；执行器侧机器保留，driven 路径默认不发 req_result（开关控制） |
 | git_issuer | **基本不改**：复用现有回调的 `project`/`issue_iid`/`issue_url`；driven 路径不再要它写 req_origin、不再要它通知用户 |
-| req_dispatcher 身份 | 仍**不碰 GitLab**（不持 token、不调 glab、不解析 project），但从"薄派发器"升级为"编排器"：多了 git_issuer 回调→spawn executor、executor 回调→推用户两步 |
+| req_dispatcher 身份 | 仍**不碰 GitLab**（不持 token、不调 glab、不建 issue、不打标签），但从"薄派发器"升级为"编排器"：多了入口消息准备、git_issuer 回调→spawn executor、executor 回调→推用户三步 |
 
 ## 8. 各组件职责一览（新链路）
 

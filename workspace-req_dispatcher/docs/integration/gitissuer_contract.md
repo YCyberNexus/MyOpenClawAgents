@@ -2,7 +2,7 @@
 
 > 状态：**req_dispatcher 侧最小依赖已定**。蓝区 `git_issuer` 是 104 OpenClaw 上的 agent（"根据需求构建 GitLab issue"）。本机 `workspace-git_issuer` 仅作测试工件，不作为蓝区行为依据。req_dispatcher 通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer`，并只依赖它最后一行输出的紧凑 JSON。
 >
-> 主动编排（driven 路径）下，req_dispatcher **不依赖 git_issuer 写 `req_origin` 标记 note，也不依赖 git_issuer 通知用户**。origin 由 req_dispatcher 在接入路径自己 capture 并全程随 pending 携带，建 issue 成功/失败由 req_dispatcher 推回用户。req_dispatcher 只复用 `git_issuer` 最后一行 JSON 里的 `project` / `issue_iid`(=iid) / `issue_url`，据此 route 到 req_executor 并调用 `RUN_SINGLE_ISSUE {project, iid, ...}`。
+> 主动编排（driven 路径）下，req_dispatcher **不依赖 git_issuer 写 `req_origin` 标记 note，也不依赖 git_issuer 通知用户**。origin 由 req_dispatcher 在接入路径自己 capture 并全程随 pending 携带，建 issue 成功/失败由 req_dispatcher 推回用户。req_dispatcher 会先把 114 自由文本整理成带 `repo=<group/project>` 的 `git_issuer_payload`，但只复用 `git_issuer` 最后一行 JSON 里的 `project` / `issue_iid`(=iid) / `issue_url` 作为 issue 事实，据此 route 到 req_executor 并调用 `RUN_SINGLE_ISSUE {project, iid, ...}`。
 >
 > 本文件覆盖 **创建 issue** 流程。需求在变成 issue 后还要**变更/撤销/取代**的对接契约见 [`gitissuer_change_request.md`](gitissuer_change_request.md)。
 
@@ -11,7 +11,7 @@
 req_dispatcher 对蓝区 git_issuer 的硬依赖是：
 
 1. **接受一段自由文本需求**作为输入。req_dispatcher 通过 `run_agent_turn.sh` 把需求原文作为 `openclaw agent --message` 的正文传入。
-2. **自己从文本解析目标 project/group**（req_dispatcher 不解析、不传结构化 project）。
+2. **从 req_dispatcher 准备后的文本解析并校验目标 project/group**。新 payload 会显式包含 `repo=<group/project>`；git_issuer 仍应按自身配置校验项目，不能因为 req_dispatcher 提供了 repo 行就绕过项目白名单。
 3. **建好 GitLab issue 后，打上执行器入口标签**（如 `todo`/`new`），使 `req_executor` 既有 cron 流程能被动捞起。
 4. **最后一行输出终态 JSON**：成功/失败，成功时带 `project`、issue IID 与 URL，失败时带原因。
 
