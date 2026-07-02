@@ -29,7 +29,7 @@
 cd "<SKILL_DIR>" && \
 source scripts/source_dispatcher_env.sh && \
 TARGET_AGENT="${GIT_ISSUER_AGENT}" \
-TARGET_SESSION_KEY="agent:${GIT_ISSUER_AGENT}:main" \
+TARGET_SESSION_ID="agent:${GIT_ISSUER_AGENT}:main" \
 AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
 bash scripts/run_agent_turn.sh <<'EOF'
 <需求原文>
@@ -39,7 +39,7 @@ EOF
 `run_agent_turn.sh` 调用的底层 CLI 形态固定为：
 
 ```bash
-openclaw agent --agent <TARGET_AGENT> --session-key <TARGET_SESSION_KEY> --message <payload> --timeout <AGENT_TIMEOUT_SECONDS>
+openclaw agent --agent <TARGET_AGENT> --session-id <TARGET_SESSION_ID> --message <payload> --timeout <AGENT_TIMEOUT_SECONDS>
 ```
 
 stdout 固定是一行 JSON envelope：
@@ -89,7 +89,7 @@ git_issuer 返回成功 JSON 后，编排器按 `project` 调 `route_project.sh`
 cd "<SKILL_DIR>" && \
 source scripts/source_dispatcher_env.sh && \
 TARGET_AGENT="<route_project.sh stdout>" \
-TARGET_SESSION_KEY="agent:<executor>:main" \
+TARGET_SESSION_ID="agent:<executor>:main" \
 AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
 bash scripts/run_agent_turn.sh <<EOF
 RUN_SINGLE_ISSUE

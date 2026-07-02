@@ -35,7 +35,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 - 不持 GitLab token、不碰 GitLab（不 glab/curl/HTTP 库建 issue / 打标签 / 跑 issue）；不解析需求/不提取 project（只 `route_project.sh` 选 executor）；不自己跑 issue；不去重；git_issuer/executor 业务失败不自动重试。
 - 下游调用失败（`run_agent_turn.sh` envelope `status=failed`）只允许"同 payload 3 次 2s 退避"；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending）。
 - `route_project.sh` 未命中覆盖表时必须返回 `DEFAULT_EXECUTOR_AGENT`；只有默认执行器未配置时才输出 `__NO_ROUTE__`。project 形态错、`ROUTING_FILE` 缺失/格式错才按 no-fallback 停。
-- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session> --message <payload> --timeout <seconds>`。origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
+- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>`。origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
 
 若你要用 SKILL / `scripts/` / `references/` 没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。详见 [`SOUL.md`](SOUL.md) §No-Fallback。
 

@@ -2,7 +2,7 @@
 # run_agent_turn.sh — 明确的 req_dispatcher → 下游 OpenClaw agent 调用包装。
 #
 # 本脚本把跨 agent 调用固定为 OpenClaw CLI 的可验证形态：
-#   openclaw agent --agent <TARGET_AGENT> --session-key <TARGET_SESSION_KEY> \
+#   openclaw agent --agent <TARGET_AGENT> --session-id <TARGET_SESSION_ID> \
 #     --message <MESSAGE> --timeout <AGENT_TIMEOUT_SECONDS>
 #
 # 目标 agent 的最后一行若是紧凑 JSON，本脚本会把它解析到 worker_result_json。
@@ -13,7 +13,8 @@ set -euo pipefail
 : "${TARGET_AGENT:?run_agent_turn: TARGET_AGENT required}"
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-TARGET_SESSION_KEY="${TARGET_SESSION_KEY:-agent:${TARGET_AGENT}:main}"
+# TARGET_SESSION_KEY 是旧契约别名；实际 CLI 调用统一使用 --session-id。
+TARGET_SESSION_ID="${TARGET_SESSION_ID:-${TARGET_SESSION_KEY:-agent:${TARGET_AGENT}:main}}"
 AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS:-600}"
 MESSAGE="${MESSAGE:-}"
 MESSAGE_FILE="${MESSAGE_FILE:-}"
@@ -42,8 +43,8 @@ NOW_UTC="$(date -u +%s)"
 RUN_ID="${RUN_ID:-openclaw-${SAFE_TARGET}-${NOW_UTC}-$$}"
 
 openclaw_args=(agent --agent "${TARGET_AGENT}")
-if [ -n "${TARGET_SESSION_KEY}" ]; then
-  openclaw_args+=(--session-key "${TARGET_SESSION_KEY}")
+if [ -n "${TARGET_SESSION_ID}" ]; then
+  openclaw_args+=(--session-id "${TARGET_SESSION_ID}")
 fi
 if [ -n "${MESSAGE_FILE}" ]; then
   openclaw_args+=(--message-file "${MESSAGE_FILE}")
@@ -84,7 +85,7 @@ fi
 jq -nc \
   --arg status "${STATUS}" \
   --arg target_agent "${TARGET_AGENT}" \
-  --arg child_session_key "${TARGET_SESSION_KEY}" \
+  --arg child_session_key "${TARGET_SESSION_ID}" \
   --arg run_id "${RUN_ID}" \
   --argjson exit_code "${EXIT_CODE}" \
   --arg raw_output "${RAW_OUTPUT}" \

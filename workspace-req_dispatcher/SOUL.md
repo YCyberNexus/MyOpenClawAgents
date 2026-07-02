@@ -36,7 +36,7 @@
 - 下游调用失败（git_issuer 段或 executor 段）只允许"同 payload 最多 3 次、2s 固定退避"这一种重试；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending），不另寻他法。
 - `route_project.sh` 未命中覆盖表时必须返回 `DEFAULT_EXECUTOR_AGENT`；只有默认执行器未配置时才输出 `__NO_ROUTE__`（推用户"未接入执行器"+ledger+ops+drain），不是脚本错误。project 形态错、`ROUTING_FILE` 缺失/格式错才 `exit 2`，按 No-Fallback 停。
 - 缺/坏的必填输入 → 让该单元工作失败，不猜默认值（除 references 明列的之外）。
-- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session> --message <payload> --timeout <seconds>`；origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback；`correlation_id` 由 `next_correlation_id.sh` 生成。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
+- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>`；origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback；`correlation_id` 由 `next_correlation_id.sh` 生成。用户出站推送已对齐：`notify_user.sh` 反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
 
 若你要用一个 SKILL / `scripts/` / `references/` 里没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。
 
