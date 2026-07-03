@@ -1,8 +1,8 @@
 # req_dispatcher Workspace Notes
 
-本工作区实现 `req_dispatcher`：104 OpenClaw 上"企微需求 → 自动处理"链路的需求接入 + **端到端编排器**。它接收 114 转发来的自由文本需求，先用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装、要求文本里有明确 GitLab `group/project`、生成面向 `git_issuer` 的建单消息；然后主动驱动整条链：通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 issue → 按 project 选择目标 `req_executor` 部署（所有合法 `group/project` 默认路由到 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）→ 用 `build_executor_payload.sh` 生成并调用其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。
+本工作区实现 `req_dispatcher`：104 OpenClaw 上"企微需求 → 自动处理"链路的需求接入 + **端到端编排器**。它接收 114 转发来的需求消息；新主入口是智伴给出的蓝区 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 解析 wiki 所属 `group/project`、只读拉取 wiki Markdown、拆分需求并生成多条面向 `git_issuer` 的建单消息；旧自由文本入口仍兼容，使用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装并要求文本里有明确 GitLab `group/project`。随后主动驱动整条链：通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 issue → 按 project 选择目标 `req_executor` 部署（所有合法 `group/project` 默认路由到 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）→ 用 `build_executor_payload.sh` 生成并调用其 `RUN_SINGLE_ISSUE` driven 单次 issue 执行（具体做 coding/测试/规格/其它由 issue 决定）→ 收执行器结果回调 → 把结论推回发起需求的企微用户。
 
-身份从"薄派发器"升级为"编排器"，但**仍不碰 GitLab**（不持 token、不调 glab、不建 issue、不打标签）。它只做受控入口分析和消息准备，不语义猜 project，issue 事实仍以 `git_issuer` 返回 JSON 为准。唯一 SKILL `requirement_dispatch`，flock 保护或 best-effort 的 shell 脚本（capture_origin / prepare_downstream_payloads / run_agent_turn / build_executor_payload / record_pending / drain_pending / evict_stuck / route_project / notify_user / ops_notify），一张 `run_id` 主键的 pending 表（executor 段长期 pending，git_issuer 段同轮审计 record/drain）+ append-only ledger。**没有** worktree / glab / GitLab token / campaign_state / UI 账号 / 模型档位——这些 acpx/执行器专有概念在本 agent 不存在（token 归执行器侧）。
+身份从"薄派发器"升级为"编排器"，但**仍不写 GitLab**（不建 issue、不打标签、不写 note、不跑 issue）。它仅可用 `WIKI_GITLAB_*` 只读配置拉取 wiki 内容；写操作仍全部归 `git_issuer` / `req_executor`。它只做受控入口分析和消息准备，不语义猜 project，issue 事实仍以 `git_issuer` 返回 JSON 为准。唯一 SKILL `requirement_dispatch`，flock 保护或 best-effort 的 shell 脚本（capture_origin / prepare_wiki_downstream_payloads / prepare_downstream_payloads / run_agent_turn / build_executor_payload / record_pending / drain_pending / evict_stuck / route_project / notify_user / ops_notify），一张 `run_id` 主键的 pending 表（executor 段长期 pending，git_issuer 段同轮审计 record/drain）+ append-only ledger。**没有** worktree / campaign_state / UI 账号 / 模型档位——这些 acpx/执行器专有概念在本 agent 不存在（执行器 token 归执行器侧）。
 
 ## Agent Identity
 
@@ -16,7 +16,7 @@
 
 唯一 SKILL：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。编排器处理两类唤醒：自由文本接入，以及 executor 结果回调。
 
-- **接入路径（A）**（114 投来自由文本需求，经 `agent run --agent req_dispatcher --deliver`）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ `prepare_downstream_payloads.sh` 准备 `git_issuer_payload` → `evict_stuck.sh` 兜底 → `run_agent_turn.sh` 调用蓝区 `git_issuer`（payload 为准备后的建单消息）→ 记录并 drain git_issuer 审计 stage → 解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（默认执行器覆盖所有合法 project）→ `build_executor_payload.sh` 生成并调 `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → 回最小受理 ack → `waiting_for_executor_callback`；失败则推用户 + drain。
+- **接入路径（A）**（114 投来需求，经 `agent run --agent req_dispatcher --deliver`）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ 若消息含 GitLab wiki URL，则 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki 并生成 `git_issuer_payloads[]`；否则 `prepare_downstream_payloads.sh` 准备旧自由文本的单条 `git_issuer_payload` → `evict_stuck.sh` 兜底 → 对每个 payload 顺序调用蓝区 `git_issuer` → 记录并 drain git_issuer 审计 stage → 解析 `{status,project,iid,url}` → 成功则 `route_project.sh` 选 executor（默认执行器覆盖所有合法 project）→ `build_executor_payload.sh` 生成并调 `<executor> RUN_SINGLE_ISSUE`(I1) → `record_pending.sh` 记 `stage=executor`/新 `run_id2` → 回最小受理 ack → `waiting_for_executor_callback`；失败则推用户 + drain。
 - **executor 回调路径（B）**（trigger 名 `RUN_EXECUTOR_RESULT_CALLBACK`）：解析结果信封(I2) → 按 `run_id2` 匹配 executor 段，回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user.sh` 推回 origin → drain executor 段。
 
 完整算法、精确 env 行、脚本入参契约：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。
@@ -26,10 +26,10 @@
 req_dispatcher 经 `scripts/run_agent_turn.sh` 调用下游 agent。脚本内部固定执行：
 
 ```bash
-openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>
+openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>
 ```
 
-脚本 stdout 固定为 `{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；openclaw 调用失败返回 `status=failed` 且脚本 exit 0，供 orchestrator 做 3 次固定退避；入参形态错误才 exit 2。executor 结果回调已固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。用户出站推送通道**已对齐**：`notify_user.sh` 反向网关推 114 接收 agent（`openclaw agent run`，连接 pin `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；`origin.reply_agent` 由 `capture_origin.sh` 优先从运行时来源元数据推导；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制超时）。
+脚本 stdout 固定为 `{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；默认 `agent:<target>:main` 形态走 `--session-key` 且由脚本自动生成，普通下游调用不要手写 `TARGET_SESSION_KEY`；仅显式非 `agent:*:*` 的 `TARGET_SESSION_ID` 兼容走 `--session-id`；openclaw 调用失败返回 `status=failed` 且脚本 exit 0，供 orchestrator 做 3 次固定退避；入参形态错误才 exit 2。下游 agent turn 可能超过本地 shell tool 的短轮询窗口，若进程仍在运行必须继续 poll 到最终 stdout，不得因暂时无输出而 kill。executor 结果回调已固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。用户出站推送通道**已对齐**：`notify_user.sh` 反向网关推 114 接收 agent（`openclaw agent run`，连接 pin `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；`origin.reply_agent` 由 `capture_origin.sh` 优先从运行时来源元数据推导；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制超时）。
 
 ## State 布局
 
@@ -48,7 +48,7 @@ schema 详见 [`skills/requirement_dispatch/references/state_schema.md`](skills/
 
 ## Deployment Pin
 
-部署期配置在 [`config/dispatcher.env`](config/dispatcher.env)：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表路径）、可选 `OPS_NOTIFY_CHANNEL` / `DEFAULT_ENTRY_LABEL`、用户结果推送 pin `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / 默认 `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`、`DISPATCHER_CALLBACK_TARGET`（executor 结果回调目标）。project 覆盖路由表本体在 [`config/routing.env`](config/routing.env)（`PROJECT=AGENT` 行）。**group / project 不在此处**——随需求文本传入，由 git_issuer 解析；未命中覆盖表的合法 project 统一走 `DEFAULT_EXECUTOR_AGENT`。**GitLab token 不在此处**——归执行器侧 pin。详见 [`config/README.md`](config/README.md)。
+部署期配置在 [`config/dispatcher.env`](config/dispatcher.env)：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表路径）、wiki 只读 pin `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN`、可选 `OPS_NOTIFY_CHANNEL` / `DEFAULT_ENTRY_LABEL`、用户结果推送 pin `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / 默认 `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`、`DISPATCHER_CALLBACK_TARGET`（executor 结果回调目标）。project 覆盖路由表本体在 [`config/routing.env`](config/routing.env)（`PROJECT=AGENT` 行）。**group / project 不在此处**——wiki 入口从 URL 解析，旧自由文本随需求文本传入，由 git_issuer 校验；未命中覆盖表的合法 project 统一走 `DEFAULT_EXECUTOR_AGENT`。**执行器 GitLab token 不在此处**——归执行器侧 pin。详见 [`config/README.md`](config/README.md)。
 
 ## req_executor 衔接依赖（重要，记录在案）
 

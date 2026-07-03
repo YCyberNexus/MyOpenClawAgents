@@ -14,14 +14,19 @@
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
 | `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
-| `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的秒数，默认 `600`。 |
+| `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
+| `RUN_AGENT_TURN_HEARTBEAT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 等待下游 agent 时向 stderr 输出 heartbeat 的间隔，默认 `30`；stdout 仍只输出最终 JSON envelope。 |
 | `ROUTING_FILE` | 否 | project 覆盖路由表文件路径（见下「`routing.env`」）。git_issuer 返回 project 后，先查本表；未命中则使用 `DEFAULT_EXECUTOR_AGENT`。消费方 `scripts/route_project.sh`。默认相对 SKILL_DIR 的 `../../config/routing.env`，也可改绝对路径。 |
+| `WIKI_GITLAB_HOST` | wiki 入口必填 | 只读拉取 GitLab wiki 的 host（含端口则写端口）。仅由 `prepare_wiki_downstream_payloads.sh` 的 `FETCH_WIKI=1` 路径使用。 |
+| `WIKI_GITLAB_API_PROTOCOL` | wiki 入口必填 | `http` 或 `https`，与 wiki 所在 GitLab 服务一致。 |
+| `WIKI_GITLAB_TOKEN` | wiki 入口必填 | 只读 wiki token。只能用于 `glab api projects/<project>/wikis/<slug>` 拉取 wiki 内容；不得用于建 issue、打标签、写 note 或 executor 操作。本机值写入 ignored `dispatcher.local.env`。 |
+| `WIKI_GLAB_BIN` | 否 | `glab` 可执行文件路径，默认 `glab`。本机 fake glab 测试可覆盖。 |
 | `REPLY_GATEWAY_URL` | 否 | 114 OpenClaw 网关 URL。用户结果推送机制已对齐为 104 反向网关调用 114 接收 agent；为空时兼容回落到旧 `ZHIBAN_GATEWAY_URL`。网关、token、目标 agent 都无法解析时，`scripts/notify_user.sh` no-op（仅记 ledger 留痕、不静默丢）。 |
 | `REPLY_GATEWAY_TOKEN` | 否 | 114 OpenClaw 网关 token。仅由 `notify_user.sh` 用于 `openclaw agent run` 投递结果信封；为空时兼容回落到旧 `ZHIBAN_GATEWAY_TOKEN`；不要写入日志。 |
 | `DEFAULT_REPLY_AGENT` | 否 | 114 上接收结果信封的默认 agent 名。`notify_user.sh` 优先使用 `origin.reply_agent`，该字段只在 origin 未提供 `reply_agent` 时兜底；为空时兼容回落到旧 `ZHIBAN_AGENT`。接收 agent 负责根据信封里的 `origin` 完成企微最后一跳。 |
 | `REPLY_NOTIFY_TIMEOUT_SECONDS` | 否 | 104 反向调用 114 接收 agent 的超时秒数，默认 `30`；为空时兼容回落到旧 `ZHIBAN_NOTIFY_TIMEOUT_SECONDS`；必须为正整数，配置形态错误时 `notify_user.sh` 以 `2` 退出。实际投递超时只写 `user_notify_failed` 留痕并 `exit 0`，不阻断终态回调路径。 |
-| `DISPATCHER_CALLBACK_TARGET` | 否 | 结果回调目标：调用 `req_executor` 的 `RUN_SINGLE_ISSUE` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。支持 `agent:req_dispatcher:main` 这类 session id 或裸 agent 名；留空＝该字段为空，执行器侧回调 no-op。 |
-| 跨 agent 调用契约 | 已定 | `scripts/run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-id <session> --message <payload> --timeout <seconds>`；CLI 使用 runner 已配置的 OpenClaw Gateway，不在本文件重复 pin 网关地址/token。 |
+| `DISPATCHER_CALLBACK_TARGET` | 否 | 结果回调目标：调用 `req_executor` 的 `RUN_SINGLE_ISSUE` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。支持 `agent:req_dispatcher:main` 这类 session key 或裸 agent 名；留空＝该字段为空，执行器侧回调 no-op。 |
+| 跨 agent 调用契约 | 已定 | `scripts/run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>`；仅显式非 `agent:*:*` 的 `TARGET_SESSION_ID` 兼容走 `--session-id`；CLI 使用 runner 已配置的 OpenClaw Gateway，不在本文件重复 pin 网关地址/token。 |
 
 ## `routing.env`（多 project 路由表）
 
@@ -44,17 +49,18 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 
 `req_dispatcher` 是**全公司共用**的需求接入链路。不同员工/团队的需求会落到不同的 GitLab project。把 project 写死在 config 里会让这个 agent 变成单租户、违背"共用接入点"的目标。
 
-因此：**114 只发自由文本需求，但必须在文本里明确写出 GitLab `group/project`**。`req_dispatcher` 会用 `prepare_downstream_payloads.sh` 剥离 114/origin 包装并生成带 `repo=<group/project>` 的 `git_issuer_payload`；若 project 缺失则在调用 git_issuer 前失败并通知用户。`req_dispatcher` 仍不碰 GitLab，issue 事实仍以 git_issuer 返回 JSON 为准。
+因此：**114 发送的 wiki URL 或旧自由文本决定目标 project**。wiki 入口从 URL 的 `<group>/<project>/-/wikis/<slug>` 解析 project，并用只读 `WIKI_GITLAB_*` 拉取 wiki 文档；旧自由文本入口仍必须在文本里明确写出 GitLab `group/project`。`req_dispatcher` 会生成带 `repo=<group/project>` 的 `git_issuer_payload`；若 project 缺失或 wiki 读取失败则在调用 git_issuer 前失败并通知用户。`req_dispatcher` 仍不写 GitLab，issue 事实仍以 git_issuer 返回 JSON 为准。
 
 ## 部署校验清单
 
 1. `STATE_ROOT` 指向的目录在 runner 上存在且 agent 可写。
 2. `GIT_ISSUER_AGENT` 指向的下游 agent 已在同一 OpenClaw 上线，可被 `run_agent_turn.sh` 通过 `openclaw agent` 调用。
-3. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
-4. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token/branch pin。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。
-5. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
-6. `DISPATCHER_CALLBACK_TARGET` 按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。未填时执行器结果回调字段为空。
+3. wiki 入口部署时，`WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` 可读目标蓝区 GitLab wiki；该 token 权限保持只读。
+4. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
+5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token/branch pin。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。
+6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
+7. `DISPATCHER_CALLBACK_TARGET` 按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。未填时执行器结果回调字段为空。
 
 ## 与 acpx 工作区的差异
 
-`req_dispatcher` **不**像 `acpx_auto_tester` 那样 pin GitLab host / UI 账号池——它根本不碰 GitLab。本目录只放上面这些派发相关的 pin。
+`req_dispatcher` **不**像 `acpx_auto_tester` 那样 pin UI 账号池或执行器 token。它只保存 wiki 只读 GitLab pin 和派发相关 pin；写 GitLab 的 token 仍归 `git_issuer` / `req_executor` 自己持有。

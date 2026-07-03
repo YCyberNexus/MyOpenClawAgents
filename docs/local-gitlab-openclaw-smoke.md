@@ -55,6 +55,91 @@ ORIGIN_JSON='{"channel":"local","user":"codex","reply_agent":"local"}' \
 bash workspace-git_issuer/skills/git_issue_intake/scripts/create_issue.sh
 ```
 
+## req_dispatcher wiki intake
+
+该 smoke 验证新入口：智伴给 req_dispatcher 一个 GitLab wiki URL，dispatcher 只读拉取
+wiki 文档、拆分需求、生成多条 `git_issuer` 建单 payload。真实建 issue 仍由
+`git_issuer` 完成。
+
+本机只把覆盖写到 ignored local env：
+
+```bash
+source /Users/yuanchenxiang/.openclaw-local-gitlab/env
+
+cat > workspace-req_dispatcher/config/dispatcher.local.env <<EOF
+STATE_ROOT=/Users/yuanchenxiang/openclaw-local-data/req_dispatcher
+WIKI_GITLAB_HOST=${GITLAB_HOST}
+WIKI_GITLAB_API_PROTOCOL=${GITLAB_API_PROTOCOL}
+WIKI_GITLAB_TOKEN=${AGENT_PAT}
+DEFAULT_EXECUTOR_AGENT=req_executor
+DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
+DOWNSTREAM_AGENT_TIMEOUT_SECONDS=120
+RUN_AGENT_TURN_HEARTBEAT_SECONDS=10
+EOF
+```
+
+创建或更新一个本地 wiki 页面：
+
+```bash
+source /Users/yuanchenxiang/.openclaw-local-gitlab/env
+export GITLAB_HOST="${GITLAB_HOST}"
+export GITLAB_TOKEN="${AGENT_PAT}"
+
+PROJECT_URI="$(printf '%s' "${PROJECT_FULL}" | sed 's#/#%2F#g')"
+WIKI_CONTENT="$(cat <<'EOF'
+## 登录流程
+实现登录页忘记密码入口。
+
+## 导出流程
+支持按筛选条件导出 CSV。
+EOF
+)"
+
+glab api --method POST "projects/${PROJECT_URI}/wikis" \
+  -f title='req-dispatcher-wiki-smoke' \
+  -f content="${WIKI_CONTENT}" || \
+glab api --method PUT "projects/${PROJECT_URI}/wikis/req-dispatcher-wiki-smoke" \
+  -f content="${WIKI_CONTENT}"
+```
+
+用脚本验证 wiki fetch + split：
+
+```bash
+source /Users/yuanchenxiang/.openclaw-local-gitlab/env
+cd /Users/yuanchenxiang/IdeaProjects/MyOpenClawAgents/workspace-req_dispatcher/skills/requirement_dispatch
+source scripts/source_dispatcher_env.sh
+
+MESSAGE="${GITLAB_URL}/${PROJECT_FULL}/-/wikis/req-dispatcher-wiki-smoke" \
+FETCH_WIKI=1 \
+bash scripts/prepare_wiki_downstream_payloads.sh | jq '{status, project, count:(.requirements|length), titles:[.requirements[].title]}'
+```
+
+预期输出里 `status` 是 `success`，`project` 是本地 `${PROJECT_FULL}`，`count` 为 `2`。
+
+真实 OpenClaw agent smoke：
+
+```bash
+source /Users/yuanchenxiang/.openclaw-local-gitlab/env
+
+openclaw agent \
+  --agent req_dispatcher \
+  --session-key agent:req_dispatcher:main \
+  --message "${GITLAB_URL}/${PROJECT_FULL}/-/wikis/req-dispatcher-wiki-smoke" \
+  --timeout 1800 \
+  --json
+```
+
+2026-07-03 本机验证结果：
+
+- `req_dispatcher` 成功解析 wiki URL，拆出 2 条需求。
+- `git_issuer` 在本机 GitLab 创建了 issue `#16`（登录流程）和 `#17`（导出流程）。
+- 两条 issue 都路由到 `req_executor`，并生成 `RUN_SINGLE_ISSUE` handoff：
+  `openclaw-req_executor-1783052334-87594` / `reqd-3`，
+  `openclaw-req_executor-1783052504-88652` / `reqd-4`。
+- dispatcher ledger 已 drain 两条 `git_issuer` success；pending 中保留两条 executor stage，等待执行器 I2 回调。
+- 本机 gateway 仍提示 `scope upgrade pending approval`，但 embedded fallback 可完成 agent turn。
+- 本机 `req_executor` 后续处理受执行器 GitLab host pin 影响；如果执行器报告蓝区 GitLab 从本机不可达，视为本机环境限制，不影响验证 `req_dispatcher -> git_issuer -> req_executor` handoff 边界。
+
 ## req_executor prepare tick
 
 该 smoke 只验证 GitLab 认证、clone、reconcile、label transition 和 spawn payload 生成。
