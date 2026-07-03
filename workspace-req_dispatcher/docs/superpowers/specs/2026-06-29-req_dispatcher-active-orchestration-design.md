@@ -45,7 +45,7 @@ req_dispatcher 仍**不碰 GitLab**（不持 token、不调 glab、不建 issue�
    │             → drain git_issuer 段
    │      failed  → 推"建 issue 失败"给 origin → drain
    │
-   └─ C. executor 回调路径(新): {correlation_id, iid, status: done|failed|timeout, mr_url, reason, wiki_url}
+   └─ C. executor 回调路径(新): {correlation_id, iid, status: done|failed|timeout, mr_url, reason}
           → 按 run_id 匹配 executor 段 pending
           → 映射用户文案 → 推回 origin → drain
 
@@ -105,11 +105,12 @@ REPO_PARENT_PATH=/data
 `dispatch_followup.sh` 终态处，若该 issue 的 state 带 `correlation_id`+`dispatcher_callback_target`（即 driven 调用），在现有 drain/label/kill 之后 **best-effort** 发一条跨 agent 结果回调给 req_dispatcher：
 
 ```
-{ correlation_id, iid, project, status: done|failed|timeout, mr_url, wiki_url, reason }
+{ correlation_id, iid, project, status: done|failed|timeout, mr_url, reason }
 ```
 
 - 仿现有 `post_result_note.sh` 的隔离语义：`set +e`、stdout→/dev/null、失败只记 wrapper.log、绝不打断 Phase 6。
 - `status` 取 Phase 6 的 `final_status`（`done`/`failed`/`timeout`；`blocked` 是可重试态、**不**回调——等下一 attempt 或停放）。
+- 旧执行器若仍带 `wiki_url`，req_dispatcher 忽略该字段，不在用户通知里传播执行证据 Wiki 链接。
 - 落地：新增 `notify_dispatcher.sh`（跨 agent send 原语，工具名待对齐 §9）。**保留** `post_result_note.sh`，但 driven 路径默认不发 req_result note（避免与回调重复；由开关控制）。
 
 ### 3.5 GitLab token 归属
@@ -144,11 +145,11 @@ token 归执行器侧（每个 per-project 部署各自 pin / env 注入）。re
 
 ### 4.3 executor 回调路径（新）
 
-1. 解析执行器结果回调 `{correlation_id, iid, status, mr_url, reason, wiki_url}`。
+1. 解析执行器结果回调 `{correlation_id, iid, status, mr_url, reason}`；兼容但忽略旧 `wiki_url` 字段。
 2. 按 `run_id`（回调 runtime 自带）匹配 `pending[executor 段]`；`correlation_id` 作二次校验。
 3. 按 `status` 映射用户文案：
    - `done` → "#<iid> 已处理完成，MR：<mr_url>"
-   - `failed` → "#<iid> 处理未通过：<reason>"（wiki_url 非空时追加"，详情见 <wiki_url>"）
+   - `failed` → "#<iid> 处理未通过：<reason>"
    - `timeout` → "#<iid> 处理超时未完成，已停放待人工处理"
 4. **推回 origin**（§4.5）→ drain executor 段。
 5. 匹配不到（迟到/已驱逐/重复）→ 仍 drain 写 `was_pending=false` 审计行，不触发 No-Fallback。

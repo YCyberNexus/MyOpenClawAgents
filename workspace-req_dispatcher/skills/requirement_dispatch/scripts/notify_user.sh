@@ -33,7 +33,6 @@
 #   STATUS              done | failed | timeout（result 事件据此选文案；其它值按通用文案）
 #   IID                 issue IID（拼入文案）
 #   MR_URL              done 文案的 MR 链接
-#   WIKI_URL            failed 文案的详情链接
 #   REASON              failed 文案的原因摘要 / failure 事件的失败说明
 #   ORIGIN_JSON         origin 元数据（channel/user/conversation/reply_agent）紧凑 JSON；
 #                       reply_agent 优先作为 114 接收结果的 agent 名，其余字段原样留痕。
@@ -59,7 +58,6 @@ NOTIFY_TIMEOUT_SECONDS="${REPLY_NOTIFY_TIMEOUT_SECONDS:-${ZHIBAN_NOTIFY_TIMEOUT_
 STATUS="${STATUS:-}"
 IID="${IID:-}"
 MR_URL="${MR_URL:-}"
-WIKI_URL="${WIKI_URL:-}"
 REASON="${REASON:-}"
 ORIGIN_JSON="${ORIGIN_JSON:-}"
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -80,11 +78,7 @@ issue_ref="任务"
 if [ "${EVENT}" = "result" ]; then
   case "${STATUS}" in
     done)    CONTENT="${issue_ref} 已处理完成，MR：${MR_URL}" ;;
-    failed)
-      CONTENT="${issue_ref} 处理未通过：${REASON:-未说明原因}"
-      # 失败路径通常不发 Wiki（WIKI_URL 常为空）——仅当确有链接才追加，避免「详情见 」尾随空。
-      [ -n "${WIKI_URL}" ] && CONTENT="${CONTENT}，详情见 ${WIKI_URL}"
-      ;;
+    failed)  CONTENT="${issue_ref} 处理未通过：${REASON:-未说明原因}" ;;
     timeout) CONTENT="${issue_ref} 处理超时未完成，已停放待人工处理" ;;
     # result 事件理应带 done/failed/timeout 之一；缺/异常 STATUS 不致命（best-effort），
     # 退化为通用结论 + 留痕，绝不静默丢。
@@ -139,14 +133,13 @@ if [ -z "${GW_URL}" ] || [ -z "${GW_TOKEN}" ] || [ -z "${TARGET_AGENT}" ]; then
 fi
 
 ENVELOPE="$(jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
-   --arg content "${CONTENT}" --arg mr "${MR_URL}" --arg wiki "${WIKI_URL}" \
+   --arg content "${CONTENT}" --arg mr "${MR_URL}" \
    --arg rsn "${REASON}" --arg ts "${TS}" --argjson origin "${ORIGIN_ARG}" \
    '{kind:"req_result_push", event:$ev,
      status:($st|select(.!="")//null),
      iid:(if $iid=="" then null else ($iid|tonumber? // $iid) end),
      content:$content, origin:$origin,
      mr_url:($mr|select(.!="")//null),
-     wiki_url:($wiki|select(.!="")//null),
      reason:($rsn|select(.!="")//null),
      ts:$ts}')"
 

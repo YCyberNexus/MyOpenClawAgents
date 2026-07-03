@@ -90,4 +90,35 @@ if ! grep -q -- '--agent legacy_zhiban_agent' "${OPENCLAW_LOG}"; then
   exit 1
 fi
 
+: > "${OPENCLAW_LOG}"
+
+PATH="${FAKE_BIN}:${PATH}" \
+OPENCLAW_LOG="${OPENCLAW_LOG}" \
+STATE_ROOT="${TEST_ROOT}/state-failed-ignore-wiki" \
+REPLY_GATEWAY_URL="ws://example.invalid:8080" \
+REPLY_GATEWAY_TOKEN="token" \
+DEFAULT_REPLY_AGENT="fallback_agent" \
+REPLY_NOTIFY_TIMEOUT_SECONDS="5" \
+EVENT="result" \
+STATUS="failed" \
+IID="45" \
+WIKI_URL="https://gitlab.example/wiki/attempt-log" \
+REASON="测试失败" \
+ORIGIN_JSON='{"channel":"wecom","user":"u4","conversation":"c4"}' \
+bash "${SKILL_DIR}/scripts/notify_user.sh" >/dev/null 2>"${TEST_ROOT}/notify-failed-ignore-wiki.err"
+
+if grep -q -- '详情见' "${OPENCLAW_LOG}"; then
+  echo "did not expect notify_user.sh failed content to include wiki details" >&2
+  echo "openclaw args:" >&2
+  sed -n '1,20p' "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if grep -q -- 'wiki_url' "${OPENCLAW_LOG}"; then
+  echo "did not expect notify_user.sh result envelope to include wiki_url" >&2
+  echo "openclaw args:" >&2
+  sed -n '1,20p' "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
 echo "ok notify_user selects reply agent"

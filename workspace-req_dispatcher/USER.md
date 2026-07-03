@@ -30,7 +30,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
   （ack 同步返回；issue 创建与执行器启动由 req_dispatcher 编排，处理结论稍后异步返回。）
 - **异步：来自 req_dispatcher 的终态结论**（受理 ack 之外的实质通知，仅终态推一次）：
   - 处理完成 → "#<iid> 已处理完成，MR：<mr_url>"
-  - 处理未通过 → "#<iid> 处理未通过：<reason>"（有详情链接时追加"，详情见 <wiki_url>"）
+  - 处理未通过 → "#<iid> 处理未通过：<reason>"
   - 处理超时 → "#<iid> 处理超时未完成，已停放待人工处理"
   - 流程性失败（建 issue 失败 / 默认执行器未配置 / 启动执行失败）→ 对应失败说明。
 

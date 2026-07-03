@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-03.7] Orchestrate the ZhiBan/OpenClaw requirement → GitLab issue → req_executor pipeline from the 104 side. Intake supports either a blue-zone GitLab wiki URL or the legacy free-text requirement with explicit `group/project`: wiki intake uses `scripts/prepare_wiki_downstream_payloads.sh` to parse the wiki URL, fetch wiki Markdown with read-only `WIKI_GITLAB_*` pins when needed, split the document into requirement items, and compose one git_issuer payload per item; legacy intake uses `scripts/prepare_downstream_payloads.sh`. req_dispatcher then calls blue-zone `git_issuer` through `scripts/run_agent_turn.sh`, routes every returned `group/project` to `DEFAULT_EXECUTOR_AGENT` unless `routing.env` has a project-specific override, builds `RUN_SINGLE_ISSUE` with `scripts/build_executor_payload.sh`, records executor pending, receives `RUN_EXECUTOR_RESULT_CALLBACK`, and pushes conclusions back to the originating user. req_dispatcher may read GitLab wiki pages only; it must not create issues, write labels/notes, or run issue work directly. Main helpers: source_dispatcher_env.sh, capture_origin.sh, prepare_wiki_downstream_payloads.sh, prepare_downstream_payloads.sh, run_agent_turn.sh, build_executor_payload.sh, next_correlation_id.sh, find_pending.sh, record_pending.sh, drain_pending.sh, evict_stuck.sh, route_project.sh, notify_user.sh, ops_notify.sh."
+description: "[SKILL_VERSION=2026-07-03.8] Orchestrate the ZhiBan/OpenClaw requirement → GitLab issue → req_executor pipeline from the 104 side. Intake supports either a blue-zone GitLab wiki URL or the legacy free-text requirement with explicit `group/project`: wiki intake uses `scripts/prepare_wiki_downstream_payloads.sh` to parse the wiki URL, fetch wiki Markdown with read-only `WIKI_GITLAB_*` pins when needed, split the document into requirement items, and compose one git_issuer payload per item; legacy intake uses `scripts/prepare_downstream_payloads.sh`. req_dispatcher then calls blue-zone `git_issuer` through `scripts/run_agent_turn.sh`, routes every returned `group/project` to `DEFAULT_EXECUTOR_AGENT` unless `routing.env` has a project-specific override, builds `RUN_SINGLE_ISSUE` with `scripts/build_executor_payload.sh`, records executor pending, receives `RUN_EXECUTOR_RESULT_CALLBACK`, and pushes conclusions back to the originating user without propagating executor Wiki evidence links. req_dispatcher may read GitLab wiki pages only; it must not create issues, write labels/notes, or run issue work directly. Main helpers: source_dispatcher_env.sh, capture_origin.sh, prepare_wiki_downstream_payloads.sh, prepare_downstream_payloads.sh, run_agent_turn.sh, build_executor_payload.sh, next_correlation_id.sh, find_pending.sh, record_pending.sh, drain_pending.sh, evict_stuck.sh, route_project.sh, notify_user.sh, ops_notify.sh."
 allowed-tools: Bash, Read
 ---
 
@@ -210,7 +210,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
 ## 路径 B：executor 回调路径（执行结果回来 → 推用户）
 
-1. **解析 executor 执行结果回调（I2 信封）**：`RUN_EXECUTOR_RESULT_CALLBACK` 消息里 `worker_result_json=<I2>`，I2 为 `{correlation_id, iid, project, status: done|failed|timeout, mr_url, wiki_url, reason}`。如果运行时还带 executor `run_id`，优先使用该 `run_id`；本地 `openclaw agent` 回投形态不带 `run_id` 时，使用 I2 的 `correlation_id` 反查 pending。
+1. **解析 executor 执行结果回调（I2 信封）**：`RUN_EXECUTOR_RESULT_CALLBACK` 消息里 `worker_result_json=<I2>`，I2 为 `{correlation_id, iid, project, status: done|failed|timeout, mr_url, reason}`；若旧 executor 仍携带 `wiki_url`，req_dispatcher 忽略它。如果运行时还带 executor `run_id`，优先使用该 `run_id`；本地 `openclaw agent` 回投形态不带 `run_id` 时，使用 I2 的 `correlation_id` 反查 pending。
 2. **匹配 executor 段 pending（主键 = `run_id`，回调缺 `run_id` 时按 `correlation_id` 反查）**：
 
    ```bash
@@ -221,14 +221,14 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    ```
 
    找到 entry 后取其 `run_id` 作为 drain 的 `RUN_ID`。若同时有 runtime `run_id` 与 I2 `correlation_id`，**`correlation_id` 作二次校验**（回调里的 `correlation_id` 须 = entry 的 `correlation_id`，防 run_id 错配；不一致则记一条紧凑告警并以 run_id 为准 drain，不臆造）。
-3. **按 status 推用户结论**（文案见 notify_user.sh，与设计稿 §4.3 逐字一致；done→"#<iid> 已处理完成，MR：<mr_url>"，failed→"#<iid> 处理未通过：<reason>"（wiki_url 非空时追加"，详情见 <wiki_url>"），timeout→"#<iid> 处理超时未完成，已停放待人工处理"）：
+3. **按 status 推用户结论**（文案见 notify_user.sh；done→"#<iid> 已处理完成，MR：<mr_url>"，failed→"#<iid> 处理未通过：<reason>"，timeout→"#<iid> 处理超时未完成，已停放待人工处理"）：
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
    source scripts/source_dispatcher_env.sh && \
    EVENT="result" STATUS="<done|failed|timeout>" \
    ORIGIN_JSON="<取自 pending 的 origin 或空>" IID="<iid>" \
-   MR_URL="<mr_url 或空>" WIKI_URL="<wiki_url 或空>" REASON="<reason 或空>" \
+   MR_URL="<mr_url 或空>" REASON="<reason 或空>" \
    bash scripts/notify_user.sh
    ```
 
@@ -285,7 +285,7 @@ OpenClaw 每个 Bash tool call 是**全新 shell**，`export`/`cd` 不跨 exec �
 | `record_pending.sh` | `STATE_ROOT`, `RUN_ID`, `STAGE`(`git_issuer`\|`executor`) | `ORIGIN_JSON`, `PROJECT`, `IID`(正整数), `CORRELATION_ID`, `CHILD_SESSION_KEY`, `REQ_DIGEST` |
 | `drain_pending.sh` | `STATE_ROOT`, `RUN_ID`, `OUTCOME` | `STAGE`, `PROJECT`, `IID`(或 `ISSUE_IID`), `ISSUE_URL`, `STATUS`(`done`\|`failed`\|`timeout`), `MR_URL`, `REASON` |
 | `route_project.sh` | `PROJECT` | `ROUTING_FILE`, `DEFAULT_EXECUTOR_AGENT`（stdout：覆盖 executor、默认 executor 或 `__NO_ROUTE__`；合法 project 默认路由到 `DEFAULT_EXECUTOR_AGENT`；project 形态错/路由表文件缺失/格式错 exit 2） |
-| `notify_user.sh` | `EVENT`(`result`\|`failure`) | `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT`（默认兜底目标；优先使用 `ORIGIN_JSON.reply_agent`）, `REPLY_NOTIFY_TIMEOUT_SECONDS`(默认 30), `ORIGIN_JSON`, `STATUS`, `IID`, `MR_URL`, `WIKI_URL`, `REASON` |
+| `notify_user.sh` | `EVENT`(`result`\|`failure`) | `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT`（默认兜底目标；优先使用 `ORIGIN_JSON.reply_agent`）, `REPLY_NOTIFY_TIMEOUT_SECONDS`(默认 30), `ORIGIN_JSON`, `STATUS`, `IID`, `MR_URL`, `REASON` |
 | `ops_notify.sh` | `EVENT` | `OPS_NOTIFY_CHANNEL`(空则 no-op), `RUN_ID`, `REASON`, `COUNT` |
 
 `STATE_ROOT` / `GIT_ISSUER_AGENT` / `DEFAULT_EXECUTOR_AGENT` / `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` / `STUCK_AFTER_MINUTES` / `OPS_NOTIFY_CHANNEL` / `ROUTING_FILE` / `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN` / `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS` / `DISPATCHER_CALLBACK_TARGET` 由 `source scripts/source_dispatcher_env.sh` 注入：先读 tracked `config/dispatcher.env`，再读 ignored `config/dispatcher.local.env`（若存在，本机测试覆盖只写这里）。`capture_origin.sh` 只规范化来源元数据，不碰 state；`prepare_wiki_downstream_payloads.sh` 只读 wiki、拆分需求并准备消息，不写 GitLab、不碰 state；`prepare_downstream_payloads.sh` 只做旧自由文本入口分析与消息准备，不碰 state、不碰 GitLab；`build_executor_payload.sh` 只生成 executor trigger 文本；`run_agent_turn.sh` 只调用 `openclaw agent` 并输出 envelope，不碰 GitLab；`route_project.sh` / `ops_notify.sh` 不碰 state（不读写 pending/ledger/锁）：前者只做 project→executor 查表/默认路由，后者只发 best-effort 告警。`notify_user.sh` 不碰 GitLab、不建 issue、不打标签——只经反向网关把结果信封投给 114 接收 agent；目标 agent 优先取 `ORIGIN_JSON.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`（网关 pin 未配置、目标 agent 缺失、投递失败或超时则记 ledger 留痕、不静默丢）。

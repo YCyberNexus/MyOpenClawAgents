@@ -192,6 +192,7 @@ group=<可选，缺省取执行器 pin 配置>
 ```
 
 - `status` 取执行器 `final_status`（`done`/`failed`/`timeout`；`blocked` 不回调——可重试态，等下一 attempt 或停放）。
+- `wiki_url` 为旧执行器兼容字段；req_dispatcher 不再消费或转发执行证据 Wiki 链接。
 - 承载该 JSON 的跨 agent 回调信封字段名 = `worker_result_json`。
 
 ### I2 字段 → notify_user / drain_pending env（运行时解析契约，已定）
@@ -204,7 +205,7 @@ executor 回调路径从 I2 取值，分别填 `notify_user.sh`（推用户）�
 | `iid` | `IID` | `IID` | 正整数。 |
 | `project` | —（不取） | `PROJECT` | 审计用。 |
 | `mr_url` | `MR_URL` | `MR_URL` | `done` 才有。 |
-| `wiki_url` | `WIKI_URL` | —（不取） | `failed` 文案的详情链接。 |
+| `wiki_url` | —（不取） | —（不取） | 兼容旧 executor 信封；忽略。 |
 | `reason` | `REASON` | `REASON` | `failed`/`timeout` 才有。 |
 | `correlation_id` | —（不取） | —（不取） | **二次校验**：须 = pending entry 的 `correlation_id`（防 run_id 错配）。 |
 | —（不取） | `ORIGIN_JSON` | —（不取） | **取自 `pending[run_id2].origin`**（接入时 capture、全程随两段携带），非来自 I2；其中 `reply_agent` 决定回推到哪个 114 agent。 |
