@@ -11,7 +11,8 @@
 #
 # best-effort 语义（仿 ops_notify.sh / acpx post_result_note.sh）：推送是终态锦上添花，
 # 绝不能让回调路径因「推用户」再失败、也绝不静默丢结论（结论由 pending/ledger 兜底）：
-#   - REPLY_GATEWAY_URL / REPLY_GATEWAY_TOKEN / 目标 agent 任一为空 → 不推，
+#   - ORIGIN_JSON 为空/null/非 object，或 REPLY_GATEWAY_URL / REPLY_GATEWAY_TOKEN /
+#     目标 agent 任一为空 → 不推，
 #     但**记一条 ledger 留痕**（user_notify_skipped），exit 0（config：留空则不推用户；
 #     留痕保证「漏推」可审计、不静默丢）。
 #   - 三项均配置 → 拼结构化信封 + 人读文案，用 `openclaw agent run` 投给 114 接收 agent；
@@ -26,16 +27,18 @@
 #                      仍空则不推、仅 ledger 留痕。
 #   REPLY_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝回落到旧 ZHIBAN_GATEWAY_TOKEN，
 #                       仍空则不推、仅 ledger 留痕。
-#   DEFAULT_REPLY_AGENT 默认接收结果的 114 agent 名；ORIGIN_JSON.reply_agent 为空时使用。
-#                       空＝回落到旧 ZHIBAN_AGENT。这些字段来自 config/dispatcher.env
-#                       或部署期 local env（调用方 source 后透传）。
+#   DEFAULT_REPLY_AGENT 默认接收结果的 114 agent 名；仅当 ORIGIN_JSON 是合法 object 且
+#                       ORIGIN_JSON.reply_agent 为空时使用。ORIGIN_JSON 为空/null/非 object
+#                       时视为手动入口，不使用该兜底值。空＝回落到旧 ZHIBAN_AGENT。
+#                       这些字段来自 config/dispatcher.env 或部署期 local env（调用方 source 后透传）。
 # 可选：
 #   STATUS              done | failed | timeout（result 事件据此选文案；其它值按通用文案）
 #   IID                 issue IID（拼入文案）
 #   MR_URL              done 文案的 MR 链接
 #   REASON              failed 文案的原因摘要 / failure 事件的失败说明
-#   ORIGIN_JSON         origin 元数据（channel/user/conversation/reply_agent）紧凑 JSON；
-#                       reply_agent 优先作为 114 接收结果的 agent 名，其余字段原样留痕。
+#   ORIGIN_JSON         origin 元数据（channel/user/conversation/reply_agent）紧凑 JSON object；
+#                       只有合法 object 才允许出站推 114。reply_agent 优先作为 114 接收
+#                       结果的 agent 名，其余字段原样留痕。
 #   REPLY_NOTIFY_TIMEOUT_SECONDS
 #                       openclaw 反向投递超时秒数；空＝回落到旧
 #                       ZHIBAN_NOTIFY_TIMEOUT_SECONDS，再空默认 30；须为正整数。
@@ -97,38 +100,51 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # 安全求值 origin：ORIGIN_JSON 由上游（114→orchestrator）透传，可能为空 / 合法 JSON /
-# 畸形。best-effort 下绝不能因 origin 畸形而丢结论——空→null；合法 JSON→原样；
-# 畸形→降级为 {raw:"<原文>"} 字符串包装并 warn，仍照常留痕。
+# 畸形。只有合法 JSON object 代表可回推来源；空/null/非 object 视为 WebUI/人工入口，
+# 不使用 DEFAULT_REPLY_AGENT 兜底。畸形值仍降级为 {raw:"<原文>"} 留痕，但不出站推 114。
+ORIGIN_PUSH_ALLOWED=0
 if [ -z "${ORIGIN_JSON}" ]; then
   ORIGIN_ARG='null'
 elif printf '%s' "${ORIGIN_JSON}" | jq empty >/dev/null 2>&1; then
   # 用 `jq empty`（仅按解析成败设退出码）判 ORIGIN_JSON 是否合法 JSON，而非 `jq -e .`
   # （后者按 filter 输出真值设退出码，会把合法的 false/null 标量误判为非法）。
   ORIGIN_ARG="${ORIGIN_JSON}"
+  if jq -e 'type=="object"' <<<"${ORIGIN_ARG}" >/dev/null 2>&1; then
+    ORIGIN_PUSH_ALLOWED=1
+  fi
 else
   echo "notify_user: ORIGIN_JSON not valid JSON; wrapping as raw (event=${EVENT})" >&2
   ORIGIN_ARG="$(jq -nc --arg raw "${ORIGIN_JSON}" '{raw:$raw}')"
 fi
 
-REPLY_AGENT="$(jq -r 'if type=="object" and (.reply_agent|type=="string") then .reply_agent else "" end' <<<"${ORIGIN_ARG}")"
-TARGET_AGENT="${REPLY_AGENT:-${DEFAULT_AGENT}}"
+if [ "${ORIGIN_PUSH_ALLOWED}" -eq 1 ]; then
+  REPLY_AGENT="$(jq -r 'if (.reply_agent|type=="string") then .reply_agent else "" end' <<<"${ORIGIN_ARG}")"
+  TARGET_AGENT="${REPLY_AGENT:-${DEFAULT_AGENT}}"
+else
+  REPLY_AGENT=""
+  TARGET_AGENT=""
+fi
 
 # 通道未配置：不推，但写一条 ledger 留痕（user_notify_skipped），保证漏推可审计、不静默丢。
 # ledger 为 append-only 审计（与 drain_pending.sh 一致），单行 JSON 原子追加，无需 flock。
 if [ -z "${GW_URL}" ] || [ -z "${GW_TOKEN}" ] || [ -z "${TARGET_AGENT}" ]; then
+  SKIP_REASON="114 gateway pins empty or reply agent empty"
+  if [ "${ORIGIN_PUSH_ALLOWED}" -ne 1 ]; then
+    SKIP_REASON="origin empty, null, or not an object; manual entry does not push to 114"
+  fi
   jq -nc --arg ev "${EVENT}" --arg st "${STATUS}" --arg iid "${IID}" \
      --arg content "${CONTENT}" --arg ts "${TS}" --arg channel "${TARGET_AGENT}" \
-     --argjson origin "${ORIGIN_ARG}" \
+     --argjson origin "${ORIGIN_ARG}" --arg reason "${SKIP_REASON}" \
      '{kind:"user_notify_skipped", event:$ev,
        status:($st|select(.!="")//null),
        iid:(if $iid=="" then null else ($iid|tonumber? // $iid) end),
        content:$content, origin:$origin,
        channel:($channel|select(.!="")//null),
        skipped_at:$ts,
-       reason:"114 gateway pins empty or reply agent empty"}' \
+       reason:$reason}' \
      >> "${LEDGER_FILE}" \
      || { echo "notify_user: failed to write ledger (event=${EVENT})" >&2; exit 1; }
-  echo "notify_user: 114 gateway pins or reply agent empty; skip push, ledger 留痕 (event=${EVENT} iid=${IID:-?})" >&2
+  echo "notify_user: ${SKIP_REASON}; skip push, ledger 留痕 (event=${EVENT} iid=${IID:-?})" >&2
   exit 0
 fi
 

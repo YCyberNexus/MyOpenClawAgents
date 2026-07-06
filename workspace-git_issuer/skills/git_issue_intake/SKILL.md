@@ -1,6 +1,6 @@
 ---
 name: git_issue_intake
-description: "[SKILL_VERSION=2026-07-01.2] Create or change GitLab issues from free-text requirements for the req_dispatcher pipeline. Project selection is configuration-first and never guessed: parse only configured full project names, slugs, or aliases from config/project_routing.env. Use scripts/parse_project.sh, create_issue.sh, update_issue.sh, and emit_callback.sh for all deterministic work. GitLab access is glab-only. The last line of the final response must be one compact JSON callback compatible with req_dispatcher, including status, action, issue_iid, issue_url, project, entry_label, superseded_by, reason, and correlation_id."
+description: "[SKILL_VERSION=2026-07-06.1] Create or change GitLab issues from free-text requirements for the req_dispatcher pipeline. Project selection is configuration-first and never guessed: parse only configured full project names, slugs, or aliases from config/project_routing.env. Use scripts/parse_project.sh, create_issue.sh, update_issue.sh, and emit_callback.sh for all deterministic work. GitLab access is glab-only. The last line of the final response must be one compact JSON callback compatible with req_dispatcher, including status, action, issue_iid, issue_url, project, entry_label, superseded_by, reason, and correlation_id."
 ---
 
 # git_issue_intake

@@ -71,6 +71,65 @@ fi
 
 PATH="${FAKE_BIN}:${PATH}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
+STATE_ROOT="${TEST_ROOT}/state-manual-no-origin" \
+REPLY_GATEWAY_URL="ws://example.invalid:8080" \
+REPLY_GATEWAY_TOKEN="token" \
+DEFAULT_REPLY_AGENT="fallback_agent" \
+REPLY_NOTIFY_TIMEOUT_SECONDS="5" \
+EVENT="result" \
+STATUS="done" \
+IID="46" \
+MR_URL="https://gitlab.example/mr/4" \
+bash "${SKILL_DIR}/scripts/notify_user.sh" >/dev/null 2>"${TEST_ROOT}/notify-manual-no-origin.err"
+
+if [ -s "${OPENCLAW_LOG}" ]; then
+  echo "did not expect notify_user.sh to send to DEFAULT_REPLY_AGENT when ORIGIN_JSON is empty" >&2
+  echo "openclaw args:" >&2
+  sed -n '1,20p' "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if ! jq -e 'select(.kind=="user_notify_skipped" and .origin==null and .channel==null)' \
+  "${TEST_ROOT}/state-manual-no-origin/_dispatcher/ledger.jsonl" >/dev/null; then
+  echo "expected empty-origin manual entry to write a skipped ledger row with null channel" >&2
+  sed -n '1,20p' "${TEST_ROOT}/state-manual-no-origin/_dispatcher/ledger.jsonl" >&2
+  exit 1
+fi
+
+: > "${OPENCLAW_LOG}"
+
+PATH="${FAKE_BIN}:${PATH}" \
+OPENCLAW_LOG="${OPENCLAW_LOG}" \
+STATE_ROOT="${TEST_ROOT}/state-manual-null-origin" \
+REPLY_GATEWAY_URL="ws://example.invalid:8080" \
+REPLY_GATEWAY_TOKEN="token" \
+DEFAULT_REPLY_AGENT="fallback_agent" \
+REPLY_NOTIFY_TIMEOUT_SECONDS="5" \
+EVENT="result" \
+STATUS="done" \
+IID="47" \
+MR_URL="https://gitlab.example/mr/5" \
+ORIGIN_JSON='null' \
+bash "${SKILL_DIR}/scripts/notify_user.sh" >/dev/null 2>"${TEST_ROOT}/notify-manual-null-origin.err"
+
+if [ -s "${OPENCLAW_LOG}" ]; then
+  echo "did not expect notify_user.sh to send to DEFAULT_REPLY_AGENT when ORIGIN_JSON is null" >&2
+  echo "openclaw args:" >&2
+  sed -n '1,20p' "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if ! jq -e 'select(.kind=="user_notify_skipped" and .origin==null and .channel==null)' \
+  "${TEST_ROOT}/state-manual-null-origin/_dispatcher/ledger.jsonl" >/dev/null; then
+  echo "expected null-origin manual entry to write a skipped ledger row with null channel" >&2
+  sed -n '1,20p' "${TEST_ROOT}/state-manual-null-origin/_dispatcher/ledger.jsonl" >&2
+  exit 1
+fi
+
+: > "${OPENCLAW_LOG}"
+
+PATH="${FAKE_BIN}:${PATH}" \
+OPENCLAW_LOG="${OPENCLAW_LOG}" \
 STATE_ROOT="${TEST_ROOT}/state-legacy-zhiban" \
 ZHIBAN_GATEWAY_URL="ws://legacy.example.invalid:8080" \
 ZHIBAN_GATEWAY_TOKEN="legacy-token" \

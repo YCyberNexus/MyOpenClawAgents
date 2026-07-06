@@ -17,7 +17,7 @@
   1. OpenClaw 网关/运行时给出的结构化 origin JSON，例如 `OPENCLAW_DELIVER_ORIGIN_JSON` / `OPENCLAW_SOURCE_ORIGIN_JSON`。
   2. OpenClaw 网关/运行时给出的离散来源字段，例如 `OPENCLAW_SOURCE_AGENT` / `OPENCLAW_SOURCE_SESSION` / `OPENCLAW_DELIVER_USER` / `OPENCLAW_DELIVER_CONVERSATION`。只有 session key 且形如 `agent:<agent>:<session>` 时，脚本会推导 `reply_agent=<agent>`。
   3. 需求文本里的显式 fallback 行：`[origin] channel=<channel> user=<user> conversation=<conversation> reply_agent=<agent>`。
-- 当前实现不因 capture 不到 origin 而阻断主流程；`ORIGIN_JSON` 不传时 entry 里 origin = `null`，`notify_user.sh` 仍会把 `origin:null` 放进结果信封。目标 agent 优先取 `origin.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`；缺少网关 pin 或目标 agent 时仅 ledger 留痕。
+- 当前实现不因 capture 不到 origin 而阻断主流程；`ORIGIN_JSON` 不传时 entry 里 origin = `null`。`notify_user.sh` 只有在 `ORIGIN_JSON` 是合法 object 时才允许出站推 114：目标 agent 优先取 `origin.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`；`ORIGIN_JSON` 为空/null/非 object 时视为手动入口，只写 ledger 留痕，不调用 114。
 
 # §1 git_issuer 段（建 issue）
 
@@ -208,7 +208,7 @@ executor 回调路径从 I2 取值，分别填 `notify_user.sh`（推用户）�
 | `wiki_url` | —（不取） | —（不取） | 兼容旧 executor 信封；忽略。 |
 | `reason` | `REASON` | `REASON` | `failed`/`timeout` 才有。 |
 | `correlation_id` | —（不取） | —（不取） | **二次校验**：须 = pending entry 的 `correlation_id`（防 run_id 错配）。 |
-| —（不取） | `ORIGIN_JSON` | —（不取） | **取自 `pending[run_id2].origin`**（接入时 capture、全程随两段携带），非来自 I2；其中 `reply_agent` 决定回推到哪个 114 agent。 |
+| —（不取） | `ORIGIN_JSON` | —（不取） | **取自 `pending[run_id2].origin`**（接入时 capture、全程随两段携带），非来自 I2；只有合法 object 才允许出站推 114，其中 `reply_agent` 决定回推到哪个 114 agent。 |
 | —（不取） | —（`EVENT=result` 固定） | `STAGE=executor` 固定 | — |
 
 `drain_pending.sh` 的 `RUN_ID` **优先来自 runtime 回调自带的 `run_id`（=`run_id2`）**；若当前回调消息不带 runtime `run_id`，用 `find_pending.sh` 按 I2 `correlation_id` 反查 pending，并取返回 entry 的 `run_id`。
@@ -223,4 +223,4 @@ executor 回调路径从 I2 取值，分别填 `notify_user.sh`（推用户）�
 ## 三条逻辑路径（已定，详见 SKILL.md）
 
 - **接入路径（A）**：capture origin → wiki URL 走 `prepare_wiki_downstream_payloads` 生成 `git_issuer_payloads[]`，旧自由文本走 `prepare_downstream_payloads` 生成单条 `git_issuer_payload` → evict_stuck → 对每个 payload 顺序 `run_agent_turn(git_issuer, payload)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `build_executor_payload` → `run_agent_turn(<executor>, RUN_SINGLE_ISSUE)` → `record_pending(run_id2, stage=executor, project/iid/correlation_id/origin)` → drain git_issuer 段 → 最小 ack。
-- **executor 回调路径（C）**：解析 I2 → 按 `run_id2` 匹配 executor 段，或在回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user(result)` 推回 origin → drain executor 段。
+- **executor 回调路径（C）**：解析 I2 → 按 `run_id2` 匹配 executor 段，或在回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user(result)` 在 origin 为合法 object 时推回 114，否则只留痕 → drain executor 段。
