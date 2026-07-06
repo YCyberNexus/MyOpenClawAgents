@@ -7,6 +7,7 @@ OpenClaw RHEL7 离线安装包的 zip 文件体积超过 GitHub 普通仓库
 
 - 文件名：`openclaw-rhel7-offline-2026.6.11.zip`
 - Release 标签：`openclaw-rhel7-2026.6.11`
+- SHA-256：`57bbf02a09a79154858db7e926ba35bbf7c9f5ce4e409b76a466859be68a134b`
 - 用途：在 RedHat Enterprise Linux 7.9 或兼容系统上离线安装 OpenClaw CLI 本体
 
 发布方式：

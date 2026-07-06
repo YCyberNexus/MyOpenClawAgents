@@ -235,22 +235,37 @@ if [ "${RUN_SETUP}" -eq 1 ]; then
     cat >&2 <<EOF
 openclaw setup returned a non-zero status after CLI installation.
 This commonly happens when the Gateway service is not running yet.
-The CLI is installed; run \`openclaw gateway run\` or reinstall with
-\`--install-gateway-service\` if you want the installer to start a service.
+The CLI is installed; run \`openclaw gateway run\`.
+Use \`--install-gateway-service\` only on servers with systemd user services.
 EOF
   fi
 fi
 
 if [ "${INSTALL_GATEWAY_SERVICE}" -eq 1 ]; then
   echo "installing OpenClaw Gateway service"
-  "${PREFIX}/bin/openclaw" gateway install || {
-    echo "gateway service install failed; CLI installation is still complete" >&2
-    exit 1
-  }
-  "${PREFIX}/bin/openclaw" gateway start || {
-    echo "gateway service start failed; CLI installation is still complete" >&2
-    exit 1
-  }
+  GATEWAY_SERVICE_READY=1
+  if ! "${PREFIX}/bin/openclaw" gateway install; then
+    GATEWAY_SERVICE_READY=0
+  elif ! "${PREFIX}/bin/openclaw" gateway start; then
+    GATEWAY_SERVICE_READY=0
+  fi
+
+  if [ "${GATEWAY_SERVICE_READY}" -ne 1 ]; then
+    cat >&2 <<EOF
+Gateway service could not be installed or started automatically.
+The CLI installation is complete.
+
+OpenClaw's managed Gateway service requires systemd user services on Linux.
+If this server does not provide systemd user services, run Gateway directly
+or put it under your existing process supervisor.
+
+To run Gateway without systemd user services:
+  ${PREFIX}/bin/openclaw gateway run
+
+To keep it running in the background for a quick smoke test:
+  nohup ${PREFIX}/bin/openclaw gateway run > "${PREFIX}/gateway.log" 2>&1 &
+EOF
+  fi
 fi
 
 cat <<EOF

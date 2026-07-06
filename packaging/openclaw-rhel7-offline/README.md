@@ -58,7 +58,19 @@ bash verify.sh
 bash install.sh --install-gateway-service
 ```
 
-如果服务安装失败，CLI 安装本身仍然保留，可手动排查：
+OpenClaw 的托管 Gateway 服务在 Linux 上依赖用户级 systemd 服务。如果服务器没有可用的 `systemd --user`，服务安装会跳过，CLI 安装仍会完成。此时可直接前台运行 Gateway：
+
+```bash
+openclaw gateway run
+```
+
+临时后台冒烟验证可执行：
+
+```bash
+nohup openclaw gateway run > "$HOME/.local/openclaw-offline/gateway.log" 2>&1 &
+```
+
+如果服务安装失败但你确认服务器支持用户级 systemd，可手动排查：
 
 ```bash
 openclaw gateway status
