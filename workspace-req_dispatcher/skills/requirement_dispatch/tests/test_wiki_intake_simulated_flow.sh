@@ -27,7 +27,7 @@ while [ "$#" -gt 0 ]; do
       target_agent="$2"
       shift 2
       ;;
-    --session-id|--session-key)
+    --session-id)
       shift 2
       ;;
     --message)

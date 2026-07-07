@@ -28,8 +28,8 @@ create issue for ai-infra/veqp_server_v3
 EOF
 )"
 
-if ! grep -q -- 'agent --agent git_issuer --session-key agent:git_issuer:main' "${OPENCLAW_LOG}"; then
-  echo "expected wrapper to call openclaw agent with target and session key" >&2
+if ! grep -q -- 'agent --agent git_issuer --session-id agent:git_issuer:main' "${OPENCLAW_LOG}"; then
+  echo "expected wrapper to call openclaw agent with target and session id" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi

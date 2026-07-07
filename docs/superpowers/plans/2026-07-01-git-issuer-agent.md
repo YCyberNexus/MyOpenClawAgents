@@ -330,7 +330,7 @@ Expected: `git_issue_intake ✓ Ready`.
 Run:
 
 ```bash
-openclaw agent --agent git_issuer --session-key agent:git_issuer:smoke --message '本地冒烟测试。不要调用脚本、不要访问 GitLab、不要 spawn 其它 agent。只回复 agent name 和唯一 skill。' --timeout 180 --json
+openclaw agent --agent git_issuer --session-id agent:git_issuer:smoke --message '本地冒烟测试。不要调用脚本、不要访问 GitLab、不要 spawn 其它 agent。只回复 agent name 和唯一 skill。' --timeout 180 --json
 ```
 
 Expected: response contains `git_issuer` and `git_issue_intake`.

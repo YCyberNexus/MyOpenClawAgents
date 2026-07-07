@@ -77,7 +77,7 @@ EOF
 `run_agent_turn.sh` 调用的底层 CLI 形态固定为：
 
 ```bash
-openclaw agent --agent <TARGET_AGENT> --session-key <TARGET_SESSION_KEY> --message <payload> --timeout <AGENT_TIMEOUT_SECONDS>
+openclaw agent --agent <TARGET_AGENT> --session-id <TARGET_SESSION_ID> --message <payload> --timeout <AGENT_TIMEOUT_SECONDS>
 ```
 
 stdout 固定是一行 JSON envelope：
@@ -88,7 +88,7 @@ stdout 固定是一行 JSON envelope：
 
 - `status=failed` 表示 `openclaw agent` 调用失败；脚本仍 `exit 0`，由 orchestrator 做同 payload 3 次 2s 退避。
 - 入参形态错误（缺 `TARGET_AGENT`、消息为空、timeout 非正整数等）才 `exit 2`，按 No-Fallback 停。
-- `TARGET_SESSION_KEY` 默认由脚本生成，值为 `agent:${TARGET_AGENT}:main`。普通下游调用不要手写该变量；若部署方确实要传显式非 `agent:*:*` 的 session id，可用 `TARGET_SESSION_ID`，脚本会改传 `--session-id`。脚本会拒绝包含省略号或尖括号的占位符 session key。
+- `TARGET_SESSION_ID` 默认由脚本生成，值为 `agent:${TARGET_AGENT}:main`，并统一通过 `--session-id` 传给 OpenClaw CLI。历史环境变量 `TARGET_SESSION_KEY` 仍可作为兼容输入，但也会转为 `--session-id`。普通下游调用不要手写这两个变量；脚本会拒绝包含省略号或尖括号的占位符 session selector。
 - `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` 是配置下限；即使单次调用传入更短的 `AGENT_TIMEOUT_SECONDS`，脚本也会提升到该下限，避免本机或蓝区下游 agent 启动被过短超时截断。
 - 下游 agent turn 可能超过本地 shell tool 的短轮询窗口；`run_agent_turn.sh` 等待时会按 `RUN_AGENT_TURN_HEARTBEAT_SECONDS`（默认 30）向 stderr 输出 heartbeat，stdout 仍只保留最终 JSON envelope。若 tool 返回进程仍在运行，继续 poll 到进程完成并读取最终 stdout，不要因为暂时无新输出而 kill。
 - `worker_result_json` 优先来自目标 agent 输出中的最后一行紧凑 JSON；若下游把 pretty JSON 放在 Markdown 代码块里，`run_agent_turn.sh` 会兜底提取最后一个合法 JSON object。蓝区 `git_issuer` 仍推荐把回调 JSON 放在最后一行，代码块兼容只用于容错。

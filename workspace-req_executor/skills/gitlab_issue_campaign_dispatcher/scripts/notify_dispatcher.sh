@@ -96,10 +96,10 @@ case "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}" in
 esac
 
 TARGET_AGENT="${DISPATCHER_CALLBACK_TARGET}"
-TARGET_SESSION_KEY=""
+TARGET_SESSION_ID=""
 case "${DISPATCHER_CALLBACK_TARGET}" in
   agent:*:*)
-    TARGET_SESSION_KEY="${DISPATCHER_CALLBACK_TARGET}"
+    TARGET_SESSION_ID="${DISPATCHER_CALLBACK_TARGET}"
     rest="${DISPATCHER_CALLBACK_TARGET#agent:}"
     TARGET_AGENT="${rest%%:*}"
     ;;
@@ -117,8 +117,8 @@ fi
 
 CALLBACK_MESSAGE="$(printf 'RUN_EXECUTOR_RESULT_CALLBACK\nworker_result_json=%s\n' "${ENVELOPE}")"
 openclaw_args=(agent --agent "${TARGET_AGENT}")
-if [ -n "${TARGET_SESSION_KEY}" ]; then
-  openclaw_args+=(--session-key "${TARGET_SESSION_KEY}")
+if [ -n "${TARGET_SESSION_ID}" ]; then
+  openclaw_args+=(--session-id "${TARGET_SESSION_ID}")
 fi
 openclaw_args+=(--message "${CALLBACK_MESSAGE}" --timeout "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}")
 

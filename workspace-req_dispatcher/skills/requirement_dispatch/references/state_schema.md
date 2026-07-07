@@ -45,7 +45,7 @@ ${STATE_ROOT}/_dispatcher/
 - `project`：GitLab `group/project`。git_issuer 段一般为 `null`；executor 段由 git_issuer JSON 透传后携带。缺省 `null`。
 - `iid`：要测的 issue IID（正整数）。git_issuer 段一般为 `null`；executor 段携带。`record_pending.sh` 给定时做正整数校验，写入为数字。
 - `correlation_id`：req_dispatcher 在调用 executor 时生成的关联 token，随 `RUN_SINGLE_ISSUE` 入参下发、由执行器原样回显在结果回调里——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍按 `run_id`，回调缺 run_id 时也用它反查 pending。git_issuer 段一般为 `null`。
-- `child_session_key`：`run_agent_turn.sh` 调用目标 agent 时使用的 session key（审计用；无则 `null`）。
+- `child_session_key`：`run_agent_turn.sh` 调用目标 agent 时使用的 session selector（字段名沿用历史命名，仅审计用；无则 `null`）。
 - `spawned_at`：epoch 秒（`date -u +%s`）。stuck 兜底据此判超时（覆盖两 stage）。
 - `req_digest`：需求文本前若干字摘要，仅供人读/审计，不参与逻辑。
 

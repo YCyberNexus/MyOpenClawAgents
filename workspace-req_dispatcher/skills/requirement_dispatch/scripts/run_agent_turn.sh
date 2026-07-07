@@ -2,11 +2,10 @@
 # run_agent_turn.sh — 明确的 req_dispatcher → 下游 OpenClaw agent 调用包装。
 #
 # 本脚本把跨 agent 调用固定为 OpenClaw CLI 的可验证形态：
-#   openclaw agent --agent <TARGET_AGENT> --session-key <TARGET_SESSION_KEY> \
+#   openclaw agent --agent <TARGET_AGENT> --session-id <TARGET_SESSION_ID> \
 #     --message <MESSAGE> --timeout <AGENT_TIMEOUT_SECONDS>
 #
-# 兼容显式 numeric session id：若只设置 TARGET_SESSION_ID 且不是 agent:*:* 形态，
-# 则传给 --session-id；默认 agent:<target>:main 形态始终走 --session-key。
+# TARGET_SESSION_KEY 作为历史兼容输入保留；底层 CLI 统一使用 --session-id。
 #
 # 目标 agent 的最后一行若是紧凑 JSON，本脚本会把它解析到 worker_result_json。
 # 若输出把 pretty JSON 放在 markdown 代码块里，也会兜底提取最后一个合法 JSON object。
@@ -17,26 +16,23 @@ set -euo pipefail
 : "${TARGET_AGENT:?run_agent_turn: TARGET_AGENT required}"
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-if [ -n "${TARGET_SESSION_KEY:-}" ]; then
-  TARGET_SESSION_SELECTOR="${TARGET_SESSION_KEY}"
-  TARGET_SESSION_SELECTOR_KIND="key"
-elif [ -n "${TARGET_SESSION_ID:-}" ]; then
+if [ -n "${TARGET_SESSION_ID:-}" ]; then
   TARGET_SESSION_SELECTOR="${TARGET_SESSION_ID}"
-  case "${TARGET_SESSION_SELECTOR}" in
-    agent:*:*) TARGET_SESSION_SELECTOR_KIND="key" ;;
-    *) TARGET_SESSION_SELECTOR_KIND="id" ;;
-  esac
+  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
+elif [ -n "${TARGET_SESSION_KEY:-}" ]; then
+  TARGET_SESSION_SELECTOR="${TARGET_SESSION_KEY}"
+  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_KEY"
 else
   TARGET_SESSION_SELECTOR="agent:${TARGET_AGENT}:main"
-  TARGET_SESSION_SELECTOR_KIND="key"
+  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
 fi
 case "${TARGET_SESSION_SELECTOR}" in
   *"…"*)
-    echo "run_agent_turn: TARGET_SESSION_KEY must not contain placeholder ellipsis: ${TARGET_SESSION_SELECTOR}" >&2
+    echo "run_agent_turn: ${TARGET_SESSION_SELECTOR_SOURCE} must not contain placeholder ellipsis: ${TARGET_SESSION_SELECTOR}" >&2
     exit 2
     ;;
   *"<"*|*">"*)
-    echo "run_agent_turn: TARGET_SESSION_KEY must not contain placeholder brackets: ${TARGET_SESSION_SELECTOR}" >&2
+    echo "run_agent_turn: ${TARGET_SESSION_SELECTOR_SOURCE} must not contain placeholder brackets: ${TARGET_SESSION_SELECTOR}" >&2
     exit 2
     ;;
 esac
@@ -78,11 +74,7 @@ RUN_ID="${RUN_ID:-openclaw-${SAFE_TARGET}-${NOW_UTC}-$$}"
 
 openclaw_args=(agent --agent "${TARGET_AGENT}")
 if [ -n "${TARGET_SESSION_SELECTOR}" ]; then
-  case "${TARGET_SESSION_SELECTOR_KIND}" in
-    key) openclaw_args+=(--session-key "${TARGET_SESSION_SELECTOR}") ;;
-    id) openclaw_args+=(--session-id "${TARGET_SESSION_SELECTOR}") ;;
-    *) echo "run_agent_turn: invalid session selector kind: ${TARGET_SESSION_SELECTOR_KIND}" >&2; exit 2 ;;
-  esac
+  openclaw_args+=(--session-id "${TARGET_SESSION_SELECTOR}")
 fi
 if [ -n "${MESSAGE_FILE}" ]; then
   openclaw_args+=(--message-file "${MESSAGE_FILE}")
