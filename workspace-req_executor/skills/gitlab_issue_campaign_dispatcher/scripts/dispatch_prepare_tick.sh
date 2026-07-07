@@ -302,11 +302,12 @@ if [ -n "${KILL_TERMINAL}" ]; then
   KILL_TERMINAL="$(to_bool "${KILL_TERMINAL}")"
   [ "${KILL_TERMINAL}" = INVALID ] && emit_chat_failure "invalid_kill_subagent_on_terminal"
 else
-  KILL_TERMINAL="true"
-  # Legacy compatibility: kill_subagent_on_done=false disables when new field is omitted.
+  KILL_TERMINAL="false"
+  # Legacy compatibility: kill_subagent_on_done is accepted when the new field
+  # is omitted, but terminal session cleanup is no longer enabled by default.
   if [ -n "${T[kill_subagent_on_done]:-}" ]; then
     legacy="$(to_bool "${T[kill_subagent_on_done]}")"
-    [ "${legacy}" = "false" ] && KILL_TERMINAL="false"
+    [ "${legacy}" = INVALID ] && emit_chat_failure "invalid_kill_subagent_on_done"
   fi
 fi
 

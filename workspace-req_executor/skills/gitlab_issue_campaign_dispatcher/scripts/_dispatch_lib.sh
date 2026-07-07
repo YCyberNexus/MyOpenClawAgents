@@ -133,8 +133,8 @@ fresh_init_state() {
       stuck_after_minutes: 332,
       run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
-      kill_subagent_on_terminal: true,
-      kill_subagent_on_done: true,
+      kill_subagent_on_terminal: false,
+      kill_subagent_on_done: false,
       result_note_enabled: false,
       issue_iids_whitelist: [],
       require_labels: [],
@@ -608,40 +608,16 @@ phase6_apply_state_classify() {
 phase6_decide_cleanup() {
   local state_json="$1" iid="$2" final_status="$3" child_session_key="$4"
 
-  local issue_root="${ISSUES_ROOT}/issue-${iid}"
-  local issue_state_file="${issue_root}/state.json"
-  local attempt_state_file="${issue_root}/attempt_state.json"
-  local summary_file="${issue_root}/summary.md"
-
-  local kill_setting
-  kill_setting="$(printf '%s' "${state_json}" | jq -r '
-    if (.kill_subagent_on_terminal // null) != null then
-      .kill_subagent_on_terminal
-    else
-      ((.kill_subagent_on_done // true) and true)
-    end')"
-
-  if [ "${kill_setting}" != "true" ]; then
-    jq -n --arg target "${child_session_key}" \
-      '{action:"skip", target:$target, reason:"cleanup_disabled"}'
-    return 0
-  fi
   if [ -z "${child_session_key}" ] || [ "${child_session_key}" = "null" ]; then
     jq -n '{action:"skip", target:"", reason:"no_child_session_key"}'
     return 0
   fi
 
-  # Local-evidence gate for non-done outcomes.
-  if [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ] || [ "${final_status}" = "timeout" ]; then
-    if [ ! -f "${issue_state_file}" ] || [ ! -f "${attempt_state_file}" ] || [ ! -f "${summary_file}" ]; then
-      jq -n --arg target "${child_session_key}" \
-        '{action:"skip", target:$target, reason:"local_evidence_missing"}'
-      return 0
-    fi
-  fi
-
+  # Preserve every terminal child session. Operators need both the local files
+  # and the OpenClaw child-session transcript for post-run diagnosis.
   jq -n --arg target "${child_session_key}" \
-    '{action:"kill", target:$target, reason:"terminal_cleanup"}'
+    --arg status "${final_status}" \
+    '{action:"skip", target:$target, reason:"preserve_terminal_evidence", status:$status}'
 }
 
 # All-in-one Phase 6 processor. Reads the validated reply, syncs labels,

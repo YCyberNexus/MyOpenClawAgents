@@ -11,6 +11,8 @@
 5. The outer subagent stages, pushes, creates/updates the MR, summarizes, and returns compact JSON.
 6. `dispatch_followup.sh` validates the compact JSON, updates state and labels, and reports terminal driven results to `req_dispatcher` when applicable.
 
+Terminal child sessions are not auto-cleaned for any final status. `done`, `blocked`, `failed`, and `timeout` all preserve the child session so operators can inspect tool output and local diagnostic context after a run.
+
 ## Paths
 
 All paths are derived by `env_paths.sh`.

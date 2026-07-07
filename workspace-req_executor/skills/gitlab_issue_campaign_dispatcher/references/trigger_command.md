@@ -58,8 +58,8 @@ Optional fields:
 - `stuck_after_minutes`: integer >= 5. Defaults to `ceil(run_timeout_seconds / 60) + 30`.
 - `run_timeout_seconds`: integer >= 60. Defaults to `acpx_timeout_seconds + 120`.
 - `acpx_timeout_seconds`: integer >= 60. Defaults to `18000`.
-- `kill_subagent_on_terminal`: boolean. Defaults to `true`.
-- `kill_subagent_on_done`: legacy boolean, only used when `kill_subagent_on_terminal` is omitted.
+- `kill_subagent_on_terminal`: legacy compatibility boolean. Defaults to `false`; terminal child sessions are preserved for diagnosis and no `subagents kill` cleanup is requested.
+- `kill_subagent_on_done`: legacy compatibility boolean, only parsed for validation when `kill_subagent_on_terminal` is omitted.
 - `result_note_enabled`: boolean. Defaults to `false`.
 - `issue_iids`: comma-separated IID whitelist layered on top of `[issue_min_iid, issue_max_iid]`.
 - `require_labels`: comma-separated live-label inclusion filter.
