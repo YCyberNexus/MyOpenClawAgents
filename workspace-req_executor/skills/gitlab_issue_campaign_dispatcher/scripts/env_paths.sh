@@ -291,13 +291,18 @@ if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
   GITLAB_HOST="$(bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh")"
   if [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
     __PIN_FILE="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)/config/gitlab.env"
+    __GITLAB_TOKEN_BEFORE_PIN_SOURCE="${GITLAB_TOKEN:-}"
     # shellcheck disable=SC1090
     source "${__PIN_FILE}"
+    if [ -n "${__GITLAB_TOKEN_BEFORE_PIN_SOURCE}" ]; then
+      export GITLAB_TOKEN="${__GITLAB_TOKEN_BEFORE_PIN_SOURCE}"
+    fi
   fi
   export GITLAB_HOST GITLAB_API_PROTOCOL
   unset __ENV_PATHS_SH_DIR
   unset __PIN_FILE
   unset __PIN_TOKEN
+  unset __GITLAB_TOKEN_BEFORE_PIN_SOURCE
 fi
 
 # ─── 4. Project handle ────────────────────────────────────────────

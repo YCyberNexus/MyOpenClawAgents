@@ -2,7 +2,7 @@
 
 Files in this directory are **deployment-time pins** edited once on each runner where the agent is deployed. They are NOT generated from trigger inputs and they are NOT touched by the agent at runtime.
 
-Local clone-parent overrides go in ignored `campaign_defaults.local.env`: `dispatch_single_issue.sh` loads `campaign_defaults.env` first, then `campaign_defaults.local.env` when present. Do not commit secrets or personal machine paths to tracked config.
+Local clone-parent overrides go in ignored `campaign_defaults.local.env`: `dispatch_single_issue.sh` loads `campaign_defaults.env` first, then `campaign_defaults.local.env` when present. Do not commit personal machine paths or extra workstation-only credentials to tracked config.
 
 ## `gitlab.env`
 
@@ -10,8 +10,7 @@ Pins the GitLab host the agent talks to. Required fields:
 
 - `GITLAB_HOST` — host (with port if non-default) of the pinned GitLab instance. Exported by `scripts/glab_auth.sh`; `glab` reads it natively from the env var, so `glab api` / `glab mr` / `glab issue` calls **must NOT pass `--hostname`** (only `glab auth login` / `glab auth status` inside `glab_auth.sh` take that flag). Example: `gitlab-b.pxsemic.tech:30000`.
 - `GITLAB_API_PROTOCOL` — `http` or `https` (must match what the GitLab server actually serves).
-- `GITLAB_TOKEN` — optional runner-side token fallback. Keep the committed value empty. Prefer process env or a runner-local deployment copy for real secrets.
-- `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN` — wiki-facing GitLab pins. Current deployment stores these values directly in tracked `gitlab.env`; `glab_auth.sh` also uses `WIKI_GITLAB_TOKEN` as the fallback token when `GITLAB_TOKEN` is empty and uses `WIKI_GLAB_BIN` as the `glab` binary when `GLAB_BIN` is unset.
+- `GITLAB_TOKEN` — req_executor's deployment token fallback. A process environment `GITLAB_TOKEN` wins when present; otherwise scripts use this value from `gitlab.env`.
 
 ### Why pin?
 
@@ -19,11 +18,11 @@ The agent runs unattended for long stretches. Re-parsing the host out of `${GITL
 
 - the agent uses a single, fixed `GITLAB_HOST` on every call to `glab`
 - the trigger's `gitlab_address` becomes a **verification** input — if it doesn't resolve to the pinned host, `scripts/glab_auth.sh` aborts with **exit 13** (stderr: `trigger gitlab_address (...) does not match deployment pin (...)`) and the orchestrator records a `block_reason` to that effect. (Exit codes: `10` pin file missing, `11` required field missing, `12` bad `GITLAB_API_PROTOCOL`, `13` trigger/pin host or protocol mismatch.)
-- token selection order is: explicit `GITLAB_TOKEN` environment value, `GITLAB_TOKEN` in this file, then `WIKI_GITLAB_TOKEN` in this file.
+- token selection order is: explicit `GITLAB_TOKEN` environment value first, then `GITLAB_TOKEN` in this file.
 
 ### Setup
 
-1. Edit `gitlab.env` on the runner with the correct host and protocol. Leave the committed `GITLAB_TOKEN` empty unless this runner deliberately owns a local, uncommitted deployment copy.
+1. Edit `gitlab.env` on the runner with the correct host, protocol, and req_executor token.
 2. Run `glab auth login --hostname <host> --token <token> --api-protocol <proto>` once manually to validate; you should see `glab auth status --hostname <host>` succeed.
 3. After this, the agent is free to run scheduled ticks.
 

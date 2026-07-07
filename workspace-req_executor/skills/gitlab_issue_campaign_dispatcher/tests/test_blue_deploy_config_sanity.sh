@@ -22,6 +22,15 @@ assert_eq() {
   fi
 }
 
+assert_nonempty() {
+  local actual="$1"
+  local label="$2"
+
+  if [ -z "${actual}" ]; then
+    fail "expected ${label} to be set"
+  fi
+}
+
 source "${REQ_EXECUTOR_DIR}/config/gitlab.env"
 source "${REQ_EXECUTOR_DIR}/config/campaign_defaults.env"
 source "${REQ_DISPATCHER_DIR}/config/dispatcher.env"
@@ -29,7 +38,7 @@ source "${REQ_DISPATCHER_DIR}/config/dispatcher.env"
 assert_eq "gitlab-b.pxsemic.tech:30000" "${GITLAB_HOST:-}" "GITLAB_HOST"
 assert_eq "http" "${GITLAB_API_PROTOCOL:-}" "GITLAB_API_PROTOCOL"
 assert_eq "/data" "${REPO_PARENT_PATH:-}" "REPO_PARENT_PATH"
-assert_eq "" "${GITLAB_TOKEN:-}" "GITLAB_TOKEN"
+assert_nonempty "${GITLAB_TOKEN:-}" "GITLAB_TOKEN"
 assert_eq "/data/req_dispatcher" "${STATE_ROOT:-}" "STATE_ROOT"
 assert_eq "agent:req_dispatcher:main" "${DISPATCHER_CALLBACK_TARGET:-}" "DISPATCHER_CALLBACK_TARGET"
 
