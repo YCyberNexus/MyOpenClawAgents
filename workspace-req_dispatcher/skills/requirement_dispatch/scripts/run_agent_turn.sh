@@ -136,6 +136,15 @@ if [ -z "${MESSAGE_FILE}" ] && [ -z "${MESSAGE}" ]; then
   exit 2
 fi
 
+RUN_SINGLE_ISSUE_SESSION_SELECTOR=""
+if [ -n "${MESSAGE_FOR_SESSION}" ]; then
+  derived_selector="$(derive_default_session_selector "${TARGET_AGENT}" "${MESSAGE_FOR_SESSION}")"
+  if [ "${derived_selector}" != "agent:${TARGET_AGENT}:main" ]; then
+    RUN_SINGLE_ISSUE_SESSION_SELECTOR="${derived_selector}"
+  fi
+  unset derived_selector
+fi
+
 if [ -n "${TARGET_SESSION_ID:-}" ]; then
   TARGET_SESSION_SELECTOR="${TARGET_SESSION_ID}"
   TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
@@ -143,7 +152,15 @@ elif [ -n "${TARGET_SESSION_KEY:-}" ]; then
   TARGET_SESSION_SELECTOR="${TARGET_SESSION_KEY}"
   TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_KEY"
 else
-  TARGET_SESSION_SELECTOR="$(derive_default_session_selector "${TARGET_AGENT}" "${MESSAGE_FOR_SESSION}")"
+  if [ -n "${RUN_SINGLE_ISSUE_SESSION_SELECTOR}" ]; then
+    TARGET_SESSION_SELECTOR="${RUN_SINGLE_ISSUE_SESSION_SELECTOR}"
+  else
+    TARGET_SESSION_SELECTOR="agent:${TARGET_AGENT}:main"
+  fi
+  TARGET_SESSION_SELECTOR_SOURCE="auto"
+fi
+if [ -n "${RUN_SINGLE_ISSUE_SESSION_SELECTOR}" ] && [ "${TARGET_SESSION_SELECTOR}" = "agent:${TARGET_AGENT}:main" ]; then
+  TARGET_SESSION_SELECTOR="${RUN_SINGLE_ISSUE_SESSION_SELECTOR}"
   TARGET_SESSION_SELECTOR_SOURCE="auto"
 fi
 case "${TARGET_SESSION_SELECTOR}" in
@@ -156,6 +173,7 @@ case "${TARGET_SESSION_SELECTOR}" in
     exit 2
     ;;
 esac
+unset RUN_SINGLE_ISSUE_SESSION_SELECTOR
 unset MESSAGE_FOR_SESSION
 
 SAFE_TARGET="$(printf '%s' "${TARGET_AGENT}" | tr -c 'A-Za-z0-9_-' '_')"
