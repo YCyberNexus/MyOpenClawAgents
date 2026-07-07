@@ -51,6 +51,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+source "${SCRIPT_DIR}/branch_utils.sh"
 
 # ─── 1. Parse trigger from stdin ──────────────────────────────────
 
@@ -114,7 +115,7 @@ done <"${TRIGGER_FILE}"
 
 # emit_chat_failure: emit a tick_failed envelope and exit 0.
 # CONTRACT: ${msg} MUST be a stable, named classification string (e.g.
-# "reconcile_failed", "clone_or_pull_failed", "ui_account_pool_too_small").
+# "reconcile_failed", "clone_or_pull_failed").
 # NEVER interpolate raw stderr from a sub-script or its internal tooling
 # (jq / glab / git / python3) into ${msg}. Raw diagnostics belong in
 # wrapper.log only. Rationale: a tool name surfacing in the orchestrator's
@@ -150,8 +151,6 @@ require() {
 }
 require group
 require project
-require branch
-require dev_branch
 require gitlab_token
 require issue_min_iid
 require issue_max_iid
@@ -190,104 +189,10 @@ if [ -n "${T[repo_path]:-}" ]; then
   export REPO_PARENT_PATH="${T[repo_path]}"
 fi
 
-# Result/data basenames: per-tick override OR carry-forward from persisted state.
-# We can't read persisted state until env_paths.sh is sourced. So:
-#  - if trigger supplies, validate now and export.
-#  - else leave unset, env_paths.sh defaults to ifp-result / ifp-data, then we
-#    re-derive from persisted state below and re-source env_paths.sh if needed.
-for bn in result_basename data_basename; do
-  if [ -n "${T[$bn]:-}" ]; then
-    case "${T[$bn]}" in
-      */*|*..*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|"")
-        emit_chat_failure "invalid_${bn}: plain directory name required" ;;
-    esac
-  fi
-done
-[ -n "${T[result_basename]:-}" ] && export RESULT_BASENAME="${T[result_basename]}"
-[ -n "${T[data_basename]:-}" ]   && export DATA_BASENAME="${T[data_basename]}"
-
-# ui_accounts_relpath: relative path of the UI account pool file under
-# ${REPO_PATH} (the project checkout root). The relpath itself names
-# the leading directory — typically ${DATA_BASENAME} but it does not
-# have to be. Same carry-forward semantics as result_basename /
-# data_basename — applied here so env_paths.sh sees the exported value
-# below. Validation matches the rules enforced in load_ui_accounts.sh.
-if [ -n "${T[ui_accounts_relpath]:-}" ]; then
-  case "${T[ui_accounts_relpath]}" in
-    /*)
-      emit_chat_failure "invalid_ui_accounts_relpath: must be a relative path" ;;
-  esac
-  case "${T[ui_accounts_relpath]}" in
-    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
-      emit_chat_failure "invalid_ui_accounts_relpath: dot segments or whitespace not allowed" ;;
-  esac
-  case "${T[ui_accounts_relpath]}" in
-    *[!A-Za-z0-9_./-]*)
-      emit_chat_failure "invalid_ui_accounts_relpath: unsupported characters" ;;
-  esac
-  export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
-fi
-
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_dispatch_lib.sh"
-
-# If the trigger omitted basenames and the persisted state lives under a
-# non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
-# Discover the existing runtime root under REPO_PATH before falling back to
-# a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
-   && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
-  shopt -s nullglob
-  for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
-    CANDIDATE_PROJECT="$(jq -r '.project // empty' "${candidate_state}" 2>/dev/null || true)"
-    [ "${CANDIDATE_PROJECT}" = "${PROJECT}" ] || continue
-    candidate_result_root="$(dirname "$(dirname "${candidate_state}")")"
-    candidate_result_basename="$(basename "${candidate_result_root}")"
-    if [ -z "${T[result_basename]:-}" ]; then
-      PERSISTED_RB="$(jq -r --arg fallback "${candidate_result_basename}" '.result_basename // $fallback' "${candidate_state}")"
-      [ -n "${PERSISTED_RB}" ] && export RESULT_BASENAME="${PERSISTED_RB}"
-    fi
-    if [ -z "${T[data_basename]:-}" ]; then
-      PERSISTED_DB="$(jq -r '.data_basename // empty' "${candidate_state}")"
-      [ -n "${PERSISTED_DB}" ] && export DATA_BASENAME="${PERSISTED_DB}"
-    fi
-    if [ -z "${T[ui_accounts_relpath]:-}" ]; then
-      PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
-      [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
-    fi
-    # shellcheck disable=SC1091
-    source "${SCRIPT_DIR}/env_paths.sh"
-    break
-  done
-fi
-
-# Carry-forward for basenames: if trigger omitted them but a persisted
-# campaign_state.json exists with non-default values, re-source env_paths
-# with those values so all derived paths match the persisted layout.
-if [ -z "${T[result_basename]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-  PERSISTED_RB="$(jq -r '.result_basename // empty' "${CAMPAIGN_STATE_FILE}")"
-  if [ -n "${PERSISTED_RB}" ] && [ "${PERSISTED_RB}" != "${RESULT_BASENAME}" ]; then
-    export RESULT_BASENAME="${PERSISTED_RB}"
-    # shellcheck disable=SC1091
-    source "${SCRIPT_DIR}/env_paths.sh"
-  fi
-fi
-if [ -z "${T[data_basename]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-  PERSISTED_DB="$(jq -r '.data_basename // empty' "${CAMPAIGN_STATE_FILE}")"
-  if [ -n "${PERSISTED_DB}" ] && [ "${PERSISTED_DB}" != "${DATA_BASENAME}" ]; then
-    export DATA_BASENAME="${PERSISTED_DB}"
-    # shellcheck disable=SC1091
-    source "${SCRIPT_DIR}/env_paths.sh"
-  fi
-fi
-if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-  PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
-  if [ -n "${PERSISTED_UAR}" ] && [ "${PERSISTED_UAR}" != "${UI_ACCOUNTS_RELPATH}" ]; then
-    export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
-  fi
-fi
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
 # The campaign lock lives inside the repo runtime root
@@ -309,8 +214,7 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
   set +e
   PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
     REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-    BRANCH="${T[branch]}" \
+    BRANCH="${T[branch]:-}" \
     bash "${SCRIPT_DIR}/clone_or_pull.sh" >"${BOOTSTRAP_CLONE_OUT}" 2>&1
   BOOT_RC=$?
   set -e
@@ -341,6 +245,12 @@ fi
 wrapper_log prepare_tick "tick started project=${PROJECT}"
 TICK_START_TS="$(date -u +%s)"
 
+if [ -z "${T[branch]:-}" ]; then
+  T[branch]="$(resolve_origin_default_branch "${REPO_PATH}")" || \
+    emit_chat_failure "unable_to_resolve_default_branch"
+  wrapper_log prepare_tick "resolved branch from origin/HEAD: ${T[branch]}"
+fi
+
 # Self-heal: restore +x on scripts/safety_bin/* in case deployment dropped
 # the mode bit. Must run before any Phase 4 prep that ends up invoking
 # run_acpx_attempt.sh inside the subagent (which asserts the bit). Safe to
@@ -362,7 +272,6 @@ to_bool() {
 
 # Optional integer fields with defaults.
 MAX_CONCURRENT="${T[max_concurrent_subagents]:-}"
-MAX_ACCOUNTS="${T[max_accounts_per_issue]:-}"
 STUCK_AFTER="${T[stuck_after_minutes]:-}"
 ACPX_TIMEOUT="${T[acpx_timeout_seconds]:-}"
 RUN_TIMEOUT="${T[run_timeout_seconds]:-}"
@@ -370,13 +279,10 @@ OUTER_TIMEOUT_GRACE_SECONDS=120
 
 # Defaults when trigger omits.
 [ -z "${MAX_CONCURRENT}" ] && MAX_CONCURRENT=1
-[ -z "${MAX_ACCOUNTS}"   ] && MAX_ACCOUNTS=14
 [ -z "${ACPX_TIMEOUT}"   ] && ACPX_TIMEOUT=18000
 
 case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;; esac
 [ "${MAX_CONCURRENT}" -ge 1 ] || emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1"
-case "${MAX_ACCOUNTS}" in *[!0-9]*|"") emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;; esac
-[ "${MAX_ACCOUNTS}" -ge 1 ] || emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1"
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
 [ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
 [ -z "${RUN_TIMEOUT}"    ] && RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
@@ -460,7 +366,7 @@ if [ -n "${T[continue_upgrade_threshold]:-}" ]; then
 fi
 
 # result_note_enabled (bool): optional, carry-forward. Opt-in switch for the
-# Phase 6 test-result回报 (result_notify_loop.md, option A). When the trigger
+# Phase 6 result callback (result_notify_loop.md, option A). When the trigger
 # supplies it, it overrides; when omitted, the persisted value is preserved
 # (default false). Off by default so existing deployments are unaffected.
 RESULT_NOTE_PROVIDED=false
@@ -481,11 +387,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson cont_threshold_provided "${CONT_UPGRADE_THRESHOLD_PROVIDED}" \
   --argjson cont_threshold "${CONT_UPGRADE_THRESHOLD}" \
   --arg branch "${T[branch]}" \
-  --arg dev_branch "${T[dev_branch]}" \
   --arg repo_path "${REPO_PARENT_PATH}" \
-  --arg result_basename "${RESULT_BASENAME}" \
-  --arg data_basename "${DATA_BASENAME}" \
-  --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -493,7 +395,6 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson blocked_retry_limit "${T[blocked_retry_limit]}" \
   --argjson blocked_cooldown_ticks "${T[blocked_cooldown_ticks]}" \
   --argjson max_concurrent_subagents "${MAX_CONCURRENT}" \
-  --argjson max_accounts_per_issue "${MAX_ACCOUNTS}" \
   --argjson stuck_after_minutes "${STUCK_AFTER}" \
   --argjson run_timeout_seconds "${RUN_TIMEOUT}" \
   --argjson acpx_timeout_seconds "${ACPX_TIMEOUT}" \
@@ -504,11 +405,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   . + {
     project: $project,
     branch: $branch,
-    dev_branch: $dev_branch,
     repo_path: $repo_path,
-    result_basename: $result_basename,
-    data_basename: $data_basename,
-    ui_accounts_relpath: $ui_accounts_relpath,
     model_tiers: (if $model_tiers_provided then $model_tiers else (.model_tiers // null) end),
     continue_upgrade_threshold: (if $cont_threshold_provided then $cont_threshold else (.continue_upgrade_threshold // 2) end),
     issue_min_iid: $issue_min_iid,
@@ -518,7 +415,6 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     blocked_retry_limit: $blocked_retry_limit,
     blocked_cooldown_ticks: $blocked_cooldown_ticks,
     max_concurrent_subagents: $max_concurrent_subagents,
-    max_accounts_per_issue: $max_accounts_per_issue,
     stuck_after_minutes: $stuck_after_minutes,
     run_timeout_seconds: $run_timeout_seconds,
     acpx_timeout_seconds: $acpx_timeout_seconds,
@@ -696,8 +592,7 @@ persist_state "${STATE_JSON}"
 
 # ─── 10. Reconcile ────────────────────────────────────────────────
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
-  REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
+  REPO_PARENT_PATH="${REPO_PARENT_PATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
@@ -855,7 +750,6 @@ fi
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
   MODEL_TIERS="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // empty')" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
@@ -865,66 +759,13 @@ set -e
 set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-  BRANCH="${T[branch]}" \
+  BRANCH="${T[branch]:-}" \
   bash "${SCRIPT_DIR}/clone_or_pull.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 CP_RC=$?
 set -e
 [ "${CP_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (exit ${CP_RC})"
 
-# ─── 14. Validate UI account pool (only when configured) ─────────
-# Skipped entirely when UI_ACCOUNTS_RELPATH is empty (neither trigger
-# nor persisted state supplied a value). In that mode no pool is read,
-# no slots are allocated, and the subagent prompt omits the UI accounts
-# section. The max_concurrent_subagents lower-bound check has already
-# run at §6; the upper bound (≤ pool_size) only applies when a pool is
-# actually loaded.
-POOL_SIZE=0
-SLOT_SIZES_CSV=""
-POOL_LINES=()
-if [ -n "${UI_ACCOUNTS_RELPATH}" ]; then
-  # The source lives inside the cloned project, so this must run after
-  # clone_or_pull.sh.
-  POOL_OUT="$(mktemp)"
-  POOL_ERR="$(mktemp)"
-  chmod 600 "${POOL_OUT}" "${POOL_ERR}" 2>/dev/null || true
-  set +e
-  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-    MAX_CONCURRENT_SUBAGENTS="${MAX_CONCURRENT}" \
-    MAX_ACCOUNTS_PER_ISSUE="${MAX_ACCOUNTS}" \
-    bash "${SCRIPT_DIR}/load_ui_accounts.sh" >"${POOL_OUT}" 2>"${POOL_ERR}"
-  POOL_RC=$?
-  set -e
-  case "${POOL_RC}" in
-    0) ;;
-    10) emit_chat_failure "ui_accounts_pool_file_missing (deployment incomplete): ${UI_ACCOUNTS_RELPATH}" ;;
-    11) emit_chat_failure "ui_accounts_pool_empty: ${UI_ACCOUNTS_RELPATH}" ;;
-    12) emit_chat_failure "ui_accounts_pool_malformed: ${UI_ACCOUNTS_RELPATH}" ;;
-    13)
-      POOL_SIZE_X="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-      emit_chat_failure "ui_account_pool_too_small: pool=${POOL_SIZE_X} max_concurrent_subagents=${MAX_CONCURRENT}" ;;
-    14) emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;;
-    15) emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1" ;;
-    16) emit_chat_failure "invalid_ui_accounts_relpath: ${UI_ACCOUNTS_RELPATH}" ;;
-    *)  emit_chat_failure "load_ui_accounts.sh failed exit=${POOL_RC}" ;;
-  esac
-  POOL_SIZE="$(awk -F= '/^POOL_SIZE=/{print $2}' "${POOL_ERR}")"
-  SLOT_SIZES_CSV="$(awk -F= '/^SLOT_SIZES=/{print $2}' "${POOL_ERR}")"
-  mapfile -t POOL_LINES <"${POOL_OUT}"
-  # POOL_OUT now lives only in the bash array; scrub the on-disk copy
-  # before any other step can fail and leak passwords via trap cleanup.
-  : >"${POOL_OUT}"
-fi
-
-# Cache pool data on state for the chat summary. Always written so the
-# disk schema stays consistent across UI-account-enabled and disabled
-# deployments (0 == "no pool configured this tick").
-STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
-  --argjson pool_size "${POOL_SIZE}" '.ui_account_pool_size = $pool_size')"
-
-# ─── 15. require_labels filter ────────────────────────────────────
+# ─── 14. require_labels filter ────────────────────────────────────
 LABEL_FILTERED_IN_JSON="[]"
 LABEL_FILTERED_OUT_JSON="[]"
 if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
@@ -1079,7 +920,6 @@ for iid in "${BATCH_IIDS[@]}"; do
   set +e
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-       RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
        IID="${iid}" \
        bash "${SCRIPT_DIR}/allocate_attempt.sh" 2>"${ALLOC_ERR}")"
   _rc=$?
@@ -1095,53 +935,18 @@ for iid in "${BATCH_IIDS[@]}"; do
   ATTEMPT["${iid}"]="${N}"
 done
 
-# ─── 18. Slice UI accounts per IID using SLOT_SIZES ─────────────
-# When the pool was skipped at §14 (UI_ACCOUNTS_RELPATH empty),
-# SLOT_SIZES_CSV is "" and POOL_LINES is empty; every IID gets count=0
-# and UI_ACCOUNTS_JSON="[]". build_prompt.sh treats an empty array as
-# "no UI accounts allocated" and omits the corresponding prompt section.
-declare -a SLOT_SIZES_ARR=()
-if [ -n "${SLOT_SIZES_CSV}" ]; then
-  IFS=',' read -ra SLOT_SIZES_ARR <<<"${SLOT_SIZES_CSV}"
-fi
-declare -A UI_OFFSET UI_COUNT UI_ACCOUNTS_JSON
-offset=0
-for k in "${!BATCH_IIDS[@]}"; do
-  iid="${BATCH_IIDS[$k]}"
-  size="${SLOT_SIZES_ARR[$k]:-0}"
-  UI_OFFSET["${iid}"]="${offset}"
-  UI_COUNT["${iid}"]="${size}"
-  acct_block="["
-  sep=""
-  for (( j=0; j<size; j++ )); do
-    idx=$(( offset + j ))
-    line="${POOL_LINES[$idx]:-}"
-    user="${line%%:*}"
-    pass="${line#*:}"
-    acct_block+="${sep}$(jq -cn --arg u "${user}" --arg p "${pass}" '{u:$u,p:$p}')"
-    sep=","
-  done
-  acct_block+="]"
-  UI_ACCOUNTS_JSON["${iid}"]="${acct_block}"
-  offset=$(( offset + size ))
-done
-
-# ─── 19. Pre-spawn persist (placeholder pending entries) ──────────
-# Defensive guard: every value below (and the same four reused in the later
-# DISPATCH_ENTRIES append, step 21) is passed to `jq --argjson`, which rejects
+# ─── 18. Pre-spawn persist (placeholder pending entries) ──────────
+# Defensive guard: every value below is passed to `jq --argjson`, which rejects
 # a non-JSON token with the generic "invalid JSON text passed to --argjson".
-# An empty ATTEMPT[$iid] (allocate_attempt.sh printed nothing), or a non-numeric
-# UI_OFFSET/UI_COUNT, would surface as that cryptic message at the jq call far
-# from its real cause and invite a misdiagnosis as a "jq version bug". Validate
-# all four as non-negative integers here, once, and fail with a named, terminal
-# reason that points at the IID and the field instead.
+# An empty ATTEMPT[$iid] (allocate_attempt.sh printed nothing) would surface
+# far from its real cause and invite a misdiagnosis as a "jq version bug".
+# Validate it here once and fail with a named, terminal reason.
 for iid in "${BATCH_IIDS[@]}"; do
-  for _pair in "iid:${iid}" "attempt:${ATTEMPT[$iid]:-}" \
-               "ui_offset:${UI_OFFSET[$iid]:-}" "ui_count:${UI_COUNT[$iid]:-}"; do
+  for _pair in "iid:${iid}" "attempt:${ATTEMPT[$iid]:-}"; do
     _field="${_pair%%:*}"; _val="${_pair#*:}"
     case "${_val}" in
       ''|*[!0-9]*)
-        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a non-negative integer (allocate_attempt.sh or the UI-slot computation produced an empty/non-numeric value); refusing to build a malformed jq --argjson call"
+        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a non-negative integer (allocate_attempt.sh produced an empty/non-numeric value); refusing to build a malformed jq --argjson call"
         ;;
     esac
   done
@@ -1150,9 +955,7 @@ done
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"
-                         --argjson "att_${iid}" "${ATTEMPT[$iid]}"
-                         --argjson "off_${iid}" "${UI_OFFSET[$iid]}"
-                         --argjson "cnt_${iid}" "${UI_COUNT[$iid]}" )
+                         --argjson "att_${iid}" "${ATTEMPT[$iid]}" )
 done
 # Build the placeholder additions in one jq pass to avoid quoting hell.
 # active_issue_sessions uses the canonical "issue-<project>-<iid>" format
@@ -1164,14 +967,14 @@ done
 PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" --argjson acpx_timeout "${ACPX_TIMEOUT}" )
 FILTER='.pending_subagents = (.pending_subagents // {})'
 for iid in "${BATCH_IIDS[@]}"; do
-  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, ui_account_index_start: \$off_${iid}, ui_account_count: \$cnt_${iid}, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout}"
+  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout}"
 done
 FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)'
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c "${PRE_PENDING_JQ_ARGS[@]}" "${FILTER}")"
 persist_state "${STATE_JSON}"
 
-# ─── 20. Per-IID prep ─────────────────────────────────────────────
+# ─── 19. Per-IID prep ─────────────────────────────────────────────
 TICK_OUTCOMES='{}'
 DISPATCH_ENTRIES='[]'
 declare -A PAYLOAD_PATH CHILD_LABEL_BY_IID
@@ -1195,13 +998,12 @@ for iid in "${BATCH_IIDS[@]}"; do
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
   # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
   # resume signal. Every other entry path (`todo`, `retry`, `new`,
-  # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
+  # `blocked`, trigger require_labels) resets from the target branch
   # baseline, even if this IID has prior attempts on disk.
   ISSUE_MODE="fresh"
   NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
@@ -1231,7 +1033,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   PA_ERR="$(mktemp)"
   CLEANUP_FILES+=("${PA_OUT}" "${PA_ERR}")
   set +e
-  env "${iid_env[@]}" BRANCH="${T[branch]}" DEV_BRANCH="${T[dev_branch]}" \
+  env "${iid_env[@]}" BRANCH="${T[branch]}" \
     ISSUE_MODE="${ISSUE_MODE}" \
     bash "${SCRIPT_DIR}/prepare_attempt.sh" >"${PA_OUT}" 2>"${PA_ERR}"
   PA_RC=$?
@@ -1417,9 +1219,8 @@ for iid in "${BATCH_IIDS[@]}"; do
 
   # build_prompt.sh
   set +e
-  env "${iid_env[@]}" BRANCH="${T[branch]}" DEV_BRANCH="${T[dev_branch]}" \
+  env "${iid_env[@]}" BRANCH="${T[branch]}" \
     ISSUE_MODE="${MODE_ACTUAL}" \
-    UI_ACCOUNTS="${UI_ACCOUNTS_JSON[$iid]}" \
     bash "${SCRIPT_DIR}/build_prompt.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
   BP_RC=$?
   set -e
@@ -1542,7 +1343,6 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_ISSUE_BODY="${ISSUE_BODY}" \
               TPL_ISSUE_MODE="${MODE_ACTUAL}" \
               TPL_BRANCH="${T[branch]}" \
-              TPL_DEV_BRANCH="${T[dev_branch]}" \
               TPL_WORK_BRANCH="${WORK_BRANCH_X}" \
               TPL_LOCAL_ATTEMPT_BRANCH="${LOCAL_ATTEMPT_BRANCH}" \
               TPL_REPO_PATH="${REPO_PATH}" \
@@ -1551,8 +1351,6 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_LOG_DIR="${LOG_DIR_X}" \
               TPL_ISSUE_ROOT="${ISSUE_ROOT_X}" \
               TPL_SCRIPTS_DIR="${SCRIPT_DIR}" \
-              TPL_RESULT_BASENAME="${RESULT_BASENAME}" \
-              TPL_DATA_BASENAME="${DATA_BASENAME}" \
               TPL_ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT}" \
               TPL_ACPX_TIMEOUT_MINUTES="${ACPX_MIN}" \
               python3 - "${template}" 2>"${RENDER_ERR}" <<'PYEOF'
@@ -1606,8 +1404,8 @@ done
 
 # ─── 21. Emit envelope ───────────────────────────────────────────
 SURVIVOR_COUNT="$(printf '%s' "${DISPATCH_ENTRIES}" | jq 'length')"
-SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s, pool=%s)' \
-  "${SURVIVOR_COUNT}" "${BATCH_SIZE}" "${MAX_CONCURRENT}" "${POOL_SIZE}")"
+SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s)' \
+  "${SURVIVOR_COUNT}" "${BATCH_SIZE}" "${MAX_CONCURRENT}")"
 
 if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
   jq -nc \

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # clone_or_pull.sh — ensure ${REPO_PATH} exists as a clone of the project
 # repo, with up-to-date refs, and create the agent's runtime subtree at
-# ${REPO_PATH}/${RESULT_BASENAME}/ (default `ifp-result/`; per-project
-# overridable via the `result_basename` trigger field).
+# ${REPO_PATH}/.req_executor/.
 #
 # The agent's state lives INSIDE the cloned repo at `${RESULT_ROOT}`.
 # Before the first clone, that subtree does not exist — the bootstrap
@@ -14,12 +13,9 @@
 #   3. After clone, create the dispatcher subtree (_dispatcher/log,
 #      _dispatcher/locks) and the issue subtree root.
 #   4. Acquire the in-repo flock and run `git fetch` + `git worktree prune`.
-#   5. Idempotently append `/<basename RESULT_ROOT>/` to
+#   5. Idempotently append `/.req_executor/` to
 #      `${REPO_PATH}/.git/info/exclude` so the runtime root is git-ignored
-#      locally. `.git/info/exclude` is NEVER committed/pushed, so this
-#      handles per-project naming (`ifp-result/`, `<project>-result/`, …)
-#      without requiring the test team to maintain a `.gitignore` rule
-#      in master + dev for every project. The current issue's
+#      locally. `.git/info/exclude` is NEVER committed/pushed. The current issue's
 #      `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which
 #      bypasses both gitignore and info/exclude), so the single
 #      committable path is unaffected.
@@ -31,27 +27,28 @@
 # Required env vars:
 #   REPO_PATH               from env_paths.sh (default /data/${PROJECT}; trigger
 #                           repo_path overrides the parent)
-#   BRANCH                  integration / target branch (typically "master")
+#   BRANCH                  optional target branch; omitted means origin/HEAD
 #   GROUP                   from trigger
 #   PROJECT                 from trigger
 #   GITLAB_TOKEN            from trigger
 #   GITLAB_HOST             from glab_auth.sh (deployment pin)
 #   GITLAB_API_PROTOCOL     from glab_auth.sh (deployment pin)
 #
-# DEV_BRANCH is consulted by prepare_attempt.sh, not here. `git fetch
-# --prune origin` retrieves all branches, so DEV_BRANCH refs are
-# available without a separate fetch.
+# `git fetch --prune origin` retrieves all branches for prepare_attempt.sh.
 
 set -euo pipefail
 
 # __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/env_paths.sh"
+source "${SCRIPT_DIR}/branch_utils.sh"
 
-: "${REPO_PATH:?}" "${WORK_ROOT:?}" "${BRANCH:?}" \
+: "${REPO_PATH:?}" "${WORK_ROOT:?}" \
   "${GROUP:?}" "${PROJECT:?}" "${GITLAB_TOKEN:?}" \
   "${GITLAB_HOST:?run scripts/glab_auth.sh first}" \
   "${GITLAB_API_PROTOCOL:?run scripts/glab_auth.sh first}"
+BRANCH="${BRANCH:-}"
 
 REMOTE_URL="${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${GROUP}/${PROJECT}.git"
 AUTHED_REMOTE_URL="$(echo "${REMOTE_URL}" | sed "s#://#://oauth2:${GITLAB_TOKEN}@#")"
@@ -67,7 +64,7 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
     if [ -d "${REPO_PATH}" ]; then
       # REPO_PATH exists but is not a git clone. Could be partial state
       # from a prior interrupted bootstrap (e.g. env_paths.sh mkdir'd
-      # the ifp-result subtree before a previous tick crashed before
+      # the runtime subtree before a previous tick crashed before
       # `git clone`), OR could be a directory the operator put there on
       # purpose. We refuse to delete it automatically. Fail the tick with
       # a clear message; the operator decides whether the directory is
@@ -80,7 +77,11 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
       flock -u 7
       exit 12
     fi
-    git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
+    if [ -n "${BRANCH}" ]; then
+      git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
+    else
+      git clone "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
+    fi
   fi
   flock -u 7
 fi
@@ -106,16 +107,20 @@ flock 8
 cd "${REPO_PATH}"
 git remote set-url origin "${AUTHED_REMOTE_URL}"
 git fetch --prune origin
+if [ -z "${BRANCH}" ]; then
+  BRANCH="$(resolve_origin_default_branch "${REPO_PATH}")" || {
+    echo "clone_or_pull: unable to resolve origin/HEAD default branch" >&2
+    exit 14
+  }
+fi
 
 # Prune stale linked-worktree metadata left by older deployments.
 git worktree prune
 
 # Ensure the agent runtime root is locally ignored. `.git/info/exclude`
 # has identical semantics to `.gitignore` but is never committed/pushed,
-# so per-project runtime-root names (e.g. `ifp-result/`,
-# `<project>-result/`) are handled here without touching the project's
-# tracked `.gitignore`. Idempotent: a fixed-string match prevents
-# duplicate appends across ticks.
+# without touching the project's tracked `.gitignore`. Idempotent: a
+# fixed-string match prevents duplicate appends across ticks.
 RUNTIME_IGNORE_LINE="/$(basename "${RESULT_ROOT}")/"
 EXCLUDE_FILE="${REPO_PATH}/.git/info/exclude"
 mkdir -p "$(dirname "${EXCLUDE_FILE}")"

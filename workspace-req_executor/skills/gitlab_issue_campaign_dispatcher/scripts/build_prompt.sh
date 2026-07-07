@@ -15,30 +15,7 @@
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
 #   ISSUE_IID, ISSUE_MODE,
-#   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH,
-#   DEV_BRANCH, UI_ACCOUNTS
-#
-# `HULAT_DIR` is NOT a trigger input. The test team commits `hulat/` to
-# master+dev, so the repo checkout already contains it at
-# `${REPO_PATH}/hulat`. env_paths.sh exports `HULAT_DIR=${REPO_PATH}/hulat`
-# for any consumer that needs the absolute path, but build_prompt.sh
-# does not surface the path in the prompt (the agent reads from `hulat/`
-# relative to the repo root).
-#
-# UI_ACCOUNTS is a JSON array of {"u":"<username>","p":"<password>"} objects,
-# allocated by the dispatcher from the test-team-owned pool. Each subagent
-# receives the slot it was assigned by load_ui_accounts.sh — slot size
-# = floor(pool_size / max_concurrent_subagents) with the integer remainder
-# front-loaded onto the first slots, then capped by max_accounts_per_issue
-# (default 14), so the count varies across IIDs in the same batch when the
-# pool does not divide evenly or the cap binds. They are
-# injected into the prompt's "# Working environment" section with an explicit
-# override note: any account named in the issue body MUST be replaced by one
-# of these values when Claude Code logs in. Different concurrent subagents
-# always receive different accounts (see dispatcher's UI Account Allocation
-# Policy), and different robot executions within a subagent MUST use different
-# accounts — sharing an account would cause one robot to kick another out of
-# the system under test.
+#   LOG_DIR, REPO_PATH, WORKTREE_DIR, OUTPUT_DIR, WORK_BRANCH, BRANCH
 #
 # Output:
 #   Writes ${LOG_DIR}/prompt.txt and prints its absolute path on stdout.
@@ -56,31 +33,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${LOG_DIR:?}" \
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
-  "${BRANCH:?}" "${DEV_BRANCH:?}"
-
-# UI accounts are allocated by the dispatcher per-batch from the pool at
-# ${REPO_PATH}/${UI_ACCOUNTS_RELPATH} (no default; trigger field
-# ui_accounts_relpath, carry-forward persisted). When the deployment did
-# NOT configure ui_accounts_relpath, the dispatcher skips the pool load
-# entirely and passes either an empty UI_ACCOUNTS env var or UI_ACCOUNTS='[]'
-# to this script; in that mode the `# UI test accounts` section of the
-# rendered prompt is omitted. When configured, each subagent receives
-# its assigned slot (count derived automatically from pool_size /
-# max_concurrent_subagents with the integer remainder front-loaded,
-# then capped by max_accounts_per_issue). The dispatcher ensures
-# distinct accounts across concurrent batch members AND across
-# concurrent robot executions within a subagent. UI_ACCOUNTS must be
-# either unset, "", "[]", or a non-empty JSON array of
-# {"u":"<user>","p":"<pass>"} objects — any other shape exits non-zero
-# and the dispatcher marks the IID `blocked`.
-ACCOUNT_COUNT=0
-if [ -n "${UI_ACCOUNTS:-}" ]; then
-  if ! echo "${UI_ACCOUNTS}" | jq -e '. | type == "array"' >/dev/null 2>&1; then
-    echo "build_prompt: UI_ACCOUNTS must be a JSON array (got: ${UI_ACCOUNTS})" >&2
-    exit 4
-  fi
-  ACCOUNT_COUNT="$(echo "${UI_ACCOUNTS}" | jq 'length')"
-fi
+  "${BRANCH:?}"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -153,10 +106,9 @@ This is a CONTINUE-MODE re-run of GitLab issue #${ISSUE_IID}.
 A prior attempt on this issue already ran, and a human reviewer requested
 resume by applying the \`continue\` label. You are running inside the shared
 per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt of
-this IID). The dispatcher has prepared the worktree from the latest available
-same-IID work branch or local prior-attempt branch, and it restores prior
-files under ${RESULT_BASENAME}/issue-${ISSUE_IID}/ so you can inspect them
-and continue. Read what's already there, then continue or correct it
+this IID). The dispatcher has prepared the worktree and restored prior files
+under .req_executor/issue-${ISSUE_IID}/ so you can inspect them and
+continue. Read what's already there, then continue or correct it
 according to the past-attempt summaries and reviewer guidance below.
 
 EOF
@@ -165,13 +117,10 @@ EOF
 You are working on GitLab issue #${ISSUE_IID}. Implement the change
 requested in the issue description. You are running inside the shared
 per-issue git worktree at ${WORKTREE_DIR} (reused across every attempt
-of this IID). Tracked files have just been reset to
-\`origin/${DEV_BRANCH}\` (the clean baseline). Any same-IID runtime
-output/log subtree that survived a previous attempt has been quarantined
-outside this active worktree before this prompt was written. The integration
-branch \`${BRANCH}\` already contains spec output from previously completed
-issues, but you should NOT see that on tracked files here when ${DEV_BRANCH}
-is kept clean.
+of this IID). The dispatcher has prepared this worktree for the current
+attempt. Any same-IID runtime output/log subtree that survived a previous
+attempt has been quarantined outside this active worktree before this prompt
+was written.
 
 EOF
   fi
@@ -196,20 +145,11 @@ ${REVIEWER_BLOCK}
 EOF
   fi
 
-  # Only advertise the test-team shared config paths that ACTUALLY exist in this
-  # worktree. A task-agnostic executor may run against a repo that carries none of
-  # them (prepare_attempt.sh soft-skips missing ones); listing a path that is not
-  # there would mislead Claude into assuming a config / knowledge base it cannot read.
-  # For the hulat deployment all three exist → this block is identical to before.
+  # Only advertise optional Claude runtime config when it actually exists.
+  # The issue body remains the source of truth for what work to perform.
   SHARED_CONFIG_BLOCK=""
-  if [ -d "${WORKTREE_DIR}/hulat" ]; then
-    SHARED_CONFIG_BLOCK+="- Hulat materials:            ${WORKTREE_DIR}/hulat   (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)"$'\n'
-  fi
   if [ -d "${WORKTREE_DIR}/.claude" ]; then
-    SHARED_CONFIG_BLOCK+="- Claude runtime config:      ${WORKTREE_DIR}/.claude (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)"$'\n'
-  fi
-  if [ -d "${WORKTREE_DIR}/${DATA_BASENAME}" ]; then
-    SHARED_CONFIG_BLOCK+="- Knowledge base:             ${WORKTREE_DIR}/${DATA_BASENAME} (committed in ${BRANCH}/${DEV_BRANCH}, available in this worktree)"$'\n'
+    SHARED_CONFIG_BLOCK+="- Claude runtime config:      ${WORKTREE_DIR}/.claude (available in this worktree)"$'\n'
   fi
   SHARED_CONFIG_BLOCK="${SHARED_CONFIG_BLOCK%$'\n'}"
 
@@ -219,36 +159,17 @@ EOF
 - Output directory:           ${OUTPUT_DIR} (for standalone deliverables that need to be preserved separately — force-added at commit time. Other source-code changes in the repo commit normally and do NOT need to go under this directory)
 ${SHARED_CONFIG_BLOCK}
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
-- Source baseline:            prepared by dispatcher for this mode (fresh uses ${DEV_BRANCH}; continue/resume uses ${WORK_BRANCH} or the latest local prior-attempt branch; shared config paths are refreshed from latest ${DEV_BRANCH} before every run)
 - Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
 
 EOF
-
-  if [ "${ACCOUNT_COUNT}" -gt 0 ]; then
-    cat <<EOF
-# UI test accounts (dispatcher-allocated — overrides any account in the issue body)
-The orchestrator has allocated the following ${ACCOUNT_COUNT} test accounts for THIS run.
-When the issue description names a UI account (for example "use F100001 to log in"),
-you MUST IGNORE that name and use one of the credentials below instead. Other concurrent
-runs are using DIFFERENT accounts; reusing the issue body's account would cause
-both runs to log each other out of the system under test.
-
-This run has ${ACCOUNT_COUNT} accounts available — one per robot test file. Assign
-distinct accounts to concurrent robot executions; never share an account between two
-concurrently-running robots.
-
-$(echo "${UI_ACCOUNTS}" | jq -r 'to_entries | .[] | "- Account \(.key + 1): username=\(.value.u), password=\(.value.p)"')
-
-EOF
-  fi
 
   cat <<EOF
 # Rules
 - Work only on this issue.
 - Modify whatever files in the repository the issue requires. If the issue produces standalone artifacts (spec / report / test files), put those under \`${OUTPUT_DIR}\`; otherwise edit source files directly where they live, and note in your final summary which files you changed.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside this worktree.
-- Treat \`hulat/\`, \`.claude/\`, and \`${DATA_BASENAME}/\` as shared repository content. Change them only when the issue genuinely requires it, and mention those changes in your final summary.
-- The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`${RESULT_BASENAME}/_dispatcher/\` and \`${RESULT_BASENAME}/issue-*/\`) and are not visible to you here. Edit source files wherever the issue requires; only the test team's shared content above (\`hulat/\`, \`.claude/\`, \`${DATA_BASENAME}/\`) warrants extra caution.
+- Use the issue description and reviewer comments as the task prompt. Do not assume any project-specific testing framework or material directory unless the issue explicitly names one.
+- The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`.req_executor/_dispatcher/\` and \`.req_executor/issues/\`) and are not visible to you here.
 - Destructive deletion is forbidden. Do NOT call \`rm\`, \`/bin/rm\`, \`git rm\`, \`unlink\`, \`find -delete\`, or script file deletion through Python, Node, or another runtime. Do not delete files or directories for cleanup. If the issue seems to require deleting something, leave it in place and explain the blocker in your final summary.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did$([ "${ISSUE_MODE}" = "continue" ] && echo " differently from the prior run").

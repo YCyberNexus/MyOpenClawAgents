@@ -97,7 +97,7 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 6. **Workflow-label exclusivity.** Aside from the transient pairs `done + blocked-cc` and `done + blocked-dispatcher`, an issue should carry at most one work-state label at a time. `set_issue_label.sh add <workflow-label>` removes conflicting workflow labels automatically. `model:{tier}` labels are orthogonal and are NOT removed when a work-state label is added (see §Model tier and quality dimensions below).
 7. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
 8. **Dispatcher final synchronization.** Phase 6 re-applies the terminal workflow labels from the compact reply as an idempotent safety net: `done` replies must end with `pr` only (no `done`); `blocked` (CC-side) replies must end with `blocked-cc` and no `doing`; `blocked` (dispatcher-side) must end with `blocked-dispatcher` and no `doing`; promoted `failed-cc` replies must end with `failed-cc` and no `blocked-cc` / `doing`; `failed-dispatcher` must end with `failed-dispatcher` and no `blocked-dispatcher` / `doing`; and `timeout` replies must end with `timeout` and no `doing` / `blocked-cc` / `blocked-dispatcher` / `failed-cc` / `failed-dispatcher`.
-9. **`timeout` is never auto-retried.** Unlike `blocked-cc` / `blocked-dispatcher`, a `timeout` IID stays in `timeout_iids` until a human reviewer strips the label, adds `retry`, or applies `continue`. Stripping `timeout` or adding `retry` re-enqueues via the regular `user_reopened` path and runs a fresh reset; `continue` resumes from the existing `${WORK_BRANCH}` (the partial work is already pushed there) while refreshing shared config paths from latest `origin/${DEV_BRANCH}`. The agent does NOT promote `timeout` to `failed`; `retry_count` is NOT consumed.
+9. **`timeout` is never auto-retried.** Unlike `blocked-cc` / `blocked-dispatcher`, a `timeout` IID stays in `timeout_iids` until a human reviewer strips the label, adds `retry`, or applies `continue`. Stripping `timeout` or adding `retry` re-enqueues via the regular `user_reopened` path and runs a fresh reset; `continue` resumes from the existing `${WORK_BRANCH}` when available. The agent does NOT promote `timeout` to `failed`; `retry_count` is NOT consumed.
 
 ## Issue closure vs `done` / `pr` labels
 
@@ -120,7 +120,7 @@ When the MR merges, GitLab parses that line and closes the linked issue automati
 **Prerequisites on the GitLab project** (these are GitLab defaults; only worry about them if someone disabled them):
 
 - Project → Settings → Merge requests → "Automatically close referenced merge requests" is enabled.
-- The MR's target branch is the project's default branch (`master` in this workspace), which is the only case GitLab auto-closes for. Auto-close does NOT fire on MRs into non-default branches.
+- The MR's target branch must match the branch where GitLab auto-close behavior is expected. Auto-close does not fire on unrelated target branches.
 
 **The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the subagent's job ends when `pr` is present.
 

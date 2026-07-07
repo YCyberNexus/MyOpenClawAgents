@@ -21,7 +21,7 @@
 #   When STATUS=spawned:        RUN_ID, CHILD_SESSION_KEY
 #   When STATUS=launch_failed:  LAUNCH_ATTEMPTS (default 3), LAUNCH_ERROR
 # Optional (forwarded when non-default deployment):
-#   REPO_PARENT_PATH, RESULT_BASENAME, DATA_BASENAME
+#   REPO_PARENT_PATH
 #
 # Stdout: one-line JSON envelope describing the recorded outcome:
 #   {"status":"spawned|launch_failed_recorded", "iid":N, "attempt_number":N,
@@ -80,7 +80,7 @@ fi
 scrub_spawn_payload() {
   local attempt_padded payload_file
   attempt_padded="$(printf '%03d' "${ATTEMPT_NUMBER}")"
-  payload_file="${WORKTREES_ROOT}/issue-${IID}/${RESULT_BASENAME}/issue-${IID}/log/attempt-${attempt_padded}/spawn_payload.txt"
+  payload_file="${WORKTREES_ROOT}/issue-${IID}/${REQ_EXECUTOR_DIR}/issue-${IID}/log/attempt-${attempt_padded}/spawn_payload.txt"
   if [ -f "${payload_file}" ]; then
     : >"${payload_file}" 2>/dev/null \
       && wrapper_log record_spawn "scrubbed spawn payload iid=${IID}" \

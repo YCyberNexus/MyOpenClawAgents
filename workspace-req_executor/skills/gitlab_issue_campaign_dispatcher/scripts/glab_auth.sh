@@ -39,7 +39,7 @@
 
 set -euo pipefail
 
-: "${GITLAB_TOKEN:?GITLAB_TOKEN must be set (trigger input)}"
+GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
 
 # Resolve workspace root from this script's location:
 #   <workspace>/skills/<name>/scripts/glab_auth.sh -> ../../..
@@ -54,6 +54,9 @@ fi
 
 # shellcheck disable=SC1090
 source "${PIN_FILE}"
+GITLAB_TOKEN="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN:-}}"
+
+: "${GITLAB_TOKEN:?GITLAB_TOKEN must be set (env or config/gitlab.env)}"
 
 if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
   echo "glab_auth: ${PIN_FILE} must define GITLAB_HOST and GITLAB_API_PROTOCOL" >&2

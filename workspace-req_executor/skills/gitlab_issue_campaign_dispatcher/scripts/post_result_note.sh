@@ -14,7 +14,7 @@
 #
 # 入参（env）：
 #   PROJECT, GROUP, GITLAB_TOKEN        (env_paths.sh → glab_auth.sh 鉴权 + PROJECT_URI)
-#   REPO_PARENT_PATH / RESULT_BASENAME / DATA_BASENAME  (env_paths.sh，随调用方透传)
+#   REPO_PARENT_PATH                    可选 clone parent override
 #   IID                                  目标 issue IID（正整数）
 #   FINAL_STATUS                         done | failed | timeout
 # 可选：

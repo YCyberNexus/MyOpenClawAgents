@@ -119,9 +119,6 @@ fresh_init_state() {
   jq -n \
     --arg project "${PROJECT}" \
     --arg repo_path "${REPO_PARENT_PATH}" \
-    --arg result_basename "${RESULT_BASENAME}" \
-    --arg data_basename "${DATA_BASENAME}" \
-    --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
     '{
       project: $project,
       repo_path: $repo_path,
@@ -133,7 +130,6 @@ fresh_init_state() {
       blocked_retry_limit: null,
       blocked_cooldown_ticks: null,
       max_concurrent_subagents: 1,
-      max_accounts_per_issue: 14,
       stuck_after_minutes: 332,
       run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
@@ -143,9 +139,6 @@ fresh_init_state() {
       issue_iids_whitelist: [],
       require_labels: [],
       require_labels_match: "or",
-      result_basename: $result_basename,
-      data_basename: $data_basename,
-      ui_accounts_relpath: $ui_accounts_relpath,
       model_tiers: null,
       continue_upgrade_threshold: 2,
       next_new_issue_iid: null,
@@ -255,7 +248,6 @@ phase6_iid_completed_live() {
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   out="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
         MIN_IID="${iid}" MAX_IID="${iid}" \
         bash "${script_dir}/reconcile.sh" 2>/dev/null)" || return 1
   ev_path="$(printf '%s' "${out}" | grep -E '^/.+/reconcile-[0-9TZ]+\.json$' | tail -n 1)" || return 1
@@ -428,7 +420,6 @@ _label_op() {
   # attempt-scoped path (it only touches the GitLab issue label set).
   PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
     REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
     ISSUE_IID="${iid}" ATTEMPT_NUMBER=1 \
     bash "${script_dir}/set_issue_label.sh" "${op}" "${lbl}"
 }

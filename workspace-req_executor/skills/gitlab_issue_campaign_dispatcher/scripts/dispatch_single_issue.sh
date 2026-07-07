@@ -5,8 +5,8 @@
 # docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md
 # §3.1–§3.3). Instead of req_dispatcher feeding a full RUN_SCHEDULED_ISSUE_CAMPAIGN
 # trigger, it sends a minimal trigger carrying only what it knows about ONE issue;
-# everything else (token / branch / quota / timeouts / basenames …) comes from the
-# per-project deployment pin in config/ — req_dispatcher never holds GitLab config.
+# everything else is either inferred by the executor or held in runner-side config;
+# req_dispatcher never holds GitLab config.
 #
 # What it does:
 #   1. Reads the I1 trigger from stdin (multi-line key=value, same text format as
@@ -14,9 +14,9 @@
 #      Optional: dispatcher_callback_target, group.
 #   2. Validates project / iid (positive integer) / correlation_id.
 #   3. Sources config/gitlab.env (host pin), config/campaign_defaults.env
-#      (campaign pin), then optional config/campaign_defaults.local.env
-#      (ignored local override) to obtain the pinned campaign fields and the
-#      GitLab token.
+#      (clone parent pin), then optional config/campaign_defaults.local.env
+#      (ignored local override) to obtain the clone parent. GitLab token comes
+#      only from process env or config/gitlab.env.
 #   4. Synthesizes the equivalent RUN_SCHEDULED_ISSUE_CAMPAIGN trigger for a single
 #      IID (issue_iids=[iid], issue_min_iid=issue_max_iid=iid, hourly_issue_quota=1,
 #      max_concurrent_subagents=1, …) and exports the dispatcher bootstrap env.
@@ -40,11 +40,11 @@
 #
 # Required input env (forwarded to env_paths.sh / dispatch_prepare_tick.sh):
 #   (none mandatory on the command line — project/iid/correlation_id arrive on
-#    stdin; token/group come from config or env override; see below)
+#    stdin; token comes from env/gitlab.env; group comes from full project,
+#    trigger group=, or env override)
 # Optional input env (override for smoke tests / non-default deployments):
-#   GITLAB_TOKEN          overrides config/campaign_defaults.env GITLAB_TOKEN
-#   GROUP                 overrides config/campaign_defaults.env GROUP and the
-#                         optional stdin `group` key
+#   GITLAB_TOKEN          overrides config/gitlab.env GITLAB_TOKEN
+#   GROUP                 smoke-test override when trigger project is bare
 #   PREPARE_TICK_CMD      path to the prepare-tick script to invoke (default:
 #                         the sibling dispatch_prepare_tick.sh). Smoke tests stub
 #                         this with a fake that just echoes its env + stdin.
@@ -57,6 +57,7 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # touching the real pins (the production deployment never sets this).
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
 GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
+GROUP_ENV_OVERRIDE="${GROUP:-}"
 
 # ─── 1. Parse the I1 trigger from stdin ────────────────────────────
 # Same line discipline as dispatch_prepare_tick.sh: tolerate CRLF, skip blank /
@@ -121,11 +122,12 @@ case "${IID_IN}" in
 esac
 [ "${IID_IN}" -ge 1 ] || { echo "dispatch_single_issue.sh: iid must be a positive integer (>=1), got: ${IID_IN}" >&2; exit 2; }
 
-# ─── 3. Load deployment pins (host + campaign defaults) ────────────
+# ─── 3. Load deployment pins (host + clone parent) ────────────────
 [ -f "${CONFIG_DIR}/gitlab.env" ] || { echo "dispatch_single_issue.sh: missing config/gitlab.env at ${CONFIG_DIR}/gitlab.env" >&2; exit 2; }
 [ -f "${CONFIG_DIR}/campaign_defaults.env" ] || { echo "dispatch_single_issue.sh: missing config/campaign_defaults.env at ${CONFIG_DIR}/campaign_defaults.env" >&2; exit 2; }
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/gitlab.env"
+GITLAB_TOKEN_GITLAB_ENV_PIN="${GITLAB_TOKEN:-}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/campaign_defaults.env"
 if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
@@ -140,7 +142,7 @@ fi
 # and PROJECT_FULL=${GROUP}/${PROJECT}, so feeding it a slashed name would double the
 # group and mis-locate the clone. Split here: if `project` has a slash, the part before
 # is the group and the part after is the bare slug; if not, it is already a bare slug
-# and GROUP must come from I1/pin.
+# and GROUP must come from I1/env/local config.
 case "${PROJECT_IN}" in
   */*)
     GROUP_FROM_PROJECT="${PROJECT_IN%/*}"
@@ -154,9 +156,10 @@ esac
 [ -n "${PROJECT_SLUG}" ] || { echo "dispatch_single_issue.sh: project resolves to an empty slug: ${PROJECT_IN}" >&2; exit 2; }
 
 # GROUP: explicit I1 group wins, then the group split out of a full-name project,
-# then the GROUP env override / pin. dispatch_prepare_tick.sh requires `group`.
-GROUP_EFF="${GROUP_IN:-${GROUP_FROM_PROJECT:-${GROUP:-}}}"
-[ -n "${GROUP_EFF}" ] || { echo "dispatch_single_issue.sh: group is required (provide a full-name project group/project, trigger group=, env GROUP=, or pin GROUP= in campaign_defaults.env)" >&2; exit 2; }
+# then the process env override used by smoke tests. dispatch_prepare_tick.sh
+# requires `group`.
+GROUP_EFF="${GROUP_IN:-${GROUP_FROM_PROJECT:-${GROUP_ENV_OVERRIDE:-}}}"
+[ -n "${GROUP_EFF}" ] || { echo "dispatch_single_issue.sh: group is required (provide a full-name project group/project, trigger group=, or env GROUP=)" >&2; exit 2; }
 
 # Full <group>/<project> name for dispatch_origin.json / the I2 callback (always the
 # full name, even when I1 project arrived as a bare slug).
@@ -165,25 +168,19 @@ case "${PROJECT_IN}" in
   *)   PROJECT_FULL="${GROUP_EFF}/${PROJECT_SLUG}" ;;
 esac
 
-# GITLAB_TOKEN: env override wins, else the pin. req_dispatcher never sends the
-# token; it always comes from the executor-side deployment.
-GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN:-}}"
-[ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in campaign_defaults.env)" >&2; exit 2; }
+# GITLAB_TOKEN: env override wins, then gitlab.env. The clone defaults layer is
+# intentionally ignored for secrets.
+GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN_GITLAB_ENV_PIN:-}}"
+[ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in config/gitlab.env)" >&2; exit 2; }
 
-# Pinned campaign fields with safe defaults (campaign_defaults.env should set
-# these; defaults mirror dispatch_prepare_tick.sh's own fallbacks so a partial
-# pin still yields a valid single-issue tick).
-BRANCH_EFF="${BRANCH:-master}"
-DEV_BRANCH_EFF="${DEV_BRANCH:-dev}"
-MAX_ACCOUNTS_EFF="${MAX_ACCOUNTS_PER_ISSUE:-14}"
-ACPX_TIMEOUT_EFF="${ACPX_TIMEOUT_SECONDS:-18000}"
-RUN_TIMEOUT_EFF="${RUN_TIMEOUT_SECONDS:-}"
-RESULT_BASENAME_EFF="${RESULT_BASENAME:-ifp-result}"
-DATA_BASENAME_EFF="${DATA_BASENAME:-ifp-data}"
-# REPO_PARENT_PATH is pinned in campaign_defaults.env (default /data); env_paths.sh
-# additionally validates it.
+ACPX_TIMEOUT_EFF=18000
+RUN_TIMEOUT_EFF=""
+MAX_RUNTIME_MINUTES_EFF=300
+BLOCKED_RETRY_LIMIT_EFF=3
+BLOCKED_COOLDOWN_TICKS_EFF=1
+# REPO_PARENT_PATH is the only campaign default required in tracked config.
+# env_paths.sh additionally validates it.
 REPO_PARENT_EFF="${REPO_PARENT_PATH:-/data}"
-UI_ACCOUNTS_RELPATH_EFF="${UI_ACCOUNTS_RELPATH:-}"
 
 # driven single-issue run is always quota=1, concurrency=1, IID-scoped to one issue.
 HOURLY_ISSUE_QUOTA_EFF=1
@@ -194,9 +191,6 @@ export PROJECT="${PROJECT_SLUG}"
 export GROUP="${GROUP_EFF}"
 export GITLAB_TOKEN="${GITLAB_TOKEN_EFF}"
 export REPO_PARENT_PATH="${REPO_PARENT_EFF}"
-export RESULT_BASENAME="${RESULT_BASENAME_EFF}"
-export DATA_BASENAME="${DATA_BASENAME_EFF}"
-[ -n "${UI_ACCOUNTS_RELPATH_EFF}" ] && export UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH_EFF}"
 
 # ─── 5. Persist the driven origin for the Phase 6 callback ─────────
 # env_paths.sh derives ISSUES_ROOT at the dispatcher level (no ISSUE_IID needed).
@@ -237,28 +231,21 @@ blocked_policy=skip_and_retry
 project=${PROJECT_SLUG}
 group=${GROUP_EFF}
 gitlab_token=${GITLAB_TOKEN_EFF}
-branch=${BRANCH_EFF}
-dev_branch=${DEV_BRANCH_EFF}
 issue_iids=${IID_IN}
 issue_min_iid=${IID_IN}
 issue_max_iid=${IID_IN}
 hourly_issue_quota=${HOURLY_ISSUE_QUOTA_EFF}
 max_concurrent_subagents=${MAX_CONCURRENT_SUBAGENTS_EFF}
-max_accounts_per_issue=${MAX_ACCOUNTS_EFF}
-max_runtime_minutes=${MAX_RUNTIME_MINUTES:-300}
-blocked_retry_limit=${BLOCKED_RETRY_LIMIT:-3}
-blocked_cooldown_ticks=${BLOCKED_COOLDOWN_TICKS:-1}
+max_runtime_minutes=${MAX_RUNTIME_MINUTES_EFF}
+blocked_retry_limit=${BLOCKED_RETRY_LIMIT_EFF}
+blocked_cooldown_ticks=${BLOCKED_COOLDOWN_TICKS_EFF}
 acpx_timeout_seconds=${ACPX_TIMEOUT_EFF}
-result_basename=${RESULT_BASENAME_EFF}
-data_basename=${DATA_BASENAME_EFF}
 repo_path=${REPO_PARENT_EFF}
 EOF
 )"
 # Append the optional fields only when a non-empty value exists, so we never feed
 # dispatch_prepare_tick.sh an empty key it would reject.
-[ -n "${RUN_TIMEOUT_EFF}" ]          && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"run_timeout_seconds=${RUN_TIMEOUT_EFF}"
-[ -n "${UI_ACCOUNTS_RELPATH_EFF}" ]  && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"ui_accounts_relpath=${UI_ACCOUNTS_RELPATH_EFF}"
-[ -n "${STUCK_AFTER_MINUTES:-}" ]    && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"stuck_after_minutes=${STUCK_AFTER_MINUTES}"
+[ -n "${RUN_TIMEOUT_EFF}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"run_timeout_seconds=${RUN_TIMEOUT_EFF}"
 
 # ─── 7. Hand off to the existing prepare-tick body ─────────────────
 PREPARE_TICK_CMD="${PREPARE_TICK_CMD:-${SCRIPT_DIR}/dispatch_prepare_tick.sh}"

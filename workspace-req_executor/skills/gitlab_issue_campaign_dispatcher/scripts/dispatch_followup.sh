@@ -7,7 +7,7 @@
 #   - the subagent's compact JSON on stdin (worker_result_json payload)
 #   - IID and (optionally) ATTEMPT_NUMBER / RUN_ID via env
 #   - the standard dispatcher env (PROJECT, GROUP, GITLAB_TOKEN, plus
-#     optional REPO_PARENT_PATH / RESULT_BASENAME / DATA_BASENAME)
+#     optional REPO_PARENT_PATH)
 #
 # This script:
 #   1. Sources env_paths.sh + _dispatch_lib.sh
@@ -62,7 +62,6 @@ RECON_EVIDENCE_PATH=""
 set +e
 RECON_OUT="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
         MIN_IID="${IID}" MAX_IID="${IID}" \
         bash "${SCRIPT_DIR}/reconcile.sh" 2>/dev/null)"
 RECON_RC=$?
@@ -265,7 +264,6 @@ case "${FINAL_STATUS}" in
       set +e
       PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
       REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-      RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
       IID="${IID}" ATTEMPT_NUMBER="${REPLY_ATTEMPT}" \
       FINAL_STATUS="${FINAL_STATUS}" MR_URL="${MR_URL}" WIKI_URL="${WIKI_URL}" BLOCK_REASON="${BLOCK_REASON}" \
       bash "${SCRIPT_DIR}/post_result_note.sh" >/dev/null 2>>"${DISPATCHER_LOG_DIR}/wrapper.log"

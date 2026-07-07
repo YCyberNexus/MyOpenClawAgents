@@ -5,10 +5,8 @@
 #
 # All path-based protection has been removed: any file Claude wrote (or
 # any file already tracked on the base branch) goes through. The script
-# force-adds two sets of paths so they survive the `${RESULT_BASENAME}/`
-# line in `.git/info/exclude` (default `ifp-result/`, overridable per
-# project via the `result_basename` trigger field, and repository-wide
-# so it applies to every linked worktree):
+# force-adds two sets of paths so they survive the `/.req_executor/`
+# line in `.git/info/exclude`:
 #   - the current issue's ${OUTPUT_DIR} (the committable output);
 #   - ${LOG_DIR}/prompt.txt and ${LOG_DIR}/claude_result.txt (the two
 #     human-reviewable evidence files; intentionally NOT the bulky
@@ -59,11 +57,11 @@ git add -A
 # which already has prior attempts' `log/attempt-NNN/prompt.txt` +
 # `claude_result.txt` committed. `.git/info/exclude` only blocks untracked
 # files, so any modification a Claude Code run accidentally makes under
-# `<RESULT_BASENAME>/issue-<iid>/log/` would be picked up by `git add -A`
+# `.req_executor/issue-<iid>/log/` would be picked up by `git add -A`
 # above and silently rewrite prior attempts' reviewer evidence. Unstage
 # anything under that subtree before the explicit force-add for the
 # current attempt's two files.
-git reset -q -- "${RESULT_BASENAME}/issue-${ISSUE_IID}/log/" 2>/dev/null || true
+git reset -q -- "${ISSUE_WORKTREE_REL}/log/" 2>/dev/null || true
 
 staged_deleted_paths="$(git diff --cached --name-only --diff-filter=D)"
 if [ -n "${staged_deleted_paths}" ]; then

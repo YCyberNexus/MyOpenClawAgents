@@ -29,8 +29,8 @@
 #   ISSUE_MODE      "fresh" or "continue" (kept for log correlation only;
 #                   no longer changes MR rotation behavior)
 #   ISSUE_TITLE     short human title for the MR title
-#   LOG_DIR         where mr_description.md lives (under WORKTREE_DIR/${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN)
-#   BRANCH          target branch (typically "master")
+#   LOG_DIR         where mr_description.md lives (under WORKTREE_DIR/.req_executor/issue-<iid>/log/attempt-NNN)
+#   BRANCH          target branch
 #   WORK_BRANCH     source branch (single, fixed)
 #   ATTEMPT_NUMBER_PADDED  e.g. "002" (used in MR title for visibility)
 #
@@ -119,7 +119,7 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
   echo "Auto-generated MR for issue #${ISSUE_IID} (attempt ${ATTEMPT_NUMBER_PADDED}, mode=${ISSUE_MODE})."
   echo
   echo "prompt.txt and claude_result.txt for this attempt are committed inside the MR"
-  echo "diff under \`${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}/\`."
+  echo "diff under \`${ATTEMPT_LOG_REL}/\`."
   echo "Raw acpx logs, git status/diff snapshots, and Wiki bookkeeping live only in"
   echo "the shared per-issue worktree on the runner (\`${LOG_DIR}\`) until housekeeping"
   echo "removes the worktree."

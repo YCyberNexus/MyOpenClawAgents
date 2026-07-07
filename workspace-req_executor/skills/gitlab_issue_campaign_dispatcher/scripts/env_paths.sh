@@ -1,30 +1,21 @@
 #!/usr/bin/env bash
 # env_paths.sh — single bootstrap for every script in this skill.
 #
-# The cloned project repo IS the agent's entire workspace. The test team
-# maintains `.claude/`, `hulat/`, and the knowledge-base directory
-# (default `ifp-data/`) inside the repo (committed to master + dev). The
-# agent's own state and per-issue subtrees live under the runtime root
-# (default `${REPO_PATH}/ifp-result/`). Runtime state/log files stay
-# uncommitted there; each issue's committed output is force-added from
-# its own `<runtime-root>/issue-<iid>/output/` directory.
+# The cloned project repo IS the agent's entire workspace. The agent's own
+# state and per-issue subtrees live under `${REPO_PATH}/.req_executor/`.
+# Runtime state/log files stay uncommitted there; each issue's committed
+# output is force-added from its own `.req_executor/issue-<iid>/output/`
+# directory inside the per-issue worktree.
 #
-# The repo clone parent and the basenames of the runtime root and
-# knowledge-base directory are overridable per project via optional trigger
-# fields `repo_path`, `result_basename`, and `data_basename` (forwarded as
-# REPO_PARENT_PATH / RESULT_BASENAME / DATA_BASENAME env vars). Defaults
-# preserve legacy behavior: repo parent `/data`, final clone target
-# `/data/${PROJECT}`, `ifp-result`, and `ifp-data` for projects that never
-# ship the new fields.
+# The repo clone parent is overridable per project via optional trigger field
+# `repo_path` (forwarded as REPO_PARENT_PATH). Defaults: repo parent `/data`
+# and final clone target `/data/${PROJECT}`.
 #
 # Disk layout produced by this file (with default basenames):
 #
 #   ${REPO_PATH}/                        ← /data/${PROJECT}, parent checkout (shared
 #                                          object DB; only `git fetch` mutates it)
-#       .claude/                         (in master+dev, test-team owned)
-#       hulat/                           (in master+dev, test-team owned)
-#       ${DATA_BASENAME}/                (in master+dev, test-team owned; default ifp-data)
-#       ${RESULT_BASENAME}/              (agent state/logs + per-issue subtrees; default ifp-result)
+#       .req_executor/                   (agent state/logs + per-issue subtrees)
 #           _dispatcher/                 ← campaign-level state + logs + locks
 #               campaign_state.json
 #               campaign.lock
@@ -44,11 +35,10 @@
 #                                          branch to BASE_REF in place (untracked files
 #                                          Claude wrote in earlier attempts survive, so
 #                                          `acpx claude exec` can pick up where it left off).
-#                   .claude/ hulat/ ${DATA_BASENAME}/    (tracked config refreshed from origin/${DEV_BRANCH})
-#                   ${RESULT_BASENAME}/issue-<iid>/output/
+#                   .req_executor/issue-<iid>/output/
 #                                                        ← OUTPUT_DIR (force-added; shared
 #                                                          across attempts of this IID)
-#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
+#                   .req_executor/issue-<iid>/log/attempt-NNN/
 #                                                        ← LOG_DIR (still attempt-scoped
 #                                                          inside the shared worktree;
 #                                                          prompt.txt + claude_result.txt
@@ -59,9 +49,8 @@
 # Path derivation is layered:
 #
 #   - dispatcher level (always derived):  PROJECT, GROUP, GITLAB_TOKEN
-#                                         (+ optional REPO_PARENT_PATH or REPO_PATH,
-#                                            RESULT_BASENAME, DATA_BASENAME)
-#       → REPO_PATH, HULAT_DIR, DATA_DIR, RESULT_ROOT, WORK_ROOT,
+#                                         (+ optional REPO_PARENT_PATH or REPO_PATH)
+#       → REPO_PATH, RESULT_ROOT, WORK_ROOT,
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
 #         ISSUES_ROOT, LOCK_FILE, WORKTREES_ROOT
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
@@ -86,15 +75,11 @@
 #   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
 #
 # Optional input env vars (forwarded by the orchestrator from trigger
-# fields; defaults preserve legacy ifp-* layout):
+# fields:
 #   REPO_PARENT_PATH absolute parent for project clones (default: /data)
 #   REPO_PATH        final clone target path. Compatibility input only when
 #                    REPO_PARENT_PATH is unset; normally exported by this file.
-#   RESULT_BASENAME  basename of the agent runtime root (default: ifp-result)
-#   DATA_BASENAME    basename of the test team's knowledge dir (default: ifp-data)
-#
-# Note: HULAT_DIR is derived as `${REPO_PATH}/hulat` because the test
-# team committed the hulat materials into the repo.
+#   REQ_EXECUTOR_DIR fixed agent runtime directory name (.req_executor)
 #
 # Outputs (exported into the calling shell): see lists above. Plus:
 #   GITLAB_HOST, GITLAB_API_PROTOCOL    (loaded via glab_auth.sh)
@@ -182,30 +167,13 @@ case "${REPO_PATH}" in
 esac
 export REPO_PARENT_PATH REPO_PATH
 
-# Per-project basenames. Optional trigger fields `result_basename` /
-# `data_basename` let the orchestrator override the runtime-root and
-# knowledge-base directory names without code changes (see
-# references/trigger_command.md). Defaults preserve legacy behavior for
-# projects that never ship the new fields.
-: "${RESULT_BASENAME:=ifp-result}"
-: "${DATA_BASENAME:=ifp-data}"
-# Relative path of the UI test-account pool file under ${REPO_PATH}
-# (the project checkout root). The relpath itself names the leading
-# directory and may point at any repo subdirectory, not only the data
-# dir. Optional trigger field `ui_accounts_relpath` overrides this with
-# carry-forward semantics (see references/trigger_command.md). There is
-# NO default value: when neither the trigger nor the persisted state
-# supplies a value, the dispatcher leaves UI_ACCOUNTS_RELPATH empty and
-# skips the entire UI-account allocation flow (no pool is read, no
-# accounts are injected into the subagent prompt). Initialize to empty
-# so downstream `set -u` reads do not trip.
-: "${UI_ACCOUNTS_RELPATH:=}"
-export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH
+# Fixed internal runtime directory. It is intentionally not trigger
+# configurable: req_executor runs issue prompts directly and does not expose
+# per-project result/data basenames.
+export REQ_EXECUTOR_DIR=".req_executor"
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
-export HULAT_DIR="${REPO_PATH}/hulat"
-export DATA_DIR="${REPO_PATH}/${DATA_BASENAME}"
-export RESULT_ROOT="${REPO_PATH}/${RESULT_BASENAME}"
+export RESULT_ROOT="${REPO_PATH}/${REQ_EXECUTOR_DIR}"
 export WORK_ROOT="${RESULT_ROOT}/_dispatcher"
 export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
@@ -249,7 +217,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
 
   # One-time migration: older deployments placed per-issue subtrees directly
-  # under ${RESULT_ROOT} (e.g. ifp-result/issue-14/) before the issues/
+  # under ${RESULT_ROOT} (legacy issue-<iid>/) before the issues/
   # nesting was introduced. Move any legacy per-issue directory into the new
   # ${ISSUES_ROOT} parent so existing state files are not lost.
   LEGACY_ISSUE_ROOT="${RESULT_ROOT}/issue-${ISSUE_IID}"
@@ -284,15 +252,17 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # ATTEMPT_DIR remains a compatibility alias for ISSUE_ROOT (the per-issue
   # persistent subtree). Cross-attempt state (state.json, attempt_state.json,
   # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
-  # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree
-  # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/ so successive attempts
-  # do NOT overwrite each other's prompt.txt / claude_result.txt. Only those
-  # two files are force-added into the MR; the rest stay locally ignored via
-  # the repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
+  # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree at
+  # .req_executor/issue-<iid>/log/attempt-NNN/ so successive attempts do NOT
+  # overwrite each other's prompt.txt / claude_result.txt. Only those two files
+  # are force-added into the MR; the rest stay locally ignored via the
+  # repository `.git/info/exclude` entry for `/.req_executor/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
-  export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/output"
-  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
+  export ISSUE_WORKTREE_REL="${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"
+  export ATTEMPT_LOG_REL="${ISSUE_WORKTREE_REL}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
+  export OUTPUT_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}/output"
+  export LOG_DIR="${WORKTREE_DIR}/${ATTEMPT_LOG_REL}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
   export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
@@ -309,8 +279,15 @@ fi
 
 # ─── 3. glab auth (idempotent — loads both HOST and PROTOCOL) ─────
 if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
-  : "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set to bootstrap glab}"
   __ENV_PATHS_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  if [ -z "${GITLAB_TOKEN:-}" ]; then
+    __PIN_FILE="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)/config/gitlab.env"
+    if [ -f "${__PIN_FILE}" ]; then
+      __PIN_TOKEN="$(bash -c 'source "$1"; printf %s "${GITLAB_TOKEN:-}"' _ "${__PIN_FILE}")"
+      [ -n "${__PIN_TOKEN}" ] && export GITLAB_TOKEN="${__PIN_TOKEN}"
+    fi
+  fi
+  : "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set to bootstrap glab}"
   GITLAB_HOST="$(bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh")"
   if [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
     __PIN_FILE="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)/config/gitlab.env"
@@ -320,6 +297,7 @@ if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
   export GITLAB_HOST GITLAB_API_PROTOCOL
   unset __ENV_PATHS_SH_DIR
   unset __PIN_FILE
+  unset __PIN_TOKEN
 fi
 
 # ─── 4. Project handle ────────────────────────────────────────────

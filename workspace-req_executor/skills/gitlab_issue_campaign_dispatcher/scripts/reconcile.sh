@@ -46,7 +46,7 @@
 #   - `is_done_on_gitlab == true` AND no `needs_continue` → finished, skip
 #   - `needs_continue == true`                            → re-enqueue; the
 #         executor will re-run the resolution flow against the existing
-#         work branch (or build one from master if none exists)
+#         work branch (or build one from the target branch if none exists)
 #   - `user_reopened == true`                             → re-enqueue from
 #         scratch (label was reverted to todo / doing, or is done-only
 #         before MR / pr completion)

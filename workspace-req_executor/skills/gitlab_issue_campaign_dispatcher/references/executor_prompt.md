@@ -4,7 +4,7 @@ The dispatcher extracts the fenced "Rendered Prompt" block below, renders it int
 
 The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
 
-> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–10, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent execute `hulat/agents/*` directly and skip `run_acpx_attempt.sh`, breaking the whole stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
+> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–10, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent skip `run_acpx_attempt.sh` and bypass the stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
 
 ---
 
@@ -26,20 +26,17 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ISSUE_LABELS}`         | comma-joined labels from the live issue (snapshot)                                      |
 | `{ISSUE_BODY}`           | issue body (already in `{LOG_DIR}/prompt.txt`; for the `<issue>` block only — keep ≤ 4 KB) |
 | `{ISSUE_MODE}`           | `fresh` or `continue`; what `prepare_attempt.sh` actually used (`mode_actual`)          |
-| `{BRANCH}`               | trigger (integration / target branch)                                                   |
-| `{DEV_BRANCH}`           | trigger (clean baseline branch)                                                         |
+| `{BRANCH}`               | resolved integration / target branch; explicit trigger value or remote default from `origin/HEAD` |
 | `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
-| `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/ifp1`, this is `/data/ifp1/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
-| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree at `{REPO_PATH}/{RESULT_BASENAME}/.worktrees/issue-{ISSUE_IID}/` (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code reads `.claude/`, `hulat/`, `{DATA_BASENAME}/` from this worktree and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
-| `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/output` (inside the shared per-issue worktree) |
-| `{LOG_DIR}`              | `{WORKTREE_DIR}/{RESULT_BASENAME}/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
-| `{ISSUE_ROOT}`           | `{REPO_PATH}/{RESULT_BASENAME}/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
+| `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/team_repo`, this is `/data/team_repo/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
+| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree under the repo's fixed `.req_executor/.worktrees/issue-{ISSUE_IID}/` runtime area (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code uses the issue prompt and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
+| `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/output` (inside the shared per-issue worktree) |
+| `{LOG_DIR}`              | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
+| `{ISSUE_ROOT}`           | `{REPO_PATH}/.req_executor/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
 | `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
-| `{RESULT_BASENAME}`      | optional trigger field `result_basename`; defaults to `ifp-result` (basename of agent runtime root) |
-| `{DATA_BASENAME}`        | optional trigger field `data_basename`; defaults to `ifp-data` (basename of test-team knowledge dir) |
 | `{ACPX_TIMEOUT_SECONDS}` | optional trigger field `acpx_timeout_seconds`; defaults to `18000`. Subagent Step 1 bash command timeout for `run_acpx_attempt.sh`. |
 | `{ACPX_TIMEOUT_MINUTES}` | `floor({ACPX_TIMEOUT_SECONDS} / 60)`; used in the constraints block's hard wall-clock soft cap. Always derived from `{ACPX_TIMEOUT_SECONDS}` so the two stay in lockstep. |
 `{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
@@ -78,18 +75,15 @@ ISSUE_IID={ISSUE_IID}
 ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}                     # fresh | continue
-BRANCH={BRANCH}                             # integration / target branch (MR opens against this)
-DEV_BRANCH={DEV_BRANCH}                     # clean baseline (fresh-mode checkout; shared config refresh source for every run)
+BRANCH={BRANCH}                             # resolved target branch for the merge request
 WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
-WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. .claude/, hulat/, {DATA_BASENAME}/ are refreshed from latest origin/{DEV_BRANCH} before every run. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
+WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
 OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
-RESULT_BASENAME={RESULT_BASENAME}           # basename of agent runtime root in the repo (default: ifp-result)
-DATA_BASENAME={DATA_BASENAME}               # basename of test-team knowledge dir in the repo (default: ifp-data)
 ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} # bash command timeout for Step 1 run_acpx_attempt.sh (also drives the {ACPX_TIMEOUT_MINUTES} soft cap)
 </config>
 
@@ -109,26 +103,24 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
   ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
   REPO_PATH={REPO_PATH} \
-  RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME}
 
-`REPO_PATH` carries the parent checkout — the shared object database every per-issue worktree branches from (default `/data/{PROJECT}`; with trigger `repo_path=/data/ifp1`, `/data/ifp1/{PROJECT}`). It is NOT the same as `WORKTREE_DIR` (which is your shared per-issue linked worktree for this IID, reused across attempts). Pass `REPO_PATH={REPO_PATH}` so `env_paths.sh` can re-derive `WORKTREE_DIR={WORKTREE_DIR}` from `ISSUE_IID` (the path no longer depends on `ATTEMPT_NUMBER`, though `LOG_DIR` still does). `RESULT_BASENAME` / `DATA_BASENAME` carry the per-project basenames of the agent runtime root and the test-team knowledge directory inside the repo. Defaults are `ifp-result` / `ifp-data`; the dispatcher renders the values that came from the trigger (or the defaults) into this prompt — pass them through verbatim. Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
+`REPO_PATH` carries the parent checkout — the shared object database every per-issue worktree branches from. It is NOT the same as `WORKTREE_DIR` (which is your shared per-issue linked worktree for this IID, reused across attempts). Pass `REPO_PATH={REPO_PATH}` so `env_paths.sh` can re-derive `WORKTREE_DIR={WORKTREE_DIR}` from `ISSUE_IID` (the path no longer depends on `ATTEMPT_NUMBER`, though `LOG_DIR` still does). Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
 </env_contract>
 
 <instructions>
 Follow steps 0-10 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
 
 Step 0 — SETUP
-  Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR} and that the test-team-committed `hulat/`, `.claude/`, and `{DATA_BASENAME}/` directories are present at its root (tracked shared config was refreshed from latest origin/{DEV_BRANCH} by `prepare_attempt.sh`). Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
+  Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR}. Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
 
-    ls -d {WORKTREE_DIR}/hulat {WORKTREE_DIR}/.claude {WORKTREE_DIR}/{DATA_BASENAME} {OUTPUT_DIR}
+    ls -d {WORKTREE_DIR} {OUTPUT_DIR}
 
-  If any is missing → FAIL status=blocked block_reason="worktree missing or required directories absent". Do NOT issue a bare `cd {WORKTREE_DIR}` as a standalone Bash tool call expecting it to persist — `cd` does NOT survive across exec calls (see <env_contract>). Step 1's `bash {SCRIPTS_DIR}/run_acpx_attempt.sh` is invoked by absolute path and does its own internal `cd {WORKTREE_DIR}` before running acpx, so the subagent does not need to set cwd itself.
+  If either path is missing → FAIL status=blocked block_reason="worktree or output directory missing". Do NOT issue a bare `cd {WORKTREE_DIR}` as a standalone Bash tool call expecting it to persist — `cd` does NOT survive across exec calls (see <env_contract>). Step 1's `bash {SCRIPTS_DIR}/run_acpx_attempt.sh` is invoked by absolute path and does its own internal `cd {WORKTREE_DIR}` before running acpx, so the subagent does not need to set cwd itself.
 
 Step 1 — EXECUTE acpx (one-shot, long-running)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
     bash {SCRIPTS_DIR}/run_acpx_attempt.sh
   CAPTURE: acpx_exit — but ONLY trust it when the script actually printed a
@@ -174,21 +166,9 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   `blocked`. Do NOT inspect or tail acpx logs after such a failure; preserve
   the logs and enter the BLOCKED_PUSH flow immediately.
 
-  TASK_OUTPUT_DIR is the dispatcher↔hulat-agent env contract for issues
-  that drive the hulat agent chain: agents under
-  ${WORKTREE_DIR}/hulat/agents/ (e.g. detector.md, testcase-generator.md,
-  executor.md) read ${TASK_OUTPUT_DIR} to decide where to archive their
-  outputs, and the dispatcher pins it to {OUTPUT_DIR} so those writes
-  land inside the shared per-issue worktree's OUTPUT_DIR and get force-added
-  by stage_and_guard.sh. Coding / non-hulat issues do not invoke those
-  agents — their deliverables land at whatever location the issue requires
-  inside the worktree, captured by stage_and_guard.sh's `git add -A`.
-  {SCRIPTS_DIR}/run_acpx_attempt.sh owns that env var and the acpx argv —
-  do not construct an acpx command yourself. If you ever change which
-  agents are called, keep TASK_OUTPUT_DIR={OUTPUT_DIR} inside
-  run_acpx_attempt.sh — without it the hulat agents fall back to a path
-  outside the worktree and their writes never make it into the commit
-  (NO_CHANGES result).
+  {SCRIPTS_DIR}/run_acpx_attempt.sh owns the acpx argv and runs Claude Code
+  from {WORKTREE_DIR} with {LOG_DIR}/prompt.txt as the issue prompt. Do not
+  construct an acpx command yourself.
 
   Tool-exec requirements for Step 1:
   - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
@@ -196,7 +176,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
   - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits (the script's own `timeout` will eventually kill acpx and return 124/137; you read the exit code from there).
   - If the Bash tool itself returns without a captured `ACPX_EXIT=` line (tool-side command timeout, disconnect, or truncated output) — which should not normally happen because the script's `timeout` fires first and the deployment sets the Bash command timeout to {ACPX_TIMEOUT_SECONDS} + 120 — treat the situation identically to acpx_exit=124 and enter the TIMEOUT flow below (NOT the blocked flow). `run_acpx_attempt.sh` runs acpx in its own process group and installs a SIGTERM/INT/HUP trap that tears the acpx subtree down on a catchable shutdown signal, but a SIGKILL of the script cannot be trapped — so acpx MAY still be running in the background. That residual-orphan risk is exactly why a missing `ACPX_EXIT=` line MUST route to `timeout`, never `blocked`. Do NOT start another acpx for the same attempt.
-  - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. Continue-mode continuity comes from: the self-contained prompt (incl. prior attempt summaries + reviewer comments), the work-branch contents that continue-mode resets check out, and the restored same-IID runtime subtree. Fresh-mode runs deliberately quarantine same-IID runtime residue before the new acpx invocation.
+  - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. Continue-mode continuity comes from the self-contained prompt, prior attempt summaries, reviewer comments, and restored same-IID runtime files. Fresh-mode runs deliberately quarantine same-IID runtime residue before the new acpx invocation.
 
   HARD PROHIBITIONS for Step 1 (no exceptions):
   - do not call `acpx` directly; only call {SCRIPTS_DIR}/run_acpx_attempt.sh
@@ -210,7 +190,6 @@ Step 2 — STAGE
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
   CAPTURE: stage_status (one of: STAGED_OK, NO_CHANGES).
   exit 0, stdout "STAGED_OK"  → continue to Step 3.
@@ -222,7 +201,6 @@ Step 3 — COMMIT + force-push (Strategy A)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     bash {SCRIPTS_DIR}/commit_and_push.sh
   CAPTURE: commit_sha (printed by the script).
@@ -233,7 +211,6 @@ Step 4 — POST-PUSH verify
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   exit 0 → continue.
   any non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
@@ -242,7 +219,6 @@ Step 5 — WIKI evidence (must land before `done`)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/upload_attempt_artifacts.sh
   CAPTURE: wiki_url (printed by the script — first wiki page URL; empty on failure).
   Non-zero exit → FAIL status=blocked block_reason="attempt wiki artifact publication failed: <last stderr line>".
@@ -252,12 +228,10 @@ Step 6 — TRANSITION doing → done
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add done
   Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
   CAPTURE labels_removed includes "doing"; labels_added includes "done".
@@ -266,7 +240,6 @@ Step 7 — CREATE / rotate the MR
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} WORKTREE_DIR={WORKTREE_DIR} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
     bash {SCRIPTS_DIR}/create_mr.sh
@@ -292,7 +265,6 @@ Step 8 — ADD `pr` label
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add pr
   Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
 
@@ -307,7 +279,6 @@ Step 9 — SUMMARIZE
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
   CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
   Run this on EVERY terminal path — done, no_changes, blocked, failed, timeout.
@@ -352,12 +323,10 @@ When any step instructs "FAIL with status=X, block_reason=Y":
      - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
-         RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
          bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
      - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
-         RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
          bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
      - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
      - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked-cc` and without `pr`.
@@ -383,7 +352,6 @@ B1 — STAGE (same script as Step 2 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
   CAPTURE: stage_status.
   - "STAGED_OK"   → continue to B2.
@@ -397,7 +365,6 @@ B2 — COMMIT + force-push (same script as Step 3 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     bash {SCRIPTS_DIR}/commit_and_push.sh
   CAPTURE: commit_sha (script stdout).
@@ -408,7 +375,6 @@ B3 — POST-PUSH verify (best-effort; same script as Step 4)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   Non-zero exit → append "; post-push verify failed: <last stderr line>"
   to BLOCK_REASON. Do NOT abandon the blocked flow on this failure.
@@ -418,12 +384,10 @@ B4 — LABEL doing → blocked
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
-      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
-      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
   If either exec fails, append "; blocked label sync failed: <stderr>"
   to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
@@ -440,7 +404,6 @@ B5 — SUMMARIZE (local-only; SAME script as Step 9)
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
   Always SUMMARY_POST_TO_ISSUE=false for blocked — evidence stays local
   under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for blocked
@@ -488,7 +451,6 @@ T1 — STAGE (same script as Step 2 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
   CAPTURE: stage_status.
   - "STAGED_OK"   → continue to T2.
@@ -502,7 +464,6 @@ T2 — COMMIT + force-push (same script as Step 3 of the normal flow)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
     bash {SCRIPTS_DIR}/commit_and_push.sh
   CAPTURE: commit_sha (script stdout).
@@ -515,7 +476,6 @@ T3 — POST-PUSH verify (best-effort; same script as Step 4)
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
   Non-zero exit → append "; post-push verify failed: <last stderr line>"
   to BLOCK_REASON. Do NOT abandon the timeout flow on this failure.
@@ -525,12 +485,10 @@ T4 — LABEL doing → timeout
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
-      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
   - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
-      RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
       bash {SCRIPTS_DIR}/set_issue_label.sh add timeout
   If either exec fails, append "; timeout label sync failed: <stderr>"
   to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
@@ -547,7 +505,6 @@ T5 — SUMMARIZE (local-only; SAME script as Step 9)
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
-    RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
   Always SUMMARY_POST_TO_ISSUE=false for timeout — evidence stays local
   under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for timeouts.

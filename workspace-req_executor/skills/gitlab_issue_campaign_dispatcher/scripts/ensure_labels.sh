@@ -14,7 +14,7 @@
 # Claude Code run actually didn't finish (env error, partial edits, etc.).
 # When the dispatcher's reconciliation sees `continue` on an issue, it
 # re-enqueues the IID and the executor restarts the resolution flow on
-# the existing work branch (or creates one from master if none exists).
+# the existing work branch (or creates one from the target branch if none exists).
 #
 # `timeout` is a subagent-applied terminal label set when `acpx claude exec`
 # exceeded its wall-clock cap. Whatever Claude Code managed to produce is

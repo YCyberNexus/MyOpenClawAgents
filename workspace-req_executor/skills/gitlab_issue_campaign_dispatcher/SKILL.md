@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-07.1] Run a GitLab issue campaign as a thin LLM orchestrator over dispatcher-side shell wrappers, reachable by THREE trigger commands: the recurring scheduled tick RUN_SCHEDULED_ISSUE_CAMPAIGN (Phases 1–5), the per-subagent terminal RUN_CHILD_COMPLETION_CALLBACK (Phase 6), and the req_dispatcher-driven single-issue entry RUN_SINGLE_ISSUE (I1; dispatch_single_issue.sh reads project/iid/correlation_id/dispatcher_callback_target/optional group, takes every other campaign field — token/branch/quota/timeouts/basenames — from config/campaign_defaults.env pin plus ignored config/campaign_defaults.local.env overrides when present, writes {correlation_id, dispatcher_callback_target, project (full <group>/<project>), iid} to the issue's dispatch_origin.json, then synthesizes an equivalent single-IID RUN_SCHEDULED_ISSUE_CAMPAIGN with quota=1/concurrency=1; on Phase 6 terminal done/failed/timeout the driven path best-effort回投 req_dispatcher via notify_dispatcher.sh with the I2 envelope {correlation_id,iid,project,status,mr_url,wiki_url,reason}, records the envelope locally, calls `openclaw agent` to send RUN_EXECUTOR_RESULT_CALLBACK with worker_result_json to the dispatcher target, and SKIPS the cron-path req_result note). The three wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh) own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked-cc/blocked-dispatcher skip-and-retry (with best-effort partial-work force-push after acpx failures for blocked-cc), terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue; timeout-shaped dead-subagent terminations — empty/unparseable/status-less worker_result_json or stuck-pending eviction arriving after the run outlived acpx_timeout_seconds−60s since spawned_at — are synthesized as timeout too, never as retryable blocked), v2 split-side label model (blocked-cc=CC/subagent-side failures, blocked-dispatcher=dispatcher-synthesized failures including prep/launch_failed/scope-evict/stuck-non-timeout/reply-downgrade/label-sync-fail; failed-cc / failed-dispatcher mirror same split; timeout is unsplit; completion = label pr only, done is transient before pr lands; model:{tier} is an orthogonal persistent monotone dimension driven by trigger field model_tiers), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, optional Phase 6 结果回报 (trigger result_note_enabled, default off, carry-forward: after a terminal done/failed/timeout drains, post_result_note.sh reads the issue's git_issuer-written req_origin marker note and — only if present — posts a structured req_result note for an external 114-side relay to deliver to the original requester; pure glab G1b+G9, best-effort/non-fatal, blocked excluded, no-op when no req_origin), persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output. A workspace-root compatibility wrapper exists at `scripts/dispatch_single_issue.sh` for agents that mistakenly invoke `scripts/` relative to the workspace root; canonical orchestration should still use `cd "${SKILL_DIR}" && bash scripts/<name>.sh`."
+description: "[SKILL_VERSION=2026-07-07.4] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -15,28 +15,24 @@ The LLM's only job is to call the right wrapper, read its JSON envelope,
 and perform the two runtime-tool-only operations that no shell process
 can: `sessions_spawn` and `subagents kill`.
 
-All agent runtime files live INSIDE the cloned repo at
-`${REPO_PATH}/${RESULT_BASENAME}/...` — campaign state, dispatcher logs,
+All agent runtime files live INSIDE the cloned repo under the fixed
+`${REPO_PATH}/.req_executor/` directory — campaign state, dispatcher logs,
 locks, per-issue state/logs/summaries, and one shared per-issue linked
-git worktree per IID at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/`.
+git worktree per IID at `${REPO_PATH}/.req_executor/.worktrees/issue-<iid>/`.
 The worktree is reused across every attempt of an IID (created on
 attempt 1 via `git worktree add -B`, then force-switched in place on
 attempt N>1 after preserving the same-IID runtime subtree; `continue`
 restores it for resume, while all non-continue entry labels reset from
-the clean baseline and archive the preserved subtree outside the active
+the target branch and archive the preserved subtree outside the active
 worktree).
 See [`references/paths.md`](references/paths.md) for the complete layout.
-(`${RESULT_BASENAME}` / `${DATA_BASENAME}` default to `ifp-result` / `ifp-data`;
-per-project `result_basename` / `data_basename` trigger fields override
-them automatically.)
 
 ## Two prompts you MUST NOT confuse (read this first)
 
 Per IID, the wrapper produces **two completely different prompt strings**.
 Mixing them is the most damaging bug in this workflow — a confused
 orchestrator will ship the *inner* prompt as the *outer* spawn payload,
-the subagent will then execute the inner prompt directly (running hulat
-agents itself, bypassing `acpx` entirely), and the whole
+the subagent will then bypass `run_acpx_attempt.sh`, and the whole
 `run_acpx_attempt.sh` → `stage_and_guard.sh` chain breaks.
 
 | | Outer **executor prompt** (the spawn payload) | Inner **Claude Code prompt** (acpx's `-f` argument) |
@@ -117,8 +113,7 @@ reduced to a small fixed shape.
          IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
          STATUS=launch_failed LAUNCH_ATTEMPTS=<attempts> \
          LAUNCH_ERROR="<verbatim last error or raw response>" \
-         (+ standard env: PROJECT, GROUP, GITLAB_TOKEN, REPO_PARENT_PATH,
-          RESULT_BASENAME, DATA_BASENAME) \
+         (+ standard env: PROJECT, GROUP, GITLAB_TOKEN, REPO_PARENT_PATH) \
          bash scripts/dispatch_record_spawn.sh                    → record_envelope
        # record_envelope may carry cleanup.action == "kill" if a partial
        # session is detectable — almost always action == "skip" here.
@@ -175,9 +170,10 @@ requester. It is NOT the cron path — the scheduled `RUN_SCHEDULED_ISSUE_CAMPAI
 (§3.6 of the active-orchestration design).
 
 **I1 trigger inputs** (multi-line key=value, same text format as the scheduled
-trigger). Only these five are sent; **every other campaign field is read from
-the deployment pin, never from the trigger** (token / branch / quota /
-concurrency / timeouts / basenames / repo layout):
+trigger). Only these five are sent. The driven wrapper reads GitLab token from
+process env or `config/gitlab.env`, reads only the clone parent from
+`config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`,
+and lets the scheduled wrapper infer branch from `origin/HEAD` when omitted:
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
@@ -185,7 +181,7 @@ concurrency / timeouts / basenames / repo layout):
 | `iid` | yes | The single issue IID to process (positive integer). |
 | `correlation_id` | yes | req_dispatcher's关联 token. Echoed back verbatim in the I2 result envelope so req_dispatcher can match its pending entry. |
 | `dispatcher_callback_target` | yes (I2) | The callback target req_dispatcher reports to. Supports `agent:req_dispatcher:main` or a bare agent id; carried opaquely into `dispatch_origin.json`. |
-| `group` | no | Falls back to the `GROUP` pin in `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env` / `gitlab.env` when omitted. |
+| `group` | no | Usually unnecessary when `project` is `<group>/<project>`. Falls back to `GROUP` env/local config only for bare project slugs. |
 
 ```
 1. cd "${SKILL_DIR}" && bash scripts/dispatch_single_issue.sh <<'TRIGGER_EOF'  → envelope
@@ -203,8 +199,8 @@ concurrency / timeouts / basenames / repo layout):
    #     malformed CONFIG-shape input — surface it and stop per §No-Fallback);
    #   • sources config/gitlab.env + config/campaign_defaults.env, then optional
    #     ignored config/campaign_defaults.local.env; requires
-   #     GITLAB_TOKEN from the sourced deployment pin or environment (never sent
-   #     by req_dispatcher) and a GROUP from trigger/env/pin;
+   #     GITLAB_TOKEN from process env or config/gitlab.env (never sent
+   #     by req_dispatcher) and a GROUP from full project, trigger, env, or local config;
    #   • writes {correlation_id, dispatcher_callback_target, project, iid} to
    #     ${ISSUE_ROOT}/dispatch_origin.json (= ${ISSUES_ROOT}/issue-<iid>/dispatch_origin.json)
    #     so Phase 6 can find req_dispatcher to report back to;
@@ -303,18 +299,14 @@ PROJECT={project}                          # always
 GROUP={group}                              # always
 GITLAB_TOKEN={gitlab_token}                # always
 REPO_PARENT_PATH={repo_path}               # when trigger supplied non-default repo_path
-RESULT_BASENAME={result_basename}          # when project uses non-default basenames
-DATA_BASENAME={data_basename}              # idem
 ```
 
 `PROJECT` / `GROUP` come from the trigger / callback payload.
-`GITLAB_TOKEN` comes from the deployment pin or environment.
+`GITLAB_TOKEN` comes from process env or `config/gitlab.env`.
 `REPO_PARENT_PATH` defaults to `/data` inside `env_paths.sh`
 when unset; non-default deployments MUST keep passing it on every
 scheduled trigger and callback because the dispatcher needs it before
-locating `${CAMPAIGN_STATE_FILE}`. Basenames carry-forward from the
-persisted state when the trigger omits them; the wrappers re-source
-`env_paths.sh` with the persisted values when needed.
+locating `${CAMPAIGN_STATE_FILE}`.
 
 ## What the wrappers handle (don't second-guess them)
 
@@ -329,7 +321,6 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Pending eviction (`stuck_after_minutes` plus trigger-scope eviction) | `dispatch_prepare_tick.sh` pending-eviction block |
 | Reconcile + disk-cache correction + Source-of-Truth Policy | `dispatch_prepare_tick.sh` steps 10–11; `dispatch_followup.sh` step 2 |
 | Eligibility batch formation (backlog → blocked retry, quota cap) | `dispatch_prepare_tick.sh` step 16 |
-| UI account allocation (slot sizes, `max_accounts_per_issue` cap, pool-too-small abort) | `dispatch_prepare_tick.sh` steps 14 + 18 |
 | Per-IID prep (allocate_attempt, prepare_attempt, claude_settings copy, glab issue read, label transitions to `doing`, build_prompt, state-file init) | `dispatch_prepare_tick.sh` step 20 |
 | Executor prompt rendering + sentinel check | `dispatch_prepare_tick.sh` step 20.8–20.9 |
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |

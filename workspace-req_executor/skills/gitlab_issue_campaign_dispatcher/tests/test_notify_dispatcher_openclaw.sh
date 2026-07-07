@@ -22,9 +22,9 @@ WORK_ROOT="${TEST_ROOT}/work" \
 DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
 CORRELATION_ID="reqd-99" \
 IID="42" \
-PROJECT="claw_gitlab/px_ifp_hulat_test" \
+PROJECT="claw_gitlab/req_executor_test" \
 STATUS="done" \
-MR_URL="http://gitlab-b.pxsemic.tech:30000/claw_gitlab/px_ifp_hulat_test/-/merge_requests/7" \
+MR_URL="http://gitlab-b.pxsemic.tech:30000/claw_gitlab/req_executor_test/-/merge_requests/7" \
 bash "${SKILL_DIR}/scripts/notify_dispatcher.sh" >/dev/null 2>"${TEST_ROOT}/notify.err"
 
 if ! grep -q -- '--agent req_dispatcher' "${OPENCLAW_LOG}"; then
