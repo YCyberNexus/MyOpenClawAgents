@@ -36,7 +36,34 @@ case "${TARGET_SESSION_SELECTOR}" in
     exit 2
     ;;
 esac
-AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS:-${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}}"
+DOWNSTREAM_TIMEOUT_FLOOR="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}"
+if [ -n "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-}" ]; then
+  case "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}" in
+    *[!0-9]*|"") echo "run_agent_turn: DOWNSTREAM_AGENT_TIMEOUT_SECONDS must be a positive integer, got: ${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}" >&2; exit 2 ;;
+    0) echo "run_agent_turn: DOWNSTREAM_AGENT_TIMEOUT_SECONDS must be positive" >&2; exit 2 ;;
+  esac
+fi
+if [ -n "${EXECUTOR_AGENT_TIMEOUT_SECONDS:-}" ]; then
+  case "${EXECUTOR_AGENT_TIMEOUT_SECONDS}" in
+    *[!0-9]*|"") echo "run_agent_turn: EXECUTOR_AGENT_TIMEOUT_SECONDS must be a positive integer, got: ${EXECUTOR_AGENT_TIMEOUT_SECONDS}" >&2; exit 2 ;;
+    0) echo "run_agent_turn: EXECUTOR_AGENT_TIMEOUT_SECONDS must be positive" >&2; exit 2 ;;
+  esac
+fi
+IS_EXECUTOR_TARGET=0
+if [ -n "${EXECUTOR_AGENT_TIMEOUT_SECONDS:-}" ]; then
+  if [ -n "${GIT_ISSUER_AGENT:-}" ]; then
+    [ "${TARGET_AGENT}" != "${GIT_ISSUER_AGENT}" ] && IS_EXECUTOR_TARGET=1
+  elif [ -n "${DEFAULT_EXECUTOR_AGENT:-}" ]; then
+    [ "${TARGET_AGENT}" = "${DEFAULT_EXECUTOR_AGENT}" ] && IS_EXECUTOR_TARGET=1
+  fi
+fi
+if [ -z "${AGENT_TIMEOUT_SECONDS:-}" ]; then
+  if [ "${IS_EXECUTOR_TARGET}" = "1" ]; then
+    AGENT_TIMEOUT_SECONDS="${EXECUTOR_AGENT_TIMEOUT_SECONDS}"
+  else
+    AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_TIMEOUT_FLOOR}"
+  fi
+fi
 MESSAGE="${MESSAGE:-}"
 MESSAGE_FILE="${MESSAGE_FILE:-}"
 
@@ -45,14 +72,17 @@ case "${AGENT_TIMEOUT_SECONDS}" in
   0) echo "run_agent_turn: AGENT_TIMEOUT_SECONDS must be positive" >&2; exit 2 ;;
 esac
 if [ -n "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-}" ]; then
-  case "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}" in
-    *[!0-9]*|"") echo "run_agent_turn: DOWNSTREAM_AGENT_TIMEOUT_SECONDS must be a positive integer, got: ${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}" >&2; exit 2 ;;
-    0) echo "run_agent_turn: DOWNSTREAM_AGENT_TIMEOUT_SECONDS must be positive" >&2; exit 2 ;;
-  esac
   if [ "${AGENT_TIMEOUT_SECONDS}" -lt "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}" ]; then
     AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}"
   fi
 fi
+if [ -n "${EXECUTOR_AGENT_TIMEOUT_SECONDS:-}" ]; then
+  if [ "${IS_EXECUTOR_TARGET}" = "1" ] && [ "${AGENT_TIMEOUT_SECONDS}" -lt "${EXECUTOR_AGENT_TIMEOUT_SECONDS}" ]; then
+    AGENT_TIMEOUT_SECONDS="${EXECUTOR_AGENT_TIMEOUT_SECONDS}"
+  fi
+fi
+unset DOWNSTREAM_TIMEOUT_FLOOR
+unset IS_EXECUTOR_TARGET
 
 if [ -n "${MESSAGE_FILE}" ]; then
   if [ ! -f "${MESSAGE_FILE}" ]; then

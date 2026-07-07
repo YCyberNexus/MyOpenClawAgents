@@ -129,6 +129,82 @@ if [ "$(printf '%s' "${timeout_floor}" | jq -r '.status')" != "success" ]; then
   exit 1
 fi
 
+: >"${OPENCLAW_LOG}"
+executor_default_timeout="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-default-timeout" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  MESSAGE="run single issue with executor timeout" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+if ! grep -q -- '--timeout 10800' "${OPENCLAW_LOG}"; then
+  echo "expected EXECUTOR_AGENT_TIMEOUT_SECONDS to apply to executor target" >&2
+  cat "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if [ "$(printf '%s' "${executor_default_timeout}" | jq -r '.status')" != "success" ]; then
+  echo "expected executor timeout default call to succeed:" >&2
+  printf '%s\n' "${executor_default_timeout}" >&2
+  exit 1
+fi
+
+: >"${OPENCLAW_LOG}"
+executor_timeout_floor="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-timeout-floor" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  AGENT_TIMEOUT_SECONDS="120" \
+  MESSAGE="run single issue with protected executor timeout" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+if ! grep -q -- '--timeout 10800' "${OPENCLAW_LOG}"; then
+  echo "expected EXECUTOR_AGENT_TIMEOUT_SECONDS to protect against shorter executor timeout" >&2
+  cat "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if [ "$(printf '%s' "${executor_timeout_floor}" | jq -r '.status')" != "success" ]; then
+  echo "expected protected executor timeout call to succeed:" >&2
+  printf '%s\n' "${executor_timeout_floor}" >&2
+  exit 1
+fi
+
+: >"${OPENCLAW_LOG}"
+git_issuer_keeps_downstream_timeout="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-git-keeps-downstream-timeout" \
+  TARGET_AGENT="git_issuer" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  MESSAGE="create issue without executor timeout" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+if ! grep -q -- '--timeout 600' "${OPENCLAW_LOG}"; then
+  echo "expected git_issuer target to keep DOWNSTREAM_AGENT_TIMEOUT_SECONDS" >&2
+  cat "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if [ "$(printf '%s' "${git_issuer_keeps_downstream_timeout}" | jq -r '.status')" != "success" ]; then
+  echo "expected git_issuer timeout call to succeed:" >&2
+  printf '%s\n' "${git_issuer_keeps_downstream_timeout}" >&2
+  exit 1
+fi
+
 set +e
 bad_session_output="$(
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \

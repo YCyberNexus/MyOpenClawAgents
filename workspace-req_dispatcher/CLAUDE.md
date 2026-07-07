@@ -41,7 +41,7 @@ agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 
 
 ## Per-exec environment contract
 
-OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在**同一个** Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source scripts/source_dispatcher_env.sh && <最小 env> bash scripts/<name>.sh`。该 helper 先加载 tracked `config/dispatcher.env`，再加载 ignored `config/dispatcher.local.env`（若存在）；脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。脚本入参契约见 SKILL §Working Directory 的表。
+OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在**同一个** Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source scripts/source_dispatcher_env.sh && <最小 env> bash scripts/<name>.sh`。该 helper 先加载 tracked `config/dispatcher.env`，再加载 ignored `config/dispatcher.local.env`（若存在）；`DOWNSTREAM_AGENT_TIMEOUT_SECONDS` 是通用下游默认，`EXECUTOR_AGENT_TIMEOUT_SECONDS` 是 executor 专用下限。脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。脚本入参契约见 SKILL §Working Directory 的表。
 
 ## Sanity-checking shell changes
 

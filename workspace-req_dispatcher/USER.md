@@ -47,7 +47,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 ## 配置
 
-部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表）、wiki 只读 pin `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN`、`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin，其中 `DEFAULT_REPLY_AGENT` 只是合法 origin object 缺少 `origin.reply_agent` 时的默认目标）、`DISPATCHER_CALLBACK_TARGET`（结果回调目标）。覆盖路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不写死在配置里**（wiki 入口从 URL 解析，旧自由文本随需求文本传入）；**执行器 GitLab token 不在配置里**（归执行器侧）。
+部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`（git_issuer 等通用下游默认）、`EXECUTOR_AGENT_TIMEOUT_SECONDS`（executor 专用，默认 10800 秒）、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表）、wiki 只读 pin `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN`、`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin，其中 `DEFAULT_REPLY_AGENT` 只是合法 origin object 缺少 `origin.reply_agent` 时的默认目标）、`DISPATCHER_CALLBACK_TARGET`（结果回调目标）。覆盖路由表本体 [`config/routing.env`](config/routing.env)。**group/project 不写死在配置里**（wiki 入口从 URL 解析，旧自由文本随需求文本传入）；**执行器 GitLab token 不在配置里**（归执行器侧）。
 
 ## 依赖与对齐项
 
