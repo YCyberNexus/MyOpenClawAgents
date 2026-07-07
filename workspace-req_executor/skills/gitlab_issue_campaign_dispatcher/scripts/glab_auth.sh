@@ -40,6 +40,7 @@
 set -euo pipefail
 
 GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
+GLAB_BIN_ENV_OVERRIDE="${GLAB_BIN:-}"
 
 # Resolve workspace root from this script's location:
 #   <workspace>/skills/<name>/scripts/glab_auth.sh -> ../../..
@@ -54,7 +55,8 @@ fi
 
 # shellcheck disable=SC1090
 source "${PIN_FILE}"
-GITLAB_TOKEN="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN:-}}"
+GITLAB_TOKEN="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN:-${WIKI_GITLAB_TOKEN:-}}}"
+GLAB_BIN="${GLAB_BIN_ENV_OVERRIDE:-${WIKI_GLAB_BIN:-glab}}"
 
 : "${GITLAB_TOKEN:?GITLAB_TOKEN must be set (env or config/gitlab.env)}"
 
@@ -94,12 +96,12 @@ LOCK_HOST="$(printf '%s' "${GITLAB_HOST}" | tr -c 'A-Za-z0-9_.-' '_')"
 exec 8>"${LOCK_ROOT}/glab-auth-${LOCK_HOST}.lock"
 flock 8
 
-glab auth login \
+"${GLAB_BIN}" auth login \
   --hostname "${GITLAB_HOST}" \
   --token "${GITLAB_TOKEN}" \
   --api-protocol "${GITLAB_API_PROTOCOL}" >/dev/null
 
-glab auth status --hostname "${GITLAB_HOST}" >/dev/null
+"${GLAB_BIN}" auth status --hostname "${GITLAB_HOST}" >/dev/null
 
 export GITLAB_HOST GITLAB_API_PROTOCOL
 echo "${GITLAB_HOST}"
