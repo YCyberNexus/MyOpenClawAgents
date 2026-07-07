@@ -50,6 +50,37 @@ if [ "${status}" != "success" ] || [ "${run_id}" != "run-git-1" ] || [ "${projec
   exit 1
 fi
 
+cat >"${FAKE_OPENCLAW}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${OPENCLAW_LOG}"
+printf '%s\n' 'Issue 已创建成功:'
+printf '%s\n' '```json'
+printf '%s\n' '{'
+printf '%s\n' '  "status": "success",'
+printf '%s\n' '  "project": "ai-infra/veqp_server_v3",'
+printf '%s\n' '  "issue_iid": 10,'
+printf '%s\n' '  "issue_url": "https://gitlab.example/issues/10"'
+printf '%s\n' '}'
+printf '%s\n' '```'
+printf '%s\n' '汇总：已创建 issue。'
+EOF
+chmod +x "${FAKE_OPENCLAW}"
+
+pretty_fenced="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-git-pretty-fenced" \
+  TARGET_AGENT="git_issuer" \
+  MESSAGE="create issue with pretty fenced json" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+if [ "$(printf '%s' "${pretty_fenced}" | jq -r '.worker_result_json.issue_iid // empty')" != "10" ]; then
+  echo "expected wrapper to parse pretty JSON inside a markdown code fence:" >&2
+  printf '%s\n' "${pretty_fenced}" >&2
+  exit 1
+fi
+
 : >"${OPENCLAW_LOG}"
 numeric_session="$(
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \

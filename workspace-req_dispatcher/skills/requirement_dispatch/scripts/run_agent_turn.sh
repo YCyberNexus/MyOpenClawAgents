@@ -9,6 +9,7 @@
 # 则传给 --session-id；默认 agent:<target>:main 形态始终走 --session-key。
 #
 # 目标 agent 的最后一行若是紧凑 JSON，本脚本会把它解析到 worker_result_json。
+# 若输出把 pretty JSON 放在 markdown 代码块里，也会兜底提取最后一个合法 JSON object。
 # openclaw 调用失败不会让本脚本非零退出；它返回 status=failed 的结构化信封，
 # 由 orchestrator 按“同 payload 最多 3 次、2s 退避”处理。入参形态错误才 exit 2。
 set -euo pipefail
@@ -142,23 +143,20 @@ esac
 RAW_OUTPUT="$(cat "${RAW_OUTPUT_FILE}" 2>/dev/null)"
 set -e
 
-LAST_JSON_LINE="$(
-  printf '%s\n' "${RAW_OUTPUT}" | awk '
-    {
-      line=$0
-      sub(/^[[:space:]]+/, "", line)
-      sub(/[[:space:]]+$/, "", line)
-      if (line ~ /^\{.*\}$/) last=line
-    }
-    END {
-      if (last != "") print last
-    }'
+WORKER_RESULT_JSON="$(
+  printf '%s' "${RAW_OUTPUT}" | jq -R -s -c '
+    def trim: gsub("^[[:space:]]+|[[:space:]]+$"; "");
+    def object_from_json: try (fromjson | select(type == "object")) catch empty;
+    def compact_line_objects:
+      [split("\n")[] | trim | select(test("^\\{.*\\}$")) | object_from_json];
+    def fenced_objects:
+      [
+        match("(?ms)(^|\\n)[[:space:]]*```[^\\n]*\\n(?<body>.*?)\\n[[:space:]]*```"; "g")
+        | .captures[] | select(.name == "body") | .string | object_from_json
+      ];
+    compact_line_objects[-1] // fenced_objects[-1] // null
+  '
 )"
-
-WORKER_RESULT_JSON="null"
-if [ -n "${LAST_JSON_LINE}" ] && printf '%s' "${LAST_JSON_LINE}" | jq -e . >/dev/null 2>&1; then
-  WORKER_RESULT_JSON="${LAST_JSON_LINE}"
-fi
 
 if [ "${EXIT_CODE}" -eq 0 ]; then
   STATUS="success"

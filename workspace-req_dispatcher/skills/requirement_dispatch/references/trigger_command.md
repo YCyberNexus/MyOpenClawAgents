@@ -2,7 +2,7 @@
 
 > 状态：**已落成明确契约**。`req_dispatcher` 发起下游 agent turn 固定通过 `scripts/run_agent_turn.sh` 包装 `openclaw agent`；executor 结果回调固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。不再使用未确认参数名的旧占位原语。
 >
-> 编排器对一条需求做两段下游调用：入口消息若包含 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；否则用 `prepare_downstream_payloads.sh` 将旧自由文本整理成单条建单消息。随后调用蓝区 `git_issuer` 建 issue 并读取其最后一行 JSON；成功后按 project 路由选 executor，再用 `build_executor_payload.sh` 生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段记录 pending，等待后续 I2 结果回调。
+> 编排器对一条需求做两段下游调用：入口消息若包含 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；否则用 `prepare_downstream_payloads.sh` 将旧自由文本整理成单条建单消息。随后调用蓝区 `git_issuer` 建 issue 并读取其 `worker_result_json`；成功后按 project 路由选 executor，再用 `build_executor_payload.sh` 生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段记录 pending，等待后续 I2 结果回调。
 
 ## 接入消息（114 → req_dispatcher）
 
@@ -91,7 +91,7 @@ stdout 固定是一行 JSON envelope：
 - `TARGET_SESSION_KEY` 默认由脚本生成，值为 `agent:${TARGET_AGENT}:main`。普通下游调用不要手写该变量；若部署方确实要传显式非 `agent:*:*` 的 session id，可用 `TARGET_SESSION_ID`，脚本会改传 `--session-id`。脚本会拒绝包含省略号或尖括号的占位符 session key。
 - `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` 是配置下限；即使单次调用传入更短的 `AGENT_TIMEOUT_SECONDS`，脚本也会提升到该下限，避免本机或蓝区下游 agent 启动被过短超时截断。
 - 下游 agent turn 可能超过本地 shell tool 的短轮询窗口；`run_agent_turn.sh` 等待时会按 `RUN_AGENT_TURN_HEARTBEAT_SECONDS`（默认 30）向 stderr 输出 heartbeat，stdout 仍只保留最终 JSON envelope。若 tool 返回进程仍在运行，继续 poll 到进程完成并读取最终 stdout，不要因为暂时无新输出而 kill。
-- `worker_result_json` 来自目标 agent 输出中的最后一行 JSON；蓝区 `git_issuer` 必须把回调 JSON 放在最后一行。
+- `worker_result_json` 优先来自目标 agent 输出中的最后一行紧凑 JSON；若下游把 pretty JSON 放在 Markdown 代码块里，`run_agent_turn.sh` 会兜底提取最后一个合法 JSON object。蓝区 `git_issuer` 仍推荐把回调 JSON 放在最后一行，代码块兼容只用于容错。
 
 ### git_issuer JSON → drain_pending env（运行时解析契约）
 

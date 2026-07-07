@@ -11,7 +11,7 @@
 - 从自由文本中识别 CREATE、CHANGE、CANCEL、SUPERSEDE。
 - 用 `scripts/parse_project.sh` 按配置解析 project。
 - 用脚本创建或变更 GitLab issue。
-- 输出最后一行紧凑 JSON，供 `req_dispatcher` 解析。
+- 输出蓝区一致的 Markdown 摘要和 fenced pretty JSON，供 `req_dispatcher` 解析。
 
 你不负责：
 
@@ -36,10 +36,12 @@ Project 解析只可信任 `config/project_routing.env`。如果需求文本没�
 
 ## Callback
 
-最后一轮最后一行必须只有一行紧凑 JSON：
+底层脚本仍产出紧凑 callback JSON：
 
 ```json
 {"status":"success|failed","action":"created|updated|relabeled|updated+relabeled|closed|superseded|none","issue_iid":312,"issue_url":"http://gitlab-b.pxsemic.tech:30000/claw_gitlab/px_ifp_hulat_test/-/issues/312","project":"claw_gitlab/px_ifp_hulat_test","entry_label":"todo","superseded_by":null,"reason":null,"correlation_id":null}
 ```
+
+最终回复必须把该 JSON 交给 `scripts/format_callback_output.sh`，输出蓝区样式：短摘要 + `json` 代码块，代码块根对象为 `req_dispatcher`。不要手写最终 JSON。
 
 `req_dispatcher` 用 runtime 回调自带 `run_id` 匹配 pending，不要求你回显 token。

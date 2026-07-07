@@ -16,6 +16,7 @@ Run local tests with fake `glab`:
 /opt/homebrew/bin/bash workspace-git_issuer/skills/git_issue_intake/tests/test_parse_project.sh
 /opt/homebrew/bin/bash workspace-git_issuer/skills/git_issue_intake/tests/test_create_issue_fake_glab.sh
 /opt/homebrew/bin/bash workspace-git_issuer/skills/git_issue_intake/tests/test_update_issue_fake_glab.sh
+/opt/homebrew/bin/bash workspace-git_issuer/skills/git_issue_intake/tests/test_format_callback_output.sh
 ```
 
 ## Rules

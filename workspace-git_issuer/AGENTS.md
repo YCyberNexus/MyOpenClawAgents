@@ -1,6 +1,6 @@
 # git_issuer Workspace Notes
 
-本工作区实现 `git_issuer`：104 OpenClaw 上“自由文本需求 → GitLab issue”的建单与变更 agent。它接收 `req_dispatcher` 透传的自由文本，按本 workspace 的配置解析目标 project，创建或变更 GitLab issue，并在最后一行输出 `req_dispatcher` 可解析的紧凑 JSON。
+本工作区实现 `git_issuer`：104 OpenClaw 上“自由文本需求 → GitLab issue”的建单与变更 agent。它接收 `req_dispatcher` 透传的自由文本，按本 workspace 的配置解析目标 project，创建或变更 GitLab issue，并输出与蓝区一致的 Markdown 摘要和 fenced pretty JSON。
 
 ## Agent Identity
 
@@ -14,7 +14,7 @@
 - GitLab 访问只允许通过 `glab`，由 `scripts/` 封装；不得使用 `curl`、`wget`、HTTP 库或 GitLab SDK。
 - 新建 issue 后必须打执行器入口标签，默认来自 `config/gitlab.env` 的 `DEFAULT_ENTRY_LABEL`。
 - 变更 issue 时只允许按契约添加 `retry` 或 `continue`；不得添加 `doing`、`done`、`pr`、`blocked-*`、`failed-*`、`timeout`，不得改 `model:*` 或 `quality:low`。
-- 最后一轮最后一行必须是单行紧凑 JSON，不加代码围栏，不加解释文字。
+- 最终回复必须使用 `format_callback_output.sh` 渲染，形成短摘要 + `json` 代码块；代码块根对象为 `req_dispatcher`。
 
 ## Execution Model
 
@@ -24,6 +24,7 @@
 - `create_issue.sh`：创建 GitLab issue，添加入口标签，可选写 `req_origin` note。
 - `update_issue.sh`：编辑、重跑标签、关闭或 supersede 既有 issue。
 - `emit_callback.sh`：输出统一回调 JSON。
+- `format_callback_output.sh`：把统一回调 JSON 渲染成蓝区样式 Markdown 输出。
 
 ## Deployment Pin
 
