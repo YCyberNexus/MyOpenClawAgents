@@ -6,6 +6,9 @@
 #     --message <MESSAGE> --timeout <AGENT_TIMEOUT_SECONDS>
 #
 # TARGET_SESSION_KEY 作为历史兼容输入保留；底层 CLI 统一使用 --session-id。
+# 未显式传 TARGET_SESSION_ID/TARGET_SESSION_KEY 时，普通下游调用默认
+# agent:<target>:main；RUN_SINGLE_ISSUE 自动按 project+iid 生成
+# agent:<target>:issue-<sanitized-project>-<iid>，避免多个 issue 堆在 executor main session。
 #
 # 目标 agent 的最后一行若是紧凑 JSON，本脚本会把它解析到 worker_result_json。
 # 若输出把 pretty JSON 放在 markdown 代码块里，也会兜底提取最后一个合法 JSON object。
@@ -16,26 +19,57 @@ set -euo pipefail
 : "${TARGET_AGENT:?run_agent_turn: TARGET_AGENT required}"
 
 OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
-if [ -n "${TARGET_SESSION_ID:-}" ]; then
-  TARGET_SESSION_SELECTOR="${TARGET_SESSION_ID}"
-  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
-elif [ -n "${TARGET_SESSION_KEY:-}" ]; then
-  TARGET_SESSION_SELECTOR="${TARGET_SESSION_KEY}"
-  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_KEY"
-else
-  TARGET_SESSION_SELECTOR="agent:${TARGET_AGENT}:main"
-  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
-fi
-case "${TARGET_SESSION_SELECTOR}" in
-  *"…"*)
-    echo "run_agent_turn: ${TARGET_SESSION_SELECTOR_SOURCE} must not contain placeholder ellipsis: ${TARGET_SESSION_SELECTOR}" >&2
-    exit 2
-    ;;
-  *"<"*|*">"*)
-    echo "run_agent_turn: ${TARGET_SESSION_SELECTOR_SOURCE} must not contain placeholder brackets: ${TARGET_SESSION_SELECTOR}" >&2
-    exit 2
-    ;;
-esac
+
+extract_run_single_issue_field() {
+  local field="$1"
+  awk -v field="${field}" '
+    NR == 1 {
+      sub(/\r$/, "", $0)
+      if ($0 != "RUN_SINGLE_ISSUE") exit 0
+      next
+    }
+    {
+      sub(/\r$/, "", $0)
+      if (index($0, field "=") == 1) {
+        print substr($0, length(field) + 2)
+        exit 0
+      }
+    }'
+}
+
+derive_default_session_selector() {
+  local target_agent="$1"
+  local message="$2"
+  local project
+  local iid
+  local safe_project
+
+  project="$(printf '%s\n' "${message}" | extract_run_single_issue_field "project")"
+  iid="$(printf '%s\n' "${message}" | extract_run_single_issue_field "iid")"
+  case "${iid}" in
+    *[!0-9]*|""|0)
+      printf 'agent:%s:main\n' "${target_agent}"
+      return 0
+      ;;
+  esac
+  if [ -z "${project}" ]; then
+    printf 'agent:%s:main\n' "${target_agent}"
+    return 0
+  fi
+
+  safe_project="$(
+    printf '%s' "${project}" |
+      tr -cs 'A-Za-z0-9' '-' |
+      sed -E 's/^-+//; s/-+$//; s/-+/-/g'
+  )"
+  if [ -z "${safe_project}" ]; then
+    printf 'agent:%s:main\n' "${target_agent}"
+    return 0
+  fi
+
+  printf 'agent:%s:issue-%s-%s\n' "${target_agent}" "${safe_project}" "${iid}"
+}
+
 DOWNSTREAM_TIMEOUT_FLOOR="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}"
 if [ -n "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-}" ]; then
   case "${DOWNSTREAM_AGENT_TIMEOUT_SECONDS}" in
@@ -89,14 +123,40 @@ if [ -n "${MESSAGE_FILE}" ]; then
     echo "run_agent_turn: MESSAGE_FILE not found: ${MESSAGE_FILE}" >&2
     exit 2
   fi
+  MESSAGE_FOR_SESSION="$(cat "${MESSAGE_FILE}")"
 elif [ -z "${MESSAGE}" ]; then
   MESSAGE="$(cat)"
+  MESSAGE_FOR_SESSION="${MESSAGE}"
+else
+  MESSAGE_FOR_SESSION="${MESSAGE}"
 fi
 
 if [ -z "${MESSAGE_FILE}" ] && [ -z "${MESSAGE}" ]; then
   echo "run_agent_turn: MESSAGE, MESSAGE_FILE, or stdin message is required" >&2
   exit 2
 fi
+
+if [ -n "${TARGET_SESSION_ID:-}" ]; then
+  TARGET_SESSION_SELECTOR="${TARGET_SESSION_ID}"
+  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
+elif [ -n "${TARGET_SESSION_KEY:-}" ]; then
+  TARGET_SESSION_SELECTOR="${TARGET_SESSION_KEY}"
+  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_KEY"
+else
+  TARGET_SESSION_SELECTOR="$(derive_default_session_selector "${TARGET_AGENT}" "${MESSAGE_FOR_SESSION}")"
+  TARGET_SESSION_SELECTOR_SOURCE="auto"
+fi
+case "${TARGET_SESSION_SELECTOR}" in
+  *"…"*)
+    echo "run_agent_turn: ${TARGET_SESSION_SELECTOR_SOURCE} must not contain placeholder ellipsis: ${TARGET_SESSION_SELECTOR}" >&2
+    exit 2
+    ;;
+  *"<"*|*">"*)
+    echo "run_agent_turn: ${TARGET_SESSION_SELECTOR_SOURCE} must not contain placeholder brackets: ${TARGET_SESSION_SELECTOR}" >&2
+    exit 2
+    ;;
+esac
+unset MESSAGE_FOR_SESSION
 
 SAFE_TARGET="$(printf '%s' "${TARGET_AGENT}" | tr -c 'A-Za-z0-9_-' '_')"
 NOW_UTC="$(date -u +%s)"

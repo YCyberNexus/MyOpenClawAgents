@@ -20,6 +20,7 @@ fi
 shift
 
 target_agent=""
+session_id=""
 message=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -28,6 +29,7 @@ while [ "$#" -gt 0 ]; do
       shift 2
       ;;
     --session-id)
+      session_id="$2"
       shift 2
       ;;
     --message)
@@ -44,8 +46,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-jq -nc --arg agent "${target_agent}" --arg message "${message}" \
-  '{agent: $agent, message: $message}' >>"${OPENCLAW_CALL_LOG:?OPENCLAW_CALL_LOG required}"
+jq -nc --arg agent "${target_agent}" --arg session_id "${session_id}" --arg message "${message}" \
+  '{agent: $agent, session_id: $session_id, message: $message}' >>"${OPENCLAW_CALL_LOG:?OPENCLAW_CALL_LOG required}"
 
 case "${target_agent}" in
   git_issuer)
@@ -135,7 +137,6 @@ for idx in $(seq 0 $((payload_count - 1))); do
     OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
     ISSUE_SEQ_FILE="${ISSUE_SEQ_FILE}" \
     TARGET_AGENT="${executor}" \
-    TARGET_SESSION_KEY="agent:${executor}:main" \
     RUN_ID="executor-${idx}" \
     bash "${SKILL_DIR}/scripts/run_agent_turn.sh" <<<"${executor_payload}"
   )"
@@ -148,6 +149,7 @@ done
 
 git_calls="$(jq -r 'select(.agent=="git_issuer") | .message' "${OPENCLAW_CALL_LOG}" | grep -c '^CREATE_GITLAB_ISSUE')"
 executor_calls="$(jq -r 'select(.agent=="req_executor") | .message' "${OPENCLAW_CALL_LOG}" | grep -c '^RUN_SINGLE_ISSUE')"
+executor_sessions="$(jq -r 'select(.agent=="req_executor") | .session_id' "${OPENCLAW_CALL_LOG}")"
 
 if [ "${git_calls}" -ne 2 ]; then
   echo "expected two git_issuer CREATE_GITLAB_ISSUE calls, got ${git_calls}" >&2
@@ -157,6 +159,26 @@ fi
 
 if [ "${executor_calls}" -ne 2 ]; then
   echo "expected two executor RUN_SINGLE_ISSUE calls, got ${executor_calls}" >&2
+  cat "${OPENCLAW_CALL_LOG}" >&2
+  exit 1
+fi
+
+if grep -qx 'agent:req_executor:main' <<<"${executor_sessions}"; then
+  echo "expected executor RUN_SINGLE_ISSUE calls to avoid main session" >&2
+  cat "${OPENCLAW_CALL_LOG}" >&2
+  exit 1
+fi
+
+executor_session_count="$(printf '%s\n' "${executor_sessions}" | sort -u | wc -l | tr -d ' ')"
+if [ "${executor_session_count}" -ne 2 ]; then
+  echo "expected two distinct executor sessions, got ${executor_session_count}" >&2
+  cat "${OPENCLAW_CALL_LOG}" >&2
+  exit 1
+fi
+
+if ! grep -qx 'agent:req_executor:issue-claw-gitlab-px-ifp-hulat-test-101' <<<"${executor_sessions}" ||
+   ! grep -qx 'agent:req_executor:issue-claw-gitlab-px-ifp-hulat-test-102' <<<"${executor_sessions}"; then
+  echo "expected executor sessions to include project and iid" >&2
   cat "${OPENCLAW_CALL_LOG}" >&2
   exit 1
 fi

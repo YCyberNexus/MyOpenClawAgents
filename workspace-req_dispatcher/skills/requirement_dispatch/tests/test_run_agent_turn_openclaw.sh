@@ -155,6 +155,36 @@ if [ "$(printf '%s' "${executor_default_timeout}" | jq -r '.status')" != "succes
 fi
 
 : >"${OPENCLAW_LOG}"
+executor_issue_scoped_session="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-issue-session" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  MESSAGE='RUN_SINGLE_ISSUE
+project=ai-infra/veqp_server_v3
+iid=11
+correlation_id=reqd-9
+dispatcher_callback_target=agent:req_dispatcher:main' \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+expected_issue_session="agent:req_executor:issue-ai-infra-veqp-server-v3-11"
+if ! grep -q -- "agent --agent req_executor --session-id ${expected_issue_session}" "${OPENCLAW_LOG}"; then
+  echo "expected executor RUN_SINGLE_ISSUE to use issue-scoped session id" >&2
+  cat "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+if [ "$(printf '%s' "${executor_issue_scoped_session}" | jq -r '.child_session_key')" != "${expected_issue_session}" ]; then
+  echo "expected issue-scoped session id in wrapper envelope:" >&2
+  printf '%s\n' "${executor_issue_scoped_session}" >&2
+  exit 1
+fi
+
+: >"${OPENCLAW_LOG}"
 executor_timeout_floor="$(
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \
   OPENCLAW_LOG="${OPENCLAW_LOG}" \
