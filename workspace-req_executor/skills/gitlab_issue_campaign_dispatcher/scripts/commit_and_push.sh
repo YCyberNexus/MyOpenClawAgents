@@ -7,8 +7,8 @@
 #   WORKTREE_DIR             repo root cwd for git commands
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
-#   LOCAL_ATTEMPT_BRANCH     "issue/<iid>-auto-fix-att<NNN>"
-#   WORK_BRANCH              "issue/<iid>-auto-fix" (single remote)
+#   LOCAL_ATTEMPT_BRANCH     "issue/<iid>-att<NNN>"
+#   WORK_BRANCH              "issue/<iid>" (single remote)
 #   ISSUE_TITLE              short human title for commit message
 #
 # Why force-push: Strategy A keeps a single MR pointing at a single

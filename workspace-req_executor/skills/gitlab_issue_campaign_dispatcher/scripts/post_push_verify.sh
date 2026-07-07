@@ -8,7 +8,7 @@
 #
 # Required env vars:
 #   WORKTREE_DIR    repo root cwd
-#   WORK_BRANCH     "issue/<iid>-auto-fix"
+#   WORK_BRANCH     "issue/<iid>"
 #   BRANCH          integration / target branch
 #   ISSUE_IID       current issue IID (kept for log correlation)
 #

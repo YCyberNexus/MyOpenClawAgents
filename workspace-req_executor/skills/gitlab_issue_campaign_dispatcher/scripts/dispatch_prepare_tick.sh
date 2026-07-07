@@ -1324,7 +1324,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   fi
 
   ACPX_MIN=$(( ACPX_TIMEOUT / 60 ))
-  WORK_BRANCH_X="issue/${iid}-auto-fix"
+  WORK_BRANCH_X="issue/${iid}"
 
   RENDER_ERR="$(mktemp)"
   CLEANUP_FILES+=("${RENDER_ERR}")

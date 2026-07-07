@@ -214,7 +214,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
 
   export ISSUE_ROOT="${ISSUES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
-  export WORK_BRANCH="issue/${ISSUE_IID}-auto-fix"
+  export WORK_BRANCH="issue/${ISSUE_IID}"
 
   # One-time migration: older deployments placed per-issue subtrees directly
   # under ${RESULT_ROOT} (legacy issue-<iid>/) before the issues/

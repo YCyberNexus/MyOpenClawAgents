@@ -2,7 +2,7 @@
 # prepare_attempt.sh — ensure a per-issue linked git worktree exists for
 # this IID and put it on the right starting point for the current attempt.
 #
-# Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>-auto-fix").
+# Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>").
 # Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
 # "${WORK_BRANCH}-att${PADDED}") checked out into a SHARED per-issue
 # linked worktree at ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}

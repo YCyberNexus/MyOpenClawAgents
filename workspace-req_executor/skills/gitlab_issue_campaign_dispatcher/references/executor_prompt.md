@@ -27,7 +27,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ISSUE_BODY}`           | issue body (already in `{LOG_DIR}/prompt.txt`; for the `<issue>` block only — keep ≤ 4 KB) |
 | `{ISSUE_MODE}`           | `fresh` or `continue`; what `prepare_attempt.sh` actually used (`mode_actual`)          |
 | `{BRANCH}`               | resolved integration / target branch; explicit trigger value or remote default from `origin/HEAD` |
-| `{WORK_BRANCH}`          | `issue/{ISSUE_IID}-auto-fix`                                                            |
+| `{WORK_BRANCH}`          | `issue/{ISSUE_IID}`                                                                     |
 | `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/team_repo`, this is `/data/team_repo/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
 | `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree under the repo's fixed `.req_executor/.worktrees/issue-{ISSUE_IID}/` runtime area (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code uses the issue prompt and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
