@@ -1,15 +1,15 @@
 # State Schema
 
-`req_dispatcher` 的 state 极小：一张以 `run_id` 为主键的 pending 表、一个 durable executor FIFO queue、一个 append-only 审计 ledger。**没有** campaign_state / worktree / glab / 标签机。所有路径由 `scripts/env_paths.sh` 从 `STATE_ROOT` 派生。
+`req_dispatcher` 的 state 极小：一张以 `run_id` 为主键的 pending 表、一个 durable executor queue、一个 append-only 审计 ledger。**没有** campaign_state / worktree / glab / 标签机。所有路径由 `scripts/env_paths.sh` 从 `STATE_ROOT` 派生。
 
-编排器对一条需求做两段下游 agent 调用：先 `git_issuer` 段（建 issue），成功后把 issue 追加到 durable executor FIFO queue；`drain_executor_queue.sh` 是唯一启动 `executor` 段（驱动 `req_executor` 单次 issue 执行）的脚本。`git_issuer` 段用 `run_agent_turn.sh` envelope 的 `run_id` 做同轮审计 record/drain；`executor` 段由 queue active 生成稳定 `run_id` / `correlation_id`，启动成功后进入 pending，等待后续 I2 结果回调。
+编排器对一条需求做两段下游 agent 调用：先 `git_issuer` 段（建 issue），成功后把 issue 追加到 durable executor queue；`drain_executor_queue.sh` 是唯一启动 `executor` 段（驱动 `req_executor` 单次 issue 执行）的脚本。`git_issuer` 段用 `run_agent_turn.sh` envelope 的 `run_id` 做同轮审计 record/drain；`executor` 段由 queue active 槽生成稳定 `run_id` / `correlation_id`，启动成功后进入 pending，等待后续 I2 结果回调。
 
 ## 磁盘布局
 
 ```
 ${STATE_ROOT}/_dispatcher/
     pending.json        ← 下游结果 pending 表；flock(pending.lock) 保护
-    executor_queue.json ← executor durable FIFO；同一 pending.lock 保护
+    executor_queue.json ← executor durable queue；同一 pending.lock 保护
     ledger.jsonl        ← append-only 终态审计（每行一条 JSON）
     seq                 ← correlation_id 单调递增序号
     pending.lock        ← flock 目标
@@ -52,53 +52,56 @@ ${STATE_ROOT}/_dispatcher/
 
 初始内容（`ensure_state_dirs` 自动建）：`{"pending":{}}`。
 
-## `executor_queue.json`（executor durable FIFO）
+## `executor_queue.json`（executor durable queue）
 
 ```json
 {
   "next_id": 1,
-  "active": {
-    "queue_id": "execq-1",
-    "project": "group/project",
-    "iid": 12,
-    "issue_url": "http://gitlab/issues/12",
-    "executor_agent": "req_executor",
-    "origin": { "channel": "..", "user": "..", "conversation": "..", "reply_agent": ".." },
-    "req_digest": "string",
-    "queued_at": 1719300000,
-    "correlation_id": "reqd-23",
-    "run_id": "executor-execq-1",
-    "launch_state": "launching|launched|launch_failed",
-    "launch_attempts": 1,
-    "launch_started_at": 1719300060,
-    "launched_at": null,
-    "next_retry_after": null,
-    "launch_error": null,
-    "child_session_key": null
-  },
+  "active": [
+    {
+      "queue_id": "execq-1",
+      "project": "group/project",
+      "iid": 12,
+      "issue_url": "http://gitlab/issues/12",
+      "executor_agent": "req_executor",
+      "origin": { "channel": "..", "user": "..", "conversation": "..", "reply_agent": ".." },
+      "req_digest": "string",
+      "queued_at": 1719300000,
+      "correlation_id": "reqd-23",
+      "run_id": "executor-execq-1",
+      "launch_state": "launching|launched|launch_failed",
+      "launch_attempts": 1,
+      "launch_started_at": 1719300060,
+      "launched_at": null,
+      "next_retry_after": null,
+      "launch_error": null,
+      "child_session_key": null
+    }
+  ],
   "queue": []
 }
 ```
 
-初始内容（`ensure_state_dirs` 自动建）：`{"next_id":1,"active":null,"queue":[]}`。
+初始内容（`ensure_state_dirs` 自动建）：`{"next_id":1,"active":[],"queue":[]}`。
+脚本兼容旧 state：若发现 legacy `.active` 为 `null` 或单个 object，会在下一次 enqueue/drain/finish/evict 时规范为数组。
 
 职责边界：
 
 - `enqueue_executor_issue.sh` 只把 `git_issuer` 已创建成功的 issue 追加到 `.queue` 队尾，并生成单调 `queue_id`。
-- `drain_executor_queue.sh` 是唯一允许把 `.queue[0]` 移入 `.active` 并启动 executor 的入口。它在认领 active 时同步预写同 `run_id` 的 executor pending 占位，避免 executor 很快回调时找不到 pending；启动失败会删除该占位，启动成功会补 `child_session_key` 并把 active 标为 `launched`。
-- `finish_executor_queue_active.sh` 只在 executor I2 回调的 `correlation_id` 匹配当前 `.active` 时清空 active；随后必须再次调用 `drain_executor_queue.sh` 继续推进队首。
-- `evict_stuck.sh` 驱逐 executor pending 时，如果该 pending 的 `run_id` 或 `correlation_id` 匹配当前 `.active`，会同步清空 active；后续 queue drain 可继续启动下一条。
-- `.active.launch_state="launching"` 表示已经从队列认领、正在启动 executor。若该状态超过 `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS`，下一次 drain 会复用同一个 `run_id` / `correlation_id` 重新启动，恢复 OpenClaw 会话被用户或运行时中断的场景；部署默认应覆盖 `EXECUTOR_AGENT_TIMEOUT_SECONDS` 再留余量，避免正常长 executor turn 尚未返回时重复启动。
+- `drain_executor_queue.sh` 是唯一允许把 queued item 移入 `.active[]` 并启动 executor 的入口。普通模式会连续执行单步 drain，最多 `EXECUTOR_QUEUE_DRAIN_BATCH_LIMIT` 次：有空闲槽且存在符合 `EXECUTOR_QUEUE_MAX_ACTIVE_PER_ORIGIN` 的 queued item 时，优先把该 item 放入 `.active[]`；没有可启动 queued item 或 active 槽已满时，才恢复到期的 `launching` / `launch_failed` active 槽。它在认领 active 槽时同步预写同 `run_id` 的 executor pending 占位，避免 executor 很快回调时找不到 pending；启动失败会删除该占位，启动成功会补 `child_session_key` 并把该 active 槽标为 `launched`。
+- `finish_executor_queue_active.sh` 只在 executor I2 回调的 `correlation_id` 匹配某个 `.active[]` 槽时清空该槽；随后必须再次调用 `drain_executor_queue.sh` 继续推进 eligible item。
+- `evict_stuck.sh` 驱逐 executor pending 时，如果该 pending 的 `run_id` 或 `correlation_id` 匹配当前 `.active[]` 槽，会同步清空该槽；后续 queue drain 可继续填充可用槽。
+- `.active[].launch_state="launching"` 表示已经从队列认领、正在启动 executor。若该状态超过 `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS`，下一次 drain 会复用同一个 `run_id` / `correlation_id` 重新启动，恢复 OpenClaw 会话被用户或运行时中断的场景；部署默认应覆盖 `EXECUTOR_AGENT_TIMEOUT_SECONDS` 再留余量，避免正常长 executor turn 尚未返回时重复启动。
 - executor 启动成功必须同时满足外层 `run_agent_turn.sh` envelope `status="success"`，以及 executor `worker_result_json.status="waiting_for_callbacks"` 或 raw output 含 `waiting_for_callbacks`。其他状态会删除 pending 占位，并保留 active 为 `launch_failed` 等后续 drain 重试。
-- 如果 executor 在初始 turn 返回前已经完成并回调，回调会 drain pending 并清 active；此时 `drain_executor_queue.sh` 返回 `active_changed_after_launch`，不再补写已完成 issue 的旧 pending。
-- `.active.launch_state="launched"` 表示 executor 已经启动且 pending 已记录；此时 queue drain 返回 `busy`，直到 I2 回调清空 active。
-- `.active.launch_state="launch_failed"` 表示本轮 drain 对同一个 payload 的启动尝试已耗尽；active 不丢弃，`next_retry_after` 到期后的下一次 drain 会继续重试。
+- 如果 executor 在初始 turn 返回前已经完成并回调，回调会 drain pending 并清 active 槽；此时 `drain_executor_queue.sh` 返回 `active_changed_after_launch`，不再补写已完成 issue 的旧 pending。
+- `.active[].launch_state="launched"` 表示 executor 已经启动且 pending 已记录。若 active 槽未满且 queued item 不受 per-origin cap 限制，后续 drain 仍可启动其他 issue。
+- `.active[].launch_state="launch_failed"` 表示本轮 drain 对同一个 payload 的启动尝试已耗尽；active 槽不丢弃，`next_retry_after` 到期后的下一次 drain 会继续重试。
 
 字段：
 
 - `next_id`：下一条入队 issue 的数字序号。`queue_id` 形如 `execq-N`。
-- `active`：当前正在启动或等待回调的 executor issue。为 `null` 时可启动队首。
-- `queue`：等待执行的 FIFO 列表。新 wiki 或自由文本需求只追加队尾，不抢占 active。
+- `active`：当前正在启动或等待回调的 executor issue 数组。数组长度受 `EXECUTOR_QUEUE_MAX_ACTIVE` 控制。
+- `queue`：等待执行的 FIFO 列表。新 wiki 或自由文本需求只追加队尾；启用 per-origin cap 时，drain 可跳过已达用户上限的 item，启动后面的其他用户 item。
 - `project` / `iid` / `issue_url`：`git_issuer` 成功返回的 issue 事实。
 - `executor_agent`：`route_project.sh` 选出的目标 executor agent。
 - `origin` / `req_digest` / `queued_at`：从接入路径携带的回推与审计信息。

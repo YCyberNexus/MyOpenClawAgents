@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Clear the durable executor queue active item after an executor terminal callback.
+# Clear one durable executor queue active item after an executor terminal callback.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -18,34 +18,51 @@ fi
 exec 9>"${LOCK_FILE}"
 flock 9
 
-active="$(jq -c '.active // null' "${EXECUTOR_QUEUE_FILE}")" \
+tmp_normalized="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
+jq '
+  def active_array:
+    if (.active | type) == "array" then .active
+    elif .active == null then []
+    else [.active]
+    end;
+  .active = active_array
+  | .queue = (.queue // [])
+' "${EXECUTOR_QUEUE_FILE}" > "${tmp_normalized}"
+mv "${tmp_normalized}" "${EXECUTOR_QUEUE_FILE}"
+
+active="$(jq -c '.active' "${EXECUTOR_QUEUE_FILE}")" \
   || { echo "jq read failed on ${EXECUTOR_QUEUE_FILE} (corrupt?)" >&2; exit 1; }
+active_count="$(jq -r '.active | length' "${EXECUTOR_QUEUE_FILE}")"
 queued_count="$(jq -r '.queue | length' "${EXECUTOR_QUEUE_FILE}")"
 
-if [ "${active}" = "null" ]; then
+if [ "${active_count}" = "0" ]; then
   flock -u 9
-  jq -nc --arg status "no_active" --argjson queued_count "${queued_count}" \
-    '{status:$status, queued_count:$queued_count}'
+  jq -nc --arg status "no_active" \
+    --argjson active_count "${active_count}" \
+    --argjson queued_count "${queued_count}" \
+    '{status:$status, active_count:$active_count, queued_count:$queued_count}'
   exit 0
 fi
 
-active_correlation="$(jq -r '.correlation_id // ""' <<<"${active}")"
-active_project="$(jq -r '.project // ""' <<<"${active}")"
-active_iid="$(jq -r '.iid // ""' <<<"${active}")"
+matched="$(jq -c --arg cid "${CORRELATION_ID}" \
+  '[.active[] | select(.correlation_id == $cid)][0] // empty' "${EXECUTOR_QUEUE_FILE}")"
 
-if [ "${active_correlation}" != "${CORRELATION_ID}" ]; then
+if [ -z "${matched}" ]; then
   flock -u 9
   jq -nc \
     --arg status "ignored" \
     --arg reason "correlation_mismatch" \
-    --arg active_correlation "${active_correlation}" \
     --arg correlation_id "${CORRELATION_ID}" \
     --argjson active "${active}" \
+    --argjson active_count "${active_count}" \
     --argjson queued_count "${queued_count}" \
-    '{status:$status, reason:$reason, active_correlation:$active_correlation,
-      correlation_id:$correlation_id, active:$active, queued_count:$queued_count}'
+    '{status:$status, reason:$reason, correlation_id:$correlation_id,
+      active:$active, active_count:$active_count, queued_count:$queued_count}'
   exit 0
 fi
+
+active_project="$(jq -r '.project // ""' <<<"${matched}")"
+active_iid="$(jq -r '.iid // ""' <<<"${matched}")"
 
 if [ -n "${PROJECT}" ] && [ "${active_project}" != "${PROJECT}" ]; then
   flock -u 9
@@ -54,10 +71,12 @@ if [ -n "${PROJECT}" ] && [ "${active_project}" != "${PROJECT}" ]; then
     --arg reason "project_mismatch" \
     --arg active_project "${active_project}" \
     --arg project "${PROJECT}" \
-    --argjson active "${active}" \
+    --argjson active "${matched}" \
+    --argjson active_count "${active_count}" \
     --argjson queued_count "${queued_count}" \
     '{status:$status, reason:$reason, active_project:$active_project,
-      project:$project, active:$active, queued_count:$queued_count}'
+      project:$project, active:$active, active_count:$active_count,
+      queued_count:$queued_count}'
   exit 0
 fi
 
@@ -68,23 +87,30 @@ if [ -n "${IID}" ] && [ "${active_iid}" != "${IID}" ]; then
     --arg reason "iid_mismatch" \
     --arg active_iid "${active_iid}" \
     --arg iid "${IID}" \
-    --argjson active "${active}" \
+    --argjson active "${matched}" \
+    --argjson active_count "${active_count}" \
     --argjson queued_count "${queued_count}" \
     '{status:$status, reason:$reason, active_iid:$active_iid,
-      iid:$iid, active:$active, queued_count:$queued_count}'
+      iid:$iid, active:$active, active_count:$active_count,
+      queued_count:$queued_count}'
   exit 0
 fi
 
 tmp="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
-jq '.active = null' "${EXECUTOR_QUEUE_FILE}" > "${tmp}"
+jq --arg cid "${CORRELATION_ID}" '
+  .active = [.active[] | select(.correlation_id != $cid)]
+' "${EXECUTOR_QUEUE_FILE}" > "${tmp}"
 mv "${tmp}" "${EXECUTOR_QUEUE_FILE}"
+active_count="$(jq -r '.active | length' "${EXECUTOR_QUEUE_FILE}")"
 queued_count="$(jq -r '.queue | length' "${EXECUTOR_QUEUE_FILE}")"
 flock -u 9
 
 jq -nc \
   --arg status "cleared" \
   --arg correlation_id "${CORRELATION_ID}" \
-  --argjson cleared_active "${active}" \
+  --argjson cleared_active "${matched}" \
+  --argjson active_count "${active_count}" \
   --argjson queued_count "${queued_count}" \
   '{status:$status, correlation_id:$correlation_id,
-    cleared_active:$cleared_active, queued_count:$queued_count}'
+    cleared_active:$cleared_active, active_count:$active_count,
+    queued_count:$queued_count}'

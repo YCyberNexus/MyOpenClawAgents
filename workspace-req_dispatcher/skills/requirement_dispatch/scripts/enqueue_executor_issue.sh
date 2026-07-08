@@ -46,8 +46,13 @@ jq \
   --argjson origin "${ORIGIN_JSON:-null}" \
   --arg req_digest "${REQ_DIGEST}" \
   --argjson queued_at "${QUEUED_AT}" '
+  def active_array:
+    if (.active | type) == "array" then .active
+    elif .active == null then []
+    else [.active]
+    end;
   .next_id = ((.next_id // 1) + 1)
-  | .active = (.active // null)
+  | .active = active_array
   | .queue = ((.queue // []) + [{
       queue_id: $queue_id,
       project: $project,
@@ -62,10 +67,12 @@ jq \
 mv "${tmp}" "${EXECUTOR_QUEUE_FILE}"
 
 queued_count="$(jq -r '.queue | length' "${EXECUTOR_QUEUE_FILE}")"
+active_count="$(jq -r '.active | length' "${EXECUTOR_QUEUE_FILE}")"
 flock -u 9
 
 jq -nc \
   --arg status "queued" \
   --arg queue_id "${queue_id}" \
   --argjson queued_count "${queued_count}" \
-  '{status:$status, queue_id:$queue_id, queued_count:$queued_count}'
+  --argjson active_count "${active_count}" \
+  '{status:$status, queue_id:$queue_id, queued_count:$queued_count, active_count:$active_count}'

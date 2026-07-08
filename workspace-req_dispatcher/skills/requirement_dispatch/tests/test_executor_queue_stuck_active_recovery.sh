@@ -106,7 +106,7 @@ if [ "$(jq -r '.status' <<<"${drain}")" != "launched" ] ||
   exit 1
 fi
 
-if [ "$(jq -r '.active.iid' "${DISPATCHER_DIR}/executor_queue.json")" != "46" ] ||
+if [ "$(jq -r '.active[0].iid' "${DISPATCHER_DIR}/executor_queue.json")" != "46" ] ||
    [ "$(jq -r '.queue | length' "${DISPATCHER_DIR}/executor_queue.json")" != "0" ]; then
   echo "expected iid 46 to become active after stuck recovery" >&2
   jq . "${DISPATCHER_DIR}/executor_queue.json" >&2

@@ -54,8 +54,8 @@ if [ "$(sort -u "${OPENCLAW_CALL_LOG}" | wc -l | tr -d ' ')" != "1" ]; then
 fi
 
 queue_file="${STATE_ROOT}/_dispatcher/executor_queue.json"
-if [ "$(jq -r '.active.iid' "${queue_file}")" != "12" ] ||
-   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launch_failed" ] ||
+if [ "$(jq -r '.active[0].iid' "${queue_file}")" != "12" ] ||
+   [ "$(jq -r '.active[0].launch_state' "${queue_file}")" != "launch_failed" ] ||
    [ "$(jq -r '.queue | length' "${queue_file}")" != "0" ]; then
   echo "expected failed launch to keep iid 12 active for later retry" >&2
   cat "${queue_file}" >&2

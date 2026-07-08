@@ -21,7 +21,7 @@ CUTOFF=$(( NOW - STUCK_AFTER_MINUTES * 60 ))
 exec 9>"${LOCK_FILE}"
 flock 9
 # 找出过期 entry（spawned_at < CUTOFF），每行一条紧凑 JSON；后续 ledger/delete/notify 都基于同一快照。
-# jq 失败（如 pending.json 损坏）必须可见，不可被 mapfile 静默吞成空数组。
+# jq 失败（如 pending.json 损坏）必须可见，不可被读取循环静默吞成空数组。
 expired_raw="$(jq -c --argjson cutoff "${CUTOFF}" \
   '.pending | to_entries[] | select(.value.spawned_at < $cutoff) |
    {run_id:.key,
@@ -33,7 +33,9 @@ expired_raw="$(jq -c --argjson cutoff "${CUTOFF}" \
   || { echo "jq read failed on ${PENDING_FILE} (corrupt?)" >&2; exit 1; }
 
 expired=()
-[ -n "${expired_raw}" ] && mapfile -t expired <<< "${expired_raw}"
+while IFS= read -r entry; do
+  [ -n "${entry}" ] && expired+=("${entry}")
+done <<< "${expired_raw}"
 notify_timeout_entries=()
 
 if [ "${#expired[@]}" -gt 0 ]; then
@@ -64,7 +66,6 @@ if [ "${#expired[@]}" -gt 0 ]; then
   # 按已确定的同一批 key 精确删除（而非按 cutoff 二次过滤），ledger 集合 == 删除集合。
   keys_json="$(printf '%s\n' "${keys[@]}" | jq -R . | jq -s .)"
   tmp="$(mktemp "${DISPATCHER_DIR}/pending.XXXXXX")"
-  trap 'rm -f "${tmp}"' EXIT
   jq --argjson ks "${keys_json}" 'reduce $ks[] as $k (.; del(.pending[$k]))' \
      "${PENDING_FILE}" > "${tmp}"
   mv "${tmp}" "${PENDING_FILE}"
@@ -73,26 +74,41 @@ if [ "${#expired[@]}" -gt 0 ]; then
     refs_json="$(printf '%s\n' "${executor_refs[@]}" | jq -s .)"
     tmp_queue="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
     jq --argjson refs "${refs_json}" '
-      (.active) as $active
-      | if $active != null and any($refs[]; .run_id == ($active.run_id // "") or ((.correlation_id // null) != null and .correlation_id == ($active.correlation_id // null)))
-        then .active = null
-        else .
-        end
+      def active_array:
+        if (.active | type) == "array" then .active
+        elif .active == null then []
+        else [.active]
+        end;
+      .active = (
+        active_array
+        | map(
+            . as $active
+            | select(
+                any($refs[];
+                  .run_id == ($active.run_id // "")
+                  or ((.correlation_id // null) != null
+                      and .correlation_id == ($active.correlation_id // null))
+                ) | not
+              )
+          )
+      )
     ' "${EXECUTOR_QUEUE_FILE}" > "${tmp_queue}"
     mv "${tmp_queue}" "${EXECUTOR_QUEUE_FILE}"
   fi
 fi
 flock -u 9
 
-for entry in "${notify_timeout_entries[@]}"; do
-  rid="$(jq -r '.run_id' <<<"${entry}")"
-  iid="$(jq -r 'if .iid == null then "" else (.iid|tostring) end' <<<"${entry}")"
-  origin_json="$(jq -c '.origin' <<<"${entry}")"
-  if ! EVENT="result" STATUS="timeout" IID="${iid}" ORIGIN_JSON="${origin_json}" \
-       REASON="no callback before stuck_after_minutes" \
-       bash "${SCRIPT_DIR}/notify_user.sh"; then
-    echo "evict_stuck: notify_user timeout push failed for run_id=${rid} (non-fatal)" >&2
-  fi
-done
+if [ "${#notify_timeout_entries[@]}" -gt 0 ]; then
+  for entry in "${notify_timeout_entries[@]}"; do
+    rid="$(jq -r '.run_id' <<<"${entry}")"
+    iid="$(jq -r 'if .iid == null then "" else (.iid|tostring) end' <<<"${entry}")"
+    origin_json="$(jq -c '.origin' <<<"${entry}")"
+    if ! EVENT="result" STATUS="timeout" IID="${iid}" ORIGIN_JSON="${origin_json}" \
+         REASON="no callback before stuck_after_minutes" \
+         bash "${SCRIPT_DIR}/notify_user.sh"; then
+      echo "evict_stuck: notify_user timeout push failed for run_id=${rid} (non-fatal)" >&2
+    fi
+  done
+fi
 
 printf 'evicted %d stuck pending\n' "${#expired[@]}"

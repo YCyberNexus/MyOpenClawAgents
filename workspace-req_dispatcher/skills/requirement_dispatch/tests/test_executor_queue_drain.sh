@@ -88,8 +88,8 @@ if [ "$(jq -r '.iid' <<<"${drain}")" != "12" ]; then
   exit 1
 fi
 
-if [ "$(jq -r '.active.iid' "${queue_file}")" != "12" ] ||
-   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ]; then
+if [ "$(jq -r '.active[0].iid' "${queue_file}")" != "12" ] ||
+   [ "$(jq -r '.active[0].launch_state' "${queue_file}")" != "launched" ]; then
   echo "expected active launched item to be iid 12" >&2
   cat "${queue_file}" >&2
   exit 1

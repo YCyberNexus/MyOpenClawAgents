@@ -60,7 +60,7 @@ if [ "$(jq -r '.status' <<<"${drain}")" != "launched" ]; then
   exit 1
 fi
 
-if [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ] ||
+if [ "$(jq -r '.active[0].launch_state' "${queue_file}")" != "launched" ] ||
    [ "$(jq -r '.pending | length' "${pending_file}")" != "1" ]; then
   echo "expected launched active and executor pending for chat_summary acceptance" >&2
   jq . "${queue_file}" >&2

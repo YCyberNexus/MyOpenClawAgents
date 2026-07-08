@@ -19,6 +19,6 @@ export DISPATCHER_DIR PENDING_FILE EXECUTOR_QUEUE_FILE LEDGER_FILE SEQ_FILE LOCK
 ensure_state_dirs() {
   mkdir -p "${DISPATCHER_DIR}" "${LOG_DIR}"
   [ -f "${PENDING_FILE}" ] || printf '%s\n' '{"pending":{}}' > "${PENDING_FILE}"
-  [ -f "${EXECUTOR_QUEUE_FILE}" ] || printf '%s\n' '{"next_id":1,"active":null,"queue":[]}' > "${EXECUTOR_QUEUE_FILE}"
+  [ -f "${EXECUTOR_QUEUE_FILE}" ] || printf '%s\n' '{"next_id":1,"active":[],"queue":[]}' > "${EXECUTOR_QUEUE_FILE}"
   [ -f "${LEDGER_FILE}" ] || : > "${LEDGER_FILE}"
 }

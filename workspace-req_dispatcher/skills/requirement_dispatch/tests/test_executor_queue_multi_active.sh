@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-queue-finish.XXXXXX")"
+TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-queue-multi-active.XXXXXX")"
 STATE_ROOT="${TEST_ROOT}/state"
 FAKE_OPENCLAW="${TEST_ROOT}/openclaw"
 OPENCLAW_CALL_LOG="${TEST_ROOT}/openclaw.calls.jsonl"
@@ -34,8 +34,9 @@ printf '%s\n' '{"status":"waiting_for_callbacks","chat_summary":"accepted execut
 FAKE
 chmod +x "${FAKE_OPENCLAW}"
 
-origin='{"channel":"wecom","user":"u1","conversation":"c1","reply_agent":"reply_agent"}'
-for iid in 12 13; do
+for iid in 12 13 14; do
+  origin="$(jq -nc --arg user "u${iid}" \
+    '{channel:"wecom", user:$user, conversation:("c-" + $user), reply_agent:"reply_agent"}')"
   STATE_ROOT="${STATE_ROOT}" \
   PROJECT="ai-infra/veqp_server_v3" \
   IID="${iid}" \
@@ -46,50 +47,51 @@ for iid in 12 13; do
   bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh" >/dev/null
 done
 
-drain_one="$(
+drain="$(
   STATE_ROOT="${STATE_ROOT}" \
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \
   OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
   EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
+  EXECUTOR_QUEUE_MAX_ACTIVE="2" \
   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
   bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
 )"
 
-finish="$(
-  STATE_ROOT="${STATE_ROOT}" \
-  CORRELATION_ID="$(jq -r '.correlation_id' <<<"${drain_one}")" \
-  PROJECT="ai-infra/veqp_server_v3" \
-  IID="12" \
-  bash "${SKILL_DIR}/scripts/finish_executor_queue_active.sh"
-)"
-
-if [ "$(jq -r '.status' <<<"${finish}")" != "cleared" ]; then
-  echo "expected finish to clear active" >&2
-  printf '%s\n' "${finish}" >&2
+if [ "$(jq -r '.status' <<<"${drain}")" != "drained" ] ||
+   [ "$(jq -r '.launched_count' <<<"${drain}")" != "2" ] ||
+   [ "$(jq -r '[.results[].iid] | join(",")' <<<"${drain}")" != "12,13" ]; then
+  echo "expected one drain invocation to launch iid 12 and iid 13" >&2
+  printf '%s\n' "${drain}" >&2
   exit 1
 fi
 
-drain_two="$(
-  STATE_ROOT="${STATE_ROOT}" \
-  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
-  OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
-  EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
-  DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
-  bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
-)"
-
-if [ "$(jq -r '.status' <<<"${drain_two}")" != "launched" ] ||
-   [ "$(jq -r '.iid' <<<"${drain_two}")" != "13" ]; then
-  echo "expected second drain to launch iid 13" >&2
-  printf '%s\n' "${drain_two}" >&2
+if [ "$(jq -r '.active_count' <<<"${drain}")" != "2" ] ||
+   [ "$(jq -r '.queued_count' <<<"${drain}")" != "1" ]; then
+  echo "expected drain summary to report two active and one queued" >&2
+  printf '%s\n' "${drain}" >&2
   exit 1
 fi
 
 queue_file="${STATE_ROOT}/_dispatcher/executor_queue.json"
-if [ "$(jq -r '.active[0].iid' "${queue_file}")" != "13" ] ||
-   [ "$(jq -r '.queue | length' "${queue_file}")" != "0" ]; then
-  echo "expected iid 13 active and empty queue" >&2
-  cat "${queue_file}" >&2
+pending_file="${STATE_ROOT}/_dispatcher/pending.json"
+
+if [ "$(jq -r '.active | length' "${queue_file}")" != "2" ] ||
+   [ "$(jq -r '[.active[].iid] | join(",")' "${queue_file}")" != "12,13" ]; then
+  echo "expected two active launched issues: 12,13" >&2
+  jq . "${queue_file}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.queue | length' "${queue_file}")" != "1" ] ||
+   [ "$(jq -r '.queue[0].iid' "${queue_file}")" != "14" ]; then
+  echo "expected iid 14 to remain queued" >&2
+  jq . "${queue_file}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.pending | length' "${pending_file}")" != "2" ]; then
+  echo "expected two executor pending entries" >&2
+  jq . "${pending_file}" >&2
   exit 1
 fi
 
@@ -100,4 +102,4 @@ if [ "${launched_iids}" != "12,13" ]; then
   exit 1
 fi
 
-echo "ok executor queue finish clears active and drains next"
+echo "ok executor queue supports multiple active issues"

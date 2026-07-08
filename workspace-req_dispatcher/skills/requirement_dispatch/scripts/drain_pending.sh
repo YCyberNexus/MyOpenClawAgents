@@ -64,7 +64,6 @@ jq -nc --arg rid "${RUN_ID}" --arg oc "${OUTCOME}" \
      drained_at:$ts, was_pending:($present=="yes")}' \
    >> "${LEDGER_FILE}"
 tmp="$(mktemp "${DISPATCHER_DIR}/pending.XXXXXX")"
-trap 'rm -f "${tmp}"' EXIT
 jq --arg rid "${RUN_ID}" 'del(.pending[$rid])' "${PENDING_FILE}" > "${tmp}"
 mv "${tmp}" "${PENDING_FILE}"
 flock -u 9

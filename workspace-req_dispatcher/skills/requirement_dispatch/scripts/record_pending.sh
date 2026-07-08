@@ -39,7 +39,6 @@ SPAWNED_AT="$(date -u +%s)"
 exec 9>"${LOCK_FILE}"
 flock 9
 tmp="$(mktemp "${DISPATCHER_DIR}/pending.XXXXXX")"
-trap 'rm -f "${tmp}"' EXIT
 jq --arg rid "${RUN_ID}" \
    --arg stage "${STAGE}" \
    --argjson origin "${ORIGIN_JSON:-null}" \

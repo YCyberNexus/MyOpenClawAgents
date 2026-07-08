@@ -123,7 +123,7 @@ if ! jq -e '.pending == {}' "${DISPATCHER_DIR}/pending.json" >/dev/null; then
   exit 1
 fi
 
-if ! jq -e '.active == null and (.queue | length) == 1 and .queue[0].iid == 46' \
+if ! jq -e '(.active | length) == 0 and (.queue | length) == 1 and .queue[0].iid == 46' \
   "${DISPATCHER_DIR}/executor_queue.json" >/dev/null; then
   echo "expected evict_stuck.sh to clear matching executor queue active and preserve queued items" >&2
   jq . "${DISPATCHER_DIR}/executor_queue.json" >&2

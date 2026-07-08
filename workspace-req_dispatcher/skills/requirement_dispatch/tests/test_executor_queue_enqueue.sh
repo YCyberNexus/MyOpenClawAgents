@@ -50,7 +50,7 @@ if [ "$(jq -r '.queue_id' <<<"${second}")" != "execq-2" ]; then
   exit 1
 fi
 
-if [ "$(jq -r '.active == null' "${queue_file}")" != "true" ]; then
+if [ "$(jq -r '.active | length' "${queue_file}")" != "0" ]; then
   echo "expected no active item after enqueue only" >&2
   cat "${queue_file}" >&2
   exit 1

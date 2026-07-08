@@ -16,6 +16,9 @@
 | `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
 | `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
 | `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，默认配置为 `10800`（3 小时）。目标 agent 不等于 `GIT_ISSUER_AGENT` 时按 executor 处理；git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
+| `EXECUTOR_QUEUE_MAX_ACTIVE` | 否 | executor 队列全局并发槽数，默认部署配置为 `8`。同一 req_dispatcher 部署最多同时保留这些 active executor issue 等回调，其余 issue 持久排队；不要按 1000 名员工创建 1000 个 executor 并发。 |
+| `EXECUTOR_QUEUE_DRAIN_BATCH_LIMIT` | 否 | 单次普通 `drain_executor_queue.sh` 最多启动多少个 eligible issue，默认部署配置为 `8`，建议与 `EXECUTOR_QUEUE_MAX_ACTIVE` 保持一致。这样一次接入或周期性恢复唤醒即可填满可用 active 槽，而不是只启动一条。 |
+| `EXECUTOR_QUEUE_MAX_ACTIVE_PER_ORIGIN` | 否 | 单个 origin 用户可同时占用的 executor 槽数，默认部署配置为 `1`。取 `0` 表示不按 origin 限流。启用时，队首用户已达上限会让后续其他用户的等待项先启动，以保留公司级入口公平性。 |
 | `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` | 否 | executor queue active 卡在 `launching` 多久后可由下一次 drain 复用同一 `run_id` / `correlation_id` 重新启动，默认配置为 `11100`（3 小时 executor 外层超时 + 5 分钟余量）。用于恢复 OpenClaw 会话被用户或运行时中断，同时避免正常长 executor turn 尚未返回时重复启动。 |
 | `EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS` | 否 | `launch_failed` active 下一次允许重试前等待的秒数，默认 `60`。 |
 | `EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS` | 否 | 单次 `drain_executor_queue.sh` 对同一 executor payload 的启动尝试次数，默认 `3`。 |
@@ -35,7 +38,7 @@
 
 ## `routing.env`（多 project 路由表）
 
-git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 调用队首 `<executor> RUN_SINGLE_ISSUE`。消费方 `scripts/route_project.sh`。
+git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 在空闲槽内调用 eligible `<executor> RUN_SINGLE_ISSUE`。消费方 `scripts/route_project.sh`。
 
 行格式：每行一条 `PROJECT=AGENT`。
 
@@ -65,7 +68,7 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token/branch pin。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
 7. `DISPATCHER_CALLBACK_TARGET` 按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。未填时执行器结果回调字段为空。
-8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 正在执行且未超时时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且无 active 时会继续推进。这个唤醒是 #11 完成后 #12 不依赖人工追问的恢复兜底。
+8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 槽已满时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且还有空闲槽时会继续推进，并按 `EXECUTOR_QUEUE_DRAIN_BATCH_LIMIT` 尽量填满可用槽。这个唤醒是 #11 完成后 #12 不依赖人工追问的恢复兜底。
 
 ## 与 acpx 工作区的差异
 

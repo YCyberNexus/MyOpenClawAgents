@@ -77,7 +77,7 @@ if [ "$(jq -r '.status' <<<"${drain}")" != "active_changed_after_launch" ]; then
   exit 1
 fi
 
-if ! jq -e '.active == null' "${queue_file}" >/dev/null; then
+if ! jq -e '(.active | length) == 0' "${queue_file}" >/dev/null; then
   echo "expected callback during launch to leave active cleared" >&2
   jq . "${queue_file}" >&2
   exit 1

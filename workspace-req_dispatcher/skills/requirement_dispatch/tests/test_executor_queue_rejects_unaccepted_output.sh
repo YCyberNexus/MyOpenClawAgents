@@ -59,13 +59,13 @@ if [ "$(jq -r '.status' <<<"${drain}")" != "launch_failed" ]; then
   exit 1
 fi
 
-if [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launch_failed" ]; then
+if [ "$(jq -r '.active[0].launch_state' "${queue_file}")" != "launch_failed" ]; then
   echo "expected active to remain launch_failed" >&2
   jq . "${queue_file}" >&2
   exit 1
 fi
 
-if ! jq -e '.active.launch_error | contains("worker_result_json.status=completed")' \
+if ! jq -e '.active[0].launch_error | contains("worker_result_json.status=completed")' \
   "${queue_file}" >/dev/null; then
   echo "expected launch_error to explain rejected worker status" >&2
   jq . "${queue_file}" >&2

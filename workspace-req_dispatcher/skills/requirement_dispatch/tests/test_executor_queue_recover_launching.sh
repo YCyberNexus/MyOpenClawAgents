@@ -45,7 +45,7 @@ bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh" >/dev/null
 queue_file="${STATE_ROOT}/_dispatcher/executor_queue.json"
 tmp="$(mktemp "${TEST_ROOT}/queue.XXXXXX")"
 jq '
-  .active = (.queue[0] + {
+  .active = [(.queue[0] + {
     correlation_id: "reqd-77",
     run_id: "executor-execq-1",
     launch_state: "launching",
@@ -54,7 +54,7 @@ jq '
     launched_at: null,
     next_retry_after: null,
     launch_error: null
-  })
+  })]
   | .queue = []
 ' "${queue_file}" >"${tmp}"
 mv "${tmp}" "${queue_file}"
@@ -88,8 +88,8 @@ if ! grep -q '^correlation_id=reqd-77$' <<<"${message}"; then
   exit 1
 fi
 
-if [ "$(jq -r '.active.launch_attempts' "${queue_file}")" != "2" ] ||
-   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ]; then
+if [ "$(jq -r '.active[0].launch_attempts' "${queue_file}")" != "2" ] ||
+   [ "$(jq -r '.active[0].launch_state' "${queue_file}")" != "launched" ]; then
   echo "expected active launch_attempts to increment and mark launched" >&2
   cat "${queue_file}" >&2
   exit 1
