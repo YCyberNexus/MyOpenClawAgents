@@ -2,13 +2,13 @@
 
 > 状态：**已落成明确契约**。`req_dispatcher` 发起下游 agent turn 固定通过 `scripts/run_agent_turn.sh` 包装 `openclaw agent`；executor 结果回调固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。不再使用未确认参数名的旧占位原语。
 >
-> 编排器对一条需求做两段下游调用：入口消息若包含 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；否则用 `prepare_downstream_payloads.sh` 将旧自由文本整理成单条建单消息。随后调用蓝区 `git_issuer` 建 issue 并读取其 `worker_result_json`；成功后按 project 路由选 executor，把 issue 追加到 durable `executor_queue.json`，再由 `drain_executor_queue.sh` 为队首生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段由队列 active 记录 pending，等待后续 I2 结果回调。
+> 编排器对一条需求做两段下游调用：入口消息若包含 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；否则用 `prepare_downstream_payloads.sh` 从自由文本中的 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段确定性提取 project 并整理成单条建单消息。随后调用蓝区 `git_issuer` 建 issue 并读取其 `worker_result_json`；成功后按 project 路由选 executor，把 issue 追加到 durable `executor_queue.json`，再由 `drain_executor_queue.sh` 为队首生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段由队列 active 记录 pending，等待后续 I2 结果回调。
 
 ## 接入消息（114 → req_dispatcher）
 
 - 形态：自由文本，经网关 `agent run --agent req_dispatcher "<需求原文或 wiki URL>" --deliver`（架构图"114 侧调用特定 agent"方式 A）或等价 HTTP 桥接（方式 B）。
 - req_dispatcher 收到的就是一段需求文本，**不是结构化 trigger 信封**。orchestrator 据"路径判定"识别为接入路径。
-- `req_dispatcher` 不再把这段文本原样透传给 git_issuer。若文本里有 GitLab wiki URL，它调用 `scripts/prepare_wiki_downstream_payloads.sh` 从 URL 解析 `group/project`、读取 wiki 并拆分为多条 `git_issuer_payloads`。若没有 wiki URL，则调用 `scripts/prepare_downstream_payloads.sh` 剥离 114/origin 包装、要求文本里明确出现 GitLab `group/project`，并生成带 `repo=<group/project>` 的单条 `git_issuer_payload`。入口准备失败时，req_dispatcher 直接推用户失败说明，不调用 git_issuer。
+- `req_dispatcher` 不再把这段文本原样透传给 git_issuer。若文本里有 GitLab wiki URL，它调用 `scripts/prepare_wiki_downstream_payloads.sh` 从 URL 解析 `group/project`、读取 wiki 并拆分为多条 `git_issuer_payloads`。若没有 wiki URL，则调用 `scripts/prepare_downstream_payloads.sh` 剥离 114/origin 包装，并从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project，生成带 `repo=<group/project>` 的单条 `git_issuer_payload`。入口准备失败时，req_dispatcher 直接推用户失败说明，不调用 git_issuer。
 
 ## origin 元数据（运行时来源优先，文本兜底）
 
@@ -38,7 +38,7 @@ bash scripts/prepare_wiki_downstream_payloads.sh
 {"status":"success","project":"claw_gitlab/px_ifp_hulat_test","wiki_url":"http://<host>/claw_gitlab/px_ifp_hulat_test/-/wikis/product/requirements","wiki_slug":"product/requirements","requirements":[{"ordinal":1,"title":"Login flow","body":"...","wiki_url":"...","wiki_section":"Login flow"}],"git_issuer_payloads":["CREATE_GITLAB_ISSUE\nrepo=claw_gitlab/px_ifp_hulat_test\nsource=req_dispatcher_wiki\n..."],"reason":null}
 ```
 
-旧自由文本入口固定脚本契约：
+自由文本入口固定脚本契约：
 
 ```bash
 cd "<SKILL_DIR>" && \
@@ -55,10 +55,10 @@ bash scripts/prepare_downstream_payloads.sh
 失败输出：
 
 ```json
-{"status":"failed","project":null,"requirement_text":"开发虚拟机台状态机...","git_issuer_payload":null,"reason":"需求文本未包含可识别的 GitLab project（格式 group/project）"}
+{"status":"failed","project":null,"requirement_text":"开发虚拟机台状态机...","git_issuer_payload":null,"reason":"需求文本未包含可识别的 GitLab project（格式 group/project），请补充目标 group/project 或具体 GitLab/Wiki URL"}
 ```
 
-`status=failed` 是入口信息不足，不是 git_issuer 失败；req_dispatcher 应推用户失败说明并停止本路径。wiki 成功时按 `git_issuer_payloads[]` 顺序逐条执行后续 git_issuer → executor 流程；旧自由文本成功时把 `git_issuer_payload` 当成长度为 1 的列表。
+`status=failed` 是入口信息不足，不是 git_issuer 失败；req_dispatcher 应推用户失败说明并停止本路径。wiki 成功时按 `git_issuer_payloads[]` 顺序逐条执行后续 git_issuer → executor 流程；自由文本成功时把 `git_issuer_payload` 当成长度为 1 的列表。
 
 ## 下游 agent 调用（req_dispatcher → git_issuer）
 
@@ -236,6 +236,6 @@ executor 回调路径从 I2 取值，分别填 `notify_user.sh`（推用户）�
 
 ## 三条逻辑路径（已定，详见 SKILL.md）
 
-- **接入路径（A）**：capture origin → wiki URL 走 `prepare_wiki_downstream_payloads` 生成 `git_issuer_payloads[]`，旧自由文本走 `prepare_downstream_payloads` 生成单条 `git_issuer_payload` → evict_stuck → 对每个 payload 顺序 `run_agent_turn(git_issuer, payload)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `enqueue_executor_issue` → drain git_issuer 段 → `drain_executor_queue` 尝试启动队首 → 最小 ack。
+- **接入路径（A）**：capture origin → wiki URL 走 `prepare_wiki_downstream_payloads` 生成 `git_issuer_payloads[]`，自由文本走 `prepare_downstream_payloads` 确定性提取 project 并生成单条 `git_issuer_payload`，无法确定 project 时推用户失败并停止 → evict_stuck → 对每个 payload 顺序 `run_agent_turn(git_issuer, payload)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `enqueue_executor_issue` → drain git_issuer 段 → `drain_executor_queue` 尝试启动队首 → 最小 ack。
 - **executor 回调路径（B）**：解析 I2 → 按 executor `run_id` 匹配 executor 段，或在回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user(result)` 在 origin 为合法 object 时推回 114，否则只留痕 → drain executor 段 → `finish_executor_queue_active` → `drain_executor_queue` 继续推进下一条。
 - **executor 队列恢复路径（C）**：收到 `RUN_EXECUTOR_QUEUE_DRAIN` → `evict_stuck` 清理过期 pending 和匹配 active → `drain_executor_queue` 恢复或推进队列。

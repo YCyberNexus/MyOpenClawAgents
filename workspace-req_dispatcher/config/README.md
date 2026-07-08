@@ -54,7 +54,7 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 
 `req_dispatcher` 是**全公司共用**的需求接入链路。不同员工/团队的需求会落到不同的 GitLab project。把 project 写死在 config 里会让这个 agent 变成单租户、违背"共用接入点"的目标。
 
-因此：**114 发送的 wiki URL 或旧自由文本决定目标 project**。wiki 入口从 URL 的 `<group>/<project>/-/wikis/<slug>` 解析 project，并用只读 `WIKI_GITLAB_*` 拉取 wiki 文档；旧自由文本入口仍必须在文本里明确写出 GitLab `group/project`。`req_dispatcher` 会生成带 `repo=<group/project>` 的 `git_issuer_payload`；若 project 缺失或 wiki 读取失败则在调用 git_issuer 前失败并通知用户。`req_dispatcher` 仍不写 GitLab，issue 事实仍以 git_issuer 返回 JSON 为准。
+因此：**114 发送的 wiki URL 或自由文本决定目标 project**。wiki 入口从 URL 的 `<group>/<project>/-/wikis/<slug>` 解析 project，并用只读 `WIKI_GITLAB_*` 拉取 wiki 文档；自由文本入口从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project。`req_dispatcher` 会生成带 `repo=<group/project>` 的 `git_issuer_payload`；若 project 缺失或 wiki 读取失败则在调用 git_issuer 前失败并通知用户。`req_dispatcher` 仍不写 GitLab，issue 事实仍以 git_issuer 返回 JSON 为准。
 
 ## 部署校验清单
 

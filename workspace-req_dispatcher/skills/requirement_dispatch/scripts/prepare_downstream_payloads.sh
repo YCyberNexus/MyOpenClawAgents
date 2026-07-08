@@ -40,6 +40,76 @@ emit_json() {
     }'
 }
 
+url_decode() {
+  local value="${1//+/ }"
+  printf '%b' "${value//%/\\x}"
+}
+
+extract_project() {
+  local text="$1"
+  local candidate=""
+
+  candidate="$(
+    printf '%s\n' "${text}" | awk '
+      match($0, /projects\/[A-Za-z0-9_.~%+-]+%2[Ff][A-Za-z0-9_.~%+-]+/) {
+        value = substr($0, RSTART + length("projects/"), RLENGTH - length("projects/"))
+        sub(/\/.*/, "", value)
+        print value
+        exit
+      }'
+  )"
+  if [ -n "${candidate}" ]; then
+    url_decode "${candidate}"
+    return 0
+  fi
+
+  candidate="$(
+    printf '%s\n' "${text}" | awk -v configured_host="${GITLAB_HOST:-${WIKI_GITLAB_HOST:-}}" '
+      function is_gitlab_host(host, configured_host, host_lc) {
+        if (configured_host != "" && host == configured_host) return 1
+        host_lc = tolower(host)
+        return host_lc ~ /(^|[.-])gitlab([.-]|$)/
+      }
+      {
+        line = $0
+        while (match(line, /https?:\/\/[^[:space:]）)，]+/)) {
+          url = substr(line, RSTART, RLENGTH)
+          line = substr(line, RSTART + RLENGTH)
+          sub(/[?#].*/, "", url)
+          sub(/[。.!！]+$/, "", url)
+          without_scheme = url
+          sub(/^https?:\/\//, "", without_scheme)
+          host = without_scheme
+          sub(/\/.*/, "", host)
+          path = without_scheme
+          if (path !~ /\//) continue
+          sub(/^[^\/]+\//, "", path)
+          if (!is_gitlab_host(host, configured_host) && path !~ /^[^\/]+\/[^\/]+\/-\//) continue
+          sub(/\/-\/.*/, "", path)
+          n = split(path, parts, "/")
+          if (n >= 2 && parts[1] != "" && parts[2] != "") {
+            print parts[1] "/" parts[2]
+            exit
+          }
+        }
+      }'
+  )"
+  if [ -n "${candidate}" ]; then
+    url_decode "${candidate}"
+    return 0
+  fi
+
+  printf '%s\n' "${text}" | awk '
+    {
+      line = $0
+      gsub(/https?:\/\/[^[:space:]）)，]+/, " ", line)
+    }
+    match(line, /[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/) {
+      print substr(line, RSTART, RLENGTH)
+      exit
+    }'
+}
+
 if [ -z "${MESSAGE}" ]; then
   emit_json failed "" "" "" "需求文本为空"
   exit 0
@@ -75,16 +145,10 @@ if [ -z "${NORMALIZED}" ]; then
   exit 0
 fi
 
-PROJECT="$(
-  printf '%s\n' "${NORMALIZED}" | awk '
-    match($0, /[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+/) {
-      print substr($0, RSTART, RLENGTH)
-      exit
-    }'
-)"
+PROJECT="$(extract_project "${NORMALIZED}")"
 
 if [ -z "${PROJECT}" ]; then
-  emit_json failed "" "${NORMALIZED}" "" "需求文本未包含可识别的 GitLab project（格式 group/project）"
+  emit_json failed "" "${NORMALIZED}" "" "需求文本未包含可识别的 GitLab project（格式 group/project），请补充目标 group/project 或具体 GitLab/Wiki URL"
   exit 0
 fi
 

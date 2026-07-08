@@ -1,14 +1,14 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-08.1] Orchestrate the ZhiBan/OpenClaw requirement → GitLab issue → durable req_executor FIFO queue from the 104 side. Intake supports either a blue-zone GitLab wiki URL or the legacy free-text requirement with explicit `group/project`: wiki intake uses `scripts/prepare_wiki_downstream_payloads.sh` to parse the wiki URL, fetch wiki Markdown with read-only `WIKI_GITLAB_*` pins when needed, split the document into requirement items, and compose one git_issuer payload per item; legacy intake uses `scripts/prepare_downstream_payloads.sh`. req_dispatcher then calls blue-zone `git_issuer` through `scripts/run_agent_turn.sh`, routes every returned `group/project` to `DEFAULT_EXECUTOR_AGENT` unless `routing.env` has a project-specific override, appends the issue to durable `executor_queue.json`, drains at most one queued executor issue through `RUN_SINGLE_ISSUE`, receives `RUN_EXECUTOR_RESULT_CALLBACK`, clears active queue state, and pushes conclusions back to the originating user without propagating executor Wiki evidence links. req_dispatcher may read GitLab wiki pages only; it must not create issues, write labels/notes, or run issue work directly. Main helpers: source_dispatcher_env.sh, capture_origin.sh, prepare_wiki_downstream_payloads.sh, prepare_downstream_payloads.sh, run_agent_turn.sh, build_executor_payload.sh, enqueue_executor_issue.sh, drain_executor_queue.sh, finish_executor_queue_active.sh, next_correlation_id.sh, find_pending.sh, record_pending.sh, drain_pending.sh, evict_stuck.sh, route_project.sh, notify_user.sh, ops_notify.sh."
+description: "[SKILL_VERSION=2026-07-08.4] Orchestrate the ZhiBan/OpenClaw requirement → GitLab issue → durable req_executor FIFO queue from the 104 side. Intake supports either a blue-zone GitLab wiki URL or free-text requirements with a deterministic project locator (`group/project`, GitLab repository/Wiki URL, or `glab api projects/<encoded-group%2Fproject>/...` snippet): wiki intake uses `scripts/prepare_wiki_downstream_payloads.sh` to parse the wiki URL, fetch wiki Markdown with read-only `WIKI_GITLAB_*` pins when needed, split the document into requirement items, and compose one git_issuer payload per item; free-text intake uses `scripts/prepare_downstream_payloads.sh`. req_dispatcher then calls blue-zone `git_issuer` through `scripts/run_agent_turn.sh`, routes every returned `group/project` to `DEFAULT_EXECUTOR_AGENT` unless `routing.env` has a project-specific override, appends the issue to durable `executor_queue.json`, drains at most one queued executor issue through `RUN_SINGLE_ISSUE`, receives `RUN_EXECUTOR_RESULT_CALLBACK`, clears active queue state, and pushes conclusions back to the originating user without propagating executor Wiki evidence links. req_dispatcher may read GitLab wiki pages only; it must not create issues, write labels/notes, or run issue work directly. Main helpers: source_dispatcher_env.sh, capture_origin.sh, prepare_wiki_downstream_payloads.sh, prepare_downstream_payloads.sh, run_agent_turn.sh, build_executor_payload.sh, enqueue_executor_issue.sh, drain_executor_queue.sh, finish_executor_queue_active.sh, next_correlation_id.sh, find_pending.sh, record_pending.sh, drain_pending.sh, evict_stuck.sh, route_project.sh, notify_user.sh, ops_notify.sh."
 allowed-tools: Bash, Read
 ---
 
 # Requirement Dispatch Skill
 
-这是一个 **端到端编排契约**。`req_dispatcher` 把 114 转发来的需求主动驱动整条「需求 → 自动处理」链路：入口现在优先支持智伴给出的蓝区 GitLab wiki URL，使用 `scripts/prepare_wiki_downstream_payloads.sh` 解析 wiki 对应的 `group/project`、只读拉取 wiki Markdown、拆分需求并生成一组适合 `git_issuer` 的建单消息；若消息不含 wiki URL，则沿用 `scripts/prepare_downstream_payloads.sh` 处理旧自由文本需求（要求文本里明确 GitLab `group/project`）。随后通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 GitLab issue；拿到 `worker_result_json` 后按 project 选择执行器（所有合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）；再用 `scripts/enqueue_executor_issue.sh` 把 issue 写入 durable executor FIFO queue；最后由 `scripts/drain_executor_queue.sh` 生成并启动队首 `RUN_SINGLE_ISSUE`、收执行器结果回调、清 active、继续 drain 下一条，并把结论推回发起需求的企微用户。所有确定性的 state 写入（pending 记录、queue 入队/drain、超时驱逐）、消息准备与本地决策（wiki 拆分、路由查表、推送留痕）都在 `scripts/` 下 flock 保护或 best-effort 的 shell 脚本里；LLM 只做脚本干不了的事：按脚本契约组织多条建单/入队/drain、读执行器回调、可选 ops 通知。
+这是一个 **端到端编排契约**。`req_dispatcher` 把 114 转发来的需求主动驱动整条「需求 → 自动处理」链路：入口现在优先支持智伴给出的蓝区 GitLab wiki URL，使用 `scripts/prepare_wiki_downstream_payloads.sh` 解析 wiki 对应的 `group/project`、只读拉取 wiki Markdown、拆分需求并生成一组适合 `git_issuer` 的建单消息；若消息不含 wiki URL，则沿用 `scripts/prepare_downstream_payloads.sh` 处理自由文本需求，从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project。随后通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer` 建 GitLab issue；拿到 `worker_result_json` 后按 project 选择执行器（所有合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，`routing.env` 只做专属覆盖）；再用 `scripts/enqueue_executor_issue.sh` 把 issue 写入 durable executor FIFO queue；最后由 `scripts/drain_executor_queue.sh` 生成并启动队首 `RUN_SINGLE_ISSUE`、收执行器结果回调、清 active、继续 drain 下一条，并把结论推回发起需求的企微用户。所有确定性的 state 写入（pending 记录、queue 入队/drain、超时驱逐）、消息准备与本地决策（wiki 拆分、路由查表、推送留痕）都在 `scripts/` 下 flock 保护或 best-effort 的 shell 脚本里；LLM 只做脚本干不了的事：按脚本契约组织多条建单/入队/drain、读执行器回调、可选 ops 通知。
 
-**职责边界（HARD）**：身份从「薄派发器」升级为「编排器」，但**仍不写 GitLab**——不得用任何 token 去建 issue、打标签、写 note、跑 issue；建 issue 是 `git_issuer` 的事，跑 issue 是 `req_executor` 的事。新 wiki 入口只允许用 `WIKI_GITLAB_*` 只读配置拉取 wiki 页面内容。编排器可以做受控入口分析：解析 wiki URL、拆分 wiki 文档、剥离 114/origin 包装、从旧自由文本中提取明确写出的 `group/project`、生成下游消息；但不能语义猜测项目，不能替代 `git_issuer` 的建单/校验职责，issue 事实仍以 `git_issuer` 返回 JSON 为准。编排器多做三步：入口分析并编辑下游消息；git_issuer 成功 → 路由 + 入 executor durable FIFO queue；executor 回调 → 推用户结论 + 清 active + 继续 drain。不去重；git_issuer / executor 返回失败均不自动重试业务（重试由用户重发需求）。详见 [`../../SOUL.md`](../../SOUL.md) §Global Rules 与下方 §No-Fallback。
+**职责边界（HARD）**：身份从「薄派发器」升级为「编排器」，但**仍不写 GitLab**——不得用任何 token 去建 issue、打标签、写 note、跑 issue；建 issue 是 `git_issuer` 的事，跑 issue 是 `req_executor` 的事。新 wiki 入口只允许用 `WIKI_GITLAB_*` 只读配置拉取 wiki 页面内容。编排器可以做受控入口分析：解析 wiki URL、拆分 wiki 文档、剥离 114/origin 包装、从自由文本中的 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段确定性提取 project、生成下游消息；但不能语义猜测项目，不能替代 `git_issuer` 的建单/校验职责，issue 事实仍以 `git_issuer` 返回 JSON 为准。编排器多做三步：入口分析并编辑下游消息；git_issuer 成功 → 路由 + 入 executor durable FIFO queue；executor 回调 → 推用户结论 + 清 active + 继续 drain。不去重；git_issuer / executor 返回失败均不自动重试业务（重试由用户重发需求）。详见 [`../../SOUL.md`](../../SOUL.md) §Global Rules 与下方 §No-Fallback。
 
 state 与磁盘布局（executor pending、git_issuer 审计 stage、I3 entry）：[`references/state_schema.md`](references/state_schema.md)。`run_agent_turn.sh` 调用契约、git_issuer JSON 字段→drain env 映射、executor RUN_SINGLE_ISSUE(I1) 入参与 executor 结果回调(I2) 信封：[`references/trigger_command.md`](references/trigger_command.md)。git_issuer 的产出/变更规格（跨团队对接文档，orchestrator 运行时不必读）：[`../../docs/integration/gitissuer_contract.md`](../../docs/integration/gitissuer_contract.md)。
 
@@ -18,7 +18,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
 - 收到**结构化结果回调**且来自 **req_executor**（I2 信封带 `correlation_id`/`status`，trigger 名见 trigger_command.md）→ **executor 回调路径**（路径 B）。
 - 收到 `RUN_EXECUTOR_QUEUE_DRAIN` → **executor 队列 drain 路径**（路径 C）。
-- 否则（114 投来的需求消息，可能含 wiki URL 或旧自由文本）→ **接入路径**（路径 A）。
+- 否则（114 投来的需求消息，可能含 wiki URL 或自由文本）→ **接入路径**（路径 A）。
 
 ## Executor FIFO Queue（HARD）
 
@@ -63,7 +63,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
    stdout 若非空即为紧凑 `origin_json`，形如 `{"channel":"..","user":"..","conversation":"..","reply_agent":".."}`；其中 `reply_agent` 是 114 上接收终态结果的 agent 名。只有该值是合法 JSON object 时，用户结果推送才允许出站到 114。
 
-2. **准备下游消息（wiki 优先，旧自由文本回退）**：
+2. **准备下游消息（wiki 优先，自由文本回退）**：
 
    - 若需求文本包含 GitLab wiki URL（`http(s)://<host>/<group>/<project>/-/wikis/<slug>`），调用 `prepare_wiki_downstream_payloads.sh`。它会解析 wiki URL 对应的 project、用只读 `WIKI_GITLAB_*` 配置拉取 wiki Markdown（本地测试可用 `WIKI_CONTENT` 注入跳过网络）、按 Markdown 标题/编号块拆分需求，并输出一组 `git_issuer_payloads`。`status=failed` 表示 wiki URL、读取或拆分失败，**不要调用 git_issuer**；应推用户失败说明并结束本路径。
 
@@ -80,7 +80,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
      {"status":"success","project":"claw_gitlab/px_ifp_hulat_test","wiki_url":"http://.../-/wikis/product/requirements","wiki_slug":"product/requirements","requirements":[{"ordinal":1,"title":"Login flow","body":"...","wiki_url":"...","wiki_section":"Login flow"}],"git_issuer_payloads":["CREATE_GITLAB_ISSUE\nrepo=claw_gitlab/px_ifp_hulat_test\nsource=req_dispatcher_wiki\n..."],"reason":null}
      ```
 
-   - 若消息不含 wiki URL，调用 `prepare_downstream_payloads.sh` 对旧自由文本做受控入口分析：剥离 114 包装和 `[origin]`/`origin={...}` 行，要求文本里明确出现 GitLab `group/project`，并生成单条给 `git_issuer` 的标准化消息。`status=failed` 表示信息不足或形态不合格，**不要调用 git_issuer**；应推用户失败说明并结束本路径。
+   - 若消息不含 wiki URL，调用 `prepare_downstream_payloads.sh` 对自由文本做受控入口分析：剥离 114 包装和 `[origin]`/`origin={...}` 行，从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project，并生成单条给 `git_issuer` 的标准化消息。`status=failed` 表示信息不足或形态不合格，**不要调用 git_issuer**；应推用户失败说明并结束本路径。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -97,7 +97,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
    失败输出形如：
 
    ```json
-   {"status":"failed","project":null,"requirement_text":"开发虚拟机台状态机...","git_issuer_payload":null,"reason":"需求文本未包含可识别的 GitLab project（格式 group/project）"}
+   {"status":"failed","project":null,"requirement_text":"开发虚拟机台状态机...","git_issuer_payload":null,"reason":"需求文本未包含可识别的 GitLab project（格式 group/project），请补充目标 group/project 或具体 GitLab/Wiki URL"}
    ```
 
    失败处置：
@@ -112,7 +112,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
    然后返回 `{path:"intake", outcome:"rejected", reason:"<reason>"}`。这不是下游失败，不写 pending。
 
-   后续步骤统一按 payload 列表处理：wiki 成功时遍历 `.git_issuer_payloads[]`；旧自由文本成功时把 `.git_issuer_payload` 当成长度为 1 的列表。每个 payload 独立建 issue、路由并入 executor queue。wiki 拆出的多个条目顺序处理，不并发建单。
+   后续步骤统一按 payload 列表处理：wiki 成功时遍历 `.git_issuer_payloads[]`；自由文本成功时把 `.git_issuer_payload` 当成长度为 1 的列表。每个 payload 独立建 issue、路由并入 executor queue。wiki 拆出的多个条目顺序处理，不并发建单。
 
 3. **stuck 兜底**（先跑，回收泄漏的 pending；覆盖两段 git_issuer/executor）：
 
@@ -124,7 +124,7 @@ orchestrator（固定 session `agent:req_dispatcher:main`）每次被唤醒先�
 
    其 stdout `evicted <N> stuck pending`：若 `N > 0`，**可选 ops 通知**（见 §可选 ops 通知，`EVENT=stuck_evicted COUNT=<N>`）。
 
-4. **调用蓝区 `git_issuer`**：用 `scripts/run_agent_turn.sh` 包装 `openclaw agent`。payload 是第 2 步生成的当前建单消息：wiki 入口为 `.git_issuer_payloads[n]`，旧自由文本入口为 `.git_issuer_payload`；不要把 114 原文直接发给 git_issuer。该脚本返回结构化 envelope：`{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；`worker_result_json` 优先来自 git_issuer 输出中的最后一行紧凑 JSON，也兼容 Markdown 代码块里的 pretty JSON object（成功时含 `project`/`issue_iid`/`issue_url`）。
+4. **调用蓝区 `git_issuer`**：用 `scripts/run_agent_turn.sh` 包装 `openclaw agent`。payload 是第 2 步生成的当前建单消息：wiki 入口为 `.git_issuer_payloads[n]`，自由文本入口为 `.git_issuer_payload`；不要把 114 原文直接发给 git_issuer。该脚本返回结构化 envelope：`{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；`worker_result_json` 优先来自 git_issuer 输出中的最后一行紧凑 JSON，也兼容 Markdown 代码块里的 pretty JSON object（成功时含 `project`/`issue_iid`/`issue_url`）。
 
    ```bash
    cd "<SKILL_DIR 绝对路径>" && \
@@ -334,7 +334,7 @@ OpenClaw 每个 Bash tool call 是**全新 shell**，`export`/`cd` 不跨 exec �
 | `source_dispatcher_env.sh` | — | `DISPATCHER_CONFIG_DIR`（测试用；默认工作区 `config/`。必须用 `source` 调用；先加载 `dispatcher.env`，再加载被 git 忽略的 `dispatcher.local.env`） |
 | `capture_origin.sh` | — | `MESSAGE` 或 `MESSAGE_FILE` 或 stdin；结构化运行时来源 env：`OPENCLAW_DELIVER_ORIGIN_JSON` / `OPENCLAW_DELIVER_ORIGIN` / `OPENCLAW_SOURCE_ORIGIN_JSON` / `OPENCLAW_SOURCE_ORIGIN` / `DELIVER_ORIGIN_JSON` / `DELIVER_ORIGIN` / `SOURCE_ORIGIN_JSON` / `SOURCE_ORIGIN`；离散运行时来源 env：`OPENCLAW_SOURCE_AGENT` / `OPENCLAW_SOURCE_SESSION` / `OPENCLAW_DELIVER_CHANNEL` / `OPENCLAW_DELIVER_USER` / `OPENCLAW_DELIVER_CONVERSATION` 等。stdout：有 origin 时输出紧凑 JSON；没有时输出空。优先级：结构化 JSON → 离散运行时 env → 文本 `[origin]` 行。 |
 | `prepare_wiki_downstream_payloads.sh` | — | `MESSAGE` 或 `MESSAGE_FILE` 或 stdin；`FETCH_WIKI=1` 时读取 `WIKI_GITLAB_HOST`/`WIKI_GITLAB_API_PROTOCOL`/`WIKI_GITLAB_TOKEN`/`WIKI_GLAB_BIN`（也兼容同名 `GITLAB_*`/`GLAB_BIN` 测试覆盖）；`WIKI_CONTENT` 可用于本地测试跳过 glab。stdout：`{status,project,wiki_url,wiki_slug,requirements,git_issuer_payloads,reason}`；`status=success` 时 `git_issuer_payloads` 是一组顺序处理的建单消息；`status=failed` 时不调用 git_issuer。入参文件缺失 exit 2。 |
-| `prepare_downstream_payloads.sh` | — | `MESSAGE` 或 `MESSAGE_FILE` 或 stdin。stdout：`{status,project,requirement_text,git_issuer_payload,reason}`；`status=success` 时 `project` 是从文本明确提取的 `group/project`，`git_issuer_payload` 是发给 git_issuer 的标准化消息；`status=failed` 时不调用 git_issuer，推用户失败说明后结束。入参文件缺失 exit 2。 |
+| `prepare_downstream_payloads.sh` | — | `MESSAGE` 或 `MESSAGE_FILE` 或 stdin。stdout：`{status,project,requirement_text,git_issuer_payload,reason}`；`status=success` 时 `project` 是从文本里的 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段确定性提取的 `group/project`，`git_issuer_payload` 是发给 git_issuer 的标准化消息；`status=failed` 时不调用 git_issuer，推用户失败说明后结束。入参文件缺失 exit 2。 |
 | `run_agent_turn.sh` | `TARGET_AGENT` + (`MESSAGE` 或 `MESSAGE_FILE` 或 stdin) | `TARGET_SESSION_ID`(显式覆盖 session id；不传时普通调用默认 `agent:${TARGET_AGENT}:main`，`RUN_SINGLE_ISSUE` 默认 `agent:${TARGET_AGENT}:issue-<sanitized-project>-<iid>`；若显式值是 `agent:${TARGET_AGENT}:main`，`RUN_SINGLE_ISSUE` 会改用 issue 级 session；统一传给 `openclaw --session-id`), `TARGET_SESSION_KEY`(历史兼容别名，也会转为 `--session-id`), `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`(通用配置下限), `EXECUTOR_AGENT_TIMEOUT_SECONDS`(executor 目标专用配置下限，默认部署为 10800), `AGENT_TIMEOUT_SECONDS`(未传时默认取对应配置下限或 600；传入值低于对应配置下限时提升到配置下限), `RUN_AGENT_TURN_HEARTBEAT_SECONDS`(stderr heartbeat 间隔，默认 30), `OPENCLAW_BIN`(默认 `openclaw`), `RUN_ID`(测试/审计覆盖)。stdout：`{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；`worker_result_json` 优先解析最后一行紧凑 JSON，并兜底解析 Markdown 代码块内的 pretty JSON object；入参形态错 exit 2；openclaw 调用失败返回 `status=failed` 且 exit 0 |
 | `build_executor_payload.sh` | `PROJECT`, `IID`, `CORRELATION_ID` | `DISPATCHER_CALLBACK_TARGET`。stdout：完整 `RUN_SINGLE_ISSUE` 多行触发文本；project 形态错、IID 非正整数或缺必填项 exit 2。 |
 | `enqueue_executor_issue.sh` | `STATE_ROOT`, `PROJECT`, `IID`, `EXECUTOR_AGENT` | `ISSUE_URL`, `ORIGIN_JSON`, `REQ_DIGEST`。stdout：`{status:"queued",queue_id,queued_count}`；追加到 `${EXECUTOR_QUEUE_FILE}` FIFO 队尾。 |
@@ -349,13 +349,13 @@ OpenClaw 每个 Bash tool call 是**全新 shell**，`export`/`cd` 不跨 exec �
 | `notify_user.sh` | `EVENT`(`result`\|`failure`) | `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT`（仅当 `ORIGIN_JSON` 是合法 object 且缺 `reply_agent` 时兜底；空/null/非 object origin 不出站推 114）, `REPLY_NOTIFY_TIMEOUT_SECONDS`(默认 30), `ORIGIN_JSON`, `STATUS`, `IID`, `MR_URL`, `REASON` |
 | `ops_notify.sh` | `EVENT` | `OPS_NOTIFY_CHANNEL`(空则 no-op), `RUN_ID`, `REASON`, `COUNT` |
 
-`STATE_ROOT` / `GIT_ISSUER_AGENT` / `DEFAULT_EXECUTOR_AGENT` / `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` / `EXECUTOR_AGENT_TIMEOUT_SECONDS` / `STUCK_AFTER_MINUTES` / `OPS_NOTIFY_CHANNEL` / `ROUTING_FILE` / `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN` / `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS` / `DISPATCHER_CALLBACK_TARGET` / `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` / `EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS` / `EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS` / `EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS` 由 `source scripts/source_dispatcher_env.sh` 注入：先读 tracked `config/dispatcher.env`，再读 ignored `config/dispatcher.local.env`（若存在，本机测试覆盖只写这里）。`capture_origin.sh` 只规范化来源元数据，不碰 state；`prepare_wiki_downstream_payloads.sh` 只读 wiki、拆分需求并准备消息，不写 GitLab、不碰 state；`prepare_downstream_payloads.sh` 只做旧自由文本入口分析与消息准备，不碰 state、不碰 GitLab；`build_executor_payload.sh` 只生成 executor trigger 文本；`enqueue_executor_issue.sh` 只追加 durable queue；`drain_executor_queue.sh` 是唯一启动 executor 的入口；`run_agent_turn.sh` 只调用 `openclaw agent` 并输出 envelope，不碰 GitLab；`route_project.sh` / `ops_notify.sh` 不碰 state（不读写 pending/ledger/锁）：前者只做 project→executor 查表/默认路由，后者只发 best-effort 告警。`notify_user.sh` 不碰 GitLab、不建 issue、不打标签——只在 `ORIGIN_JSON` 是合法 object 时经反向网关把结果信封投给 114 接收 agent；目标 agent 优先取 `ORIGIN_JSON.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`。`ORIGIN_JSON` 为空/null/非 object 时视为手动入口，只写 ledger 留痕；网关 pin 未配置、目标 agent 缺失、投递失败或超时也记 ledger 留痕、不静默丢。
+`STATE_ROOT` / `GIT_ISSUER_AGENT` / `DEFAULT_EXECUTOR_AGENT` / `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` / `EXECUTOR_AGENT_TIMEOUT_SECONDS` / `STUCK_AFTER_MINUTES` / `OPS_NOTIFY_CHANNEL` / `ROUTING_FILE` / `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN` / `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS` / `DISPATCHER_CALLBACK_TARGET` / `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` / `EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS` / `EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS` / `EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS` 由 `source scripts/source_dispatcher_env.sh` 注入：先读 tracked `config/dispatcher.env`，再读 ignored `config/dispatcher.local.env`（若存在，本机测试覆盖只写这里）。`capture_origin.sh` 只规范化来源元数据，不碰 state；`prepare_wiki_downstream_payloads.sh` 只读 wiki、拆分需求并准备消息，不写 GitLab、不碰 state；`prepare_downstream_payloads.sh` 只做自由文本入口分析与消息准备，不碰 state、不碰 GitLab；`build_executor_payload.sh` 只生成 executor trigger 文本；`enqueue_executor_issue.sh` 只追加 durable queue；`drain_executor_queue.sh` 是唯一启动 executor 的入口；`run_agent_turn.sh` 只调用 `openclaw agent` 并输出 envelope，不碰 GitLab；`route_project.sh` / `ops_notify.sh` 不碰 state（不读写 pending/ledger/锁）：前者只做 project→executor 查表/默认路由，后者只发 best-effort 告警。`notify_user.sh` 不碰 GitLab、不建 issue、不打标签——只在 `ORIGIN_JSON` 是合法 object 时经反向网关把结果信封投给 114 接收 agent；目标 agent 优先取 `ORIGIN_JSON.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`。`ORIGIN_JSON` 为空/null/非 object 时视为手动入口，只写 ledger 留痕；网关 pin 未配置、目标 agent 缺失、投递失败或超时也记 ledger 留痕、不静默丢。
 
 ## No-Fallback（HARD）
 
 - 脚本非零退出 → 读 stdout/stderr、分类、记录、**stop**。不内联重写脚本逻辑、不"手动来一遍"、不换"更简单的命令"。
 - **不写 GitLab**：不得用任何 token 建 issue / 打标签 / 写 note / 跑 issue——建 issue 是 git_issuer 的事、跑 issue 是 req_executor 的事。唯一允许的 GitLab 访问是 `prepare_wiki_downstream_payloads.sh` 使用 `glab api` 只读拉取 wiki 页面内容。
-- **只做受控入口分析**：wiki 入口必须先用 `prepare_wiki_downstream_payloads.sh` 生成 `git_issuer_payloads`；旧自由文本入口必须先用 `prepare_downstream_payloads.sh` 生成 `git_issuer_payload`。若 wiki URL/读取/拆分失败，或旧文本没有明确 `group/project`，推用户失败说明并停止，不调用 git_issuer。不语义猜 project、不补写 project、不把 114/origin 包装原样发给 git_issuer。最终 issue 事实仍以 git_issuer 返回的 `project`/`issue_iid`/`issue_url` 为准。
+- **只做受控入口分析**：wiki 入口必须先用 `prepare_wiki_downstream_payloads.sh` 生成 `git_issuer_payloads`；自由文本入口必须先用 `prepare_downstream_payloads.sh` 从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段确定性提取 project 并生成 `git_issuer_payload`。若 wiki URL/读取/拆分失败，或自由文本无法确定 project，推用户失败说明并停止，不调用 git_issuer。不语义猜 project、不补写 project、不把 114/origin 包装原样发给 git_issuer。最终 issue 事实仍以 git_issuer 返回的 `project`/`issue_iid`/`issue_url` 为准。
 - **所有合法 GitLab project 默认可路由**：`route_project.sh` 先查覆盖表，未命中时返回 `DEFAULT_EXECUTOR_AGENT`。`__NO_ROUTE__` 只表示默认执行器未配置且无覆盖；project 形态错、路由表文件缺失/格式错（exit 2）才是部署/回调形态错误，按 No-Fallback 停。
 - **不去重**：透传语义；114 重发同需求会生成新的 git_issuer 调用 / executor queue item / pending，可能重复建 issue + 重复测（去重是 114/git_issuer 侧的事）。
 - **git_issuer / executor 业务结果失败 → 不自动重试**（避免重复建 issue / 重复测；重试由用户重发需求）。
