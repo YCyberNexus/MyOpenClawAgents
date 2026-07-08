@@ -64,7 +64,7 @@ case "${target_agent}" in
       '{status:"success",issue_iid:$iid,issue_url:$issue_url,project:"claw_gitlab/px_ifp_hulat_test",entry_label:"todo",reason:null,correlation_id:null}'
     ;;
   req_executor)
-    jq -nc '{status:"accepted"}'
+    jq -nc '{status:"waiting_for_callbacks",chat_summary:"accepted executor turn"}'
     ;;
   *)
     echo "unexpected target agent: ${target_agent}" >&2
@@ -116,36 +116,85 @@ for idx in $(seq 0 $((payload_count - 1))); do
   issue_json="$(jq -c '.worker_result_json' <<<"${git_envelope}")"
   project="$(jq -r '.project' <<<"${issue_json}")"
   iid="$(jq -r '.issue_iid' <<<"${issue_json}")"
+  issue_url="$(jq -r '.issue_url' <<<"${issue_json}")"
   executor="$(
     PROJECT="${project}" \
     DEFAULT_EXECUTOR_AGENT="req_executor" \
     bash "${SKILL_DIR}/scripts/route_project.sh"
   )"
-  correlation_id="$(
+  enqueue="$(
     STATE_ROOT="${STATE_ROOT}" \
-    bash "${SKILL_DIR}/scripts/next_correlation_id.sh"
-  )"
-  executor_payload="$(
     PROJECT="${project}" \
     IID="${iid}" \
-    CORRELATION_ID="${correlation_id}" \
-    DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
-    bash "${SKILL_DIR}/scripts/build_executor_payload.sh"
+    ISSUE_URL="${issue_url}" \
+    EXECUTOR_AGENT="${executor}" \
+    REQ_DIGEST="wiki item ${idx}" \
+    bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh"
   )"
-  executor_envelope="$(
+  if [ "$(jq -r '.status' <<<"${enqueue}")" != "queued" ]; then
+    echo "expected enqueue success" >&2
+    printf '%s\n' "${enqueue}" >&2
+    exit 1
+  fi
+
+  queue_drain="$(
+    STATE_ROOT="${STATE_ROOT}" \
     OPENCLAW_BIN="${FAKE_OPENCLAW}" \
     OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
     ISSUE_SEQ_FILE="${ISSUE_SEQ_FILE}" \
-    TARGET_AGENT="${executor}" \
-    RUN_ID="executor-${idx}" \
-    bash "${SKILL_DIR}/scripts/run_agent_turn.sh" <<<"${executor_payload}"
+    EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
+    DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
+    bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
   )"
-  if [ "$(jq -r '.status' <<<"${executor_envelope}")" != "success" ]; then
-    echo "expected executor run_agent_turn success" >&2
-    printf '%s\n' "${executor_envelope}" >&2
-    exit 1
+  if [ "${idx}" -eq 0 ]; then
+    if [ "$(jq -r '.status' <<<"${queue_drain}")" != "launched" ] ||
+       [ "$(jq -r '.iid' <<<"${queue_drain}")" != "101" ]; then
+      echo "expected first queued issue to launch" >&2
+      printf '%s\n' "${queue_drain}" >&2
+      exit 1
+    fi
+    first_run_id="$(jq -r '.run_id' <<<"${queue_drain}")"
+    first_correlation_id="$(jq -r '.correlation_id' <<<"${queue_drain}")"
+  else
+    if [ "$(jq -r '.status' <<<"${queue_drain}")" != "busy" ]; then
+      echo "expected second issue to stay queued while first is active" >&2
+      printf '%s\n' "${queue_drain}" >&2
+      exit 1
+    fi
   fi
 done
+
+STATE_ROOT="${STATE_ROOT}" \
+RUN_ID="${first_run_id}" \
+OUTCOME="success" \
+STAGE="executor" \
+PROJECT="claw_gitlab/px_ifp_hulat_test" \
+IID="101" \
+MR_URL="http://localhost:8081/claw_gitlab/px_ifp_hulat_test/-/merge_requests/1" \
+bash "${SKILL_DIR}/scripts/drain_pending.sh" >/dev/null
+
+STATE_ROOT="${STATE_ROOT}" \
+CORRELATION_ID="${first_correlation_id}" \
+PROJECT="claw_gitlab/px_ifp_hulat_test" \
+IID="101" \
+bash "${SKILL_DIR}/scripts/finish_executor_queue_active.sh" >/dev/null
+
+second_drain="$(
+  STATE_ROOT="${STATE_ROOT}" \
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
+  ISSUE_SEQ_FILE="${ISSUE_SEQ_FILE}" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
+  DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
+  bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${second_drain}")" != "launched" ] ||
+   [ "$(jq -r '.iid' <<<"${second_drain}")" != "102" ]; then
+  echo "expected second queued issue to launch after first finishes" >&2
+  printf '%s\n' "${second_drain}" >&2
+  exit 1
+fi
 
 git_calls="$(jq -r 'select(.agent=="git_issuer") | .message' "${OPENCLAW_CALL_LOG}" | grep -c '^CREATE_GITLAB_ISSUE')"
 executor_calls="$(jq -r 'select(.agent=="req_executor") | .message' "${OPENCLAW_CALL_LOG}" | grep -c '^RUN_SINGLE_ISSUE')"
@@ -183,4 +232,4 @@ if ! grep -qx 'agent:req_executor:issue-claw-gitlab-px-ifp-hulat-test-101' <<<"$
   exit 1
 fi
 
-echo "ok wiki intake simulated flow creates issues and dispatches executors"
+echo "ok wiki intake simulated flow queues issues and drains executors"

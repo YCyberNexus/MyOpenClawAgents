@@ -69,6 +69,43 @@ jq -n --argjson ts "${old_ts}" \
     }
   }' > "${DISPATCHER_DIR}/pending.json"
 : > "${DISPATCHER_DIR}/ledger.jsonl"
+jq -n '{
+  next_id: 2,
+  active: {
+    queue_id: "execq-1",
+    project: "group/project",
+    iid: 42,
+    issue_url: "http://gitlab/issues/42",
+    executor_agent: "req_executor",
+    origin: {
+      channel: "wecom",
+      user: "u1",
+      conversation: "c1",
+      reply_agent: "origin_reply_agent"
+    },
+    req_digest: "demo requirement",
+    queued_at: 1,
+    correlation_id: "corr-42",
+    run_id: "run-executor-origin",
+    launch_state: "launched",
+    launch_attempts: 1,
+    launch_started_at: 1,
+    launched_at: 2,
+    next_retry_after: null,
+    launch_error: null,
+    child_session_key: "child-42"
+  },
+  queue: [{
+    queue_id: "execq-2",
+    project: "group/project",
+    iid: 46,
+    issue_url: "http://gitlab/issues/46",
+    executor_agent: "req_executor",
+    origin: null,
+    req_digest: "queued after stuck",
+    queued_at: 3
+  }]
+}' > "${DISPATCHER_DIR}/executor_queue.json"
 
 PATH="${FAKE_BIN}:${PATH}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
@@ -83,6 +120,13 @@ bash "${SKILL_DIR}/scripts/evict_stuck.sh" >/dev/null
 if ! jq -e '.pending == {}' "${DISPATCHER_DIR}/pending.json" >/dev/null; then
   echo "expected evict_stuck.sh to delete all expired pending entries" >&2
   jq . "${DISPATCHER_DIR}/pending.json" >&2
+  exit 1
+fi
+
+if ! jq -e '.active == null and (.queue | length) == 1 and .queue[0].iid == 46' \
+  "${DISPATCHER_DIR}/executor_queue.json" >/dev/null; then
+  echo "expected evict_stuck.sh to clear matching executor queue active and preserve queued items" >&2
+  jq . "${DISPATCHER_DIR}/executor_queue.json" >&2
   exit 1
 fi
 

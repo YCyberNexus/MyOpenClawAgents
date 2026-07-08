@@ -2,7 +2,7 @@
 
 > 状态：**已落成明确契约**。`req_dispatcher` 发起下游 agent turn 固定通过 `scripts/run_agent_turn.sh` 包装 `openclaw agent`；executor 结果回调固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。不再使用未确认参数名的旧占位原语。
 >
-> 编排器对一条需求做两段下游调用：入口消息若包含 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；否则用 `prepare_downstream_payloads.sh` 将旧自由文本整理成单条建单消息。随后调用蓝区 `git_issuer` 建 issue 并读取其 `worker_result_json`；成功后按 project 路由选 executor，再用 `build_executor_payload.sh` 生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段记录 pending，等待后续 I2 结果回调。
+> 编排器对一条需求做两段下游调用：入口消息若包含 GitLab wiki URL，先用 `prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；否则用 `prepare_downstream_payloads.sh` 将旧自由文本整理成单条建单消息。随后调用蓝区 `git_issuer` 建 issue 并读取其 `worker_result_json`；成功后按 project 路由选 executor，把 issue 追加到 durable `executor_queue.json`，再由 `drain_executor_queue.sh` 为队首生成并调用该 executor 的 `RUN_SINGLE_ISSUE`。git_issuer 段只做本轮审计 record/drain；executor 段由队列 active 记录 pending，等待后续 I2 结果回调。
 
 ## 接入消息（114 → req_dispatcher）
 
@@ -109,7 +109,7 @@ orchestrator 从 `run_agent_turn.sh` envelope 的 `worker_result_json` 取值，
 
 `entry_label` / `action` / `superseded_by` 等字段供审计/排查，orchestrator 不强依赖。完整字段表与变更场景的 `action` 扩展见 docs/integration 下的两份对接文档。
 
-> **drain git_issuer 段 ≠ 链路终点**：success 时 drain git_issuer 段只是收尾审计 stage，编排器随即按 project 路由起 executor 段（§2）；failed/no_route 时 drain 并推用户。
+> **drain git_issuer 段 ≠ 链路终点**：success 时 drain git_issuer 段只是收尾审计 stage，编排器随即按 project 路由并把 issue 入 executor FIFO queue（§2）；failed/no_route 时 drain 并推用户。
 
 ## 匹配策略（git_issuer 段）
 
@@ -120,11 +120,23 @@ orchestrator 从 `run_agent_turn.sh` envelope 的 `worker_result_json` 取值，
 
 # §2 executor 段（驱动 req_executor 单次 issue 执行）
 
-git_issuer 返回成功 JSON 后，编排器按 `project` 调 `route_project.sh` 选目标 req_executor 部署 agent：覆盖表命中则用专属 executor，未命中则用 `DEFAULT_EXECUTOR_AGENT`。随后调用其 `RUN_SINGLE_ISSUE` driven 入口，并记一条**新** `pending[run_id2]`（`stage=executor`）。executor Phase 6 终态回调结果，编排器据 `run_id2` 或 `correlation_id` drain、把结论 `notify_user.sh` 推回 origin。
+git_issuer 返回成功 JSON 后，编排器按 `project` 调 `route_project.sh` 选目标 req_executor 部署 agent：覆盖表命中则用专属 executor，未命中则用 `DEFAULT_EXECUTOR_AGENT`。随后必须调用 `enqueue_executor_issue.sh` 把 issue 追加到 `${STATE_ROOT}/_dispatcher/executor_queue.json`；只有 `drain_executor_queue.sh` 可以把队首 issue 认领为 active、调用其 `RUN_SINGLE_ISSUE` driven 入口，并在 executor 明确进入等待回调状态后记一条**新** executor pending（`stage=executor`）。executor Phase 6 终态回调结果，编排器据 executor `run_id` 或 `correlation_id` drain、把结论 `notify_user.sh` 推回 origin。
 
-## 下游 agent 调用（req_dispatcher → req_executor）
+## 入队与下游 agent 调用（req_dispatcher → req_executor）
 
-同样使用 `run_agent_turn.sh`：
+接入路径不得直接调用 executor。先入队：
+
+```bash
+cd "<SKILL_DIR>" && \
+source scripts/source_dispatcher_env.sh && \
+PROJECT="<group/project>" IID="<issue_iid>" ISSUE_URL="<issue_url>" \
+EXECUTOR_AGENT="<route_project.sh stdout>" \
+ORIGIN_JSON="<origin_json 或空>" \
+REQ_DIGEST="<当前需求条目摘要 或空>" \
+bash scripts/enqueue_executor_issue.sh
+```
+
+然后由 `drain_executor_queue.sh` 内部生成 payload 并调用 `run_agent_turn.sh`：
 
 ```bash
 cd "<SKILL_DIR>" && \
@@ -135,7 +147,7 @@ DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET}" \
 bash scripts/build_executor_payload.sh
 ```
 
-然后把上一条命令的 stdout 作为 payload 调用目标 executor：
+再把上一条命令的 stdout 作为 payload 调用目标 executor：
 
 ```bash
 cd "<SKILL_DIR>" && \
@@ -147,7 +159,7 @@ bash scripts/run_agent_turn.sh <<EOF
 EOF
 ```
 
-返回 envelope 的 `run_id` 即 executor 段 `pending[run_id2]` 主键，`child_session_key` 写入 pending 便于审计。若 envelope `status=failed`，同 payload 最多 3 次、2s 退避；耗尽 = `launch_failed`，推用户"已建 issue #<iid> 但未能启动处理"。
+executor queue active 的稳定 `run_id` 即 executor 段 pending 主键。`drain_executor_queue.sh` 在认领 active 时先写 executor pending 占位，避免 executor 子任务很快回调时找不到 pending；启动成功后补 `child_session_key` 便于审计。启动成功必须同时满足外层 envelope `status=success`，以及 executor `worker_result_json.status="waiting_for_callbacks"` 或 raw output 含 `waiting_for_callbacks`（兼容 req_executor 现有纯文本 `chat_summary` 输出）；其他状态会删除 pending 占位，把 active 标为 `launch_failed` 并等待后续 `RUN_EXECUTOR_QUEUE_DRAIN` 重试。同 payload 单次 drain 最多 3 次、2s 退避；耗尽 = `launch_failed`，不推用户终态，因为 issue 仍保留在 active 等恢复。如果 executor 在初始 turn 返回前已完成并回调，drain 返回 `active_changed_after_launch`，不再补写旧 pending。
 
 ### (I1) RUN_SINGLE_ISSUE 入参（req_dispatcher 构造，默认发往 executor issue 级 session）
 
@@ -176,7 +188,7 @@ group=<可选，缺省取执行器 pin 配置>
 
 ### §correlation_id（executor 段二次校验 token）
 
-- 用途：req_dispatcher 调用 executor 时生成、随 I1 下发，执行器原样回显在 I2 `correlation_id`——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍 `run_id2`。
+- 用途：req_dispatcher 调用 executor 时生成、随 I1 下发，执行器原样回显在 I2 `correlation_id`——**作 executor 回调的二次校验**（防 run_id 错配）；主匹配仍 executor `run_id`。
 - 生成机制已实现：`scripts/next_correlation_id.sh` 在 `${STATE_ROOT}/_dispatcher/seq` 上用 flock 单调递增，stdout 输出 `reqd-<n>`。不要用随机数或时间戳替代。
 
 ## 结果回调 trigger（req_executor 完成 → req_dispatcher）
@@ -185,7 +197,7 @@ group=<可选，缺省取执行器 pin 配置>
 
 - 回调 trigger 名称：`RUN_EXECUTOR_RESULT_CALLBACK`。
 - 执行器结果 JSON（下面 I2）承载字段：`worker_result_json=<I2 JSON>`。
-- 若运行时回调携带 executor `run_id`（= `run_id2`），executor 回调路径优先用 `RUN_ID` 查 pending；若 `openclaw agent` 回投消息不带运行时 `run_id`，用 `CORRELATION_ID` 调 `scripts/find_pending.sh` 反查 pending，再取 entry 的 `run_id` drain。
+- 若运行时回调携带 executor `run_id`，executor 回调路径优先用 `RUN_ID` 查 pending；若 `openclaw agent` 回投消息不带运行时 `run_id`，用 `CORRELATION_ID` 调 `scripts/find_pending.sh` 反查 pending，再取 entry 的 `run_id` drain。
 
 ### (I2) 执行器结果回调信封（executor Phase 6 终态发出，一行紧凑 JSON）
 
@@ -210,19 +222,20 @@ executor 回调路径从 I2 取值，分别填 `notify_user.sh`（推用户）�
 | `wiki_url` | —（不取） | —（不取） | 兼容旧 executor 信封；忽略。 |
 | `reason` | `REASON` | `REASON` | `failed`/`timeout` 才有。 |
 | `correlation_id` | —（不取） | —（不取） | **二次校验**：须 = pending entry 的 `correlation_id`（防 run_id 错配）。 |
-| —（不取） | `ORIGIN_JSON` | —（不取） | **取自 `pending[run_id2].origin`**（接入时 capture、全程随两段携带），非来自 I2；只有合法 object 才允许出站推 114，其中 `reply_agent` 决定回推到哪个 114 agent。 |
+| —（不取） | `ORIGIN_JSON` | —（不取） | **取自 executor pending entry 的 `origin`**（接入时 capture、经 executor queue 携带），非来自 I2；只有合法 object 才允许出站推 114，其中 `reply_agent` 决定回推到哪个 114 agent。 |
 | —（不取） | —（`EVENT=result` 固定） | `STAGE=executor` 固定 | — |
 
-`drain_pending.sh` 的 `RUN_ID` **优先来自 runtime 回调自带的 `run_id`（=`run_id2`）**；若当前回调消息不带 runtime `run_id`，用 `find_pending.sh` 按 I2 `correlation_id` 反查 pending，并取返回 entry 的 `run_id`。
+`drain_pending.sh` 的 `RUN_ID` **优先来自 runtime 回调自带的 executor `run_id`**；若当前回调消息不带 runtime `run_id`，用 `find_pending.sh` 按 I2 `correlation_id` 反查 pending，并取返回 entry 的 `run_id`。
 
 ## 匹配策略（executor 段）
 
-- **主：`run_id2`**（= 调用 executor 后 `run_agent_turn.sh` envelope 的 `run_id`，由 `record_pending.sh` 记为 `RUN_ID`）。executor 回调若带 runtime `run_id`，直接用它查 pending 并 drain。
+- **主：executor `run_id`**（= executor queue active 的稳定 `run_id`，启动成功后由 `record_pending.sh` 记为 `RUN_ID`）。executor 回调若带 runtime `run_id`，直接用它查 pending 并 drain。
 - **无 run_id 回调：`correlation_id` 反查**。当前 `notify_dispatcher.sh` 经 `openclaw agent` 投递的 `RUN_EXECUTOR_RESULT_CALLBACK` 不携带 runtime `run_id`，因此 req_dispatcher 用 I2 的 `correlation_id` 调 `find_pending.sh` 找到 executor pending entry，再以 entry.run_id drain。
 - **二次校验：`correlation_id`**（I2 回显值须 = pending entry 的 `correlation_id`）——防 run_id 错配。不一致：记紧凑告警、以 `run_id` 为准 drain，不臆造。
 - **匹配不到 pending**：迟到 / 重复 / 已被 stuck 驱逐的回调，仍照常 `drain_pending.sh`（`STAGE=executor`、`was_pending=false`）——预期情形、非错误。
 
 ## 三条逻辑路径（已定，详见 SKILL.md）
 
-- **接入路径（A）**：capture origin → wiki URL 走 `prepare_wiki_downstream_payloads` 生成 `git_issuer_payloads[]`，旧自由文本走 `prepare_downstream_payloads` 生成单条 `git_issuer_payload` → evict_stuck → 对每个 payload 顺序 `run_agent_turn(git_issuer, payload)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `build_executor_payload` → `run_agent_turn(<executor>, RUN_SINGLE_ISSUE)` → `record_pending(run_id2, stage=executor, project/iid/correlation_id/origin)` → drain git_issuer 段 → 最小 ack。
-- **executor 回调路径（C）**：解析 I2 → 按 `run_id2` 匹配 executor 段，或在回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user(result)` 在 origin 为合法 object 时推回 114，否则只留痕 → drain executor 段。
+- **接入路径（A）**：capture origin → wiki URL 走 `prepare_wiki_downstream_payloads` 生成 `git_issuer_payloads[]`，旧自由文本走 `prepare_downstream_payloads` 生成单条 `git_issuer_payload` → evict_stuck → 对每个 payload 顺序 `run_agent_turn(git_issuer, payload)` → `record_pending(run_id, stage=git_issuer, origin)` → 解析 `{status,project,iid,url}` → 成功则 `route_project` 选 executor（默认 `DEFAULT_EXECUTOR_AGENT` 覆盖所有合法 project）→ `enqueue_executor_issue` → drain git_issuer 段 → `drain_executor_queue` 尝试启动队首 → 最小 ack。
+- **executor 回调路径（B）**：解析 I2 → 按 executor `run_id` 匹配 executor 段，或在回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user(result)` 在 origin 为合法 object 时推回 114，否则只留痕 → drain executor 段 → `finish_executor_queue_active` → `drain_executor_queue` 继续推进下一条。
+- **executor 队列恢复路径（C）**：收到 `RUN_EXECUTOR_QUEUE_DRAIN` → `evict_stuck` 清理过期 pending 和匹配 active → `drain_executor_queue` 恢复或推进队列。

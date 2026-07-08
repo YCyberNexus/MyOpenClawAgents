@@ -9,13 +9,17 @@
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `GIT_ISSUER_AGENT` | 是 | 下游目标 agent 名。`req_dispatcher` 通过 `run_agent_turn.sh` 调用它，由它完成"需求→issue"。默认 `git_issuer`。 |
-| `STATE_ROOT` | 是 | 运行时 state 根目录。`pending.json` / `ledger.jsonl` / 锁 / 序号 / 日志都在 `${STATE_ROOT}/_dispatcher/` 下。必须是 server 上 agent 可写的持久目录。 |
-| `STUCK_AFTER_MINUTES` | 是 | stuck/timeout 兜底阈值（分钟）。pending 超过该时长仍没等到回调 → 合成失败并 drain，避免 pending 永久泄漏。应略大于 git_issuer 单次建 issue 预期最大耗时 + 余量。 |
+| `STATE_ROOT` | 是 | 运行时 state 根目录。`pending.json` / `executor_queue.json` / `ledger.jsonl` / 锁 / 序号 / 日志都在 `${STATE_ROOT}/_dispatcher/` 下。必须是 server 上 agent 可写的持久目录。 |
+| `STUCK_AFTER_MINUTES` | 是 | stuck/timeout 兜底阈值（分钟）。pending 超过该时长仍没等到终态回调 → 合成失败并 drain，避免 pending 永久泄漏。应覆盖 git_issuer 建 issue 与 executor 单 issue 执行的最长合理时间 + 余量；默认配置为 `240`，覆盖 3 小时 executor 外层超时。 |
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
 | `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
 | `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
 | `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，默认配置为 `10800`（3 小时）。目标 agent 不等于 `GIT_ISSUER_AGENT` 时按 executor 处理；git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
+| `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` | 否 | executor queue active 卡在 `launching` 多久后可由下一次 drain 复用同一 `run_id` / `correlation_id` 重新启动，默认配置为 `11100`（3 小时 executor 外层超时 + 5 分钟余量）。用于恢复 OpenClaw 会话被用户或运行时中断，同时避免正常长 executor turn 尚未返回时重复启动。 |
+| `EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS` | 否 | `launch_failed` active 下一次允许重试前等待的秒数，默认 `60`。 |
+| `EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS` | 否 | 单次 `drain_executor_queue.sh` 对同一 executor payload 的启动尝试次数，默认 `3`。 |
+| `EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS` | 否 | 同一 drain 内相邻启动尝试之间的固定退避秒数，默认 `2`。 |
 | `RUN_AGENT_TURN_HEARTBEAT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 等待下游 agent 时向 stderr 输出 heartbeat 的间隔，默认 `30`；stdout 仍只输出最终 JSON envelope。 |
 | `ROUTING_FILE` | 否 | project 覆盖路由表文件路径（见下「`routing.env`」）。git_issuer 返回 project 后，先查本表；未命中则使用 `DEFAULT_EXECUTOR_AGENT`。消费方 `scripts/route_project.sh`。默认相对 SKILL_DIR 的 `../../config/routing.env`，也可改绝对路径。 |
 | `WIKI_GITLAB_HOST` | wiki 入口必填 | 只读拉取 GitLab wiki 的 host（含端口则写端口）。仅由 `prepare_wiki_downstream_payloads.sh` 的 `FETCH_WIKI=1` 路径使用。 |
@@ -31,7 +35,7 @@
 
 ## `routing.env`（多 project 路由表）
 
-git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再调用 `<executor> RUN_SINGLE_ISSUE`。消费方 `scripts/route_project.sh`。
+git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 调用队首 `<executor> RUN_SINGLE_ISSUE`。消费方 `scripts/route_project.sh`。
 
 行格式：每行一条 `PROJECT=AGENT`。
 
@@ -61,6 +65,7 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token/branch pin。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
 7. `DISPATCHER_CALLBACK_TARGET` 按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。未填时执行器结果回调字段为空。
+8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 正在执行且未超时时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且无 active 时会继续推进。这个唤醒是 #11 完成后 #12 不依赖人工追问的恢复兜底。
 
 ## 与 acpx 工作区的差异
 

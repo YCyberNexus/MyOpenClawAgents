@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # 兜底：扫超时 pending → 合成 stuck_evicted 写 ledger + 从 pending 删除。
+# 若超时 pending 是当前 executor queue active，也在同一锁内清 active，避免 FIFO 永久卡住。
 # executor 段若携带 origin，则解锁后 best-effort 推 timeout 给用户。
 # 在接入路径开头调用，避免 pending 永久泄漏。覆盖两段（git_issuer/executor），不分 stage 一并扫。
 # 入参（env）：STUCK_AFTER_MINUTES(必，非负整数)
@@ -27,6 +28,7 @@ expired_raw="$(jq -c --argjson cutoff "${CUTOFF}" \
     stage:(.value.stage // ""),
     project:(.value.project // null),
     iid:(.value.iid // null),
+    correlation_id:(.value.correlation_id // null),
     origin:(.value.origin // null)}' "${PENDING_FILE}")" \
   || { echo "jq read failed on ${PENDING_FILE} (corrupt?)" >&2; exit 1; }
 
@@ -36,6 +38,7 @@ notify_timeout_entries=()
 
 if [ "${#expired[@]}" -gt 0 ]; then
   keys=()
+  executor_refs=()
   for entry in "${expired[@]}"; do
     rid="$(jq -r '.run_id' <<<"${entry}")"
     stage="$(jq -r '.stage // ""' <<<"${entry}")"
@@ -44,6 +47,9 @@ if [ "${#expired[@]}" -gt 0 ]; then
     keys+=("${rid}")
     if [ "${stage}" = "executor" ] && jq -e '.origin != null' <<<"${entry}" >/dev/null; then
       notify_timeout_entries+=("${entry}")
+    fi
+    if [ "${stage}" = "executor" ]; then
+      executor_refs+=("$(jq -c '{run_id, correlation_id}' <<<"${entry}")")
     fi
     jq -nc --arg rid "${rid}" --arg stage "${stage}" \
        --arg project "${project}" --arg iid "${iid}" --argjson ts "${NOW}" \
@@ -62,6 +68,19 @@ if [ "${#expired[@]}" -gt 0 ]; then
   jq --argjson ks "${keys_json}" 'reduce $ks[] as $k (.; del(.pending[$k]))' \
      "${PENDING_FILE}" > "${tmp}"
   mv "${tmp}" "${PENDING_FILE}"
+
+  if [ "${#executor_refs[@]}" -gt 0 ]; then
+    refs_json="$(printf '%s\n' "${executor_refs[@]}" | jq -s .)"
+    tmp_queue="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
+    jq --argjson refs "${refs_json}" '
+      (.active) as $active
+      | if $active != null and any($refs[]; .run_id == ($active.run_id // "") or ((.correlation_id // null) != null and .correlation_id == ($active.correlation_id // null)))
+        then .active = null
+        else .
+        end
+    ' "${EXECUTOR_QUEUE_FILE}" > "${tmp_queue}"
+    mv "${tmp_queue}" "${EXECUTOR_QUEUE_FILE}"
+  fi
 fi
 flock -u 9
 

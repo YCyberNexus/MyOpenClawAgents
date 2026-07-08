@@ -7,16 +7,18 @@ set -euo pipefail
 
 DISPATCHER_DIR="${STATE_ROOT}/_dispatcher"
 PENDING_FILE="${DISPATCHER_DIR}/pending.json"
+EXECUTOR_QUEUE_FILE="${DISPATCHER_DIR}/executor_queue.json"
 LEDGER_FILE="${DISPATCHER_DIR}/ledger.jsonl"
 SEQ_FILE="${DISPATCHER_DIR}/seq"
 LOCK_FILE="${DISPATCHER_DIR}/pending.lock"
 LOG_DIR="${DISPATCHER_DIR}/log"
 
-export DISPATCHER_DIR PENDING_FILE LEDGER_FILE SEQ_FILE LOCK_FILE LOG_DIR
+export DISPATCHER_DIR PENDING_FILE EXECUTOR_QUEUE_FILE LEDGER_FILE SEQ_FILE LOCK_FILE LOG_DIR
 
 # 幂等地确保 state 目录与初始文件存在。
 ensure_state_dirs() {
   mkdir -p "${DISPATCHER_DIR}" "${LOG_DIR}"
   [ -f "${PENDING_FILE}" ] || printf '%s\n' '{"pending":{}}' > "${PENDING_FILE}"
+  [ -f "${EXECUTOR_QUEUE_FILE}" ] || printf '%s\n' '{"next_id":1,"active":null,"queue":[]}' > "${EXECUTOR_QUEUE_FILE}"
   [ -f "${LEDGER_FILE}" ] || : > "${LEDGER_FILE}"
 }
