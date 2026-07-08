@@ -302,6 +302,7 @@ iid="$(jq -r '.iid' <<<"${active}")"
 executor_agent="$(jq -r '.executor_agent' <<<"${active}")"
 correlation_id="$(jq -r '.correlation_id' <<<"${active}")"
 run_id="$(jq -r '.run_id' <<<"${active}")"
+target_branch="$(jq -r '.target_branch // ""' <<<"${active}")"
 origin_json="$(jq -c 'if .origin == null then empty else .origin end' <<<"${active}" || true)"
 
 payload="$(
@@ -309,6 +310,7 @@ payload="$(
   IID="${iid}" \
   CORRELATION_ID="${correlation_id}" \
   DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}" \
+  TARGET_BRANCH="${target_branch}" \
   bash "${SCRIPT_DIR}/build_executor_payload.sh"
 )"
 
@@ -411,6 +413,7 @@ if [ "${accepted_executor}" = "true" ]; then
       --arg status "launched" \
       --arg queue_id "${queue_id}" \
       --arg project "${project}" \
+      --arg target_branch "${target_branch}" \
       --argjson iid "${iid}" \
       --arg run_id "${run_id}" \
       --arg correlation_id "${correlation_id}" \
@@ -419,6 +422,7 @@ if [ "${accepted_executor}" = "true" ]; then
       --argjson queued_count "${queued_count}" \
       --argjson max_active "${MAX_ACTIVE}" \
       '{status:$status, queue_id:$queue_id, project:$project, iid:$iid,
+        target_branch:($target_branch | select(. != "") // null),
         run_id:$run_id, correlation_id:$correlation_id,
         claim_kind:($claim_kind|select(.!="")//null),
         active_count:$active_count, queued_count:$queued_count, max_active:$max_active}'

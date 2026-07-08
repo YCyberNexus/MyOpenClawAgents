@@ -59,6 +59,6 @@ ${REPO_PATH}/
 | `ATTEMPT_LOG_REL` | `${ISSUE_WORKTREE_REL}/log/attempt-${ATTEMPT_NUMBER_PADDED}` |
 | `LOG_DIR` | `${WORKTREE_DIR}/${ATTEMPT_LOG_REL}` |
 
-`clone_or_pull.sh` appends `/.req_executor/` to `${REPO_PATH}/.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}`, `${LOG_DIR}/prompt.txt`, and `${LOG_DIR}/claude_result.txt` so reviewer-facing evidence survives while bulky local logs stay ignored.
+`clone_or_pull.sh` appends `/.req_executor/` and `logs/` to `${REPO_PATH}/.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes `${LOG_DIR}` plus any `logs/` path from the commit index, so logs stay local and do not appear in MR changes.
 
 Claude Code is invoked only through `scripts/run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs the fixed acpx command against `${LOG_DIR}/prompt.txt`.

@@ -10,7 +10,7 @@ Core contract:
 - `build_prompt.sh` writes `${LOG_DIR}/prompt.txt` from the issue title, description, prior summaries, and reviewer comments.
 - Runtime state lives under `${REPO_PATH}/.req_executor/`.
 - There are no runtime basename, project data directory, or UI account-pool trigger/config fields.
-- `clone_or_pull.sh` locally ignores `/.req_executor/`; `stage_and_guard.sh` force-adds only the current issue's output plus `prompt.txt` and `claude_result.txt`.
+- `clone_or_pull.sh` locally ignores `/.req_executor/` and `logs/`; `stage_and_guard.sh` force-adds only the current issue's output and removes `${LOG_DIR}` / `logs/` paths from the commit index.
 
 The standard wrapper environment is:
 

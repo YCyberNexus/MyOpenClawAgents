@@ -11,7 +11,7 @@
 # What it does:
 #   1. Reads the I1 trigger from stdin (multi-line key=value, same text format as
 #      dispatch_prepare_tick.sh). Required keys: project, iid, correlation_id.
-#      Optional: dispatcher_callback_target, group.
+#      Optional: dispatcher_callback_target, group, branch.
 #   2. Validates project / iid (positive integer) / correlation_id.
 #   3. Sources config/gitlab.env (host pin), config/campaign_defaults.env
 #      (clone parent pin), then optional config/campaign_defaults.local.env
@@ -110,6 +110,7 @@ IID_IN="${T[iid]:-}"
 CORRELATION_ID="${T[correlation_id]:-}"
 DISPATCHER_CALLBACK_TARGET="${T[dispatcher_callback_target]:-}"
 GROUP_IN="${T[group]:-}"
+BRANCH_IN="${T[branch]:-${T[target_branch]:-}}"
 
 [ -n "${PROJECT_IN}" ]    || { echo "dispatch_single_issue.sh: missing required trigger field: project" >&2; exit 2; }
 [ -n "${IID_IN}" ]        || { echo "dispatch_single_issue.sh: missing required trigger field: iid" >&2; exit 2; }
@@ -121,6 +122,22 @@ case "${IID_IN}" in
   *[!0-9]*|"") echo "dispatch_single_issue.sh: iid must be a positive integer, got: ${IID_IN}" >&2; exit 2 ;;
 esac
 [ "${IID_IN}" -ge 1 ] || { echo "dispatch_single_issue.sh: iid must be a positive integer (>=1), got: ${IID_IN}" >&2; exit 2; }
+
+validate_branch_name() {
+  local branch="$1"
+  case "${branch}" in
+    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+      return 1
+      ;;
+  esac
+  [ "${branch}" != "@" ] || return 1
+  return 0
+}
+
+if [ -n "${BRANCH_IN}" ] && ! validate_branch_name "${BRANCH_IN}"; then
+  echo "dispatch_single_issue.sh: branch must be a safe Git ref name, got: ${BRANCH_IN}" >&2
+  exit 2
+fi
 
 # ─── 3. Load deployment pins (host + clone parent) ────────────────
 [ -f "${CONFIG_DIR}/gitlab.env" ] || { echo "dispatch_single_issue.sh: missing config/gitlab.env at ${CONFIG_DIR}/gitlab.env" >&2; exit 2; }
@@ -246,6 +263,7 @@ EOF
 # Append the optional fields only when a non-empty value exists, so we never feed
 # dispatch_prepare_tick.sh an empty key it would reject.
 [ -n "${RUN_TIMEOUT_EFF}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"run_timeout_seconds=${RUN_TIMEOUT_EFF}"
+[ -n "${BRANCH_IN}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"branch=${BRANCH_IN}"
 
 # ─── 7. Hand off to the existing prepare-tick body ─────────────────
 PREPARE_TICK_CMD="${PREPARE_TICK_CMD:-${SCRIPT_DIR}/dispatch_prepare_tick.sh}"

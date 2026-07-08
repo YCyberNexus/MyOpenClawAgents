@@ -14,6 +14,7 @@ first="$(
   IID="12" \
   ISSUE_URL="http://gitlab/issues/12" \
   EXECUTOR_AGENT="req_executor" \
+  TARGET_BRANCH="release/2026.07" \
   ORIGIN_JSON="${origin}" \
   REQ_DIGEST="first issue" \
   bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh"
@@ -71,6 +72,18 @@ fi
 
 if [ "$(jq -r '.queue[0].origin.reply_agent' "${queue_file}")" != "reply_agent" ]; then
   echo "expected origin to be preserved" >&2
+  cat "${queue_file}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.queue[0].target_branch' "${queue_file}")" != "release/2026.07" ]; then
+  echo "expected target_branch to be preserved on the queued item" >&2
+  cat "${queue_file}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.queue[1].target_branch' "${queue_file}")" != "null" ]; then
+  echo "expected missing target_branch to stay null" >&2
   cat "${queue_file}" >&2
   exit 1
 fi

@@ -186,7 +186,7 @@ FINAL_STATUS="$(printf '%s' "${PHASE6_OUT}" | jq -r '.final_status')"
 CLEANUP="$(printf '%s' "${PHASE6_OUT}" | jq -c '.cleanup')"
 REMAINING_COUNT="$(printf '%s' "${PHASE6_OUT}" | jq -r '.remaining_pending_count')"
 MR_URL="$(printf '%s' "${REPLY_JSON}" | jq -r '.merge_request_url // ""')"
-WIKI_URL="$(printf '%s' "${REPLY_JSON}" | jq -r '.wiki_url // ""')"
+WIKI_URL=""
 CAMPAIGN_STATUS="$(printf '%s' "${NEW_STATE}" | jq -r '.campaign_status // "running"')"
 if [ "${REMAINING_COUNT}" = "0" ] && [ "${CAMPAIGN_STATUS}" = "waiting_for_callbacks" ]; then
   CAMPAIGN_STATUS="running"

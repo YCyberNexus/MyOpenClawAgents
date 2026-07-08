@@ -64,6 +64,7 @@ ${STATE_ROOT}/_dispatcher/
       "iid": 12,
       "issue_url": "http://gitlab/issues/12",
       "executor_agent": "req_executor",
+      "target_branch": "release/2026.07",
       "origin": { "channel": "..", "user": "..", "conversation": "..", "reply_agent": ".." },
       "req_digest": "string",
       "queued_at": 1719300000,
@@ -104,6 +105,7 @@ ${STATE_ROOT}/_dispatcher/
 - `queue`：等待执行的 FIFO 列表。新 wiki 或自由文本需求只追加队尾；启用 per-origin cap 时，drain 可跳过已达用户上限的 item，启动后面的其他用户 item。
 - `project` / `iid` / `issue_url`：`git_issuer` 成功返回的 issue 事实。
 - `executor_agent`：`route_project.sh` 选出的目标 executor agent。
+- `target_branch`：入口消息明确指定的 MR 目标分支；未指定时为 `null`，executor 继续用 `origin/HEAD` 兜底。
 - `origin` / `req_digest` / `queued_at`：从接入路径携带的回推与审计信息。
 - `correlation_id`：下发给 executor 并由 I2 回显的关联 token，用于回调二次校验和 active 清理。
 - `run_id`：queue 生成的稳定 executor run id，形如 `executor-execq-N`。同一个 active 重试必须复用该值，避免重复 pending key。

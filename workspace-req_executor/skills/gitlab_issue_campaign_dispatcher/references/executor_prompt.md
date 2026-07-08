@@ -4,7 +4,7 @@ The dispatcher extracts the fenced "Rendered Prompt" block below, renders it int
 
 The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
 
-> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–10, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent skip `run_acpx_attempt.sh` and bypass the stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
+> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–9, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent skip `run_acpx_attempt.sh` and bypass the stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
 
 ---
 
@@ -32,7 +32,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/team_repo`, this is `/data/team_repo/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
 | `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree under the repo's fixed `.req_executor/.worktrees/issue-{ISSUE_IID}/` runtime area (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code uses the issue prompt and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/output` (inside the shared per-issue worktree) |
-| `{LOG_DIR}`              | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
+| `{LOG_DIR}`              | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; log files stay local and are not committed into the MR diff) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/.req_executor/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
@@ -58,7 +58,7 @@ The **last line inside the fenced block** is a paired closer sentinel `# REQ_EXE
 ```
 # REQ_EXECUTOR_EXECUTOR_PROMPT_V1
 You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
-The dispatcher has already prepared everything. Your job: run acpx → commit/push/wiki/MR/labels/summarize → return ONE compact JSON line. If acpx fails after producing files, still stage/commit/push anything committable before marking the issue blocked.
+The dispatcher has already prepared everything. Your job: run acpx → commit/push/MR/labels/summarize → return ONE compact JSON line. If acpx fails after producing files, still stage/commit/push anything committable before marking the issue blocked.
 
 DO NOT load any SKILL.md, SOUL.md, or AGENTS.md.
 DO NOT call sessions_spawn or sessions_history.
@@ -80,7 +80,7 @@ WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issu
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
 WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
-OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
+OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh; logs/ paths are still removed from the index)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
@@ -108,7 +108,7 @@ Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix th
 </env_contract>
 
 <instructions>
-Follow steps 0-10 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
+Follow steps 0-9 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
 
 Step 0 — SETUP
   Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR}. Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
@@ -215,16 +215,7 @@ Step 4 — POST-PUSH verify
   exit 0 → continue.
   any non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
 
-Step 5 — WIKI evidence (must land before `done`)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/upload_attempt_artifacts.sh
-  CAPTURE: wiki_url (printed by the script — first wiki page URL; empty on failure).
-  Non-zero exit → FAIL status=blocked block_reason="attempt wiki artifact publication failed: <last stderr line>".
-  Do NOT skip Wiki and proceed to `done`.
-
-Step 6 — TRANSITION doing → done
+Step 5 — TRANSITION doing → done
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
@@ -236,7 +227,7 @@ Step 6 — TRANSITION doing → done
   Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
   CAPTURE labels_removed includes "doing"; labels_added includes "done".
 
-Step 7 — CREATE / rotate the MR
+Step 6 — CREATE / rotate the MR
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} WORKTREE_DIR={WORKTREE_DIR} \
@@ -261,7 +252,7 @@ Step 7 — CREATE / rotate the MR
 
   Do NOT call `glab mr merge`. Do NOT close the issue. GitLab auto-closes via `Closes #{ISSUE_IID}` in the MR body.
 
-Step 8 — ADD `pr` label
+Step 7 — ADD `pr` label
   PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
@@ -270,7 +261,7 @@ Step 8 — ADD `pr` label
 
   After this step the live issue should carry `pr` only — `set_issue_label.sh add pr` removes `done` (pr replaces done). Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr"; labels_removed includes "done".
 
-Step 9 — SUMMARIZE
+Step 8 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
     SUMMARY_POST_TO_ISSUE=<true|false> \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
@@ -283,21 +274,22 @@ Step 9 — SUMMARIZE
   CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
   Run this on EVERY terminal path — done, no_changes, blocked, failed, timeout.
   Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, no_changes, and timeout.
-  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
+  Failure paths MUST keep summaries local only: set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
 
-Step 10 — REPLY
+Step 9 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
 
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"<url or empty>","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
+  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
 
   Field rules:
-  - status = done           when Steps 0-8 all succeeded.
+  - status = done           when Steps 0-7 all succeeded.
   - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
   - status = blocked        when any FAIL flow or BLOCKED_PUSH flow was entered with a retryable reason. block_reason MUST be non-empty.
   - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
   - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137}, tool-side timeout, or the whole-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap from <constraints>). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap", or "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" for the whole-run cap). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
-  - labels_added / labels_removed: the actual transitions you performed. For done: ["pr"] added, ["doing","done"] removed (pr replaces done — done was a transient set in Step 6 then removed when pr is added). For blocked before `done`: ["blocked-cc"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked-cc" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
-  - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / BLOCKED_PUSH / timeout).
+  - labels_added / labels_removed: the actual transitions you performed. For done: ["pr"] added, ["doing","done"] removed (pr replaces done — done was a transient set in Step 5 then removed when pr is added). For blocked before `done`: ["blocked-cc"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked-cc" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
+  - mr_action = none when no MR step ran (no_changes / blocked before Step 6 / BLOCKED_PUSH / timeout).
+  - wiki_url is a legacy compatibility field and MUST be "".
   - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
@@ -319,7 +311,7 @@ Step 10 — REPLY
 When any step instructs "FAIL with status=X, block_reason=Y":
   1. Stop the algorithm at this step. Do NOT continue to later steps. Step 1 acpx non-timeout failures do not use this flow; they use <blocked_push_flow> so any committable generated files can still be pushed.
   2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
-  3. Immediately sync the live issue label to blocked before summarizing. Each invocation MUST be a separate Bash exec, in the exact form used at Step 6 / B4 / T4 (full `bash {SCRIPTS_DIR}/set_issue_label.sh ...` absolute path + inline env vars):
+  3. Immediately sync the live issue label to blocked before summarizing. Each invocation MUST be a separate Bash exec, in the exact form used at Step 5 / B4 / T4 (full `bash {SCRIPTS_DIR}/set_issue_label.sh ...` absolute path + inline env vars):
      - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
@@ -327,12 +319,12 @@ When any step instructs "FAIL with status=X, block_reason=Y":
      - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
-         bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
-     - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, Wiki, MR, or pr.
-     - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 6 should leave the issue as `done` + `blocked-cc` and without `pr`.
-  4. Leave commit_sha / merge_request_url / wiki_url empty if those steps were not reached.
-  5. Run Step 9 (summarize) with ATTEMPT_STATUS / BLOCK_REASON and SUMMARY_POST_TO_ISSUE=false.
-  6. Output the compact JSON per Step 10 with status=X and block_reason=Y filled in.
+        bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
+     - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, MR, or pr.
+     - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 5 should leave the issue as `done` + `blocked-cc` and without `pr`.
+  4. Leave commit_sha / merge_request_url empty if those steps were not reached. Always leave wiki_url empty.
+  5. Run Step 8 (summarize) with ATTEMPT_STATUS / BLOCK_REASON and SUMMARY_POST_TO_ISSUE=false.
+  6. Output the compact JSON per Step 9 with status=X and block_reason=Y filled in.
 
 Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.
 </fail_flow>
@@ -395,7 +387,7 @@ B4 — LABEL doing → blocked
   CAPTURE: record successful operations in labels_removed (include
   "doing") and labels_added (include "blocked-cc").
 
-B5 — SUMMARIZE (local-only; SAME script as Step 9)
+B5 — SUMMARIZE (local-only; SAME script as Step 8)
   ATTEMPT_STATUS=blocked \
     SUMMARY_POST_TO_ISSUE=false \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
@@ -410,7 +402,7 @@ B5 — SUMMARIZE (local-only; SAME script as Step 9)
   attempts even when a partial commit was pushed.
 
 B6 — REPLY
-  Emit the compact JSON per Step 10 with:
+  Emit the compact JSON per Step 9 with:
     status            = "blocked"
     mr_action         = "none"
     merge_request_url = ""
@@ -422,8 +414,8 @@ B6 — REPLY
     block_reason      = <BLOCK_REASON, non-empty>
 
 HARD rules for the blocked push flow:
-- Do NOT run Step 5 (Wiki upload), Step 6 (doing → done), Step 7
-  (create_mr.sh), or Step 8 (add `pr`). The issue gets `blocked`, NOT
+- Do NOT run Step 5 (doing → done), Step 6 (create_mr.sh), or Step 7
+  (add `pr`). The issue gets `blocked`, NOT
   `done` + `pr`, and no MR is opened for a known-failing attempt.
 - Do NOT call `acpx` again. The failed run already produced the only
   worktree contents eligible for this attempt's push.
@@ -496,7 +488,7 @@ T4 — LABEL doing → timeout
   CAPTURE: record successful operations in labels_removed (include
   "doing") and labels_added (include "timeout").
 
-T5 — SUMMARIZE (local-only; SAME script as Step 9)
+T5 — SUMMARIZE (local-only; SAME script as Step 8)
   ATTEMPT_STATUS=timeout \
     SUMMARY_POST_TO_ISSUE=false \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
@@ -510,7 +502,7 @@ T5 — SUMMARIZE (local-only; SAME script as Step 9)
   under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for timeouts.
 
 T6 — REPLY
-  Emit the compact JSON per Step 10 with:
+  Emit the compact JSON per Step 9 with:
     status            = "timeout"
     mr_action         = "none"
     merge_request_url = ""
@@ -522,8 +514,8 @@ T6 — REPLY
     block_reason      = <BLOCK_REASON, non-empty>
 
 HARD rules for the timeout flow:
-- Do NOT run Step 5 (Wiki upload), Step 6 (doing → done), Step 7
-  (create_mr.sh), or Step 8 (add `pr`). The issue gets `timeout`, NOT
+- Do NOT run Step 5 (doing → done), Step 6 (create_mr.sh), or Step 7
+  (add `pr`). The issue gets `timeout`, NOT
   `done` + `pr`.
 - Do NOT prefer `blocked` over `timeout` here — `timeout` is its own
   terminal status and is what the dispatcher's bookkeeping expects for
@@ -544,4 +536,4 @@ HARD rules for the timeout flow:
 - The dispatcher MUST verify all placeholders have been substituted before calling `sessions_spawn`. A literal `{` followed by an uppercase identifier in the rendered string is a missed substitution; abort the IID with `block_reason="prompt template render incomplete: <placeholder>"`.
 - The dispatcher passes the rendered string as the entire spawn payload. There are no additional env-var injections at the OpenClaw layer — the subagent reads everything from this prompt.
 - **`sessions_spawn` shape (anonymous + `label=` cosmetic + `timeoutSeconds=30` + `runTimeoutSeconds=<run_timeout_seconds>` default `acpx_timeout_seconds + 120` / 18120s with defaults + `cleanup="keep"` + serial-only + 3-attempt launch retry) is the contract in [`SKILL.md`](../SKILL.md) §The orchestrator loop and §No-Fallback.** Do NOT pass `name=` / `session_name=` / `mode="session"` (triggers `thread_required` on some channels). DO pass `label="#<iid>-att-<NNN>"` for the UI LABEL column — it is a separate cosmetic field. Validate the launch ack carries both `runId` and `childSessionKey` before recording into `pending_subagents[iid]`; if launch validation fails, retry the identical spawn payload up to 3 total attempts with 2-second fixed backoff before synthesizing a blocked reply. Matched callbacks identify the IID by the `iid` field of the compact JSON, NOT by the runtime session-key label. The rendered prompt's `iid` field MUST therefore be correct.
-- **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via `RUN_CHILD_COMPLETION_CALLBACK`, not the synchronous return of `sessions_spawn`. The subagent just emits the compact JSON line on its last turn (Step 10) and stops; the runtime forwards it inside `worker_result_json`. Phase 6 reads that reply and owns all terminal state-file writes per [`state_schema.md`](state_schema.md) §Compact Subagent Reply + §Phase 6 Write Mapping.
+- **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via `RUN_CHILD_COMPLETION_CALLBACK`, not the synchronous return of `sessions_spawn`. The subagent just emits the compact JSON line on its last turn (Step 9) and stops; the runtime forwards it inside `worker_result_json`. Phase 6 reads that reply and owns all terminal state-file writes per [`state_schema.md`](state_schema.md) §Compact Subagent Reply + §Phase 6 Write Mapping.

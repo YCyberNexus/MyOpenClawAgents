@@ -73,9 +73,10 @@
 #     worktree uses the repository's own `.claude/` path when present.
 #   - It does NOT write `.git/info/exclude`. That is `clone_or_pull.sh`'s
 #     responsibility (it appends `/.req_executor/` once per clone).
-#     Runtime state/logs and `.worktrees/` therefore stay locally
-#     git-ignored; the current issue's output directory is force-added
-#     explicitly by stage_and_guard.sh, which bypasses the exclude.
+#     Runtime state/logs, `.worktrees/`, and generic `logs/` directories
+#     therefore stay locally git-ignored; the current issue's output directory
+#     is force-added explicitly by stage_and_guard.sh, which then removes log
+#     paths from the index.
 #
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
 #   REPO_PATH, ISSUE_IID, ISSUE_MODE,
@@ -432,10 +433,8 @@ else
   # First attempt for this IID (or recovery from a broken state). Create
   # the shared per-issue linked worktree branched from ${BASE_REF}. This
   # is the cwd Claude Code runs in; OUTPUT_DIR and LOG_DIR are inside it.
-  # OUTPUT_DIR is force-added by stage_and_guard.sh after the run;
-  # LOG_DIR's prompt.txt + claude_result.txt are force-added by the same
-  # script, the remaining log files stay locally ignored via the
-  # repository `.git/info/exclude` entry.
+  # OUTPUT_DIR is force-added by stage_and_guard.sh after the run; LOG_DIR and
+  # generic logs/ directories stay local and are removed from the index.
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
   git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi

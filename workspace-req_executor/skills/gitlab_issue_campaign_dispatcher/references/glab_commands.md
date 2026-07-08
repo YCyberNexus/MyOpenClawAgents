@@ -128,7 +128,7 @@ glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.w
 
 ### G9 — Post a note (comment) on the issue (subagent)
 
-Used by `scripts/summarize_attempt.sh` to post successful `done` attempt summaries back to the issue so the next continue-mode run can read them. Failure summaries are written locally only when `SUMMARY_POST_TO_ISSUE=false`. Also used by `scripts/upload_attempt_artifacts.sh` to link Wiki evidence before `done` labeling and MR creation.
+Used by `scripts/summarize_attempt.sh` to post successful `done` attempt summaries back to the issue so the next continue-mode run can read them. Failure summaries are written locally only when `SUMMARY_POST_TO_ISSUE=false`.
 
 ```bash
 glab api --method POST \
@@ -148,45 +148,12 @@ glab mr close <mr_iid> --repo "${PROJECT_FULL}"
 
 `<mr_iid>` is the per-project MR IID (the integer in `merge_requests/<N>`). Get it via G6 (`.[0].iid`).
 
-### G11 — Read a Wiki page (subagent)
+### G11-G13 — Legacy Wiki page APIs (not used)
 
-Used by `scripts/upload_attempt_artifacts.sh` to decide whether to create or update an attempt-scoped Wiki page.
-
-```bash
-glab api "projects/${PROJECT_URI}/wikis/${WIKI_SLUG_URI}"
-```
-
-`WIKI_SLUG_URI` is the URI-encoded Wiki title, for example `issue33%2Fattempt-001%2Fprompt.txt`.
-
-### G12 — Create a Wiki page (subagent)
-
-Used by `scripts/upload_attempt_artifacts.sh` when G11 reports the page is absent. The script creates attempt-scoped Wiki pages:
-
-- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/prompt.txt`
-- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/claude_result.txt`
-- `issue${ISSUE_IID}/attempt-${ATTEMPT_NUMBER_PADDED}/report.html` when a `report.html` exists under `${OUTPUT_DIR}`
-
-```bash
-glab api --method POST \
-  "projects/${PROJECT_URI}/wikis" \
-  -f "title=${WIKI_TITLE}" \
-  -F "content=@${SOURCE_PATH}" \
-  -f "format=markdown"
-```
-
-### G13 — Update a Wiki page (subagent)
-
-Used by `scripts/upload_attempt_artifacts.sh` when rerunning the same allocated attempt or resuming after a partial post.
-
-```bash
-glab api --method PUT \
-  "projects/${PROJECT_URI}/wikis/${WIKI_SLUG_URI}" \
-  -f "title=${WIKI_TITLE}" \
-  -F "content=@${SOURCE_PATH}" \
-  -f "format=markdown"
-```
-
-The subagent constructs browser URLs as `${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}/-/wikis/${WIKI_TITLE}` and posts those links back to the issue with G9.
+Current req_executor runs must not publish `prompt.txt`, `claude_result.txt`, or
+`report.html` to project Wiki pages. `scripts/upload_attempt_artifacts.sh` is a
+no-op compatibility shim for already-rendered legacy prompts and must not call
+the Wiki read/create/update APIs.
 
 ### G14 — 结果回报: read `req_origin` + post `req_result` (dispatcher, Phase 6)
 

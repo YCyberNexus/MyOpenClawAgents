@@ -38,7 +38,7 @@ Like `gitlab.env`, this file is `source`d (and may be loaded under `set -a`), so
 
 ### Why only this is pinned
 
-The runner has to know where to clone repositories before it can read issue content or repository-local guidance. Everything else is either supplied by the issue/wiki, inferred by the wrapper (`branch` from `origin/HEAD`), or handled by Claude Code/OpenClaw defaults.
+The runner has to know where to clone repositories before it can read issue content or repository-local guidance. Everything else is either supplied by the issue/wiki, supplied by req_dispatcher as an optional `branch`, inferred by the wrapper (`branch` from `origin/HEAD` when omitted), or handled by Claude Code/OpenClaw defaults.
 
 ### Fields
 
@@ -50,6 +50,6 @@ Do not put branch, quota, timeout, token, runtime basename, data directory, or a
 
 ## Runtime Layout
 
-`req_executor` stores its own state under the fixed in-repo directory `${REPO_PATH}/.req_executor/`. This directory is not configurable through trigger fields or tracked config. `clone_or_pull.sh` adds `/.req_executor/` to the local `.git/info/exclude`; `stage_and_guard.sh` force-adds only the current issue's output directory plus `prompt.txt` and `claude_result.txt`.
+`req_executor` stores its own state under the fixed in-repo directory `${REPO_PATH}/.req_executor/`. This directory is not configurable through trigger fields or tracked config. `clone_or_pull.sh` adds `/.req_executor/` and `logs/` to the local `.git/info/exclude`; `stage_and_guard.sh` force-adds only the current issue's output directory and removes `${LOG_DIR}` plus any `logs/` path from the commit index.
 
 There is no UI-account pool configuration in this workspace. The issue body is passed to Claude Code as the task prompt; credentials, account pools, or project-specific data directories must be described by the issue itself if they are relevant.

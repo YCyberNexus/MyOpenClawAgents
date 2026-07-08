@@ -12,8 +12,8 @@ This document is the workspace-wide reference for issue workflow labels. Both ha
 - `new`
 - `continue` — **human-applied review label.** Reviewers set this on an issue whose MR was created and the agent applied `pr`, but where the actual Claude Code run did not finish (env failure, partial edits, etc.). The agent never sets `continue` itself — only humans do. When the dispatcher's reconciliation sees `continue`, it re-enqueues the IID and prepares the next attempt's repo checkout from the existing work branch (continue mode). **Reviewer contract** — including how to leave supplemental steps as an issue comment so the agent can pick them up — is documented in `continue_mode.md`.
 - `doing`
-- `done` — **transient only.** Applied by the subagent in Step 6 after Wiki evidence publication and before MR creation. Removed by Step 8 when `pr` is added. `done` and `pr` are never present simultaneously in steady state.
-- `pr` — **stable completion label.** Applied by the subagent in Step 8 immediately after `create_mr.sh` succeeds; replaces `done` (which is removed in the same operation). An issue carrying `pr` is considered complete by the dispatcher.
+- `done` — **transient only.** Applied by the subagent in Step 5 after post-push verification and before MR creation. Removed by Step 7 when `pr` is added. `done` and `pr` are never present simultaneously in steady state.
+- `pr` — **stable completion label.** Applied by the subagent in Step 7 immediately after `create_mr.sh` succeeds; replaces `done` (which is removed in the same operation). An issue carrying `pr` is considered complete by the dispatcher.
 - `blocked-cc` — subagent/CC-side retryable failure (acpx non-timeout failure, NO_CHANGES, push rejected, post-push steps failed). Partial work may be pushed to `${WORK_BRANCH}` but no MR / `pr` is opened.
 - `blocked-dispatcher` — dispatcher-synthesized retryable failure: prep failed, launch failed after retry exhaustion, scope/stuck eviction, unparseable reply downgrade, or label-sync failure downgrade. No CC run produced output.
 - `failed-cc` — `blocked-cc` promoted after `retry_count > blocked_retry_limit`. Terminal until human relabel.
@@ -61,25 +61,25 @@ When the scheduled trigger supplies `require_labels`, those labels are also trea
          ▼
        done (transient) ──► pr   (or blocked-cc / blocked-dispatcher / timeout as usual)
 
-Note: `done` is a transient intermediate label only. The subagent applies it in Step 6 and
-removes it in Step 8 when `pr` is added. `done` and `pr` never coexist in steady state.
+Note: `done` is a transient intermediate label only. The subagent applies it in Step 5 and
+removes it in Step 7 when `pr` is added. `done` and `pr` never coexist in steady state.
 ```
 
 ## Concrete transitions and how to perform them
 
-All transitions use targeted add/remove calls through `scripts/set_issue_label.sh` so that unrelated non-workflow labels on the issue are preserved. The script enforces workflow-label exclusivity when adding a workflow label: it removes conflicting workflow labels in the same GitLab issue update, leaving only the target label except for the allowed transient pairs `done + blocked-cc` and `done + blocked-dispatcher` (failure after Step 6 but before Step 8).
+All transitions use targeted add/remove calls through `scripts/set_issue_label.sh` so that unrelated non-workflow labels on the issue are preserved. The script enforces workflow-label exclusivity when adding a workflow label: it removes conflicting workflow labels in the same GitLab issue update, leaving only the target label except for the allowed transient pairs `done + blocked-cc` and `done + blocked-dispatcher` (failure after Step 5 but before Step 7).
 
 | From       | To         | Performer  | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
 | `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove `todo`, `retry`, `new`, `continue`, `contiune`, `blocked-cc`, `blocked-dispatcher`, `done`, `pr`, `failed-cc`, `failed-dispatcher`, `timeout`, and every matched trigger `require_labels` label; add `doing` |
 | `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `todo`, `continue`, `contiune`, `retry`, `new`, `blocked-cc`, `blocked-dispatcher`, `done`, `pr`, `failed-cc`, `failed-dispatcher`, `timeout`, and every matched trigger `require_labels` label; add `doing` |
-| `doing`    | `done`     | subagent   | branch pushed, post-push verification passed, attempt artifacts published to the project Wiki and linked from the issue (Step 6) | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
-| `done`     | `pr`       | subagent   | immediately after MR creation / rotation succeeds (Step 8) — `done` is removed and `pr` is added in its place | `set_issue_label.sh add pr` (which also removes `done`); result: `pr` only, `done` absent |
+| `doing`    | `done`     | subagent   | branch pushed and post-push verification passed (Step 5) | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
+| `done`     | `pr`       | subagent   | immediately after MR creation / rotation succeeds (Step 7) — `done` is removed and `pr` is added in its place | `set_issue_label.sh add pr` (which also removes `done`); result: `pr` only, `done` absent |
 | `doing`    | `blocked-cc`  | subagent   | CC-side retryable failure during this run (acpx non-timeout failure, NO_CHANGES, push rejected, post-push steps failed); for acpx failures, committable partial work is first staged, committed, and force-pushed to `${WORK_BRANCH}` when possible, but no MR / `pr` is opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-cc`  |
 | `doing`    | `blocked-dispatcher` | dispatcher | dispatcher-synthesized retryable failure (prep failed, launch failed after retry exhaustion, scope/stuck eviction, unparseable reply downgrade, label-sync failure downgrade); no CC run output | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-dispatcher` |
 | `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work was committed and force-pushed to `${WORK_BRANCH}` but NO MR / `pr` was opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
-| `done`     | `done+blocked-cc` | subagent | CC-side retryable failure after Wiki evidence and `done` (Step 6), before `pr` can be added (Step 8) | `set_issue_label.sh add blocked-cc`; do NOT add `pr`                  |
-| `done`     | `done+blocked-dispatcher` | dispatcher | dispatcher-side label-sync failure after `done` (Step 6), before `pr` can be added | `set_issue_label.sh add blocked-dispatcher`; do NOT add `pr`          |
+| `done`     | `done+blocked-cc` | subagent | CC-side retryable failure after `done` (Step 5), before `pr` can be added (Step 7) | `set_issue_label.sh add blocked-cc`; do NOT add `pr`                  |
+| `done`     | `done+blocked-dispatcher` | dispatcher | dispatcher-side label-sync failure after `done` (Step 5), before `pr` can be added | `set_issue_label.sh add blocked-dispatcher`; do NOT add `pr`          |
 | `blocked-cc`  | `doing`    | dispatcher | retry begins on a later tick after cooldown | `set_issue_label.sh remove blocked-cc` ; `set_issue_label.sh add doing`  |
 | `blocked-dispatcher` | `doing` | dispatcher | retry begins on a later tick after cooldown | `set_issue_label.sh remove blocked-dispatcher` ; `set_issue_label.sh add doing` |
 | `blocked-cc`  | `failed-cc`   | dispatcher | `retry_count > blocked_retry_limit` during Phase 6; launch-side `sessions_spawn` failures do not increment `retry_count` | `set_issue_label.sh remove blocked-cc` ; `set_issue_label.sh add failed-cc` |
@@ -89,8 +89,8 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 
 ## Important rules
 
-1. **`pr` replaces `done`, not adds to it.** `done` is a transient intermediate label applied by the subagent in Step 6 after Wiki evidence publication. `pr` is applied in Step 8 after MR creation and removes `done` in the same operation. `done` and `pr` MUST NOT coexist in steady state — an issue in the `pr` state no longer carries `done`.
-2. **Attempt evidence comes first.** Before `create_mr.sh` runs and before the issue can be labeled `done`, `scripts/upload_attempt_artifacts.sh` MUST publish attempt-scoped Wiki pages for `prompt.txt`, `claude_result.txt`, and optional `report.html`, then link them from the issue.
+1. **`pr` replaces `done`, not adds to it.** `done` is a transient intermediate label applied by the subagent in Step 5 after post-push verification. `pr` is applied in Step 7 after MR creation and removes `done` in the same operation. `done` and `pr` MUST NOT coexist in steady state — an issue in the `pr` state no longer carries `done`.
+2. **No attempt Wiki evidence.** req_executor must not publish `prompt.txt`, `claude_result.txt`, or `report.html` to project Wiki pages. `scripts/upload_attempt_artifacts.sh` is kept only as a no-op compatibility shim for already-rendered legacy prompts.
 3. **Dispatcher completion requires `pr` (not `done`).** `done` is transient and will be removed. Reconciliation considers an issue complete when the `pr` label is present (and `continue` is absent). `done` alone is NOT a completion signal.
 4. **Never call `glab mr merge`.** The merge request stays open for human review.
 5. **No full-set label overwrite.** Always use targeted add/remove operations through `set_issue_label.sh` (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, model tier, quality, etc.) the user may have added.
@@ -105,8 +105,8 @@ These are distinct signals. The agent controls `done` (transient) and `pr` (stab
 
 | Signal              | Who sets it                         | When                                              | Means                                  |
 | ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
-| `done` label        | the subagent (Step 6)               | immediately after attempt evidence Wiki publication, before MR creation / rotation | transient: "agent finished solving and published evidence; MR creation in progress" |
-| `pr` label          | the subagent (Step 8)               | immediately after `create_mr.sh` returns successfully; simultaneously removes `done` | stable: "the MR exists for human review; issue is complete from the agent's perspective" |
+| `done` label        | the subagent (Step 5)               | immediately after post-push verification, before MR creation / rotation | transient: "agent finished solving; MR creation in progress" |
+| `pr` label          | the subagent (Step 7)               | immediately after `create_mr.sh` returns successfully; simultaneously removes `done` | stable: "the MR exists for human review; issue is complete from the agent's perspective" |
 | issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "a human reviewed, approved, and merged" |
 
 GitLab's native auto-close is triggered by the **closing keyword in the MR description**. `scripts/create_mr.sh` writes the description starting with:

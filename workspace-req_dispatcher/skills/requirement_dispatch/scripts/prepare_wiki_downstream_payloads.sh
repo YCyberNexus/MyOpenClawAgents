@@ -43,14 +43,16 @@ trim_multiline() {
 emit_json() {
   local status="$1"
   local project="$2"
-  local wiki_url="$3"
-  local wiki_slug="$4"
-  local requirements_json="$5"
-  local payloads_json="$6"
-  local reason="$7"
+  local target_branch="$3"
+  local wiki_url="$4"
+  local wiki_slug="$5"
+  local requirements_json="$6"
+  local payloads_json="$7"
+  local reason="$8"
   jq -nc \
     --arg status "${status}" \
     --arg project "${project}" \
+    --arg target_branch "${target_branch}" \
     --arg wiki_url "${wiki_url}" \
     --arg wiki_slug "${wiki_slug}" \
     --argjson requirements "${requirements_json}" \
@@ -59,6 +61,7 @@ emit_json() {
     {
       status: $status,
       project: (if $project == "" then null else $project end),
+      target_branch: (if $target_branch == "" then null else $target_branch end),
       wiki_url: (if $wiki_url == "" then null else $wiki_url end),
       wiki_slug: (if $wiki_slug == "" then null else $wiki_slug end),
       requirements: $requirements,
@@ -68,7 +71,7 @@ emit_json() {
 }
 
 fail_json() {
-  emit_json failed "" "" "" "[]" "[]" "$1"
+  emit_json failed "" "" "" "" "[]" "[]" "$1"
 }
 
 url_encode() {
@@ -80,8 +83,56 @@ url_decode() {
   printf '%b' "${v//%/\\x}"
 }
 
+validate_branch_name() {
+  local branch="$1"
+  case "${branch}" in
+    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+      return 1
+      ;;
+  esac
+  [ "${branch}" != "@" ] || return 1
+  return 0
+}
+
+extract_target_branch() {
+  local text="$1"
+  printf '%s\n' "${text}" | awk '
+    function emit(value) {
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", value)
+      gsub(/[[:space:]"'\''`“”‘’)，,。;；]+$/, "", value)
+      print value
+    }
+    {
+      line = $0
+      if (match(line, /(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._\/-]+/)) {
+        value = substr(line, RSTART, RLENGTH)
+        sub(/^[^:=]*[:=][[:space:]]*/, "", value)
+        emit(value)
+        exit
+      }
+      if (match(line, /(目标分支|分支)[[:space:]]*[：:=][[:space:]]*[A-Za-z0-9._\/-]+/)) {
+        value = substr(line, RSTART, RLENGTH)
+        sub(/^.*[：:=][[:space:]]*/, "", value)
+        emit(value)
+        exit
+      }
+      if (match(line, /(合并到|合到|merge[[:space:]]+to)[[:space:]]*[A-Za-z0-9._\/-]+/)) {
+        value = substr(line, RSTART, RLENGTH)
+        sub(/^(合并到|合到|merge[[:space:]]+to)[[:space:]]*/, "", value)
+        emit(value)
+        exit
+      }
+    }'
+}
+
 if [ -z "${MESSAGE}" ]; then
   fail_json "需求文本为空"
+  exit 0
+fi
+
+TARGET_BRANCH="$(extract_target_branch "${MESSAGE}")"
+if [ -n "${TARGET_BRANCH}" ] && ! validate_branch_name "${TARGET_BRANCH}"; then
+  fail_json "target branch must be a safe Git ref name"
   exit 0
 fi
 
@@ -322,4 +373,4 @@ EOF
   payloads_json="$(jq -c --arg payload "${payload}" '. + [$payload]' <<<"${payloads_json}")"
 done
 
-emit_json success "${PROJECT}" "${WIKI_URL}" "${WIKI_SLUG}" "${requirements_json}" "${payloads_json}" ""
+emit_json success "${PROJECT}" "${TARGET_BRANCH}" "${WIKI_URL}" "${WIKI_SLUG}" "${requirements_json}" "${payloads_json}" ""
