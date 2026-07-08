@@ -13,12 +13,11 @@
 #   3. After clone, create the dispatcher subtree (_dispatcher/log,
 #      _dispatcher/locks) and the issue subtree root.
 #   4. Acquire the in-repo flock and run `git fetch` + `git worktree prune`.
-#   5. Idempotently append `/.req_executor/` to
+#   5. Idempotently append `/.req_executor/` and `logs/` to
 #      `${REPO_PATH}/.git/info/exclude` so the runtime root is git-ignored
 #      locally. `.git/info/exclude` is NEVER committed/pushed. The current issue's
-#      `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh` (which
-#      bypasses both gitignore and info/exclude), so the single
-#      committable path is unaffected.
+#      `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh`, and the stage
+#      guard removes `logs/` paths from the index before commit.
 #
 # The MAIN repo's working tree is the only issue execution cwd. The
 # dispatcher serializes issue attempts, and prepare_attempt.sh switches this
@@ -117,14 +116,19 @@ fi
 # Prune stale linked-worktree metadata left by older deployments.
 git worktree prune
 
-# Ensure the agent runtime root is locally ignored. `.git/info/exclude`
+# Ensure the agent runtime root and generic logs directories are locally ignored. `.git/info/exclude`
 # has identical semantics to `.gitignore` but is never committed/pushed,
 # without touching the project's tracked `.gitignore`. Idempotent: a
 # fixed-string match prevents duplicate appends across ticks.
 RUNTIME_IGNORE_LINE="/$(basename "${RESULT_ROOT}")/"
+LOGS_IGNORE_LINE="logs/"
 EXCLUDE_FILE="${REPO_PATH}/.git/info/exclude"
 mkdir -p "$(dirname "${EXCLUDE_FILE}")"
 if [ ! -f "${EXCLUDE_FILE}" ] || ! grep -Fxq "${RUNTIME_IGNORE_LINE}" "${EXCLUDE_FILE}"; then
   printf '\n# req_executor runtime root (managed by clone_or_pull.sh)\n%s\n' \
     "${RUNTIME_IGNORE_LINE}" >> "${EXCLUDE_FILE}"
+fi
+if [ ! -f "${EXCLUDE_FILE}" ] || ! grep -Fxq "${LOGS_IGNORE_LINE}" "${EXCLUDE_FILE}"; then
+  printf '\n# req_executor local logs (managed by clone_or_pull.sh)\n%s\n' \
+    "${LOGS_IGNORE_LINE}" >> "${EXCLUDE_FILE}"
 fi

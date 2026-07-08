@@ -59,6 +59,7 @@ for iid in 12 13; do
   IID="${iid}" \
   ISSUE_URL="http://gitlab/issues/${iid}" \
   EXECUTOR_AGENT="req_executor" \
+  TARGET_BRANCH="$([ "${iid}" = "12" ] && printf 'release/2026.07' || true)" \
   ORIGIN_JSON="${origin}" \
   REQ_DIGEST="issue ${iid}" \
   bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh" >/dev/null
@@ -105,8 +106,9 @@ fi
 message="$(jq -r 'select(.agent=="req_executor") | .message' "${OPENCLAW_CALL_LOG}")"
 if ! grep -q '^RUN_SINGLE_ISSUE' <<<"${message}" ||
    ! grep -q '^iid=12$' <<<"${message}" ||
-   ! grep -q '^correlation_id=reqd-1$' <<<"${message}"; then
-  echo "expected RUN_SINGLE_ISSUE payload for iid 12 with reqd-1" >&2
+   ! grep -q '^correlation_id=reqd-1$' <<<"${message}" ||
+   ! grep -q '^branch=release/2026.07$' <<<"${message}"; then
+  echo "expected RUN_SINGLE_ISSUE payload for iid 12 with reqd-1 and target branch" >&2
   cat "${OPENCLAW_CALL_LOG}" >&2
   exit 1
 fi

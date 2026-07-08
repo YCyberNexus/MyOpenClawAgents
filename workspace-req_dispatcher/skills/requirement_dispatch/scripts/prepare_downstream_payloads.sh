@@ -22,18 +22,21 @@ fi
 emit_json() {
   local status="$1"
   local project="$2"
-  local requirement_text="$3"
-  local git_issuer_payload="$4"
-  local reason="$5"
+  local target_branch="$3"
+  local requirement_text="$4"
+  local git_issuer_payload="$5"
+  local reason="$6"
   jq -nc \
     --arg status "${status}" \
     --arg project "${project}" \
+    --arg target_branch "${target_branch}" \
     --arg requirement_text "${requirement_text}" \
     --arg git_issuer_payload "${git_issuer_payload}" \
     --arg reason "${reason}" '
     {
       status: $status,
       project: (if $project == "" then null else $project end),
+      target_branch: (if $target_branch == "" then null else $target_branch end),
       requirement_text: (if $requirement_text == "" then null else $requirement_text end),
       git_issuer_payload: (if $git_issuer_payload == "" then null else $git_issuer_payload end),
       reason: (if $reason == "" then null else $reason end)
@@ -110,8 +113,70 @@ extract_project() {
     }'
 }
 
+validate_branch_name() {
+  local branch="$1"
+  case "${branch}" in
+    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+      return 1
+      ;;
+  esac
+  [ "${branch}" != "@" ] || return 1
+  return 0
+}
+
+extract_target_branch() {
+  local text="$1"
+  printf '%s\n' "${text}" | awk '
+    function emit(value) {
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", value)
+      gsub(/[[:space:]"'\''`“”‘’)，,。;；]+$/, "", value)
+      print value
+    }
+    {
+      line = $0
+      if (match(line, /(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._\/-]+/)) {
+        value = substr(line, RSTART, RLENGTH)
+        sub(/^[^:=]*[:=][[:space:]]*/, "", value)
+        emit(value)
+        exit
+      }
+      if (match(line, /(目标分支|分支)[[:space:]]*[：:=][[:space:]]*[A-Za-z0-9._\/-]+/)) {
+        value = substr(line, RSTART, RLENGTH)
+        sub(/^.*[：:=][[:space:]]*/, "", value)
+        emit(value)
+        exit
+      }
+      if (match(line, /(合并到|合到|merge[[:space:]]+to)[[:space:]]*[A-Za-z0-9._\/-]+/)) {
+        value = substr(line, RSTART, RLENGTH)
+        sub(/^(合并到|合到|merge[[:space:]]+to)[[:space:]]*/, "", value)
+        emit(value)
+        exit
+      }
+    }'
+}
+
+strip_target_branch_directive() {
+  local text="$1"
+  printf '%s\n' "${text}" | awk '
+    function trim(s) {
+      sub(/^[[:space:]]+/, "", s)
+      sub(/[[:space:]]+$/, "", s)
+      return s
+    }
+    {
+      line = $0
+      gsub(/[[:space:]]*(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*[，,;；]?/, " ", line)
+      gsub(/[[:space:]]*(目标分支|分支)[[:space:]]*[：:=][[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*[，,;；]?/, " ", line)
+      gsub(/[[:space:]]*(合并到|合到|merge[[:space:]]+to)[[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*[，,;；]?/, " ", line)
+      line = trim(line)
+      sub(/^(处理|实现|完成)[[:space:]]*[，,:：][[:space:]]*/, "", line)
+      line = trim(line)
+      if (line != "") print line
+    }'
+}
+
 if [ -z "${MESSAGE}" ]; then
-  emit_json failed "" "" "" "需求文本为空"
+  emit_json failed "" "" "" "" "需求文本为空"
   exit 0
 fi
 
@@ -141,27 +206,38 @@ NORMALIZED="$(
 )"
 
 if [ -z "${NORMALIZED}" ]; then
-  emit_json failed "" "" "" "需求正文为空"
+  emit_json failed "" "" "" "" "需求正文为空"
   exit 0
 fi
 
-PROJECT="$(extract_project "${NORMALIZED}")"
+TARGET_BRANCH="$(extract_target_branch "${NORMALIZED}")"
+if [ -n "${TARGET_BRANCH}" ] && ! validate_branch_name "${TARGET_BRANCH}"; then
+  emit_json failed "" "" "${NORMALIZED}" "" "target branch must be a safe Git ref name"
+  exit 0
+fi
+
+PROJECT_SOURCE="${NORMALIZED}"
+if [ -n "${TARGET_BRANCH}" ]; then
+  PROJECT_SOURCE="$(strip_target_branch_directive "${NORMALIZED}")"
+fi
+
+PROJECT="$(extract_project "${PROJECT_SOURCE}")"
 
 if [ -z "${PROJECT}" ]; then
-  emit_json failed "" "${NORMALIZED}" "" "需求文本未包含可识别的 GitLab project（格式 group/project），请补充目标 group/project 或具体 GitLab/Wiki URL"
+  emit_json failed "" "" "${NORMALIZED}" "" "需求文本未包含可识别的 GitLab project（格式 group/project），请补充目标 group/project 或具体 GitLab/Wiki URL"
   exit 0
 fi
 
 case "${PROJECT}" in
   */*) ;;
   *)
-    emit_json failed "" "${NORMALIZED}" "" "GitLab project 必须是 group/project 格式"
+    emit_json failed "" "" "${NORMALIZED}" "" "GitLab project 必须是 group/project 格式"
     exit 0
     ;;
 esac
 
 NORMALIZED="$(
-  printf '%s\n' "${NORMALIZED}" | awk -v project="${PROJECT}" '
+  printf '%s\n' "${PROJECT_SOURCE}" | awk -v project="${PROJECT}" '
     function trim(s) {
       sub(/^[[:space:]]+/, "", s)
       sub(/[[:space:]]+$/, "", s)
@@ -177,14 +253,18 @@ NORMALIZED="$(
         }
       }
       sub(/^[[:space:]]*(中|里|上|下|项目)?[[:space:]]*/, "", line)
-      sub(/^(处理|实现|完成)[[:space:]]*[：:][[:space:]]*/, "", line)
+      sub(/^(处理|实现|完成)[[:space:]]*[，,:：][[:space:]]*/, "", line)
       line = trim(line)
       if (line != "") print line
     }'
 )"
 
+if [ -n "${TARGET_BRANCH}" ]; then
+  NORMALIZED="$(strip_target_branch_directive "${NORMALIZED}")"
+fi
+
 if [ -z "${NORMALIZED}" ]; then
-  emit_json failed "" "" "" "需求正文为空"
+  emit_json failed "" "" "" "" "需求正文为空"
   exit 0
 fi
 
@@ -202,4 +282,4 @@ ${NORMALIZED}
 EOF
 )"
 
-emit_json success "${PROJECT}" "${NORMALIZED}" "${GIT_ISSUER_PAYLOAD}" ""
+emit_json success "${PROJECT}" "${TARGET_BRANCH}" "${NORMALIZED}" "${GIT_ISSUER_PAYLOAD}" ""

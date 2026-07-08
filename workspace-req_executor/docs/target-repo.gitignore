@@ -5,3 +5,8 @@
 # for operators who want the same local ignore behavior in a manual checkout.
 
 .req_executor/
+
+# Local logs are ignored by the req_executor clone as well. Existing tracked
+# logs are left in history, but stage_and_guard.sh removes logs/ paths from
+# future commit indexes.
+logs/

@@ -27,7 +27,7 @@ ${REPO_PATH}/
       .req_executor/issue-<iid>/log/attempt-NNN/
 ```
 
-`clone_or_pull.sh` writes `/.req_executor/` to local `.git/info/exclude`. `stage_and_guard.sh` force-adds `${OUTPUT_DIR}`, `${LOG_DIR}/prompt.txt`, and `${LOG_DIR}/claude_result.txt`.
+`clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes any `logs/` path plus `${LOG_DIR}` from the commit index.
 
 ## Removed Legacy Inputs
 

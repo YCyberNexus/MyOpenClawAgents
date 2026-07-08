@@ -1,6 +1,6 @@
 # req_dispatcher User Contract
 
-把本工作区用作"企微需求 → 自动处理"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；新主入口是智伴给出的蓝区 GitLab wiki 链接。本 agent 会从 wiki URL 解析目标 `group/project`，只读拉取 wiki 文档，拆分需求，再主动驱动整条链：调用蓝区 `git_issuer` 为每个拆分需求建 issue → 按 project 选择目标 `req_executor` 部署（合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，覆盖项见 `routing.env`）→ 把 issue 放入 durable executor FIFO queue → 由队列 drain 启动单次 issue 执行入口 → 收执行结果回调 → 清 active 并继续下一条 → 把结论推回发起需求的企微用户。自由文本入口仍兼容，可从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project；如果无法确定 project，会在调用 git_issuer 前直接返回失败说明。本 agent 不写 GitLab（不建 issue、不打标签、不写 note）。
+把本工作区用作"企微需求 → 自动处理"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；新主入口是智伴给出的蓝区 GitLab wiki 链接。本 agent 会从 wiki URL 解析目标 `group/project`，只读拉取 wiki 文档，拆分需求，再主动驱动整条链：调用蓝区 `git_issuer` 为每个拆分需求建 issue → 按 project 选择目标 `req_executor` 部署（合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，覆盖项见 `routing.env`）→ 把 issue 和可选目标分支放入 durable executor FIFO queue → 由队列 drain 启动单次 issue 执行入口 → 收执行结果回调 → 清 active 并继续下一条 → 把结论推回发起需求的企微用户。自由文本入口仍兼容，可从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project；如果无法确定 project，会在调用 git_issuer 前直接返回失败说明。本 agent 不写 GitLab（不建 issue、不打标签、不写 note）。
 
 ## 114 如何调用
 
@@ -19,6 +19,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 - 发的就是**一段文本消息**，不是结构化字段。新主形态是包含 GitLab wiki URL，例如 `http://<gitlab>/<group>/<project>/-/wikis/<slug>`。
 - wiki URL 会决定目标 project，req_dispatcher 会读取 wiki Markdown 并按标题/编号块拆分需求；拆不出多条时整页作为一条需求。
 - 自由文本入口仍支持：目标 project 必须能从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取。req_dispatcher 会先提取这个 project 并生成给 `git_issuer` 的 `repo=<group/project>` 标准化消息；如果自由文本里无法确定 project，会在调用 git_issuer 前直接返回失败说明。
+- 需要指定 MR 目标分支时，可在同一条自然语言消息里明确写 `branch=release/xxx`、`target_branch=release/xxx`、`目标分支：release/xxx` 或 `合到 release/xxx`；无论消息是否包含 wiki URL，req_dispatcher 都会把它作为 executor 的 `branch=` 透传，并从给 git_issuer 的需求正文中剥离。
 - 若需把处理结果推回**发起需求的具体企微用户**，`req_dispatcher` 会先从 OpenClaw 网关/运行时来源元数据捕获 origin（如 source agent/session、deliver origin），再 fallback 到需求文本里的 `[origin] channel=... user=... conversation=... reply_agent=...` 行。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；只有捕获到合法 origin object 时才允许出站推 114，`reply_agent` 缺省时才退回部署期默认 `DEFAULT_REPLY_AGENT`。手动 WebUI 入口通常没有 origin，结果只落 ledger/log 留痕，不给 114 或企微发消息。
 - `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 接收 agent，再由该 agent 投回企微（不在 ack 里）。
 
@@ -47,7 +48,7 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 ## 配置
 
-部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`（git_issuer 等通用下游默认）、`EXECUTOR_AGENT_TIMEOUT_SECONDS`（executor 专用，默认 10800 秒）、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表）、wiki 只读 pin `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN`、`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin，其中 `DEFAULT_REPLY_AGENT` 只是合法 origin object 缺少 `origin.reply_agent` 时的默认目标）、`DISPATCHER_CALLBACK_TARGET`（结果回调目标）、`EXECUTOR_QUEUE_*`（队列恢复与启动重试窗口）。覆盖路由表本体 [`config/routing.env`](config/routing.env)。部署侧还需要周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`，用于清理超时 active、恢复中断或补推进队列。**group/project 不写死在配置里**（wiki 入口从 URL 解析，自由文本入口从 `group/project`、GitLab 仓库/Wiki URL 或 `glab api projects/<encoded-group%2Fproject>/...` 片段提取）；**执行器 GitLab token 不在配置里**（归执行器侧）。
+部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`（git_issuer 等通用下游默认）、`EXECUTOR_AGENT_TIMEOUT_SECONDS`（executor 专用，默认 10800 秒）、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表）、wiki 只读 pin `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN`、`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin，其中 `DEFAULT_REPLY_AGENT` 只是合法 origin object 缺少 `origin.reply_agent` 时的默认目标）、`DISPATCHER_CALLBACK_TARGET`（结果回调目标）、`EXECUTOR_QUEUE_*`（队列恢复与启动重试窗口）。覆盖路由表本体 [`config/routing.env`](config/routing.env)。部署侧还需要周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`，用于清理超时 active、恢复中断或补推进队列。**group/project 不写死在配置里**（wiki 入口从 URL 解析，自由文本入口从 `group/project`、GitLab 仓库/Wiki URL 或 `glab api projects/<encoded-group%2Fproject>/...` 片段提取）；**目标分支不写死在配置里**（只从入口消息里的明确分支指令提取）；**执行器 GitLab token 不在配置里**（归执行器侧）。
 
 ## 依赖与对齐项
 

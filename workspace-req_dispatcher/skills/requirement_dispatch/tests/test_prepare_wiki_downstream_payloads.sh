@@ -48,6 +48,30 @@ if [ "$(jq -r '.wiki_slug' <<<"${prepared}")" != "product/requirements" ]; then
   exit 1
 fi
 
+branch_prepared="$(
+  MESSAGE="目标分支：release/2026.07，请处理 ${WIKI_URL}" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${branch_prepared}")" != "success" ]; then
+  echo "expected branch-qualified wiki payload preparation to succeed" >&2
+  printf '%s\n' "${branch_prepared}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.target_branch' <<<"${branch_prepared}")" != "release/2026.07" ]; then
+  echo "expected wiki target_branch release/2026.07" >&2
+  printf '%s\n' "${branch_prepared}" >&2
+  exit 1
+fi
+
+if jq -r '.git_issuer_payloads[0]' <<<"${branch_prepared}" | grep -q '目标分支'; then
+  echo "expected wiki git_issuer payload to omit dispatcher-only branch directive" >&2
+  printf '%s\n' "${branch_prepared}" >&2
+  exit 1
+fi
+
 dotted="$(
   MESSAGE="请处理 http://localhost:8081/claw_gitlab/px_ifp_hulat_test/-/wikis/product/spec.v1" \
   WIKI_CONTENT='只有一段需求正文。' \

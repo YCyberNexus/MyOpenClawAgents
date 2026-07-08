@@ -41,10 +41,7 @@
 #                   .req_executor/issue-<iid>/log/attempt-NNN/
 #                                                        ← LOG_DIR (still attempt-scoped
 #                                                          inside the shared worktree;
-#                                                          prompt.txt + claude_result.txt
-#                                                          force-added by stage_and_guard.sh,
-#                                                          other files stay locally ignored
-#                                                          via .git/info/exclude)
+#                                                          stays local and is not committed)
 #
 # Path derivation is layered:
 #
@@ -254,9 +251,9 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
   # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree at
   # .req_executor/issue-<iid>/log/attempt-NNN/ so successive attempts do NOT
-  # overwrite each other's prompt.txt / claude_result.txt. Only those two files
-  # are force-added into the MR; the rest stay locally ignored via the
-  # repository `.git/info/exclude` entry for `/.req_executor/`.
+  # overwrite each other's prompt.txt / claude_result.txt. Log files stay local;
+  # stage_and_guard.sh force-adds only OUTPUT_DIR and removes LOG_DIR / logs/
+  # paths from the commit index.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_WORKTREE_REL="${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"

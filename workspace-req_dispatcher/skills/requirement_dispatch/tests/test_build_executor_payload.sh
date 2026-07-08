@@ -25,6 +25,28 @@ if [ "${payload}" != "${expected}" ]; then
   exit 1
 fi
 
+payload_with_branch="$(
+  PROJECT="ai-infra/veqp_server_v3" \
+  IID="312" \
+  CORRELATION_ID="reqd-7" \
+  DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
+  TARGET_BRANCH="release/2026.07" \
+  bash "${SKILL_DIR}/scripts/build_executor_payload.sh"
+)"
+
+expected_with_branch='RUN_SINGLE_ISSUE
+project=ai-infra/veqp_server_v3
+iid=312
+correlation_id=reqd-7
+dispatcher_callback_target=agent:req_dispatcher:main
+branch=release/2026.07'
+
+if [ "${payload_with_branch}" != "${expected_with_branch}" ]; then
+  echo "unexpected executor payload with target branch" >&2
+  printf 'expected:\n%s\nactual:\n%s\n' "${expected_with_branch}" "${payload_with_branch}" >&2
+  exit 1
+fi
+
 if PROJECT="veqp_server_v3" \
    IID="312" \
    CORRELATION_ID="reqd-7" \
@@ -52,6 +74,21 @@ fi
 if ! grep -q "IID must be a positive integer" "${TEST_ROOT}/build-executor-iid.err"; then
   echo "expected clear iid error" >&2
   cat "${TEST_ROOT}/build-executor-iid.err" >&2
+  exit 1
+fi
+
+if PROJECT="ai-infra/veqp_server_v3" \
+   IID="312" \
+   CORRELATION_ID="reqd-7" \
+   TARGET_BRANCH="../bad" \
+   bash "${SKILL_DIR}/scripts/build_executor_payload.sh" >/dev/null 2>"${TEST_ROOT}/build-executor-branch.err"; then
+  echo "expected invalid target branch to fail" >&2
+  exit 1
+fi
+
+if ! grep -q "branch must be a safe Git ref name" "${TEST_ROOT}/build-executor-branch.err"; then
+  echo "expected clear branch error" >&2
+  cat "${TEST_ROOT}/build-executor-branch.err" >&2
   exit 1
 fi
 

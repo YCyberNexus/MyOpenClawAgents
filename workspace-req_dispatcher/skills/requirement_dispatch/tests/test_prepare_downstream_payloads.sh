@@ -67,6 +67,59 @@ if ! grep -q '最后一行输出 req_dispatcher 契约 JSON' <<<"${git_payload}"
   exit 1
 fi
 
+branch_input="$(
+  MESSAGE='请在 GitLab ai-infra/veqp_server_v3 中处理，目标分支：release/2026.07，修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${branch_input}")" != "success" ]; then
+  echo "expected branch-qualified input to succeed" >&2
+  printf '%s\n' "${branch_input}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.target_branch' <<<"${branch_input}")" != "release/2026.07" ]; then
+  echo "expected target_branch release/2026.07" >&2
+  printf '%s\n' "${branch_input}" >&2
+  exit 1
+fi
+
+branch_requirement="$(jq -r '.requirement_text' <<<"${branch_input}")"
+if [ "${branch_requirement}" != "修复导出流程。" ]; then
+  echo "expected branch directive to be stripped from requirement_text" >&2
+  printf '%s\n' "${branch_input}" >&2
+  exit 1
+fi
+
+if jq -r '.git_issuer_payload' <<<"${branch_input}" | grep -q '目标分支'; then
+  echo "expected git_issuer payload to omit dispatcher-only branch directive" >&2
+  printf '%s\n' "${branch_input}" >&2
+  exit 1
+fi
+
+branch_before_project="$(
+  MESSAGE='目标分支：release/2026.07，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${branch_before_project}")" != "success" ]; then
+  echo "expected branch-before-project input to succeed" >&2
+  printf '%s\n' "${branch_before_project}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.project' <<<"${branch_before_project}")" != "ai-infra/veqp_server_v3" ]; then
+  echo "expected branch-before-project input to preserve the real project" >&2
+  printf '%s\n' "${branch_before_project}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.target_branch' <<<"${branch_before_project}")" != "release/2026.07" ]; then
+  echo "expected branch-before-project target_branch release/2026.07" >&2
+  printf '%s\n' "${branch_before_project}" >&2
+  exit 1
+fi
+
 missing_project="$(
   MESSAGE='[来自114] 用户wuyun请求： 开发虚拟机台状态机。' \
   bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"

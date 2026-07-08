@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-08.1] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages."
+description: "[SKILL_VERSION=2026-07-08.3] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, accept an optional branch field from req_dispatcher, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages and are not committed into MR changes."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -42,7 +42,7 @@ the subagent will then bypass `run_acpx_attempt.sh`, and the whole
 | Tells it to | run Steps 0–9: `bash run_acpx_attempt.sh` → stage → push → verify → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue and write its deliverables (code / tests / specs / docs — whatever the issue asks for) |
 | Shape | starts with sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
 | Sent how | `sessions_spawn(payload=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", timeoutSeconds=30, runTimeoutSeconds=<run_timeout_seconds>, cleanup="keep")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
-| File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`, force-added into the MR diff by `stage_and_guard.sh` |
+| File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`; it stays on the runner and is not committed into the MR diff |
 
 **HARD RULE: `${LOG_DIR}/prompt.txt` is NEVER the spawn payload.** The
 wrapper's pre-spawn sentinel grep on the rendered string guards against

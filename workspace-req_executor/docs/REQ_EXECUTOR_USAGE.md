@@ -20,7 +20,7 @@ Optional:
 group=<group>
 ```
 
-`dispatch_single_issue.sh` reads GitLab token from process env or `config/gitlab.env`, reads only the clone parent from `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`, synthesizes a one-IID scheduled trigger without `branch=`, and writes:
+`dispatch_single_issue.sh` reads GitLab token from process env or `config/gitlab.env`, reads only the clone parent from `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`, accepts optional `branch=`, synthesizes a one-IID scheduled trigger, and writes:
 
 ```text
 ${REPO_PATH}/.req_executor/issues/issue-<iid>/dispatch_origin.json

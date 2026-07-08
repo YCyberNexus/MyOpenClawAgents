@@ -32,7 +32,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/team_repo`, this is `/data/team_repo/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
 | `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree under the repo's fixed `.req_executor/.worktrees/issue-{ISSUE_IID}/` runtime area (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code uses the issue prompt and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
 | `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/output` (inside the shared per-issue worktree) |
-| `{LOG_DIR}`              | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; `prompt.txt` + `claude_result.txt` force-added into the MR, other files locally ignored) |
+| `{LOG_DIR}`              | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; log files stay local and are not committed into the MR diff) |
 | `{ISSUE_ROOT}`           | `{REPO_PATH}/.req_executor/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
 | `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
 | `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
@@ -80,7 +80,7 @@ WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issu
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
 WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
-OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh)
+OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh; logs/ paths are still removed from the index)
 LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
 ISSUE_ROOT={ISSUE_ROOT}
 SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
