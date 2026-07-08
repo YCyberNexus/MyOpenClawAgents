@@ -14,12 +14,17 @@
 #   atomic_write_json <path>     ← reads JSON from stdin, atomic mv
 #   load_state                   → cat CAMPAIGN_STATE_FILE (or fresh init)
 #   wrapper_log <phase> <msg...> → append to dispatcher log
-#   phase6_synthesize_blocked <iid> <attempt_number> <block_reason> [block_side]
-#                                → emit a synthetic compact reply JSON
-#                                  (block_side defaults to "dispatcher"; pass
-#                                   "cc" for real subagent callbacks)
-#   phase6_normalize_reply <reply_json> <ctx_iid> <ctx_attempt>
-#                                → validated + normalized reply JSON
+#   iso_to_epoch <iso8601>       → epoch seconds (0 when unparseable)
+#   phase6_synthesize_reply <iid> <attempt_number> <status> <block_reason>
+#                                → emit a synthetic compact reply JSON (status=blocked|timeout)
+#   phase6_synthesize_blocked <iid> <attempt_number> <block_reason>
+#                                → phase6_synthesize_reply with status=blocked
+#   phase6_synthesize_timeout <iid> <attempt_number> <block_reason>
+#                                → phase6_synthesize_reply with status=timeout
+#   phase6_normalize_reply <reply_json> <ctx_iid> <ctx_attempt> [synth_status]
+#                                → validated + normalized reply JSON; synth_status
+#                                  (default blocked) is used when the raw reply is
+#                                  unparseable or carries no status field
 #   phase6_sync_labels <iid> <final_status>
 #                                → run set_issue_label.sh ops; echo any append-on-failure text
 #   phase6_write_state_files <iid> <attempt_number> <reply_json> <final_status>
@@ -45,43 +50,15 @@ set -euo pipefail
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# derive_effective_model_tiers <full_csv> <model_settings_dir>
-#   Echoes the EFFECTIVE ordered model-tier CSV: the subset of <full_csv> for
-#   which `${model_settings_dir}/<tier>-settings.json` exists and is readable,
-#   preserving <full_csv> order. This is the per-deployment upgrade ladder that
-#   auto-discovers which tiers are actually available from the settings files
-#   on disk, while the WISDOM order (flash<pro<max …) is carried by <full_csv>
-#   (the configured model_tiers).
-#     - <model_settings_dir> empty → echoes <full_csv> unchanged (auto-discovery
-#       disabled; legacy behavior — the tier is then only a prompt-text hint).
-#     - configured but no <tier>-settings.json matches → echoes the empty
-#       string; the caller decides (prepare aborts the tick, followup falls
-#       back to the full list because its narrow reconcile is best-effort).
-#   Consumers: reconcile.sh (integer model_tier index) and the per-tick tier
-#   pinning in dispatch_prepare_tick.sh (pin_model_tier → MODEL selection) MUST
-#   use this. ensure_labels.sh (creates every model:<tier> label) and
-#   set_issue_label.sh (model:* mutual-exclusion clear-set) keep receiving the
-#   FULL list so migration / future tier switches can still create and clear
-#   labels outside the current effective subset.
-derive_effective_model_tiers() {
-  local full_csv="$1" msd="$2"
-  if [ -z "${msd}" ]; then
-    printf '%s' "${full_csv}"
+# Parse an ISO-8601 UTC timestamp into epoch seconds. Echoes 0 when the
+# input is empty / null / unparseable so callers can branch on `-gt 0`.
+iso_to_epoch() {
+  local ts="$1"
+  if [ -z "${ts}" ] || [ "${ts}" = "null" ]; then
+    echo 0
     return 0
   fi
-  # String accumulation (not a bash array) so an empty result stays `set -u`
-  # safe. The read guard `|| [ -n "${t}" ]` is essential: `tr` emits no trailing
-  # newline after the LAST tier, and a bare `while read` would silently drop it
-  # — and the last tier is the highest/cap tier, so dropping it would quietly
-  # truncate the upgrade ladder.
-  local out="" t
-  while IFS= read -r t || [ -n "${t}" ]; do
-    [ -n "${t}" ] || continue
-    if [ -r "${msd}/${t}-settings.json" ]; then
-      if [ -z "${out}" ]; then out="${t}"; else out="${out},${t}"; fi
-    fi
-  done < <(printf '%s' "${full_csv}" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-  printf '%s' "${out}"
+  date -u -d "${ts}" +%s 2>/dev/null || gdate -u -d "${ts}" +%s 2>/dev/null || echo 0
 }
 
 atomic_write_json() {
@@ -165,13 +142,11 @@ fresh_init_state() {
       issue_iids_whitelist: [],
       require_labels: [],
       require_labels_match: "or",
-      model_tiers: ["flash", "pro", "max"],
-      pin_model_tier: null,
       result_basename: $result_basename,
       data_basename: $data_basename,
       ui_accounts_relpath: $ui_accounts_relpath,
-      precheck_relpath: null,
-      model_settings_dir: null,
+      model_tiers: null,
+      continue_upgrade_threshold: 2,
       next_new_issue_iid: null,
       tick_seq: 0,
       active_issue_iids: [],
@@ -185,7 +160,6 @@ fresh_init_state() {
       timeout_iids: [],
       campaign_status: "running",
       quota_launched_this_tick: 0,
-      quota_completed_this_tick: 0,
       last_reconcile_evidence: null,
       updated_at: null
     }'
@@ -202,33 +176,25 @@ persist_state() {
 
 # ─── Phase 6 helpers ───────────────────────────────────────────────
 
-# Synthesize a blocked reply. The 4th arg (block_side) selects the side:
-#   - "dispatcher" (default): DISPATCHER-SIDE failure (prep failure, spawn
-#     launch failure, scope/stuck eviction). No subagent ever ran acpx, so the
-#     model-upgrade decision excludes it. Maps to the `blocked-dispatcher`
-#     workflow label (promotes to `failed-dispatcher` on retry exhaustion).
-#   - "cc": a REAL subagent callback that already spawned and ran acpx but
-#     returned an empty / unparseable compact reply. Per §4, real callbacks are
-#     CC-side, so they map to `blocked-cc` (promotes to `failed-cc`) and DO feed
-#     the model-upgrade path — "subagent ran but failed / produced no usable
-#     output" is exactly the scenario the upgrade is meant to cover.
-# The `block_side` field is read by phase6_process to pick the side.
-phase6_synthesize_blocked() {
-  local iid="$1" attempt_number="$2" block_reason="$3" block_side="${4:-dispatcher}"
-  # Guard against typos in callers: anything other than "cc" maps to dispatcher.
-  if [ "${block_side}" != "cc" ]; then
-    block_side="dispatcher"
-  fi
+# Emit a synthetic compact reply. status MUST be blocked or timeout:
+# `blocked` re-enters the retry pool; `timeout` parks the IID in
+# timeout_iids with no auto-retry (只要超时就不重试 — see SKILL.md
+# §Timeout-shaped synthesized replies).
+phase6_synthesize_reply() {
+  local iid="$1" attempt_number="$2" status="$3" block_reason="$4"
+  case "${status}" in
+    blocked|timeout) ;;
+    *) status="blocked" ;;
+  esac
   jq -n \
     --argjson iid "${iid}" \
     --argjson attempt_number "${attempt_number}" \
+    --arg status "${status}" \
     --arg block_reason "${block_reason}" \
-    --arg block_side "${block_side}" \
     '{
       iid: $iid,
       attempt_number: $attempt_number,
-      status: "blocked",
-      block_side: $block_side,
+      status: $status,
       mode_actual: "",
       work_branch: "",
       local_branch: "",
@@ -240,18 +206,29 @@ phase6_synthesize_blocked() {
       labels_removed: [],
       summary_posted: false,
       block_reason: $block_reason,
-      log_dir: ""
+      log_dir: "",
+      block_side: "dispatcher"
     }'
+}
+
+phase6_synthesize_blocked() {
+  phase6_synthesize_reply "$1" "$2" blocked "$3"
+}
+
+phase6_synthesize_timeout() {
+  phase6_synthesize_reply "$1" "$2" timeout "$3"
 }
 
 # phase6_evidence_shows_completed <iid> <evidence_json>
 # Pure check (NO GitLab call): returns 0 (true) iff the reconcile evidence array
 # in <evidence_json> marks <iid> as already in a GitLab-completed/closed terminal
-# state. Tolerant of both label vocabularies — benchmark-test `done` via
-# is_done_on_gitlab, v2 `pr` via has_done_pr — and of missing fields (null →
-# false). This is the Source-of-Truth guard: a completed/closed issue must NEVER
-# be regressed to blocked/timeout by a stale earlier attempt's late callback or
-# stuck-eviction.
+# state. Tolerant of both label vocabularies — v2 `pr` via has_done_pr /
+# is_done_on_gitlab, benchmark-test `done` via is_done_on_gitlab — and of missing
+# fields (null → false). This is the Source-of-Truth guard: a completed/closed
+# issue must NEVER be regressed to timeout/blocked/failed by a stale earlier
+# attempt's late callback or stuck-eviction. (needs_continue is intentionally NOT
+# excluded here — a `pr`+`continue` issue must also be protected from a stale
+# regression; §11 reconcile correction still routes it to continue afterwards.)
 phase6_evidence_shows_completed() {
   local iid="$1" evidence_json="$2"
   [ -n "${evidence_json}" ] || return 1
@@ -268,9 +245,9 @@ phase6_evidence_shows_completed() {
 # is the only sanctioned GitLab access path; it self-auths via env_paths.sh) and
 # return 0 (true) iff it is already completed/closed. On ANY failure (reconcile
 # error, missing/malformed evidence) returns 1 (false) so the caller proceeds with
-# its normal eviction — the stuck-eviction backstop stays live even when GitLab is
-# unreachable; the guard only suppresses a regression when fresh ground truth is
-# actually available.
+# its normal eviction/regression — the stuck-eviction backstop stays live even
+# when GitLab is unreachable; the guard only suppresses a regression when fresh
+# ground truth is actually available.
 phase6_iid_completed_live() {
   local iid="$1"
   local script_dir out ev_path ev_json
@@ -291,12 +268,23 @@ phase6_iid_completed_live() {
 #   $1 = the reply JSON (raw text — may be invalid JSON)
 #   $2 = expected iid (from pending entry)
 #   $3 = expected attempt_number (from pending entry)
+#   $4 = synth_status (optional, default "blocked"): the status used when the
+#        raw reply is unparseable or carries no status field. The caller passes
+#        "timeout" when the run already outlived its acpx wall-clock budget, so
+#        a dead subagent's garbled/empty terminal payload parks the IID as
+#        timeout (no auto-retry) instead of re-entering the blocked retry pool.
+#        A parseable reply with an explicit status keeps that status — a live
+#        subagent's own verdict always wins.
 # Output (stdout): a normalized JSON object (always valid; synthesized on
 # parse failure / iid mismatch). The orchestrator's "drop stale callback"
 # check happens BEFORE this — by the time the caller gets here, the IID
 # is known to match a pending entry.
 phase6_normalize_reply() {
-  local raw="$1" exp_iid="$2" exp_attempt="$3"
+  local raw="$1" exp_iid="$2" exp_attempt="$3" synth_status="${4:-blocked}"
+  case "${synth_status}" in
+    blocked|timeout) ;;
+    *) synth_status="blocked" ;;
+  esac
   local parsed
   if ! parsed="$(printf '%s' "${raw}" | jq -c . 2>/dev/null)"; then
     local first200
@@ -305,34 +293,22 @@ phase6_normalize_reply() {
     # the (possibly non-JSON) raw as one string, replacing any invalid bytes with
     # U+FFFD, then slices by codepoint and flattens CR/LF for a one-line reason.
     first200="$(printf '%s' "${raw}" | jq -Rsr '.[0:200] | gsub("\\r";"") | gsub("\\n";" ")' 2>/dev/null || printf '%s' "${raw}" | head -c 200 | tr -d '\r' | tr '\n' ' ')"
-    # A callback arrived but its compact reply is unparseable. Per the v2
-    # decision this is attributed to the DISPATCHER side (an unusable payload
-    # is an orchestration/transport anomaly, not a Claude-Code work failure),
-    # so it defaults to block_side "dispatcher" → blocked-dispatcher. A
-    # *parseable* reply (normalized below) still defaults to CC-side.
-    phase6_synthesize_blocked "${exp_iid}" "${exp_attempt}" \
+    phase6_synthesize_reply "${exp_iid}" "${exp_attempt}" "${synth_status}" \
       "callback worker_result_json not valid JSON: ${first200}"
     return 0
   fi
   # Normalize: tolerate null/empty fields, normalize legacy no_changes,
   # require non-empty block_reason for blocked/failed/timeout.
-  #
-  # v2: a real subagent reply is always a Claude-Code-side outcome (the
-  # subagent ran acpx and/or its post-acpx steps), so its blocked/failed
-  # outcomes are CC-side. We stamp `block_side: "cc"` here unless the reply
-  # explicitly carries a side (forward-compat). The dispatcher-side
-  # `block_side: "dispatcher"` is only ever produced by
-  # phase6_synthesize_blocked.
   printf '%s' "${parsed}" | jq -c \
     --argjson exp_iid "${exp_iid}" \
-    --argjson exp_attempt "${exp_attempt}" '
+    --argjson exp_attempt "${exp_attempt}" \
+    --arg synth_status "${synth_status}" '
     def s: if . == null then "" else . end;
     def a: if . == null then [] else . end;
     {
       iid: (.iid // $exp_iid),
       attempt_number: (.attempt_number // $exp_attempt),
-      status: (.status // "blocked"),
-      block_side: (if (.block_side // "") == "dispatcher" then "dispatcher" else "cc" end),
+      status: (.status // $synth_status),
       mode_actual: (.mode_actual | s),
       work_branch: (.work_branch | s),
       local_branch: (.local_branch | s),
@@ -345,8 +321,22 @@ phase6_normalize_reply() {
       summary_posted: (.summary_posted // false),
       block_reason: (.block_reason | s),
       log_dir: (.log_dir | s),
-      metrics: (.metrics // null)
+      block_side: "cc"
     }
+    | .status as $st
+    | if (($st | type) != "string")
+         or ((["done","no_changes","blocked","failed","timeout"] | index($st)) == null) then
+        # Status present but empty/garbage — the subagent did not author a
+        # usable verdict, so this is a dead-subagent shape like a missing
+        # status: coerce to synth_status (timeout when the run outlived its
+        # budget) instead of letting phase6_sync_labels reject it and the
+        # sync-failure path demote it to retryable blocked.
+        .status = $synth_status
+        | .block_side = "dispatcher"
+        | (if (.block_reason | length) == 0 then
+             .block_reason = ("subagent reply carried unsupported status " + ($st | tostring) + " — coerced to " + $synth_status)
+           else . end)
+      else . end
     | if .status == "no_changes" then
         .status = "blocked"
         | (if (.block_reason | length) == 0 then .block_reason = "subagent produced no staged changes" else . end)
@@ -358,45 +348,67 @@ phase6_normalize_reply() {
 }
 
 # Synchronize live workflow labels via set_issue_label.sh.
-# Inputs: $1=iid, $2=final_status — one of the v2 internal terminal states:
-#   done | blocked_cc | blocked_dispatcher | failed_cc | failed_dispatcher | timeout
+# Inputs: $1=iid, $2=final_status (done|blocked|failed|timeout)
+#         $3=block_side (cc|dispatcher, 默认 dispatcher) — selects
+#            blocked-cc/blocked-dispatcher and failed-cc/failed-dispatcher.
 # Returns: 0 on success, non-zero with stderr if any required op fails.
-#
-# `set_issue_label.sh add <workflow-label>` already removes the rest of the
-# workflow mutual-exclusion group in the same GitLab update (and never touches
-# the orthogonal model:{tier} / quality:low dimensions), so each branch only
-# needs the single `add` plus a defensive `remove doing` to guarantee the
-# transient `doing` label is gone. eval branch: the MR/pr flow is removed, so a
-# `done` outcome ends carrying `done` (no `pr`).
 phase6_sync_labels() {
-  local iid="$1" final_status="$2"
+  local iid="$1" final_status="$2" block_side="${3:-dispatcher}"
+  case "${block_side}" in cc|dispatcher) ;; *) block_side="dispatcher" ;; esac
   local rc=0
   case "${final_status}" in
     done)
-      # eval branch: `done` is the terminal success label; the MR/pr flow is
-      # removed, so the issue ends carrying `done` (NOT `pr`).
-      _label_op "${iid}" remove doing || rc=$?
-      _label_op "${iid}" add done     || rc=$?
+      # C: pr 替换 done —— 终态只留 pr。
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove blocked-cc         || rc=$?
+      _label_op "${iid}" remove blocked-dispatcher || rc=$?
+      _label_op "${iid}" remove failed-cc          || rc=$?
+      _label_op "${iid}" remove failed-dispatcher  || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" remove timeout            || rc=$?
+      _label_op "${iid}" add pr                    || rc=$?
+      _label_op "${iid}" remove done               || rc=$?
       ;;
-    blocked_cc)
-      _label_op "${iid}" remove doing       || rc=$?
-      _label_op "${iid}" add blocked-cc     || rc=$?
+    blocked)
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove timeout            || rc=$?
+      _label_op "${iid}" remove failed-cc          || rc=$?
+      _label_op "${iid}" remove failed-dispatcher  || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      if [ "${block_side}" = "cc" ]; then
+        _label_op "${iid}" remove blocked-dispatcher || rc=$?
+        _label_op "${iid}" add blocked-cc            || rc=$?
+      else
+        _label_op "${iid}" remove blocked-cc         || rc=$?
+        _label_op "${iid}" add blocked-dispatcher    || rc=$?
+      fi
       ;;
-    blocked_dispatcher)
-      _label_op "${iid}" remove doing            || rc=$?
-      _label_op "${iid}" add blocked-dispatcher  || rc=$?
-      ;;
-    failed_cc)
-      _label_op "${iid}" remove doing     || rc=$?
-      _label_op "${iid}" add failed-cc    || rc=$?
-      ;;
-    failed_dispatcher)
-      _label_op "${iid}" remove doing            || rc=$?
-      _label_op "${iid}" add failed-dispatcher   || rc=$?
+    failed)
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove blocked-cc         || rc=$?
+      _label_op "${iid}" remove blocked-dispatcher || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" remove timeout            || rc=$?
+      if [ "${block_side}" = "cc" ]; then
+        _label_op "${iid}" remove failed-dispatcher || rc=$?
+        _label_op "${iid}" add failed-cc            || rc=$?
+      else
+        _label_op "${iid}" remove failed-cc         || rc=$?
+        _label_op "${iid}" add failed-dispatcher    || rc=$?
+      fi
       ;;
     timeout)
-      _label_op "${iid}" remove doing || rc=$?
-      _label_op "${iid}" add timeout  || rc=$?
+      _label_op "${iid}" remove doing              || rc=$?
+      _label_op "${iid}" remove blocked-cc         || rc=$?
+      _label_op "${iid}" remove blocked-dispatcher || rc=$?
+      _label_op "${iid}" remove blocked            || rc=$?
+      _label_op "${iid}" remove failed-cc          || rc=$?
+      _label_op "${iid}" remove failed-dispatcher  || rc=$?
+      _label_op "${iid}" remove failed             || rc=$?
+      _label_op "${iid}" add timeout               || rc=$?
       ;;
     *)
       echo "phase6_sync_labels: unsupported final_status=${final_status}" >&2
@@ -445,7 +457,7 @@ phase6_read_prior_issue_state() {
 # campaign-level classification with the same value).
 phase6_write_state_files() {
   local iid="$1" attempt_number="$2" reply="$3" final_status="$4" \
-        prior_issue_state="$5" is_launch_synth="$6"
+        prior_issue_state="$5" is_launch_synth="$6" block_side="${7:-}"
 
   local issue_root="${ISSUES_ROOT}/issue-${iid}"
   local attempt_padded
@@ -462,17 +474,11 @@ phase6_write_state_files() {
 
   # Compute retry_count. `timeout` is terminal-but-not-failed and DOES NOT
   # consume retry budget — it stays parked until a human strips the label.
-  # v2: every blocked/failed side variant (blocked_cc / blocked_dispatcher /
-  # failed_cc / failed_dispatcher) consumes the budget except launch-side synth.
   local prior_retry_count
   prior_retry_count="$(printf '%s' "${prior_issue_state}" | jq -r '.retry_count // 0')"
   local new_retry_count="${prior_retry_count}"
-  if [ "${is_launch_synth}" != "true" ]; then
-    case "${final_status}" in
-      blocked_cc|blocked_dispatcher|failed_cc|failed_dispatcher)
-        new_retry_count=$((prior_retry_count + 1))
-        ;;
-    esac
+  if [ "${is_launch_synth}" != "true" ] && { [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ]; }; then
+    new_retry_count=$((prior_retry_count + 1))
   fi
 
   # ─── ATTEMPT_STATE_FILE ───
@@ -487,6 +493,7 @@ phase6_write_state_files() {
   new_attempt_state="$(printf '%s' "${prior_attempt_state}" | jq \
     --arg now "${now}" \
     --arg final_status "${final_status}" \
+    --arg block_side "${block_side}" \
     --arg summary_file "${summary_file}" \
     --argjson summary_exists "${summary_exists}" \
     --argjson reply "${reply}" \
@@ -501,7 +508,8 @@ phase6_write_state_files() {
         attempt_artifacts_posted_to_wiki: ($reply.wiki_url != ""),
         summary_file: (if $summary_exists then $summary_file else null end),
         summary_posted_to_issue: ($reply.summary_posted // false),
-        block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end)
+        block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end),
+        block_side: (if ($final_status == "blocked" or $final_status == "failed") and ($block_side != "") then $block_side else null end)
       }
     ')"
   printf '%s' "${new_attempt_state}" | atomic_write_json "${attempt_state_file}"
@@ -513,6 +521,7 @@ phase6_write_state_files() {
     --argjson attempt_number "${attempt_number}" \
     --arg now "${now}" \
     --arg final_status "${final_status}" \
+    --arg block_side "${block_side}" \
     --arg issue_root "${issue_root}" \
     --argjson new_retry_count "${new_retry_count}" \
     --argjson reply "${reply}" \
@@ -531,36 +540,11 @@ phase6_write_state_files() {
         block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end),
         commit_sha: (if $reply.commit_sha == "" then null else $reply.commit_sha end),
         merge_request_url: (if $reply.merge_request_url == "" then null else $reply.merge_request_url end),
-        updated_at: $now
+        updated_at: $now,
+        block_side: (if ($final_status == "blocked" or $final_status == "failed") and ($block_side != "") then $block_side else ($prior.block_side // null) end)
       }
     ')"
   printf '%s' "${new_issue_state}" | atomic_write_json "${issue_state_file}"
-
-  # ─── benchmark metrics ledger (append-only) ───
-  # The compact reply may carry a `metrics` object (collect_metrics.sh, Step 1.5).
-  # Append one line per terminal attempt so aggregate_benchmark.sh can build the
-  # issue × model matrix without depending on per-attempt branches. The model
-  # name is taken from the dispatcher-resolved issue state (authoritative — the
-  # executor prompt does not thread MODEL into metrics.json), falling back to
-  # whatever the reply's metrics carried. Best-effort: a write failure NEVER
-  # fails the callback. Synthesized blocked replies carry no metrics, so
-  # dispatcher-side / unparseable failures simply leave no ledger line.
-  local _metrics _model
-  _metrics="$(printf '%s' "${reply}" | jq -c '.metrics // null' 2>/dev/null || echo null)"
-  if [ "${_metrics}" != "null" ] && [ -n "${_metrics}" ]; then
-    _model="$(printf '%s' "${prior_issue_state}" | jq -r '.model // empty' 2>/dev/null || echo "")"
-    local _ledger_dir="${RESULT_ROOT}/_dispatcher/benchmark"
-    mkdir -p "${_ledger_dir}" 2>/dev/null || true
-    printf '%s' "${_metrics}" | jq -c \
-      --argjson iid "${iid}" --argjson att "${attempt_number}" \
-      --arg status "${final_status}" --arg ts "${now}" \
-      --arg model "${_model}" '
-      . + {iid:$iid, attempt_number:$att, status:$status, ts:$ts,
-           model:(if (.model // "") != "" then .model
-                  elif $model != "" then $model
-                  else null end)}' \
-      >> "${_ledger_dir}/metrics.jsonl" 2>/dev/null || true
-  fi
 
   echo "${new_retry_count}"
 }
@@ -569,8 +553,7 @@ phase6_write_state_files() {
 # Inputs:
 #   $1 = current state JSON
 #   $2 = iid
-#   $3 = final_status — v2 internal terminal state:
-#        done | blocked_cc | blocked_dispatcher | failed_cc | failed_dispatcher | timeout
+#   $3 = final_status (done|blocked|failed|timeout)
 # Output: the updated state JSON on stdout.
 # Caller persists.
 #
@@ -579,36 +562,20 @@ phase6_write_state_files() {
 # §active_issue_iids / active_issue_sessions semantics). This avoids the
 # substring trap of regex-filtering by IID suffix (IID 14 vs 114).
 #
-# The campaign-level `blocked_iids` / `failed_iids` lists are side-agnostic
-# unions: both `*_cc` and `*_dispatcher` outcomes land in the same list, since
-# batch scheduling only cares whether an IID is blocked-and-retryable or
-# terminally-failed regardless of which side produced it. The side only drives
-# the live label (`blocked-cc` vs `blocked-dispatcher`); the model tier is
-# pinned per tick in PREPARE independent of the side.
-#
 # `timeout` lands in `timeout_iids` and is NOT added to `unfinished_iids`,
 # so the dispatcher does NOT auto-retry it. A human reviewer strips the
-# `timeout` or adds `retry` to re-enqueue.
+# `timeout`, adds `retry`, or applies `continue` to re-enqueue.
 phase6_apply_state_classify() {
   local state_json="$1" iid="$2" final_status="$3"
-  # Collapse the side variants into the campaign-list bucket.
-  local bucket
-  case "${final_status}" in
-    done)                              bucket="done" ;;
-    blocked_cc|blocked_dispatcher)     bucket="blocked" ;;
-    failed_cc|failed_dispatcher)       bucket="failed" ;;
-    timeout)                           bucket="timeout" ;;
-    *)                                 bucket="failed" ;;
-  esac
   printf '%s' "${state_json}" | jq -c \
     --argjson iid "${iid}" \
-    --arg bucket "${bucket}" \
+    --arg final_status "${final_status}" \
     --arg project "${PROJECT}" '
     . as $s
     | .pending_subagents        = ($s.pending_subagents        | del(.[($iid|tostring)]))
     | .active_issue_iids        = (.pending_subagents | keys | map(tonumber) | sort)
     | .active_issue_sessions    = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))
-    | (if $bucket == "done" then
+    | (if $final_status == "done" then
          .completed_iids    = (((.completed_iids // []) + [$iid]) | unique)
          | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
@@ -616,14 +583,14 @@ phase6_apply_state_classify() {
          | .failed_iids     = ((.failed_iids     // []) | map(select(. != $iid)))
          | .timeout_iids    = ((.timeout_iids    // []) | map(select(. != $iid)))
          | .quota_completed_this_tick = (((.quota_completed_this_tick // 0)) + 1)
-       elif $bucket == "blocked" then
+       elif $final_status == "blocked" then
          .blocked_iids      = (((.blocked_iids   // []) + [$iid]) | unique)
          | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) + {($iid|tostring): (.tick_seq // 0)})
          | .unfinished_iids = (((.unfinished_iids // []) + [$iid]) | unique)
          | .completed_iids  = ((.completed_iids // []) | map(select(. != $iid)))
          | .failed_iids     = ((.failed_iids    // []) | map(select(. != $iid)))
          | .timeout_iids    = ((.timeout_iids   // []) | map(select(. != $iid)))
-       elif $bucket == "timeout" then
+       elif $final_status == "timeout" then
          .timeout_iids      = (((.timeout_iids   // []) + [$iid]) | unique)
          | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {}) | del(.[($iid|tostring)]))
          | .unfinished_iids = ((.unfinished_iids // []) | map(select(. != $iid)))
@@ -672,9 +639,8 @@ phase6_decide_cleanup() {
     return 0
   fi
 
-  # Local-evidence gate for non-done outcomes (every v2 blocked/failed side
-  # variant + timeout). Only `done` skips this gate.
-  if [ "${final_status}" != "done" ]; then
+  # Local-evidence gate for non-done outcomes.
+  if [ "${final_status}" = "blocked" ] || [ "${final_status}" = "failed" ] || [ "${final_status}" = "timeout" ]; then
     if [ ! -f "${issue_state_file}" ] || [ ! -f "${attempt_state_file}" ] || [ ! -f "${summary_file}" ]; then
       jq -n --arg target "${child_session_key}" \
         '{action:"skip", target:$target, reason:"local_evidence_missing"}'
@@ -698,28 +664,12 @@ phase6_decide_cleanup() {
 #   {"final_status":"...","cleanup":{...},"remaining_pending_count":N,"updated_state":<json>}
 phase6_process() {
   local state_json="$1" reply_json="$2" is_launch_synth="$3"
-  local iid attempt_number reply_status block_side
+  local iid attempt_number reply_status
   iid="$(printf '%s' "${reply_json}" | jq -r '.iid')"
   attempt_number="$(printf '%s' "${reply_json}" | jq -r '.attempt_number')"
   reply_status="$(printf '%s' "${reply_json}" | jq -r '.status')"
-  # block_side: "cc" for real subagent replies, "dispatcher" for synthesized
-  # dispatcher-side failures (prep / launch / eviction). Default to "cc".
-  block_side="$(printf '%s' "${reply_json}" | jq -r 'if (.block_side // "") == "dispatcher" then "dispatcher" else "cc" end')"
-
-  # Map the compact-reply status + side onto the v2 internal terminal state.
-  #   reply done                         → done
-  #   reply blocked/no_changes, cc       → blocked_cc
-  #   reply blocked/no_changes, disp.    → blocked_dispatcher
-  #   reply failed, cc                   → failed_cc       (direct, rare)
-  #   reply failed, dispatcher           → failed_dispatcher
-  #   reply timeout                      → timeout
-  local final_status
-  case "${reply_status}" in
-    done)              final_status="done" ;;
-    timeout)           final_status="timeout" ;;
-    failed)            final_status="failed_${block_side}" ;;
-    blocked|no_changes|*) final_status="blocked_${block_side}" ;;
-  esac
+  local block_side
+  block_side="$(printf '%s' "${reply_json}" | jq -r '.block_side // "dispatcher"')"
 
   # Capture child_session_key BEFORE drain.
   local child_session_key
@@ -727,41 +677,40 @@ phase6_process() {
     | jq -r --argjson iid "${iid}" '.pending_subagents[($iid|tostring)].child_session_key // ""')"
 
   # Sync labels for the preliminary status. On sync failure:
-  #   - failed_* → keep the failed side variant (retry-budget exhaustion is sticky).
-  #   - timeout  → keep `timeout` (terminal, no retry; append diagnostic to
-  #                block_reason and retry the sync best-effort once).
-  #   - done / blocked_* → demote to the blocked side variant (historical safety
-  #                net for transient GitLab API failures), preserving the side.
+  #   - `failed`  → keep `failed` (retry-budget exhaustion is sticky).
+  #   - `timeout` → keep `timeout` (terminal, no retry; only append diagnostic
+  #                 to block_reason and retry the sync best-effort once).
+  #   - else      → demote to `blocked` (the historical safety net for
+  #                 transient GitLab API failures on done/blocked outcomes).
   local label_err=""
+  local final_status="${reply_status}"
   local _err=""
-  if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" 2>&1 >/dev/null)"; then
+  if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" "${block_side}" 2>&1 >/dev/null)"; then
     label_err="${_err}"
-    case "${final_status}" in
-      timeout)
-        reply_json="$(printf '%s' "${reply_json}" | jq -c \
-          --arg le "phase6 label sync failed: ${label_err}" '
-          (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
-        ')"
-        # best-effort timeout sync — leaves issue without `doing` removal in worst case,
-        # but the dispatcher refuses to spawn for an IID in timeout_iids on the next tick,
-        # so no parallel acpx can start regardless.
-        phase6_sync_labels "${iid}" timeout >/dev/null 2>&1 || true
-        ;;
-      failed_cc|failed_dispatcher)
-        : # keep the failed side variant; nothing further to do.
-        ;;
-      *)
-        # done / blocked_* → demote to the same-side blocked variant.
-        final_status="blocked_${block_side}"
-        reply_json="$(printf '%s' "${reply_json}" | jq -c \
-          --arg le "phase6 label sync failed: ${label_err}" '
-          .status = "blocked"
-          | (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
-        ')"
-        # best-effort blocked sync
-        phase6_sync_labels "${iid}" "${final_status}" >/dev/null 2>&1 || true
-        ;;
-    esac
+    if [ "${final_status}" = "timeout" ]; then
+      reply_json="$(printf '%s' "${reply_json}" | jq -c \
+        --arg le "phase6 label sync failed: ${label_err}" '
+        (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
+      ')"
+      # best-effort timeout sync — leaves issue without `doing` removal in worst case,
+      # but the dispatcher refuses to spawn for an IID in timeout_iids on the next tick,
+      # so no parallel acpx can start regardless. The lingering `doing` also keeps
+      # reconcile's user_reopened false (reconcile.sh excludes live `doing`), so the
+      # live-label correction cannot silently un-park the cached timeout either.
+      phase6_sync_labels "${iid}" timeout >/dev/null 2>&1 || true
+    elif [ "${final_status}" != "failed" ]; then
+      final_status="blocked"
+      block_side="dispatcher"
+      # append to block_reason
+      reply_json="$(printf '%s' "${reply_json}" | jq -c \
+        --arg le "phase6 label sync failed: ${label_err}" '
+        .status = "blocked"
+        | .block_side = "dispatcher"
+        | (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
+      ')"
+      # best-effort blocked sync
+      phase6_sync_labels "${iid}" blocked "dispatcher" >/dev/null 2>&1 || true
+    fi
   fi
 
   # Write per-issue state files (computes new retry_count).
@@ -769,21 +718,18 @@ phase6_process() {
   prior_issue_state="$(phase6_read_prior_issue_state "${iid}")"
   local new_retry_count blocked_retry_limit
   new_retry_count="$(phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
-    "${final_status}" "${prior_issue_state}" "${is_launch_synth}")"
+    "${final_status}" "${prior_issue_state}" "${is_launch_synth}" "${block_side}")"
 
-  # Promote blocked_* → failed_* (same side) if retry_count > blocked_retry_limit.
+  # Promote blocked → failed if retry_count > blocked_retry_limit.
   blocked_retry_limit="$(printf '%s' "${state_json}" | jq -r '.blocked_retry_limit // 0')"
-  case "${final_status}" in
-    blocked_cc|blocked_dispatcher)
-      if [ "${is_launch_synth}" != "true" ] && [ "${new_retry_count}" -gt "${blocked_retry_limit}" ]; then
-        final_status="failed_${block_side}"
-        phase6_sync_labels "${iid}" "${final_status}" >/dev/null 2>&1 || true
-        # rewrite issue state with the promoted status (retry_count already incremented)
-        phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
-          "${final_status}" "${prior_issue_state}" "${is_launch_synth}" >/dev/null
-      fi
-      ;;
-  esac
+  if [ "${final_status}" = "blocked" ] && [ "${is_launch_synth}" != "true" ] \
+     && [ "${new_retry_count}" -gt "${blocked_retry_limit}" ]; then
+    final_status="failed"
+    phase6_sync_labels "${iid}" failed "${block_side}" >/dev/null 2>&1 || true
+    # rewrite issue state with final_status=failed (retry_count already incremented)
+    phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
+      "${final_status}" "${prior_issue_state}" "${is_launch_synth}" "${block_side}" >/dev/null
+  fi
 
   # Apply campaign-state classification + drain.
   local updated_state

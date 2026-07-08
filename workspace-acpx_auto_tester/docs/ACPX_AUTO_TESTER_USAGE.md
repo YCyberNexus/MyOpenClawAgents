@@ -1,7 +1,7 @@
-# acpx_auto_tester_test 使用文档
+# acpx_auto_tester 使用文档
 
 本文档面向调度器配置、运维和项目使用者。它说明如何把 trigger prompt 传给
-`acpx_auto_tester_test`，以及 agent 从收到 trigger 到打 `done` 终态标签、处理回调的完整流程。
+`acpx_auto_tester`，以及 agent 从收到 trigger 到创建 MR、处理回调的完整流程。
 
 详细实现契约位于
 `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/`。本文只描述人需要
@@ -9,13 +9,13 @@
 
 ## 1. Agent 是什么
 
-`acpx_auto_tester_test` 是一个非交互式 GitLab issue 自动化 agent，用来周期性扫描一批
+`acpx_auto_tester` 是一个非交互式 GitLab issue 自动化 agent，用来周期性扫描一批
 GitLab issue，并为每个符合条件的 issue 启动一个独立执行单元：
 
 - 主 orchestrator session：固定会话，接收 scheduler tick 和 child completion callback。
 - per-issue subagent：每个 issue IID 每次 attempt 启动一个匿名子会话，负责运行
-  `acpx claude exec`、提交代码、推分支、上传 Wiki 证据、打 `done` 终态成功标签（本分支不创建
-  MR），并返回一行 compact JSON。
+  `acpx claude exec`、提交代码、推分支、上传 Wiki 证据、创建 MR，并返回一行 compact
+  JSON。
 - dispatcher shell wrappers：负责所有确定性动作，包括 trigger 解析、flock、状态持久化、
   GitLab reconcile、标签切换、prompt 渲染和 callback bookkeeping。
 
@@ -32,7 +32,7 @@ trigger 是普通多行文本，不是 JSON，也不需要代码块。第一行�
 调度器必须把 trigger 发送到同一个 orchestrator session，通常是：
 
 ```text
-agent:acpx_auto_tester_test:main
+agent:acpx_auto_tester:main
 ```
 
 传递规则：
@@ -114,15 +114,15 @@ data_basename=ifp-data
 | --- | --- |
 | `group` | GitLab group slug。 |
 | `project` | GitLab project slug。 |
-| `branch` | 集成/目标分支，通常是 `master`；本分支不创建 MR，该字段仅作为 base/target 语义保留。 |
+| `branch` | 集成/目标分支，MR 会开到这个分支，通常是 `master`。 |
 | `dev_branch` | fresh attempt 的干净基线分支，通常是 `dev`；每次运行前也会从最新 `origin/${dev_branch}` 刷新 `.claude/`、`hulat/`、`${DATA_BASENAME}/` 这些共享配置路径。没有独立基线时可设成和 `branch` 一样。 |
 | `gitlab_token` | 用于 `glab auth login` 的 token。GitLab host 不从 trigger 推导，而是部署时固定在 `config/gitlab.env`。 |
 | `issue_min_iid` | issue IID 范围下限，包含。 |
 | `issue_max_iid` | issue IID 范围上限，包含。 |
 | `hourly_issue_quota` | 当前 scheduled tick 最多 launch 多少个 IID，不是完成数。 |
 | `max_runtime_minutes` | scheduled tick 的 pre-launch wrapper 时间预算；callback 不受这个预算限制。 |
-| `blocked_retry_limit` | `blocked-cc` / `blocked-dispatcher` outcome 最多消耗多少次 retry budget，超过后会被同侧提升为 `failed-cc` / `failed-dispatcher`。 |
-| `blocked_cooldown_ticks` | `blocked-cc` / `blocked-dispatcher` 的 IID 再次可重试前需要等待多少个 scheduled tick。 |
+| `blocked_retry_limit` | `blocked` outcome 最多消耗多少次 retry budget，超过后会被提升为 `failed`。 |
+| `blocked_cooldown_ticks` | blocked IID 再次可重试前需要等待多少个 scheduled tick。 |
 
 ### 固定值字段
 
@@ -154,16 +154,8 @@ blocked_policy=skip_and_retry
 | `kill_subagent_on_terminal` | `true` | terminal callback 后是否尽力清理 runtime child session。 |
 | `result_basename` | `ifp-result` | repo 内 agent runtime root 的目录名。 |
 | `data_basename` | `ifp-data` | repo 内测试知识库目录名。 |
-| `model_settings_dir` | 无默认 | 存放各档位 Claude Code settings 文件的绝对路径目录，文件名为 `<tier>-settings.json`。Phase 4 会把 `${model_settings_dir}/${MODEL}-settings.json` 复制到 worktree 的 `.claude/settings.json`，从而真正切换 acpx 底层模型。**按 tick 生效、非 carry-forward**；省略时该 tick 回退到 worktree 已提交的 settings。目录里实际存在的 `<tier>-settings.json` 集合决定 effective tier 集（`pin_model_tier` 必须命中其中一个）。 |
-| `model_tiers` | `flash,pro,max` | 有序（低到高）模型档位列表，支撑持久 `model:{tier}` 维度。本分支无失败升档阶梯；它仅作为 effective-tier 发现的 wisdom-order 列表。carry-forward 持久化。 |
-| `precheck_relpath` | 无默认 | 环境 precheck manifest 相对 `${REPO_PATH}` 的路径。配置后每个 tick 在 batch 形成后、per-IID prep 前运行 `precheck.sh`，探测 manifest 声明的 `urls`/`commands`/`env_vars`/`files`；`required` 失败或 manifest 损坏会给本 tick batch 的 IID 打 `precheck-failed` 并终止本 tick。carry-forward 持久化。 |
+| `claude_settings_path` | 空 | 可选的 Claude Code settings JSON 绝对路径；会复制到 issue worktree 的 `.claude/settings.json`。 |
 | `gitlab_address` | 空 | 仅用于校验是否匹配部署固定 host；新配置通常不传。 |
-
-#### benchmark-test 必填字段（model-eval 分支）
-
-| 字段 | 默认值 | 说明 |
-| --- | --- | --- |
-| `pin_model_tier` | 无默认，**必填** | 本 tick 为每个 batch IID 钉死的模型档位名（必须是 `model_tiers` 元素，且在 `model_settings_dir` 发现的 effective tier 集中）。它绕过失败升档阶梯，也绕过 `model:{tier}` 只升不降的单调不变量——issue 被精确打成 `model:<pin_model_tier>`（允许从更高的历史档位下调）。用于把一个 issue 在候选模型间扫描做基准：每个候选模型触发一个 tick。**按 tick 生效、非 carry-forward。** 缺失 → 本 tick 以 `pin_model_tier_required` 终止；非法字符 → `invalid_pin_model_tier`；值不在 effective tier 集 → 该 IID 标 `blocked-dispatcher`。 |
 
 ### 字段覆盖规则
 
@@ -241,7 +233,7 @@ worker_result_json=<the exact compact JSON line emitted by the subagent>
 subagent compact JSON 示例：
 
 ```json
-{"iid":14,"attempt_number":2,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att002","commit_sha":"abc1234","merge_request_url":"","mr_action":"none","wiki_url":"http://gitlab.example.com/group/project/-/wikis/issue14/attempt-002/prompt","labels_added":["done"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/project/ifp-result/.worktrees/issue-14/ifp-result/issue-14/log/attempt-002","metrics":{"iid":14,"attempt_number":2,"model":null,"wall_clock_seconds":842,"accuracy":{"available":true,"passed":18,"failed":2,"skipped":0,"total":20,"pass_rate":0.9,"robot_files":5}}}
+{"iid":14,"attempt_number":2,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att002","commit_sha":"abc1234","merge_request_url":"http://gitlab.example.com/group/project/-/merge_requests/15","mr_action":"created","wiki_url":"http://gitlab.example.com/group/project/-/wikis/issue14/attempt-002/prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/project/ifp-result/.worktrees/issue-14/ifp-result/issue-14/log/attempt-002"}
 ```
 
 callback path 不接受 scheduled trigger 的调度字段覆盖。它只处理单个 IID 的终态：
@@ -267,21 +259,21 @@ flowchart TD
     G -- "Yes" --> H["Run GitLab reconcile; GitLab labels are source of truth"]
     H --> I["ensure_labels.sh and clone_or_pull.sh"]
     I --> J["Optional UI account pool load and slot allocation"]
-    J --> K["Build eligible IID batch: backlog, fresh, then blocked-cc / blocked-dispatcher retry"]
+    J --> K["Build eligible IID batch: backlog, fresh, then blocked retry"]
     K --> L["Per IID prep: allocate attempt, prepare worktree, labels to doing, build inner Claude prompt"]
     L --> M["Render outer executor prompt to spawn_payload.txt"]
     M --> N["orchestrator calls sessions_spawn serially"]
     N --> O{"valid launch ack?"}
     O -- "No, attempts < 3" --> N
-    O -- "No, attempts = 3" --> P["dispatch_record_spawn.sh records launch_failed as blocked-dispatcher"]
+    O -- "No, attempts = 3" --> P["dispatch_record_spawn.sh records launch_failed as blocked"]
     O -- "Yes" --> Q["dispatch_record_spawn.sh records runId and childSessionKey"]
     Q --> R["Scheduled tick exits with waiting_for_callbacks"]
     P --> R
     R --> S["Subagent runs executor prompt Steps 0-10"]
     S --> T["run_acpx_attempt.sh invokes acpx claude exec -f LOG_DIR/prompt.txt"]
     T --> U{"acpx result"}
-    U -- "success" --> V["stage, commit, force-push, verify, upload Wiki, label done (terminal success)"]
-    U -- "retryable failure" --> W["label blocked-cc and summarize locally"]
+    U -- "success" --> V["stage, commit, force-push, verify, upload Wiki, labels done, create MR, add pr"]
+    U -- "retryable failure" --> W["label blocked and summarize locally"]
     U -- "timeout" --> X["commit partial work if any, label timeout, no MR"]
     V --> Y["Subagent emits one compact JSON line"]
     W --> Y
@@ -307,22 +299,17 @@ subagent 不读取 `SKILL.md`、`SOUL.md` 或 `AGENTS.md`，只读取 orchestrat
 4. 调用 `commit_and_push.sh` force-push 到 `issue/<iid>-auto-fix`。
 5. 调用 `post_push_verify.sh` 做推送后验证。
 6. 调用 `upload_attempt_artifacts.sh` 发布 attempt 证据到 GitLab Wiki。
-7. 把 issue label 从 `doing` 切到 `done`（终态成功标签，本分支不创建 MR、无 `pr`）。
-8. （已移除）本分支不创建 MR，没有 `create_mr.sh`，跳过。
-9. （已移除）本分支没有 `pr` label，`done` 即终态成功标签，跳过。
+7. 把 issue label 从 `doing` 切到 `done`。
+8. 调用 `create_mr.sh` 创建或轮转 MR。
+9. 添加 `pr` label。
 10. 调用 `summarize_attempt.sh`。
 11. 输出一行 compact JSON，作为 callback 的 `worker_result_json`。
 
-> executor 真实步骤编号（来源 = `executor_prompt.md` 的 `<instructions>`）：Step 6 = TRANSITION
-> doing → done（终态成功）；Step 7 = REMOVED（无 MR）；Step 8 = REMOVED（无 `pr`）；
-> Step 9 = SUMMARIZE；Step 10 = REPLY（一行 compact JSON）。subagent 不加载任何 SKILL，
-> 不读 `SOUL.md` / `AGENTS.md`，不调 `sessions_spawn` / `sessions_history`，不写任何 state 文件。
-
 失败路径：
 
-- 普通可重试失败：移除 `doing`，添加 `blocked-cc`，本地写 summary，不开 MR。
-- `NO_CHANGES`：归类为 `blocked-cc`，原因是 `Claude produced no staged changes`。
-- acpx 超时：添加 `timeout`，尽量提交和 push partial work，但不开 MR。
+- 普通可重试失败：移除 `doing`，添加 `blocked`，本地写 summary，不开 MR。
+- `NO_CHANGES`：归类为 `blocked`，原因是 `Claude produced no staged changes`。
+- acpx 超时：添加 `timeout`，尽量提交和 push partial work，但不开 MR，不添加 `pr`。
 
 ## 7. 两种 Prompt 不要混淆
 
@@ -330,7 +317,7 @@ subagent 不读取 `SKILL.md`、`SOUL.md` 或 `AGENTS.md`，只读取 orchestrat
 
 | Prompt | 文件 | 发送给谁 | 用途 |
 | --- | --- | --- | --- |
-| outer executor prompt | `${LOG_DIR}/spawn_payload.txt` | `sessions_spawn(payload=...)` 的 per-issue subagent | 指挥 subagent 运行 acpx、提交、推送、上传 Wiki、打 `done` 终态标签（本分支不创建 MR）、返回 compact JSON |
+| outer executor prompt | `${LOG_DIR}/spawn_payload.txt` | `sessions_spawn(payload=...)` 的 per-issue subagent | 指挥 subagent 运行 acpx、提交、推送、上传 Wiki、创建 MR、返回 compact JSON |
 | inner Claude Code prompt | `${LOG_DIR}/prompt.txt` | `acpx claude exec -f` | 指挥 Claude Code 根据 GitLab issue 生成测试/规格输出 |
 
 使用者和调度器只传 trigger prompt。不要把 `${LOG_DIR}/prompt.txt` 当作
@@ -344,12 +331,12 @@ subagent 不读取 `SKILL.md`、`SOUL.md` 或 `AGENTS.md`，只读取 orchestrat
 | --- | --- |
 | `todo` / `new` / `retry` | 待调度入口标签。 |
 | `doing` | dispatcher 已选择该 issue，subagent 正在运行。 |
-| `done` | subagent 完成实现并发布 attempt evidence。本分支无 MR、无 `pr`，`done` 即终态成功标签，永不被替换；唯一允许的瞬态对是 `done`+`blocked-cc` 或 `done`+`blocked-dispatcher`。 |
-| `blocked-cc` | Claude-Code 侧可重试失败（acpx 非超时失败 / `NO_CHANGES` / push 被拒 / acpx 后置步骤失败）；冷却后可能自动重试。 |
-| `blocked-dispatcher` | dispatcher 侧可重试失败（prep / spawn / scope 或 stuck eviction，无 CC 输出）；冷却后可能自动重试。 |
-| `failed-cc` | `blocked-cc` 超过 retry budget 后晋升的终态（CC 侧）。 |
-| `failed-dispatcher` | `blocked-dispatcher` 超过 retry budget 后晋升的终态（dispatcher 侧）。 |
-| `timeout` | acpx 超过 wall-clock cap；partial work 可能已 push，但不开 MR。终态停车：永不消耗 retry_count、永不自动晋升、永不自动重试。 |
+| `done` | subagent 完成实现并发布 attempt evidence。 |
+| `pr` | 对应 MR 已创建。完成态要求 `done + pr` 同时存在。 |
+| `blocked` | 可重试失败；冷却后可能自动重试。 |
+| `failed` | retry budget 耗尽或不可恢复失败。 |
+| `timeout` | acpx 超过 wall-clock cap；partial work 可能已 push，但不开 MR，不自动重试。 |
+| `continue` | 人工添加，要求下一次从已有 work branch / prior attempt 继续。 |
 
 标签流程：
 
@@ -357,18 +344,16 @@ subagent 不读取 `SKILL.md`、`SOUL.md` 或 `AGENTS.md`，只读取 orchestrat
 stateDiagram-v2
     [*] --> Pending
     Pending --> Doing: scheduled tick selects IID / labels to doing
-    Doing --> Done: subagent success / add done (terminal success)
-    Doing --> BlockedCc: CC-side retryable failure / add blocked-cc
-    Doing --> BlockedDispatcher: dispatcher-side failure / add blocked-dispatcher
-    BlockedCc --> Doing: cooldown elapsed and eligible
-    BlockedDispatcher --> Doing: cooldown elapsed and eligible
-    BlockedCc --> FailedCc: retry_count > blocked_retry_limit
-    BlockedDispatcher --> FailedDispatcher: retry_count > blocked_retry_limit
+    Doing --> Done: subagent success / add done
+    Done --> DonePr: MR created / add pr
+    Doing --> Blocked: retryable failure / add blocked
+    Blocked --> Doing: cooldown elapsed and eligible
+    Blocked --> Failed: retry_count > blocked_retry_limit
     Doing --> Timeout: acpx timeout / add timeout
-    Timeout --> Doing: human strips timeout or adds retry
-    Done --> Closed: human closes issue
-    FailedCc --> Closed: human closes issue
-    FailedDispatcher --> Closed: human closes issue
+    DonePr --> Doing: human adds continue / continue mode
+    Timeout --> Doing: human strips timeout or adds retry/continue
+    DonePr --> Closed: human merges MR / GitLab auto-closes issue
+    Failed --> Closed: human closes issue
     Closed --> [*]
 ```
 
@@ -455,8 +440,8 @@ scheduled tick 的 `chat_summary` 常见形态：
 callback 的 `chat_summary` 常见形态：
 
 ```text
-#14 done cleanup=kill:terminal_cleanup_enabled
-#15 blocked_cc reason=Claude produced no staged changes cleanup=kill:terminal_cleanup_enabled
+#14 done mr=http://... cleanup=kill:terminal_cleanup_enabled
+#15 blocked reason=Claude produced no staged changes cleanup=kill:terminal_cleanup_enabled
 #16 timeout reason=acpx exec exceeded 18000s wall-clock cap cleanup=kill:terminal_cleanup_enabled
 ```
 
@@ -472,9 +457,9 @@ ${WORKTREE_DIR}/${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
 - 不要让 scheduler 改变 orchestrator session；callback 必须回到同一个 session。
 - 不要跳过 callback delivery。stuck eviction 只是兜底，不是正常路径。
 - 不要让调度器并行发送多个 scheduled tick 到同一个 campaign；wrapper 会用 flock 保护，但并行 tick 只会制造无效重试。
-- 不要手动改写 workflow label 全量集合；人工只需要添加 `retry` 或移除 `timeout` 等入口信号。
-- 本分支不创建 MR。GitLab 层面的"完成"是人工 CLOSE issue；agent/subagent 绝不自行关闭 issue，也没有 MR 的 `Closes #<iid>` 自动关闭。
-- `timeout` 不会自动重试。需要人移除 `timeout`，或在 `timeout` 之上添加 `retry`，再由下一次 scheduled tick 接管。
+- 不要手动改写 workflow label 全量集合；人工只需要添加 `continue`、`retry` 或移除 `timeout` 等入口信号。
+- 不要指望 agent 自动 merge MR。它只创建 MR；合并和 issue auto-close 由人和 GitLab 完成。
+- `timeout` 不会自动重试。需要人移除 `timeout`、添加 `retry`，或添加 `continue` 后再由下一次 scheduled tick 接管。
 - 如果项目目录名不是 `ifp-result` / `ifp-data`，第一次 trigger 要传 `result_basename` / `data_basename`，之后可省略。
 - 如果曾经配置过 `ui_accounts_relpath`，省略该字段不会禁用账号池，因为它是 carry-forward 字段。禁用需要运维手动清理 `campaign_state.json` 中的持久化值。
 

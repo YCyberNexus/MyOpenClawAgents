@@ -7,27 +7,23 @@
 # Detailed evidence (full claude_result.txt, full git_diff.patch,
 # acpx_raw.log, prompt.txt) lives on the runner under ${LOG_DIR}. On
 # push-ready attempts, prompt/result/report evidence is also published to
-# the project Wiki (Wiki publish completes the `done` terminal; no MR
-# follows on benchmark-test). The summary itself stays scannable.
+# the project Wiki before MR creation. The summary itself stays scannable.
 #
 # Required env vars:
 #   GITLAB_HOST              from glab_auth.sh
 #   PROJECT_URI              URI-encoded "${GROUP}/${PROJECT}"
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
-#   ISSUE_MODE               "fresh" (continue disabled on benchmark-test)
+#   ISSUE_MODE               "fresh" or "continue"
 #   ATTEMPT_DIR              issue dir for the current attempt
 #   LOG_DIR                  current-attempt log dir
 #   SUMMARY_FILE             ${ISSUE_ROOT}/summary.md
 #
 # Optional env vars:
-#   ATTEMPT_STATUS           v2 per-side: "done" | "blocked-cc" | "blocked-dispatcher"
-#                            | "failed-cc" | "failed-dispatcher" | "timeout"
-#                            ("blocked"/"failed"/"no_changes" are legacy; the value is
-#                            only echoed into the summary markdown, never branched on)
-#   COMMIT_SHA               last commit on the immutable per-attempt branch ${LOCAL_ATTEMPT_BRANCH} (if pushed)
-#   MERGE_REQUEST_URL        always empty on benchmark-test (no MR is ever created)
-#   BLOCK_REASON             when ATTEMPT_STATUS is any blocked-*/failed-*/timeout
+#   ATTEMPT_STATUS           "done" | "blocked" | "failed" | "timeout" ("no_changes" is legacy)
+#   COMMIT_SHA               last commit on the work branch (if pushed)
+#   MERGE_REQUEST_URL        MR URL (if known)
+#   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed|timeout
 #   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
 #                            so evidence stays local under ${LOG_DIR} / ${ISSUE_ROOT}.
 #
@@ -35,9 +31,9 @@
 # so future build_prompt.sh runs distinguish agent-posted summaries from
 # reviewer comments:
 #
-#   <!-- acpx_auto_tester_test:attempt-summary v2 attempt=NNN -->
+#   <!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->
 #   ...short summary...
-#   <!-- /acpx_auto_tester_test:attempt-summary -->
+#   <!-- /acpx_auto_tester:attempt-summary -->
 
 set -euo pipefail
 
@@ -75,8 +71,8 @@ if [ -s "${LOG_DIR}/git_status.txt" ]; then
 fi
 
 {
-  echo "<!-- acpx_auto_tester_test:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
-  echo "## acpx_auto_tester_test attempt ${ATTEMPT_NUMBER_PADDED}"
+  echo "<!-- acpx_auto_tester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
+  echo "## acpx_auto_tester attempt ${ATTEMPT_NUMBER_PADDED}"
   echo
   echo "- **Mode**: ${ISSUE_MODE}"
   echo "- **Status**: ${ATTEMPT_STATUS}"
@@ -90,9 +86,9 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive on the issue's immutable per-attempt branch \`${LOCAL_ATTEMPT_BRANCH}\`)"
+  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping. \`prompt.txt\` + \`claude_result.txt\` survive in the MR diff)"
   if [ -f "${LOG_DIR}/wiki_artifacts.md" ]; then
-    echo "- **Wiki evidence**: published and linked from this issue"
+    echo "- **Wiki evidence**: published and linked from this issue before MR creation"
   fi
 
   if [ -n "${CHANGED_PREVIEW}" ] && [ "${CHANGED_COUNT}" -gt 0 ]; then
@@ -111,7 +107,7 @@ fi
   fi
 
   echo
-  echo "<!-- /acpx_auto_tester_test:attempt-summary -->"
+  echo "<!-- /acpx_auto_tester:attempt-summary -->"
 } > "${SUMMARY_FILE}"
 
 if [ "${SUMMARY_POST_TO_ISSUE}" = "true" ]; then

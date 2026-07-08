@@ -6,30 +6,21 @@
 #   GITLAB_HOST    from glab_auth.sh
 #   PROJECT_URI    URI-encoded "${GROUP}/${PROJECT}"
 #
-# Workflow labels (benchmark-test): todo retry new doing done blocked-cc
-#   blocked-dispatcher timeout failed-cc failed-dispatcher
-# Orthogonal persistent model dimension: model:<tier> for each tier in the
-#   configured MODEL_TIERS list (default flash,pro,max → model:flash
-#   model:pro model:max).
+# Workflow labels: todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue
+# Orthogonal: model:<tier> (created from trigger model_tiers; persistent), quality:low (one-shot soft signal)
 #
-# Per-side blocked / failed variants (`-cc` = the Claude Code attempt itself
-# failed; `-dispatcher` = the dispatcher-side prep / spawn / eviction failed).
-# On benchmark-test `done` is the terminal success label (no MR / `pr`).
-# ensure_labels.sh only CREATES missing labels and never removes existing ones,
-# so historical labels left over from earlier deployments are not cleaned up
-# here — that is acceptable; no historical migration is needed.
+# `continue` is a human-applied review label. Reviewers set it on an issue
+# whose MR was created and labeled `done` + `pr` by the agent, but where the
+# Claude Code run actually didn't finish (env error, partial edits, etc.).
+# When the dispatcher's reconciliation sees `continue` on an issue, it
+# re-enqueues the IID and the executor restarts the resolution flow on
+# the existing work branch (or creates one from master if none exists).
 #
 # `timeout` is a subagent-applied terminal label set when `acpx claude exec`
-# exceeded its wall-clock cap. Whatever Claude Code produced is still committed
-# and pushed to `${LOCAL_ATTEMPT_BRANCH}`, but no MR is opened. Treated as terminal
-# (NOT auto-retried) until a human strips the label; never consumes retry budget
-# and never promoted to a `failed-*` variant.
-#
-# `model:{tier}` is a persistent orthogonal dimension (e.g. model:flash /
-# model:pro / model:max). It is NOT a workflow label: it survives the transition
-# into `doing`. On benchmark-test the tier is pinned per tick (not escalated),
-# so it is not monotonic. The trigger may configure an ordered model list of any
-# length.
+# exceeded its wall-clock cap. Whatever Claude Code managed to produce is
+# still committed and force-pushed to `${WORK_BRANCH}`, but no MR / `pr`
+# is opened. Treated by the dispatcher as terminal (NOT auto-retried) until
+# a human strips the label.
 
 set -euo pipefail
 
@@ -39,24 +30,14 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}"
 
-# Workflow labels (mutually-exclusive group) get the neutral gray; the
-# persistent model tiers get a distinct color so they stand out from the
-# workflow state in the GitLab UI.
-WORKFLOW_LABELS=(todo retry new doing done blocked-cc blocked-dispatcher timeout failed-cc failed-dispatcher)
-# The model tier set is configuration-driven: MODEL_TIERS is an ordered,
-# comma-separated list (the dispatcher passes the trigger-configured
-# model_tiers through verbatim). It defaults to "flash,pro,max" so the
-# created label set is unchanged for the default deployment.
-MODEL_TIERS="${MODEL_TIERS:-flash,pro,max}"
-MODEL_LABELS=()
-while IFS= read -r __tier; do
-  [ -n "${__tier}" ] && MODEL_LABELS+=("model:${__tier}")
-done < <(printf '%s' "${MODEL_TIERS}" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
-# Dispatcher-side tick-level marker (NOT a mutually-exclusive workflow state):
-# precheck-failed is applied to a tick's batch IIDs when environment precheck
-# fails (dispatch_prepare_tick.sh §16b), and cleared when the issue next enters
-# `doing`. See references/precheck_manifest.md / references/label_lifecycle.md.
-DISPATCHER_LABELS=(precheck-failed)
+REQUIRED_LABELS=(todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue quality:low)
+
+# model:{tier} 档位标签按 trigger model_tiers 动态创建（缺省=不创建，特性关）。
+if [ -n "${MODEL_TIERS:-}" ]; then
+  while IFS= read -r _tier; do
+    [ -n "${_tier}" ] && REQUIRED_LABELS+=("model:${_tier}")
+  done < <(printf '%s' "${MODEL_TIERS}" | jq -r '.[].tier // empty' 2>/dev/null || true)
+fi
 
 existing="$(
   glab api --paginate \
@@ -64,20 +45,11 @@ existing="$(
     | jq -r '.[].name'
 )"
 
-# label_color <label> — pick a color for a label that needs creating.
-label_color() {
-  case "$1" in
-    model:*)         printf '%s' "#1f78d1" ;;  # blue  — persistent model tier
-    precheck-failed) printf '%s' "#d9534f" ;;  # red   — dispatcher precheck gate
-    *)               printf '%s' "#808080" ;;  # gray  — workflow state
-  esac
-}
-
-for label in "${WORKFLOW_LABELS[@]}" "${MODEL_LABELS[@]}" "${DISPATCHER_LABELS[@]}"; do
-  if ! printf '%s\n' "${existing}" | grep -qx "${label}"; then
+for label in "${REQUIRED_LABELS[@]}"; do
+  if ! printf '%s\n' "${existing}" | grep -qxF "${label}"; then
     glab api --method POST \
       "projects/${PROJECT_URI}/labels" \
-      -f "name=${label}" -f "color=$(label_color "${label}")" >/dev/null
+      -f "name=${label}" -f "color=#808080" >/dev/null
     echo "created:${label}"
   fi
 done

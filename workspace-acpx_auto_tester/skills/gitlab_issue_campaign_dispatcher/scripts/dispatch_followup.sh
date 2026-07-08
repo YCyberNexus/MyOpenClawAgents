@@ -52,39 +52,9 @@ fi
 
 wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
 
-# Resolved, configuration-driven model tier list (ordered, comma-separated)
-# read straight from the persisted campaign state so the narrow reconcile maps
-# model:{tier} labels against the SAME list the prepare tick used. Defaults to
-# "flash,pro,max" when the state file is absent or has no override.
-MODEL_TIERS_CSV="$(
-  if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-    jq -r '(.model_tiers // ["flash","pro","max"]) | join(",")' "${CAMPAIGN_STATE_FILE}" 2>/dev/null
-  fi
-)"
-[ -z "${MODEL_TIERS_CSV}" ] && MODEL_TIERS_CSV="flash,pro,max"
-
-# Narrow reconcile must map model:{tier} labels against the EFFECTIVE ladder
-# (tiers whose <tier>-settings.json exist), identical to what the prepare tick
-# used — otherwise the cached integer model_tier would drift between paths.
-# model_settings_dir is read from the same persisted state (already path-validated
-# at the prepare entry before it was persisted; here it only feeds the read-only
-# `[ -r <tier>-settings.json ]` probe inside derive_effective_model_tiers — never
-# a cp / exec — so it is intentionally not re-validated. Anyone later reusing
-# this value for a cp/exec-class op MUST re-validate). empty → effective equals
-# full. On the callback path an empty effective (should not happen for an IID
-# that was actually spawned) falls back to full rather than aborting, since this
-# narrow reconcile is best-effort.
-MODEL_SETTINGS_DIR_FU="$(
-  if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-    jq -r '.model_settings_dir // empty' "${CAMPAIGN_STATE_FILE}" 2>/dev/null
-  fi
-)"
-EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_CSV}" "${MODEL_SETTINGS_DIR_FU}")"
-[ -z "${EFFECTIVE_TIERS_CSV}" ] && EFFECTIVE_TIERS_CSV="${MODEL_TIERS_CSV}"
-
 # Phase 6 step 0 — narrow reconcile (best-effort; failure does NOT abort).
 # The GitLab live state is consulted again so any reviewer relabel between
-# spawn and callback (e.g. reviewer marks the issue rejected → blocked) gets
+# spawn and callback (e.g. continue → reviewer-rejected → blocked) gets
 # picked up at terminal-write time.
 # Capture the narrow reconcile's evidence path so the completion guard below can
 # consult fresh GitLab live labels before any regressing terminal write.
@@ -93,7 +63,6 @@ set +e
 RECON_OUT="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
         REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
         RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-        MODEL_TIERS="${EFFECTIVE_TIERS_CSV}" \
         MIN_IID="${IID}" MAX_IID="${IID}" \
         bash "${SCRIPT_DIR}/reconcile.sh" 2>/dev/null)"
 RECON_RC=$?
@@ -118,18 +87,46 @@ fi
 
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 
-# Read the compact reply from stdin. Empty stdin → synthesize blocked.
-# A callback arrived but carried no usable compact reply. Per the v2 decision
-# this is attributed to the DISPATCHER side (an empty payload is an
-# orchestration/transport anomaly, not a Claude-Code work outcome), so it
-# defaults to block_side "dispatcher" → blocked-dispatcher and does NOT feed
-# the model-upgrade path.
+# Synthesized-reply status for a dead subagent (empty / unparseable /
+# status-less worker_result_json). 只要超时就不重试: when the run already
+# outlived its acpx wall-clock budget (elapsed since spawned_at ≥
+# acpx_timeout_seconds - 60s slack for ack-timestamp skew), the
+# termination is timeout-shaped — the runtime's runTimeoutSeconds kill or
+# a death inside the subagent's own timeout flow — so the IID is parked
+# as `timeout` (no auto-retry) instead of `blocked` (retryable). A reply
+# that parses and carries an explicit status is never reclassified: a
+# live subagent's own verdict wins (phase6_normalize_reply contract).
+SYNTH_STATUS="blocked"
+ELAPSED_S=""
+# Budget pinned in the pending entry at spawn time (Phase 4 step 19); fall
+# back to the campaign-level value for entries spawned before the field
+# existed. A trigger override applied while this run was in flight must not
+# change which budget the run is judged against.
+ACPX_TIMEOUT_S="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.acpx_timeout_seconds // empty')"
+[ -n "${ACPX_TIMEOUT_S}" ] || ACPX_TIMEOUT_S="$(printf '%s' "${STATE_JSON}" | jq -r '.acpx_timeout_seconds // 18000')"
+SP_EPOCH="$(iso_to_epoch "$(printf '%s' "${PENDING_ENTRY}" | jq -r '.spawned_at // ""')")"
+if [ "${SP_EPOCH}" -gt 0 ]; then
+  ELAPSED_S=$(( $(date -u +%s) - SP_EPOCH ))
+  TIMEOUT_FLOOR_S=$(( ACPX_TIMEOUT_S - 60 ))
+  [ "${TIMEOUT_FLOOR_S}" -lt 0 ] && TIMEOUT_FLOOR_S=0
+  if [ "${ELAPSED_S}" -ge "${TIMEOUT_FLOOR_S}" ]; then
+    SYNTH_STATUS="timeout"
+  fi
+fi
+
+# Read the compact reply from stdin. Empty stdin → synthesize a terminal
+# reply: timeout when the run consumed its time budget, blocked otherwise.
 RAW_REPLY="$(cat)"
 if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
-  REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_ATTEMPT}" \
-    "callback worker_result_json was empty")"
+  if [ "${SYNTH_STATUS}" = "timeout" ]; then
+    REPLY_JSON="$(phase6_synthesize_timeout "${IID}" "${PENDING_ATTEMPT}" \
+      "callback worker_result_json was empty after ${ELAPSED_S}s >= acpx_timeout_seconds(${ACPX_TIMEOUT_S})-60s — timeout-shaped termination, parked without retry")"
+  else
+    REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_ATTEMPT}" \
+      "callback worker_result_json was empty")"
+  fi
 else
-  REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_ATTEMPT}")"
+  REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_ATTEMPT}" "${SYNTH_STATUS}")"
 fi
 
 # IID cross-check. phase6_normalize_reply preserves a parseable reply's iid, so
@@ -157,10 +154,9 @@ fi
 # att1 killed out-of-band, att2 done, gateway restarted, att1's dead-session
 # callback re-delivered while pending_subagents[IID] still holds att1 so the
 # attempt-number cross-check above passes). Applying its regressing status would
-# call phase6_sync_labels → set_issue_label.sh: a regressing `failed`/`timeout`
-# (or a `blocked-*` promoted past the retry limit to `failed-*`) maps to an `add`
-# that STRIPS the live `done` completion label via the workflow-label mutual-
-# exclusion group (`add blocked-*` alone keeps `done`).
+# call phase6_sync_labels → set_issue_label.sh: a regressing `timeout`/`failed` /
+# `blocked-*` maps to an `add` that STRIPS the live `pr` completion label via the
+# workflow-label mutual-exclusion group (the keep-table never preserves `pr`).
 # So if GitLab live labels already show this issue completed/closed, DROP the
 # regressing reply without touching labels and drain the stale pending entry.
 # `done` replies are never dropped (a success on a completed issue is idempotent).

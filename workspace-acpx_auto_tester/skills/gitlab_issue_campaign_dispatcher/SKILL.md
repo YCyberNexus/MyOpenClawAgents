@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-06-17.1] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep (incl. per-tick model-tier pinning), label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. v2 label model: per-side blocked-cc / blocked-dispatcher and failed-cc / failed-dispatcher (replacing single blocked / failed), done is the terminal success label, plus a persistent model:{tier} dimension. Supports quota carryover, backlog-first scheduling, blocked skip-and-retry with best-effort partial-work push to the immutable per-attempt branch after acpx failures (CC side → blocked-cc), dispatcher-side failures → blocked-dispatcher, retry-over-limit promotion blocked-cc→failed-cc / blocked-dispatcher→failed-dispatcher, terminal timeout parking (acpx wall-clock cap → label=timeout, partial work pushed to the immutable per-attempt branch, no auto-retry, never promoted; reviewer strips timeout or adds retry to re-enqueue), per-tick model pinning via the required pin_model_tier trigger field (no failure-escalation ladder), optional per-tick environment precheck (opt in via trigger field precheck_relpath with carry-forward persistence — probes required/optional URLs via /dev/tcp plus commands/env-vars/files before per-IID work; a required failure tags the batch IIDs precheck-failed and aborts the tick), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-07-08.1] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked-cc/blocked-dispatcher skip-and-retry (with best-effort partial-work force-push after acpx failures for blocked-cc), terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue; timeout-shaped dead-subagent terminations — empty/unparseable/status-less worker_result_json or stuck-pending eviction arriving after the run outlived acpx_timeout_seconds−60s since spawned_at — are synthesized as timeout too, never as retryable blocked), v2 split-side label model (blocked-cc=CC/subagent-side failures, blocked-dispatcher=dispatcher-synthesized failures including prep/launch_failed/scope-evict/stuck-non-timeout/reply-downgrade/label-sync-fail; failed-cc / failed-dispatcher mirror same split; timeout is unsplit; completion = label pr only, done is transient before pr is added and removed when pr lands; model:{tier} is an orthogonal persistent monotone dimension driven by trigger field model_tiers), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -21,38 +21,14 @@ locks, per-issue state/logs/summaries, and one shared per-issue linked
 git worktree per IID at `${REPO_PATH}/${RESULT_BASENAME}/.worktrees/issue-<iid>/`.
 The worktree is reused across every attempt of an IID (created on
 attempt 1 via `git worktree add -B`, then force-switched in place on
-attempt N>1 after preserving the same-IID runtime subtree; every attempt
-runs FRESH — it resets from the clean baseline and archives the preserved
-subtree outside the active worktree. Continue / resume is disabled on this
-branch).
+attempt N>1 after preserving the same-IID runtime subtree; `continue`
+restores it for resume, while all non-continue entry labels reset from
+the clean baseline and archive the preserved subtree outside the active
+worktree).
 See [`references/paths.md`](references/paths.md) for the complete layout.
 (`${RESULT_BASENAME}` / `${DATA_BASENAME}` default to `ifp-result` / `ifp-data`;
 per-project `result_basename` / `data_basename` trigger fields override
 them automatically.)
-
-> **benchmark-test branch (model-eval specialization).** On this branch the
-> agent is specialized into a pure model-evaluation tool that scores candidate
-> models on **efficiency + accuracy** (cost is NOT collected — a separate team
-> owns it). The orchestrator loop below is UNCHANGED — it still just calls the
-> wrappers — but those wrappers + the executor prompt deliberately diverge from
-> production: the model is pinned per tick via the REQUIRED `pin_model_tier`
-> trigger field (the failure-escalation ladder and the `model:{tier}`
-> monotonic-raise invariant are bypassed); every attempt runs FRESH; the MR/`pr`
-> flow is removed so `done` is the terminal success label; every attempt's full
-> `${LOG_DIR}` is archived to an immutable per-attempt branch
-> `issue/<iid>-auto-fix-att<NNN>-<tier>` (the `-<tier>` suffix is the pinned
-> model, also stamped on the run's `log/attempt-<NNN>-<tier>/` folder, so the
-> model is visible at a glance from both the branch list and the filesystem);
-> subagent Step 1.5 (`collect_metrics.sh`)
-> records wall-clock + Robot-Framework pass-rate into `metrics.json`, which the
-> callback appends to the `${RESULT_BASENAME}/_dispatcher/benchmark/metrics.jsonl`
-> ledger for `aggregate_benchmark.sh` to render an issue × model matrix. A done
-> attempt additionally writes a per-attempt key-value scorecard
-> (Issue / Attempt / Model / Time / Accuracy) to the worktree-internal
-> `${RESULT_BASENAME}/issue-<iid>/summary.md` (subagent Step 2.5,
-> `write_branch_summary.sh`), force-added so it ships on that attempt's own
-> immutable branch — done branches only. Full
-> semantics: [`../../../statemachine.v2.md`](../../../statemachine.v2.md) §6.
 
 ## Two prompts you MUST NOT confuse (read this first)
 
@@ -67,10 +43,10 @@ agents itself, bypassing `acpx` entirely), and the whole
 | -- | -- | -- |
 | Built from | rendering [`references/executor_prompt.md`](references/executor_prompt.md), written by `dispatch_prepare_tick.sh` to `${LOG_DIR}/spawn_payload.txt` | running `scripts/build_prompt.sh`, which writes `${LOG_DIR}/prompt.txt` |
 | Audience | the OUTER subagent (the runtime-spawned model) | the INNER Claude Code session that `acpx claude exec -f ${LOG_DIR}/prompt.txt` starts |
-| Tells it to | run the steps: `bash run_acpx_attempt.sh` → collect metrics → stage → write branch summary (done flow) → push → verify → wiki → labels → summarize → emit compact JSON (on benchmark-test the MR/`pr` steps 7/8 are removed and `done` is terminal — see the callout above) | implement the GitLab issue using `hulat/agents/*.md` and write spec output under `${OUTPUT_DIR}` |
+| Tells it to | run Steps 0–10: `bash run_acpx_attempt.sh` → stage → push → verify → wiki → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue using `hulat/agents/*.md` and write spec output under `${OUTPUT_DIR}` |
 | Shape | starts with sentinel `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
 | Sent how | `sessions_spawn(payload=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", timeoutSeconds=30, runTimeoutSeconds=<run_timeout_seconds>, cleanup="keep")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
-| File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`, force-added onto the per-attempt branch (with the rest of `${LOG_DIR}`) by `stage_and_guard.sh` |
+| File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`, force-added into the MR diff by `stage_and_guard.sh` |
 
 **HARD RULE: `${LOG_DIR}/prompt.txt` is NEVER the spawn payload.** The
 wrapper's pre-spawn sentinel grep on the rendered string guards against
@@ -161,7 +137,7 @@ reduced to a small fixed shape.
 
 The 3-attempt + 2-second-backoff retry loop is the **only** retry logic
 the LLM owns — `dispatch_record_spawn.sh STATUS=launch_failed` synthesizes
-the Phase 6 blocked-dispatcher reply when exhaustion happens, so by the time the
+the Phase 6 blocked reply when exhaustion happens, so by the time the
 script returns, state is durable and the next IID can be spawned.
 
 ### Path B — `RUN_CHILD_COMPLETION_CALLBACK`
@@ -258,8 +234,7 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Reconcile + disk-cache correction + Source-of-Truth Policy | `dispatch_prepare_tick.sh` steps 10–11; `dispatch_followup.sh` step 2 |
 | Eligibility batch formation (backlog → blocked retry, quota cap) | `dispatch_prepare_tick.sh` step 16 |
 | UI account allocation (slot sizes, `max_accounts_per_issue` cap, pool-too-small abort) | `dispatch_prepare_tick.sh` steps 14 + 18 |
-| Per-IID prep (allocate_attempt, pin model tier from `pin_model_tier`, prepare_attempt, model-settings copy, glab issue read, label transitions to `doing`, `model:{tier}` stamp, build_prompt with MODEL injected, state-file init). **benchmark-test: the tier is PINNED per tick (no escalation ladder) — see the callout above.** | `dispatch_prepare_tick.sh` step 20 |
-| v2 label model (per-side blocked-cc / blocked-dispatcher / failed-cc / failed-dispatcher, `done` terminal success, `model:{tier}` dimension). **benchmark-test: `done` is terminal (no `pr` / MR), and `model:{tier}` is pinned per tick from `pin_model_tier` (not escalated) — see the callout above.** | `references/label_lifecycle.md`; `_dispatch_lib.sh::phase6_sync_labels`; `set_issue_label.sh` |
+| Per-IID prep (allocate_attempt, prepare_attempt, claude_settings copy, glab issue read, label transitions to `doing`, build_prompt, state-file init) | `dispatch_prepare_tick.sh` step 20 |
 | Executor prompt rendering + sentinel check | `dispatch_prepare_tick.sh` step 20.8–20.9 |
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |
 | Phase 6 validation + label sync + state writes + classification + drain | `dispatch_followup.sh` + `_dispatch_lib.sh::phase6_process` |
@@ -343,15 +318,22 @@ is only the dispatcher's progress cache.** Both wrappers enforce this:
   callback get picked up.
 
 Disk cache is corrected to match GitLab — never the other way around.
-A hand-applied bare `blocked-cc` / `blocked-dispatcher` / `failed-cc` /
-`failed-dispatcher` label (one the dispatcher did not itself write into
-`blocked_iids` / `failed_iids`) is honored as a **terminal park**: the IID
-is excluded from `backlog` and `fresh` selection and is NOT auto-retried;
-a reviewer re-runs it by applying `retry` (a fresh reset that wins over the
-lingering label — continue/resume is disabled on this branch). Dispatcher-
-applied `blocked-*` (tracked in `blocked_iids`) keeps its existing
-cooldown-then-retry behavior. The LLM does NOT need to second-guess any of
-this; the wrappers handle it.
+A hand-applied bare `blocked` / `blocked-cc` / `blocked-dispatcher` / `failed` / `failed-cc` / `failed-dispatcher` label (one the dispatcher did
+not itself write into `blocked_iids` / `failed_iids`) is honored as a
+**terminal park**: the IID is excluded from `backlog` and `fresh`
+selection and is NOT auto-retried; a reviewer re-runs it by applying
+`retry` (fresh reset, wins over the lingering label) or `continue`
+(resume). Dispatcher-applied `blocked-cc` (CC/subagent-side failures,
+tracked in `blocked_iids` with `block_side=cc`) and `blocked-dispatcher`
+(dispatcher-synthesized failures: prep, launch_failed, scope-evict,
+stuck-non-timeout, reply-downgrade, label-sync failures; `block_side=dispatcher`)
+keep their existing cooldown-then-retry behavior; both feed the same
+`blocked_iids` classification and the same retry_count/blocked_retry_limit
+promotion to `failed-cc` / `failed-dispatcher`. Bare `blocked` / `failed`
+without suffix are recognized as legacy compat and treated as `blocked-cc`
+/ `failed-cc` respectively when consumed by reconcile (already in the
+live issue's labels). The LLM does NOT need to second-guess any of this;
+the wrappers handle it.
 
 ## Locking
 
@@ -374,8 +356,9 @@ sibling folders:
 - [`references/state_schema.md`](references/state_schema.md) — `campaign_state.json`, per-issue state, per-attempt state, compact subagent reply schemas; Phase 6 Write Mapping; wrapper-side write ownership.
 - [`references/executor_prompt.md`](references/executor_prompt.md) — the fixed-format template the wrapper renders and writes to `${LOG_DIR}/spawn_payload.txt`. The OUTER spawn payload.
 - [`references/paths.md`](references/paths.md) — full path layout (dispatcher + per-issue subtrees + per-issue worktrees).
-- [`references/glab_commands.md`](references/glab_commands.md) — the workspace-wide allowed `glab` command list (G1–G9). Wrappers and subagent scripts both consume this.
+- [`references/glab_commands.md`](references/glab_commands.md) — the workspace-wide allowed `glab` command list (G1–G13). Wrappers and subagent scripts both consume this.
 - [`references/label_lifecycle.md`](references/label_lifecycle.md) — workflow label transitions.
+- [`references/continue_mode.md`](references/continue_mode.md) — reviewer contract for the `continue` label and the prompt template injected in continue mode.
 
 When in doubt about a path / schema / command / behavior, READ the
 matching reference file. Do NOT reconstruct from memory — these

@@ -2,7 +2,7 @@
 
 - 日期:2026-06-09
 - 状态:已批准设计,进入实现
-- 关联代码:`workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher/`
+- 关联代码:`workspace-acpx_auto_tester_test/skills/gitlab_issue_campaign_dispatcher/`
 
 ## 1. 背景与目标
 
@@ -258,7 +258,7 @@ dispatcher 在 §16b 失败分支里对每个 batch IID 调用现有 `set_issue_
 | `SKILL.md` | tick-level prep / §16b 加 precheck 步骤;`precheck-failed` 说明;**bump `SKILL_VERSION`** |
 | `CLAUDE.md`(根) | 同步架构描述(辅助文档,不触发 version bump);进 doing 清除集补 `precheck-failed` |
 
-> 注:除 `CLAUDE.md`、`docs/` 外,本次改动全部落在 `workspace-acpx_auto_tester/` 下,触发项目
+> 注:除 `CLAUDE.md`、`docs/` 外,本次改动全部落在 `workspace-acpx_auto_tester_test/` 下,触发项目
 > Stop hook 的强制 code review,且需在同一提交里 bump `SKILL_VERSION`。
 
 ## 11. 测试计划

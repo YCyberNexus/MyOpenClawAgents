@@ -12,8 +12,8 @@
 #   - if acpx hasn't exited within the grace window, SIGKILL is sent
 #   - the script returns exit code 124 (SIGTERM) or 137 (SIGKILL)
 # The subagent prompt detects 124 / 137 and enters the dedicated timeout
-# flow (commit + push partial work to ${LOCAL_ATTEMPT_BRANCH}, label `timeout`; there
-# is no MR step in this campaign). See references/executor_prompt.md §timeout_flow.
+# flow (commit + push partial work to ${WORK_BRANCH}, label `timeout`, NO
+# MR). See references/executor_prompt.md §timeout_flow.
 #
 # Orphan prevention (defense-in-depth): acpx is launched as a backgrounded
 # job in its OWN process group and reaped with `wait`, with a SIGTERM/INT/HUP
@@ -97,10 +97,6 @@ fi
 
 cd "${WORKTREE_DIR}"
 
-# Benchmark efficiency stamp: record wall-clock start before acpx launches.
-# collect_metrics.sh reads timing.txt to compute wall_clock_seconds.
-printf 'start_epoch=%s\n' "$(date +%s)" > "${LOG_DIR}/timing.txt"
-
 # Run acpx (under `timeout`) as a backgrounded job in its OWN process group
 # so the entire acpx subtree can be torn down if THIS script is signalled to
 # stop. Two reasons this matters:
@@ -135,7 +131,6 @@ cleanup() {
   # timeout flow (executor_prompt.md "NO `ACPX_EXIT=<n>` line → timeout").
   # We still exit 124 (rather than the inherited signal code) so that on the
   # off chance the code IS read it maps to timeout, never blocked.
-  printf 'end_epoch=%s\n' "$(date +%s)" >> "${LOG_DIR}/timing.txt" 2>/dev/null || true
   exit 124
 }
 
@@ -157,7 +152,6 @@ trap cleanup TERM INT HUP
 set +m
 wait "${acpx_pgid}"
 acpx_exit=$?
-printf 'end_epoch=%s\n' "$(date +%s)" >> "${LOG_DIR}/timing.txt"
 set -e
 trap - TERM INT HUP
 

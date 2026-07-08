@@ -48,17 +48,13 @@
 #                   ${RESULT_BASENAME}/issue-<iid>/hulat-spec-issue<iid>/
 #                                                        ← OUTPUT_DIR (force-added; shared
 #                                                          across attempts of this IID)
-#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN-<tier>/
+#                   ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/
 #                                                        ← LOG_DIR (still attempt-scoped
-#                                                          inside the shared worktree; the
-#                                                          `-<tier>` suffix is the pinned
-#                                                          model tier MODEL (flash/pro/max)
-#                                                          so the run folder shows at a glance
-#                                                          which model produced it;
-#                                                          the whole LOG_DIR is
-#                                                          force-added by stage_and_guard.sh
-#                                                          (only post-push wiki_* stay
-#                                                          locally ignored via .git/info/exclude)
+#                                                          inside the shared worktree;
+#                                                          prompt.txt + claude_result.txt
+#                                                          force-added by stage_and_guard.sh,
+#                                                          other files stay locally ignored
+#                                                          via .git/info/exclude)
 #
 # Path derivation is layered:
 #
@@ -69,12 +65,7 @@
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
 #         ISSUES_ROOT, LOCK_FILE, WORKTREES_ROOT
 #   - per-issue + attempt level (derived only if ISSUE_IID is set):
-#                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER, MODEL
-#       (MODEL = the pinned model tier name, e.g. flash/pro/max; it is REQUIRED
-#        here because LOG_DIR and LOCAL_ATTEMPT_BRANCH carry it as a `-<tier>`
-#        suffix, and every dispatcher / subagent script re-derives those paths
-#        by sourcing this file — a missing or divergent MODEL would split the
-#        pipeline across two path spellings.)
+#                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
 #         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
 #         LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
@@ -209,26 +200,7 @@ export REPO_PARENT_PATH REPO_PATH
 # accounts are injected into the subagent prompt). Initialize to empty
 # so downstream `set -u` reads do not trip.
 : "${UI_ACCOUNTS_RELPATH:=}"
-# Relative path of the environment-precheck manifest under ${REPO_PATH} (the
-# project checkout root). Optional trigger field `precheck_relpath` overrides
-# this with carry-forward semantics (see references/precheck_manifest.md). There
-# is NO default value: when neither the trigger nor the persisted state supplies
-# a value, PRECHECK_RELPATH stays empty and the dispatcher skips the entire
-# precheck flow (§16b). Initialize to empty so downstream `set -u` reads do not
-# trip.
-: "${PRECHECK_RELPATH:=}"
-# Absolute path of the directory holding the per-tier Claude Code settings
-# files (`<tier>-settings.json`, e.g. flash-settings.json / pro-settings.json /
-# max-settings.json). Optional trigger field `model_settings_dir` overrides
-# this PER-TICK — NOT carry-forward (see references/trigger_command.md): omitting
-# it on a trigger leaves MODEL_SETTINGS_DIR at the empty default below, reverting
-# that tick to legacy behavior. It is an ABSOLUTE path (typically outside
-# ${REPO_PATH}), so unlike the basenames it does NOT feed any path derivation
-# below — it is only initialized here to empty so downstream `set -u` reads do
-# not trip. When empty, the dispatcher skips the per-tier settings copy entirely
-# and acpx uses the worktree's committed .claude/settings.json as-is.
-: "${MODEL_SETTINGS_DIR:=}"
-export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH MODEL_SETTINGS_DIR PRECHECK_RELPATH
+export RESULT_BASENAME DATA_BASENAME UI_ACCOUNTS_RELPATH
 
 # ─── 1. Dispatcher-level path layout (always) ──────────────────────
 export HULAT_DIR="${REPO_PATH}/hulat"
@@ -239,13 +211,6 @@ export STATE_DIR="${WORK_ROOT}"
 export CAMPAIGN_STATE_FILE="${STATE_DIR}/campaign_state.json"
 export LOG_ROOT="${WORK_ROOT}/log"
 export DISPATCHER_LOG_DIR="${LOG_ROOT}"
-
-# Environment-precheck manifest absolute path (only when configured). When
-# PRECHECK_RELPATH is empty, PRECHECK_FILE stays unset; precheck.sh / §16b are
-# gated on PRECHECK_RELPATH being non-empty, so it is consumed only when set.
-if [ -n "${PRECHECK_RELPATH}" ]; then
-  export PRECHECK_FILE="${REPO_PATH}/${PRECHECK_RELPATH}"
-fi
 export ISSUES_ROOT="${RESULT_ROOT}/issues"
 export LOCK_FILE="${STATE_DIR}/campaign.lock"
 
@@ -278,24 +243,6 @@ export -f issue_state_file_for
 # ─── 2. Per-issue + attempt path layout (only when ISSUE_IID set) ──
 if [ -n "${ISSUE_IID:-}" ]; then
   : "${ATTEMPT_NUMBER:?env_paths.sh: ATTEMPT_NUMBER must be set when ISSUE_IID is set (dispatcher allocates via allocate_attempt.sh)}"
-
-  # MODEL (the pinned model tier name, e.g. flash/pro/max) participates in
-  # LOG_DIR and LOCAL_ATTEMPT_BRANCH so the per-attempt log directory and the
-  # immutable per-attempt branch both carry the tier as a `-<tier>` suffix
-  # (e.g. .../log/attempt-003-pro, issue/<iid>-auto-fix-att003-pro) for quick
-  # at-a-glance benchmarking. It is REQUIRED here for the same reason
-  # ATTEMPT_NUMBER is: every dispatcher and subagent script re-derives these
-  # paths by sourcing this file, so a missing or divergent MODEL would split the
-  # pipeline across two path spellings. The dispatcher pins it per tick from
-  # pin_model_tier and threads it through iid_env (dispatcher side) and the
-  # executor prompt's env contract (subagent side).
-  : "${MODEL:?env_paths.sh: MODEL (pinned model tier, e.g. flash/pro/max) must be set when ISSUE_IID is set — the dispatcher threads it via iid_env / the executor prompt so LOG_DIR and LOCAL_ATTEMPT_BRANCH carry the tier suffix consistently}"
-  case "${MODEL}" in
-    *[!A-Za-z0-9._-]*)
-      echo "env_paths.sh: MODEL='${MODEL}' contains characters outside [A-Za-z0-9._-]; refusing to build LOG_DIR / LOCAL_ATTEMPT_BRANCH with an unsafe tier slug" >&2
-      exit 1
-      ;;
-  esac
 
   export ISSUE_ROOT="${ISSUES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
@@ -338,34 +285,17 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # persistent subtree). Cross-attempt state (state.json, attempt_state.json,
   # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
   # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree
-  # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN-<tier>/ so successive
-  # attempts do NOT overwrite each other's artifacts AND the run folder shows
-  # the pinned model tier at a glance. The whole LOG_DIR present at
-  # staging time is force-added onto `${LOCAL_ATTEMPT_BRANCH}` (eval full
-  # archival); only the post-push wiki_* files stay locally ignored via the
-  # repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
+  # at ${RESULT_BASENAME}/issue-<iid>/log/attempt-NNN/ so successive attempts
+  # do NOT overwrite each other's prompt.txt / claude_result.txt. Only those
+  # two files are force-added into the MR; the rest stay locally ignored via
+  # the repository `.git/info/exclude` entry for `/${RESULT_BASENAME}/`.
   export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
-  # Per-issue subtree INSIDE the shared worktree — the common parent of
-  # OUTPUT_DIR and the per-attempt LOG_DIR. The done-flow scorecard summary.md
-  # is written at its root (see BRANCH_SUMMARY_FILE below) so it lands on the
-  # immutable per-attempt branch alongside the spec output and the logs.
-  export WORKTREE_ISSUE_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}"
-  export OUTPUT_DIR="${WORKTREE_ISSUE_DIR}/hulat-spec-issue${ISSUE_IID}"
-  # The `-${MODEL}` suffix stamps the pinned model tier (flash/pro/max) onto
-  # both the per-attempt run folder and the immutable per-attempt branch so the
-  # model used for a run is visible at a glance from `ls` and from the GitLab
-  # branch list, without opening state.json / metrics.json or the issue labels.
-  export LOG_DIR="${WORKTREE_ISSUE_DIR}/log/attempt-${ATTEMPT_NUMBER_PADDED}-${MODEL}"
+  export OUTPUT_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}"
+  export LOG_DIR="${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
-  # Worktree-internal per-attempt scorecard (key-value: Issue / Attempt / Model
-  # / Time / Accuracy). Distinct from SUMMARY_FILE above, which lives OUTSIDE
-  # the worktree (${ISSUE_ROOT}/summary.md) and is the GitLab-note source. This
-  # one is force-added by write_branch_summary.sh onto ${LOCAL_ATTEMPT_BRANCH}
-  # for done runs only (the normal flow's Step 2.5).
-  export BRANCH_SUMMARY_FILE="${WORKTREE_ISSUE_DIR}/summary.md"
-  export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}-${MODEL}"
+  export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
 
   # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR
   # are created inside prepare_attempt.sh after `git worktree add`

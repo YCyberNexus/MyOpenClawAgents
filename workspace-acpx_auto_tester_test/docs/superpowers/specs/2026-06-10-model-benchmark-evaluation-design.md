@@ -143,7 +143,7 @@ sweep（operator 驱动）：对同一 issue 连续触发多轮，每轮 `pin_mo
 | `SKILL.md` | P1/P2 | 增补 pin/评测分支；删 escalation/MR/continue 描述；**每次 workspace 改动 bump `SKILL_VERSION`** |
 | `statemachine.v2.md`（仓库根） | P1/P2 | 记录特化偏离（非 workspace，不触发 bump） |
 
-> `workspace-acpx_auto_tester/` 下每次改动都走 code-review 子代理循环并 bump `SKILL_VERSION`。
+> `workspace-acpx_auto_tester_test/` 下每次改动都走 code-review 子代理循环并 bump `SKILL_VERSION`。
 
 ---
 

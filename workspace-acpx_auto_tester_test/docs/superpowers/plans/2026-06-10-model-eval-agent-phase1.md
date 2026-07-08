@@ -14,11 +14,11 @@
 
 1. **本地 fixture 冒烟**（纯逻辑脚本：`collect_metrics.sh` / `aggregate_benchmark.sh`）——在本机用造好的 `output.xml` / `metrics.jsonl` 直接跑，断言输出。**这类必须先写失败的 fixture 测试再实现**（TDD）。
 2. **`bash -n` 语法检查 + 人工走查锚点**（改动深耦合 dispatcher 脚本：`dispatch_*`、`_dispatch_lib.sh`、`commit_and_push.sh` 等，无法本机端到端执行）。
-3. **`code-reviewer` 子代理审查循环**（每个 `workspace-acpx_auto_tester/` 改动必走，最多 3 轮，见根 `CLAUDE.md` §Code review workflow）。
+3. **`code-reviewer` 子代理审查循环**（每个 `workspace-acpx_auto_tester_test/` 改动必走，最多 3 轮，见根 `CLAUDE.md` §Code review workflow）。
 
-每次 `workspace-acpx_auto_tester/` 下的改动都要 **bump `SKILL.md` 第 3 行的 `[SKILL_VERSION=...]`** 到 `2026-06-10.N`（同日递增 N）。
+每次 `workspace-acpx_auto_tester_test/` 下的改动都要 **bump `SKILL.md` 第 3 行的 `[SKILL_VERSION=...]`** 到 `2026-06-10.N`（同日递增 N）。
 
-**约定：** `SKILL_DIR` = `workspace-acpx_auto_tester/skills/gitlab_issue_campaign_dispatcher`。所有相对路径以仓库根为准。
+**约定：** `SKILL_DIR` = `workspace-acpx_auto_tester_test/skills/gitlab_issue_campaign_dispatcher`。所有相对路径以仓库根为准。
 
 ---
 

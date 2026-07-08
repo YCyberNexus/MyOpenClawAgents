@@ -36,6 +36,9 @@ node_modules/
 # Logs
 *.log
 
+# Local offline release bundles
+openclaw-rhel7-offline-2026.6.11.zip
+
 # Claude Code hook sentinels (state, not config)
 workspace-acpx_auto_tester/.claude/.review-done-sha
 workspace-acpx_auto_tester/.claude/.review-baseline

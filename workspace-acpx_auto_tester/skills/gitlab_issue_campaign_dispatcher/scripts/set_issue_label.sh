@@ -14,27 +14,10 @@
 # Use this script (not a full labels overwrite) for every label transition,
 # so manually-added labels on the issue are preserved. Adding a workflow label
 # also removes conflicting workflow labels to keep the issue in a single
-# workflow state, except for the allowed transient pairs (see below).
-#
-# label model (benchmark-test):
-#   - Workflow labels are a mutually-exclusive group (todo / new / retry /
-#     doing / done / blocked-cc / blocked-dispatcher / timeout / failed-cc /
-#     failed-dispatcher). Adding any one removes the others. `done` is the
-#     terminal success label (there is no MR / `pr` on this branch); the only
-#     allowed transient pair is `done` + `blocked-cc` or `done` +
-#     `blocked-dispatcher` (a failure after `done`).
-#   - `model:{tier}` is a separate persistent dimension that is internally
-#     mutually exclusive: adding `model:pro` removes `model:flash` /
-#     `model:max` but does NOT touch any workflow label. This is what keeps the
-#     model tier alive across the transition into `doing`.
-#   - `precheck-failed` is a dispatcher-side, tick-level marker (NOT a workflow
-#     state). It is an unknown non-workflow / non-model label here, so adding it
-#     produces no conflicts and it coexists with any workflow label. The
-#     dispatcher applies it to a tick's batch IIDs when environment precheck
-#     fails (dispatch_prepare_tick.sh §16b) and removes it explicitly when the
-#     issue next enters `doing` (it is in that script's into-`doing`
-#     REMOVE_LBLS set). It does not consume retry and does not upgrade the model
-#     tier. See references/precheck_manifest.md / references/label_lifecycle.md.
+# workflow state. Allowed transient pairs: done+blocked-cc and done+blocked-dispatcher
+# (failure after `done` wiki, before `pr`). `pr` replaces `done` (done removed when pr added).
+# model:<tier> and quality:low are orthogonal (not in WORKFLOW_LABELS) — adding/removing
+# them never disturbs work labels, and adding a work label never disturbs them.
 
 set -euo pipefail
 
@@ -52,69 +35,48 @@ fi
 OP="$1"
 LABEL="$2"
 
-# Workflow mutual-exclusion group (benchmark-test: no `pr`, no `continue`).
-WORKFLOW_LABELS=(todo retry new doing done blocked-cc blocked-dispatcher timeout failed-cc failed-dispatcher)
-# Model tier dimension — internally mutually exclusive, orthogonal to the
-# workflow group (NOT cleared when a workflow label is added). The tier set
-# is configuration-driven: MODEL_TIERS is an ordered, comma-separated list
-# (the dispatcher passes the trigger-configured model_tiers through). It
-# defaults to "flash,pro,max" so the model mutual-exclusion is unchanged for
-# the default deployment.
-MODEL_TIERS="${MODEL_TIERS:-flash,pro,max}"
-MODEL_LABELS=()
-while IFS= read -r __tier; do
-  [ -n "${__tier}" ] && MODEL_LABELS+=("model:${__tier}")
-done < <(printf '%s' "${MODEL_TIERS}" | tr ',' '\n' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')
+# Legacy single `blocked`/`failed` are kept in this list ONLY so that adding a
+# new workflow state still clears any stray residue of them; the agent never
+# WRITES single blocked/failed anymore (it uses *-cc / *-dispatcher).
+WORKFLOW_LABELS=(todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher blocked failed timeout continue contiune)
 
-is_in_set() {
-  local needle="$1"
-  shift
+is_workflow_label() {
+  local label="$1"
   local candidate
-  for candidate in "$@"; do
-    if [ "${needle}" = "${candidate}" ]; then
+  for candidate in "${WORKFLOW_LABELS[@]}"; do
+    if [ "${label}" = "${candidate}" ]; then
       return 0
     fi
   done
   return 1
 }
 
-is_workflow_label() { is_in_set "$1" "${WORKFLOW_LABELS[@]}"; }
-is_model_label()    { is_in_set "$1" "${MODEL_LABELS[@]}"; }
-
 is_kept_label() {
   local candidate="$1"
   shift
-  is_in_set "${candidate}" "$@"
+  local kept
+  for kept in "$@"; do
+    if [ "${candidate}" = "${kept}" ]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-# conflicts_for_add <label> — print, one per line, the labels that must be
-# removed in the SAME GitLab update when <label> is added. Returns nothing
-# (no conflicts) for `quality:low` and any unknown non-workflow / non-model
-# label, so those are added without disturbing other labels.
-conflicts_for_add() {
+workflow_conflicts_for_add() {
   local label="$1"
+  local keep=("${label}")
   local candidate
 
-  if is_model_label "${label}"; then
-    # Model dimension is internally exclusive: drop the other tiers, keep
-    # every workflow label and quality:low untouched.
-    for candidate in "${MODEL_LABELS[@]}"; do
-      if [ "${candidate}" != "${label}" ]; then
-        printf '%s\n' "${candidate}"
-      fi
-    done
-    return 0
-  fi
-
   if ! is_workflow_label "${label}"; then
-    # quality:low and any other non-workflow / non-model label: no conflicts.
     return 0
   fi
 
-  local keep=("${label}")
   case "${label}" in
+    pr)
+      keep=(pr)
+      ;;
     blocked-cc)
-      # Allowed transient pair: a failure after `done` but before `pr`.
       keep=(done blocked-cc)
       ;;
     blocked-dispatcher)
@@ -147,7 +109,7 @@ if [ "${OP}" = "add" ]; then
   CONFLICTS=()
   while IFS= read -r conflict_label; do
     CONFLICTS+=("${conflict_label}")
-  done < <(conflicts_for_add "${LABEL}")
+  done < <(workflow_conflicts_for_add "${LABEL}")
   if [ "${#CONFLICTS[@]}" -gt 0 ]; then
     CONFLICT_LABELS="$(join_by_comma "${CONFLICTS[@]}")"
     glab api --method PUT \

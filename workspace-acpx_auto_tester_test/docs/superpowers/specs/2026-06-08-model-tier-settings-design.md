@@ -152,4 +152,4 @@ GitLab model:<tier> 标签
 - 清 Stop hook 阻塞：循环完成后写当前 diff 指纹到 `.claude/.review-done-sha`。
 
 ## 11. SKILL_VERSION
-- 本次涉及 `workspace-acpx_auto_tester/` 下 `scripts/`、`references/`、`statemachine.v2.md` 与 `SKILL.md` 的改动，必须在同一 commit bump `SKILL.md` line 3 的 `[SKILL_VERSION=...]` 至 `2026-06-08.N`（按当日序号递增）。
+- 本次涉及 `workspace-acpx_auto_tester_test/` 下 `scripts/`、`references/`、`statemachine.v2.md` 与 `SKILL.md` 的改动，必须在同一 commit bump `SKILL.md` line 3 的 `[SKILL_VERSION=...]` 至 `2026-06-08.N`（按当日序号递增）。

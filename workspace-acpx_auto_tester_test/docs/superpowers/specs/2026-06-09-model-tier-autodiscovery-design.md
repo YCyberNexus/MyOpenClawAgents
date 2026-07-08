@@ -143,4 +143,4 @@ derive_effective_model_tiers() {
 - 清 Stop hook：写 diff 指纹到 `.claude/.review-done-sha`。
 
 ## 11. SKILL_VERSION
-- 本次改 `workspace-acpx_auto_tester/` 下 `scripts/` 与 `references/` 及 `SKILL.md`，必须同 commit bump `SKILL.md` line 3 的 `[SKILL_VERSION=...]` 至当日 `2026-06-09.N`（按序号递增；当前为 `2026-06-09.1`，本次 → `2026-06-09.2`）。
+- 本次改 `workspace-acpx_auto_tester_test/` 下 `scripts/` 与 `references/` 及 `SKILL.md`，必须同 commit bump `SKILL.md` line 3 的 `[SKILL_VERSION=...]` 至当日 `2026-06-09.N`（按序号递增；当前为 `2026-06-09.1`，本次 → `2026-06-09.2`）。

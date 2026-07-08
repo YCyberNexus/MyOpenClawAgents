@@ -91,13 +91,20 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    entries.
 8. **Pending eviction.** First, any `pending_subagents` entry whose IID
    is outside `effective_iid_universe` is scope-evicted: synthesize a
-   Phase 6 `blocked-dispatcher` reply (a dispatcher-side outcome — no CC
-   output exists), drain it, persist it, and add a `cleanup_actions[]`
-   kill request for the recorded child session key when present. Then
-   apply the stuck-pending backstop to remaining entries where
-   `(now - spawned_at) >= stuck_after_minutes` (or a placeholder with
-   `spawned_at = null`). Stuck eviction is still classified as
-   `blocked-dispatcher` but does not emit a kill request unless future
+   Phase 6 blocked reply, drain it, persist it, and add a
+   `cleanup_actions[]` kill request for the recorded child session key
+   when present. Then apply the stuck-pending backstop to remaining
+   entries where `(now - spawned_at) >= stuck_after_minutes` (or a
+   placeholder with `spawned_at = null`). A stuck eviction whose run
+   already outlived its acpx wall-clock budget
+   (`now - spawned_at >= acpx_timeout_seconds - 60s`) is timeout-shaped:
+   it synthesizes a Phase 6 **timeout** reply, so the IID parks in
+   `timeout_iids` with no auto-retry (只要超时就不重试). With the default
+   `stuck_after_minutes` (`ceil(run_timeout_seconds/60)+30`) every stuck
+   eviction passes that budget check; only an operator-shortened
+   `stuck_after_minutes` can evict early enough to stay **blocked**
+   (retryable). Placeholder evictions (spawn never landed) always stay
+   blocked. Stuck eviction does not emit a kill request unless future
    tooling adds one.
 9. If `pending_subagents` is still non-empty after eviction → emit
    `status:"waiting_for_callbacks"` envelope and exit 0.
@@ -130,22 +137,6 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     at or above `next_new_issue_iid`, then blocked IIDs whose
     `blocked_cooldown_ticks` has elapsed. Cap by
     `min(max_concurrent_subagents, hourly_issue_quota - quota_launched_this_tick)`.
-16b. **Environment precheck** — only when `PRECHECK_RELPATH` is non-empty
-    (trigger `precheck_relpath`, carry-forward persisted). Run `precheck.sh`,
-    which reads the manifest at `${REPO_PATH}/${PRECHECK_RELPATH}` and probes its
-    `urls` (pure-bash `/dev/tcp` TCP reachability — no curl), `commands`
-    (`command -v`), `env_vars` (set & non-empty; value never logged), and `files`
-    (`-f`/`-d`/`-e`). Exit `0` = every `required` passed (or manifest absent =
-    skipped) → proceed. Exit `1` (a `required` failed) or `2` (malformed
-    manifest) → tag every batch IID with `precheck-failed` (best-effort
-    `set_issue_label.sh add precheck-failed`), then
-    `status:"tick_failed", chat_summary:"precheck_failed …"` /
-    `"precheck_manifest_error …"`. Runs after batch formation so the tag names
-    exactly the batch IIDs, and before §17 (the heavy per-IID prep). Evidence:
-    `${DISPATCHER_LOG_DIR}/precheck-<ts>.json`. The tag is non-workflow, does NOT
-    consume retry or upgrade the model tier, and is cleared when the issue next
-    enters `doing` (§20). When `PRECHECK_RELPATH` is empty, skip entirely. See
-    [precheck_manifest.md](precheck_manifest.md).
 17. For each IID in the batch (sequential):
     1. `allocate_attempt.sh` → attempt number.
 18. `load_ui_accounts.sh` already ran in step 14; slice the captured
@@ -155,46 +146,18 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
     Persist. This is the structural guarantee against same-IID double
     spawn across crashes.
 20. **Per-IID prep loop** (sequential). For each IID:
-    1. `ISSUE_MODE` is always `fresh` (continue / resume is disabled on the
-       benchmark-test branch; every attempt resets from `origin/${dev_branch}`).
-    1b. **Pin model tier** (benchmark-test). The model tier is PINNED for the
-       whole tick from the REQUIRED `pin_model_tier` trigger field — there is
-       NO failure-escalation ladder (no hard/soft upgrade) and NO `model:{tier}`
-       monotonic-raise invariant (the pin may down-shift from a higher prior
-       tier). The issue is stamped exactly `model:<pin_model_tier>`. Captures
-       `MODEL` (the resolved model name) and `MODEL_TIER_LABEL` for steps 5b / 6.
-       The effective tier list — `model_tiers` intersected with the
-       `<tier>-settings.json` actually present in `model_settings_dir`
-       (auto-discovered each tick via `derive_effective_model_tiers`) — still
-       gates which pins are valid; `reconcile.sh` maps `model:<tier>` labels to
-       integer indices against the same effective list, while `ensure_labels.sh`
-       / `set_issue_label.sh` use the full `model_tiers`. A `pin_model_tier` not
-       in the effective set marks that IID `blocked-dispatcher`. A configured
-       `model_settings_dir` with none of the tiers' `<tier>-settings.json`
-       present aborts the tick (`no_model_settings_files`).
+    1. Resolve `ISSUE_MODE` (`continue` if `needs_continue` from
+       reconcile OR persisted state mode == continue; else `fresh`).
     2. `prepare_attempt.sh` → `mode_actual`, `LOCAL_ATTEMPT_BRANCH`.
        Failure → `prep_blocked` (drains pending, classifies as blocked,
        skips IID).
-    3. Optional per-tier model-settings copy: when `model_settings_dir` is
-       configured, copy `${model_settings_dir}/${MODEL}-settings.json` →
-       `${WORKTREE_DIR}/.claude/settings.json` (renamed on copy) +
-       `update-index --skip-worktree` so the resolved `model:{tier}` actually
-       drives acpx's model. A configured dir whose `${MODEL}-settings.json` is
-       missing/unreadable → `prep_blocked` (blocked-dispatcher). Replaces the
-       retired `claude_settings_path` single-file override.
+    3. Optional `claude_settings_path` copy + `update-index --skip-worktree`.
     4. `glab api projects/${PROJECT_URI}/issues/${iid}` → title, URL,
        labels, description (truncated to 4 KB).
-    5. `set_issue_label.sh remove <entry-label>` × N then `add doing` (the
-       "进 doing 清除集" = the whole workflow group; `model:{tier}` is
-       deliberately NOT removed).
-    5b. `set_issue_label.sh add ${MODEL_TIER_LABEL}` (stamps the pinned
-       model tier; the model dimension is internally exclusive, so the pin
-       may down-shift a higher prior tier).
-    6. `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`, with `MODEL`
-       injected into the prompt's Working environment section).
+    5. `set_issue_label.sh remove <entry-label>` × N then `add doing`.
+    6. `build_prompt.sh` (writes `${LOG_DIR}/prompt.txt`).
     7. Initialize `${ATTEMPT_STATE_FILE}` + `${ISSUE_STATE_FILE}` with
-       `status=in_progress` (the issue state also stamps `model_tier` /
-       `model` / `continue_count`).
+       `status=in_progress`.
     8. Render `references/executor_prompt.md` fenced block via
        inline `python3 -c '…'` (handles multi-line `{ISSUE_BODY}` safely;
        does pure `str.replace` of `{NAME}` → value, no format-string
@@ -220,16 +183,16 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 
 | Field | Meaning |
 | ----- | ------- |
-| `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs blocked during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed, precheck_failed, precheck_manifest_error; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
+| `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs blocked during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
 | `dispatch_entries` | Array of `{iid, attempt_number, child_label, payload_path}` objects; empty unless `status == "ready"`. The LLM `Read`s each `payload_path` and feeds the file contents to `sessions_spawn(payload=...)`. **Token-sensitive:** the file holds the GitLab token in cleartext (substituted from `{GITLAB_TOKEN}`); the wrapper writes it with mode 0600 and `dispatch_record_spawn.sh STATUS=spawned` truncates it once the runtime has it. The wrapper.log MUST NEVER include the rendered prompt contents. |
 | `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |
 | `backoff_seconds` | Always `2` today. Sleep between retries. |
-| `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. |
+| `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. Stuck evictions whose run outlived `acpx_timeout_seconds - 60s` are classified `timeout` (parked, no auto-retry); scope/placeholder evictions and early stuck evictions are classified `blocked`. |
 | `scope_evicted_iids` | Subset of `evicted_iids` evicted because the IID was outside `issue_iids ∩ [issue_min_iid,issue_max_iid]`. |
-| `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked blocked-dispatcher. |
+| `cleanup_actions` | Array of best-effort runtime cleanup requests. The LLM must call `subagents kill --target <target>` for each `{action:"kill"}` before spawning new entries from the same envelope. Scope eviction uses this to stop the old subagent/process tree after the issue is marked blocked. |
 | `label_filtered_in` / `label_filtered_out` | Optional — only emitted when `require_labels` is non-empty. |
-| `tick_outcome_per_iid` | Optional map; populated when per-IID prep failures pushed an IID into blocked-dispatcher. |
+| `tick_outcome_per_iid` | Optional map; populated when per-IID prep failures pushed an IID into blocked. |
 | `last_reconcile_evidence` | Absolute path to the `reconcile-<ts>.json` evidence file this tick produced. |
 | `chat_summary` | One-line human-readable string for the chat. |
 
@@ -268,8 +231,7 @@ Called: once per IID per scheduled wake-up, immediately after each
   `placeholder:true`, bumps `quota_launched_this_tick`, sets
   `campaign_status = "waiting_for_callbacks"`, persists, then truncates
   `${LOG_DIR}/spawn_payload.txt` to scrub the GitLab token.
-- `STATUS=launch_failed`: synthesizes a `blocked-dispatcher` Phase 6
-  reply (launch is a dispatcher-side step — no CC attempt ran) with
+- `STATUS=launch_failed`: synthesizes a blocked Phase 6 reply with
   `block_reason="sessions_spawn failed after ${LAUNCH_ATTEMPTS} attempts (2s backoff): ${LAUNCH_ERROR}"`,
   runs `phase6_process` with `is_launch_synth=true` (so retry_count is
   NOT incremented — launch-side failures get their cross-tick
@@ -307,10 +269,12 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 ### Inputs
 
 - **stdin**: the subagent's terminal compact JSON (the runtime's
-  `worker_result_json` payload). Empty stdin → synthesized blocked-dispatcher
-  reply with `block_reason="callback worker_result_json was empty"` (a
-  callback that arrived but is empty is an orchestration/transport anomaly —
-  `dispatch_followup.sh` defaults to `block_side="dispatcher"`).
+  `worker_result_json` payload). Empty stdin → synthesized terminal
+  reply: **timeout** (parked, no auto-retry) when the run already
+  outlived its acpx wall-clock budget
+  (`now - spawned_at >= acpx_timeout_seconds - 60s` — the
+  runtime-kill / dead-timeout-flow signature), otherwise **blocked**
+  (retryable) with `block_reason="callback worker_result_json was empty"`.
   The orchestrator MUST feed this with a heredoc
   (`… bash scripts/dispatch_followup.sh <<'WORKER_JSON_EOF' … WORKER_JSON_EOF`),
   never with `echo "<literal>" | … bash …`. The compact JSON is
@@ -329,30 +293,26 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
    logged but not aborting).
 3. Load campaign_state.json; look up `pending_subagents[IID]`. Missing
    → emit `callback_status:"stale_or_already_drained"`, exit 0.
-4. Parse compact reply via `phase6_normalize_reply` (unparseable payloads
-   synthesized as a blocked-dispatcher reply — an unusable payload is a
-   dispatcher-side anomaly; a *parseable* reply missing `block_side` still
-   defaults to `block_side:"cc"`, preserving the real-callback = CC-side
-   invariant).
+4. Parse compact reply via `phase6_normalize_reply` (parse errors and a
+   missing or non-enum `status` field — anything outside
+   `{done, no_changes, blocked, failed, timeout}`, including the empty
+   string — normalize to a synthesized terminal reply: `timeout` when the
+   run outlived `acpx_timeout_seconds - 60s` since `spawned_at` (budget
+   pinned in the pending entry at spawn time), else `blocked`; a parseable
+   reply with an explicit enum `status` always keeps the subagent's own
+   verdict).
 5. Cross-check `reply.attempt_number == pending.attempt_number`; mismatch
    → stale, exit 0.
 6. Run `phase6_process` with `is_launch_synth=false`:
-   - map reply.status + `block_side` to the v2 internal final_status
-     (`done` / `blocked_cc` / `blocked_dispatcher` / `failed_cc` /
-     `failed_dispatcher` / `timeout`); a real callback is CC-side
-   - sync labels (`done` → `done` (terminal success — there is no `pr`);
-     `blocked_cc` → `blocked-cc`;
-     `blocked_dispatcher` → `blocked-dispatcher`; `failed_cc` → `failed-cc`;
-     `failed_dispatcher` → `failed-dispatcher`; `timeout` → `timeout`; label
-     sync failure on a non-failed / non-timeout outcome → append to
-     block_reason and demote to the same-side `blocked_*` variant)
+   - sync labels (`done` → done+pr; `blocked` → blocked; `failed` →
+     failed; `timeout` → timeout; label sync failure on a
+     non-failed / non-timeout outcome → append to block_reason and
+     demote to blocked)
    - write `${ISSUE_STATE_FILE}` + `${ATTEMPT_STATE_FILE}` per
      state_schema.md §Phase 6 Write Mapping
-   - bump retry_count + maybe promote `blocked_cc → failed_cc` /
-     `blocked_dispatcher → failed_dispatcher` (`timeout` never consumes
-     retry_count and never promotes)
+   - bump retry_count + maybe promote `blocked → failed` (`timeout`
+     never consumes retry_count and never promotes)
    - drain pending entry, classify into completed/blocked/failed/timeout lists
-     (the campaign lists are side-agnostic unions)
 7. Decide cleanup (`phase6_decide_cleanup`).
 8. Persist campaign_state.json (with `campaign_status="running"` when
    `pending_subagents` reaches empty).
@@ -364,8 +324,8 @@ Trigger: `RUN_CHILD_COMPLETION_CALLBACK`
 | ----- | ----- |
 | `callback_status` | `"handled"` or `"stale_or_already_drained"` |
 | `iid`, `attempt_number` | echo |
-| `terminal_status` | final status after label sync + retry promotion (`done` / `blocked_cc` / `blocked_dispatcher` / `failed_cc` / `failed_dispatcher` / `timeout`) |
-| `merge_request_url` | from the compact reply; always empty `""` on benchmark-test (MR creation is removed) |
+| `terminal_status` | final status after label sync + retry promotion (`done` / `blocked` / `failed` / `timeout`) |
+| `merge_request_url` | from the compact reply |
 | `block_reason` | from the compact reply (with any label-sync error appended) |
 | `cleanup` | `{action, target, reason}`. LLM should call `subagents kill --target <target>` iff `action == "kill"` |
 | `remaining_pending_iids` | the post-drain `pending_subagents` keys |

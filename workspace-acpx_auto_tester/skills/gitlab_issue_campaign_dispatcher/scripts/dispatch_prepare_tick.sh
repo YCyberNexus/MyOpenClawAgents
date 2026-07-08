@@ -70,7 +70,7 @@ retire_temp_file() {
   # instead of deleting it.
   : >"${path}" 2>/dev/null || true
 
-  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester_test.retired"
+  local retire_dir="${TMPDIR:-/tmp}/acpx_auto_tester.retired"
   mkdir -p "${retire_dir}" 2>/dev/null || return 0
   mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
 }
@@ -228,50 +228,6 @@ if [ -n "${T[ui_accounts_relpath]:-}" ]; then
   export UI_ACCOUNTS_RELPATH="${T[ui_accounts_relpath]}"
 fi
 
-# precheck_relpath: relative path of the environment-precheck manifest under
-# ${REPO_PATH} (the project checkout root). Same carry-forward semantics and the
-# same relpath validation rules as ui_accounts_relpath. See
-# references/precheck_manifest.md. When unset (trigger + persisted state both
-# empty) the dispatcher skips the §16b precheck entirely.
-if [ -n "${T[precheck_relpath]:-}" ]; then
-  case "${T[precheck_relpath]}" in
-    /*)
-      emit_chat_failure "invalid_precheck_relpath: must be a relative path" ;;
-  esac
-  case "${T[precheck_relpath]}" in
-    *"/.."|*"/../"*|"../"*|".."|*"/."|*"/./"*|"./"*|"."|*$'\n'*|*$'\r'*|*$'\t'*|*" "*)
-      emit_chat_failure "invalid_precheck_relpath: dot segments or whitespace not allowed" ;;
-  esac
-  case "${T[precheck_relpath]}" in
-    *[!A-Za-z0-9_./-]*)
-      emit_chat_failure "invalid_precheck_relpath: unsupported characters" ;;
-  esac
-  export PRECHECK_RELPATH="${T[precheck_relpath]}"
-fi
-
-# model_settings_dir: absolute path to the directory holding the per-tier
-# Claude Code settings files (`<tier>-settings.json`). The resolved MODEL
-# (flash/pro/max, pinned per tick from pin_model_tier) selects `${MODEL}-settings.json`,
-# which Phase 4 per-IID prep copies to ${WORKTREE_DIR}/.claude/settings.json so
-# acpx claude exec actually runs on the tier's model. Same carry-forward
-# persistence semantics as ui_accounts_relpath. Validated here (absolute-path
-# rules identical to the retired claude_settings_path) at trigger-parse time so
-# a malformed value aborts the whole tick rather than per-IID. Because it is
-# absolute it does NOT feed env_paths.sh path derivation, so no re-source is
-# needed below.
-if [ -n "${T[model_settings_dir]:-}" ]; then
-  case "${T[model_settings_dir]}" in
-    /) emit_chat_failure "invalid_model_settings_dir: must not be /" ;;
-    /*) ;;
-    *) emit_chat_failure "invalid_model_settings_dir: must be an absolute path" ;;
-  esac
-  case "${T[model_settings_dir]}" in
-    *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
-      emit_chat_failure "invalid_model_settings_dir: dot segments, whitespace, or unsupported characters" ;;
-  esac
-  export MODEL_SETTINGS_DIR="${T[model_settings_dir]}"
-fi
-
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
@@ -281,7 +237,7 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # non-default result root, the default CAMPAIGN_STATE_FILE path will not exist.
 # Discover the existing runtime root under REPO_PATH before falling back to
 # a fresh default tree.
-if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ] || [ -z "${T[precheck_relpath]:-}" ]; } \
+if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z "${T[ui_accounts_relpath]:-}" ]; } \
    && [ ! -f "${CAMPAIGN_STATE_FILE}" ] && [ -d "${REPO_PATH}" ]; then
   shopt -s nullglob
   for candidate_state in "${REPO_PATH}"/*/_dispatcher/campaign_state.json; do
@@ -300,10 +256,6 @@ if { [ -z "${T[result_basename]:-}" ] || [ -z "${T[data_basename]:-}" ] || [ -z 
     if [ -z "${T[ui_accounts_relpath]:-}" ]; then
       PERSISTED_UAR="$(jq -r '.ui_accounts_relpath // empty' "${candidate_state}")"
       [ -n "${PERSISTED_UAR}" ] && export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
-    fi
-    if [ -z "${T[precheck_relpath]:-}" ]; then
-      PERSISTED_PCR="$(jq -r '.precheck_relpath // empty' "${candidate_state}")"
-      [ -n "${PERSISTED_PCR}" ] && export PRECHECK_RELPATH="${PERSISTED_PCR}"
     fi
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/env_paths.sh"
@@ -336,26 +288,6 @@ if [ -z "${T[ui_accounts_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
     export UI_ACCOUNTS_RELPATH="${PERSISTED_UAR}"
   fi
 fi
-# precheck_relpath carry-forward. Like ui_accounts_relpath, the relpath itself
-# does not feed dispatcher path derivation (the §16b precheck call passes
-# PRECHECK_RELPATH to precheck.sh, which re-derives PRECHECK_FILE on its own),
-# so no env_paths re-source is needed here.
-if [ -z "${T[precheck_relpath]:-}" ] && [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-  PERSISTED_PCR="$(jq -r '.precheck_relpath // empty' "${CAMPAIGN_STATE_FILE}")"
-  if [ -n "${PERSISTED_PCR}" ] && [ "${PERSISTED_PCR}" != "${PRECHECK_RELPATH}" ]; then
-    export PRECHECK_RELPATH="${PERSISTED_PCR}"
-  fi
-fi
-# model_settings_dir is intentionally NOT carry-forward (unlike ui_accounts_relpath
-# / model_tiers / the basenames). Omitting it on a trigger means "unconfigured this
-# tick": MODEL_SETTINGS_DIR stays at its env_paths.sh empty default, so the
-# per-tier settings copy + tier auto-discovery fall back to legacy behavior
-# (effective = full model_tiers, no settings copy, the tier is a prompt-text hint
-# only). The current tick's value (the trigger's, or empty) is still snapshotted
-# into campaign_state.json by the state jq below — NOT for carry-forward, but so
-# the same-batch callback (dispatch_followup.sh) derives the identical effective
-# tier list for its narrow reconcile. The single-batch invariant guarantees that
-# callback is processed before the next prepare tick can overwrite the snapshot.
 
 # ─── 5. Flock ─────────────────────────────────────────────────────
 # The campaign lock lives inside the repo runtime root
@@ -394,7 +326,7 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
     BOOTSTRAP_LOG_HINT="${DISPATCHER_LOG_DIR}/wrapper.log"
     cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
   else
-    BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/acpx_auto_tester_test.bootstrap.${PROJECT}.log"
+    BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/acpx_auto_tester.bootstrap.${PROJECT}.log"
     cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
     chmod 600 "${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
   fi
@@ -502,55 +434,44 @@ case "${REQ_LABELS_MATCH}" in
     ;;
 esac
 
-# ─── v2 model-tier config (optional) ──────────────────────────────
-# `model_tiers` is the ordered, comma-separated model list backing the
-# `model:{tier}` dimension (lowest first; element 0 = TIER_0 = default). The
-# label for tier k is `model:<element-k>`; the default list yields
-# model:flash / model:pro / model:max. It carries forward when the trigger
-# omits it (handled in the override jq below). (benchmark-test pins the model
-# per tick via pin_model_tier, so there is no failure-escalation soft/hard
-# trigger — model_tiers is only the wisdom-order list for effective-tier
-# discovery under model_settings_dir.)
-MODEL_TIERS_RAW="${T[model_tiers]:-}"
-MODEL_TIERS_JSON=""
-if [ -n "${MODEL_TIERS_RAW}" ]; then
-  MODEL_TIERS_JSON="$(printf '%s' "${MODEL_TIERS_RAW}" | tr ',' '\n' | awk '{gsub(/^[[:space:]]+|[[:space:]]+$/,""); if(length>0) print}' | jq -Rsc 'split("\n") | map(select(length>0))')"
-  if [ "$(printf '%s' "${MODEL_TIERS_JSON}" | jq 'length')" -lt 1 ]; then
-    emit_chat_failure "invalid_model_tiers: must list at least one model"
+# model_tiers (JSON array) + continue_upgrade_threshold (int): optional,
+# carry-forward. When the trigger supplies them they override the persisted
+# value; when omitted the persisted value is preserved (// $prior.* in the
+# merge filter below). model_tiers is validated as a JSON array here;
+# continue_upgrade_threshold is validated as an integer >= 1.
+MODEL_TIERS_PROVIDED=false
+MODEL_TIERS_JSON="null"
+if [ -n "${T[model_tiers]:-}" ]; then
+  if ! MODEL_TIERS_JSON="$(printf '%s' "${T[model_tiers]}" | jq -ce 'if type == "array" and (all(.[]; (.tier | type == "string" and (length > 0)) and (.settings | type == "string" and (length > 0)))) then . else error("invalid") end' 2>/dev/null)"; then
+    emit_chat_failure "invalid_model_tiers: must be a JSON array of {tier:non-empty-string, settings:non-empty-string}"
   fi
-  # Each element becomes a `model:<element>` label name; reject characters that
-  # are not safe in a GitLab label name segment.
-  if printf '%s' "${MODEL_TIERS_JSON}" | jq -e 'map(test("^[A-Za-z0-9_.-]+$") | not) | any' >/dev/null; then
-    emit_chat_failure "invalid_model_tiers: tier names must match [A-Za-z0-9_.-]+"
-  fi
+  MODEL_TIERS_PROVIDED=true
 fi
 
-# pin_model_tier (eval branch): the operator-pinned model tier for THIS tick.
-# REQUIRED on benchmark-test — without it there is nothing to benchmark and we
-# refuse to fall back to the failure-escalation ladder. Per-tick, NOT
-# carry-forward. Membership in the EFFECTIVE tier list is checked later in the
-# per-IID resolve block (where EFFECTIVE_TIERS_CSV is known); here we only
-# enforce presence + a safe label-segment charset.
-PIN_MODEL_TIER="${T[pin_model_tier]:-}"
-if [ -z "${PIN_MODEL_TIER}" ]; then
-  emit_chat_failure "pin_model_tier_required: benchmark-test requires an explicit pin_model_tier on every tick"
+CONT_UPGRADE_THRESHOLD_PROVIDED=false
+CONT_UPGRADE_THRESHOLD="null"
+if [ -n "${T[continue_upgrade_threshold]:-}" ]; then
+  case "${T[continue_upgrade_threshold]}" in
+    *[!0-9]*|"") emit_chat_failure "invalid_continue_upgrade_threshold: must be >= 1" ;;
+  esac
+  [ "${T[continue_upgrade_threshold]}" -ge 1 ] || emit_chat_failure "invalid_continue_upgrade_threshold: must be >= 1"
+  CONT_UPGRADE_THRESHOLD="${T[continue_upgrade_threshold]}"
+  CONT_UPGRADE_THRESHOLD_PROVIDED=true
 fi
-case "${PIN_MODEL_TIER}" in
-  *[!A-Za-z0-9_.-]*) emit_chat_failure "invalid_pin_model_tier: must match [A-Za-z0-9_.-]+" ;;
-esac
-export PIN_MODEL_TIER
 
 # Apply trigger overrides into the state JSON.
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --arg project "${PROJECT}" \
+  --argjson model_tiers_provided "${MODEL_TIERS_PROVIDED}" \
+  --argjson model_tiers "${MODEL_TIERS_JSON}" \
+  --argjson cont_threshold_provided "${CONT_UPGRADE_THRESHOLD_PROVIDED}" \
+  --argjson cont_threshold "${CONT_UPGRADE_THRESHOLD}" \
   --arg branch "${T[branch]}" \
   --arg dev_branch "${T[dev_branch]}" \
   --arg repo_path "${REPO_PARENT_PATH}" \
   --arg result_basename "${RESULT_BASENAME}" \
   --arg data_basename "${DATA_BASENAME}" \
   --arg ui_accounts_relpath "${UI_ACCOUNTS_RELPATH}" \
-  --arg precheck_relpath "${PRECHECK_RELPATH}" \
-  --arg model_settings_dir "${MODEL_SETTINGS_DIR}" \
   --argjson issue_min_iid "${T[issue_min_iid]}" \
   --argjson issue_max_iid "${T[issue_max_iid]}" \
   --argjson hourly_issue_quota "${T[hourly_issue_quota]}" \
@@ -565,9 +486,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson kill_subagent_on_terminal "${KILL_TERMINAL}" \
   --argjson issue_iids_whitelist "${ISSUE_IIDS_JSON}" \
   --argjson require_labels "${REQ_LABELS_JSON}" \
-  --arg require_labels_match "${REQ_LABELS_MATCH}" \
-  --argjson model_tiers_override "${MODEL_TIERS_JSON:-null}" \
-  --arg pin_model_tier "${PIN_MODEL_TIER}" '
+  --arg require_labels_match "${REQ_LABELS_MATCH}" '
   . + {
     project: $project,
     branch: $branch,
@@ -576,9 +495,8 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     result_basename: $result_basename,
     data_basename: $data_basename,
     ui_accounts_relpath: $ui_accounts_relpath,
-    precheck_relpath: $precheck_relpath,
-    model_settings_dir: $model_settings_dir,
-    pin_model_tier: $pin_model_tier,
+    model_tiers: (if $model_tiers_provided then $model_tiers else (.model_tiers // null) end),
+    continue_upgrade_threshold: (if $cont_threshold_provided then $cont_threshold else (.continue_upgrade_threshold // 2) end),
     issue_min_iid: $issue_min_iid,
     issue_max_iid: $issue_max_iid,
     hourly_issue_quota: $hourly_issue_quota,
@@ -594,11 +512,6 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     issue_iids_whitelist: $issue_iids_whitelist,
     require_labels: $require_labels,
     require_labels_match: $require_labels_match,
-    model_tiers: (
-      if $model_tiers_override != null then $model_tiers_override
-      elif (.model_tiers // []) | length > 0 then .model_tiers
-      else ["flash","pro","max"] end
-    ),
     tick_seq: ((.tick_seq // 0) + 1),
     blocked_at_tick_by_iid: (.blocked_at_tick_by_iid // {}),
     quota_launched_this_tick: 0,
@@ -664,6 +577,15 @@ for piid in ${PENDING_KEYS}; do
   CHILD_SESSION_KEY="$(printf '%s' "${ENTRY}" | jq -r '.child_session_key // ""')"
   EVICT=false
   EVICT_KIND=""
+  # 只要超时就不重试: a stuck-evicted run that already outlived its acpx
+  # wall-clock budget is a timeout-shaped termination — synthesize `timeout`
+  # (parked in timeout_iids, no auto-retry) instead of `blocked` (retryable).
+  # Scope evictions and surviving placeholders are not time-based failures
+  # and stay `blocked`. With the default stuck_after_minutes
+  # (ceil(run_timeout_seconds/60)+30) every stuck eviction passes the budget
+  # check; only an operator-shortened stuck_after_minutes can evict a run
+  # early enough to stay `blocked`.
+  EVICT_SYNTH="blocked"
   if ! printf '%s' "${EFF_UNIVERSE_JSON}" | jq -e --argjson iid "${piid}" 'index($iid) != null' >/dev/null; then
     EVICT=true
     EVICT_KIND="scope"
@@ -676,14 +598,27 @@ for piid in ${PENDING_KEYS}; do
       REASON="placeholder pending entry survived: spawn was never observed to land"
     fi
   else
-    # parse spawned_at as ISO-8601
-    SP_EPOCH="$(date -u -d "${SP_AT}" +%s 2>/dev/null || gdate -u -d "${SP_AT}" +%s 2>/dev/null || echo 0)"
+    SP_EPOCH="$(iso_to_epoch "${SP_AT}")"
     if [ "${SP_EPOCH}" -gt 0 ]; then
-      DELTA=$(( (NOW_TS - SP_EPOCH) / 60 ))
+      ELAPSED_S=$(( NOW_TS - SP_EPOCH ))
+      DELTA=$(( ELAPSED_S / 60 ))
       if [ "${DELTA}" -ge "${STUCK_AFTER}" ]; then
         EVICT=true
         EVICT_KIND="stuck"
-        REASON="no callback received within stuck_after_minutes (${DELTA} min)"
+        # Judge against the budget pinned in the entry at spawn time; fall
+        # back to this tick's value for entries spawned before the field
+        # existed. A trigger override applied mid-flight must not change
+        # which budget the run is judged against.
+        ENTRY_ACPX="$(printf '%s' "${ENTRY}" | jq -r '.acpx_timeout_seconds // empty')"
+        [ -n "${ENTRY_ACPX}" ] || ENTRY_ACPX="${ACPX_TIMEOUT}"
+        TIMEOUT_FLOOR_S=$(( ENTRY_ACPX - 60 ))
+        [ "${TIMEOUT_FLOOR_S}" -lt 0 ] && TIMEOUT_FLOOR_S=0
+        if [ "${ELAPSED_S}" -ge "${TIMEOUT_FLOOR_S}" ]; then
+          EVICT_SYNTH="timeout"
+          REASON="no callback received within stuck_after_minutes (${DELTA} min) and the run outlived acpx_timeout_seconds(${ENTRY_ACPX}) — timeout-shaped, parked without retry"
+        else
+          REASON="no callback received within stuck_after_minutes (${DELTA} min)"
+        fi
       fi
     fi
   fi
@@ -691,32 +626,35 @@ for piid in ${PENDING_KEYS}; do
     # Completion guard (Source-of-Truth). A stale pending entry for an earlier
     # attempt can survive an out-of-band `subagents kill` + a later attempt's
     # success across a gateway restart. Regressing it here calls phase6_process
-    # → phase6_sync_labels → set_issue_label.sh. A regressing terminal that maps
-    # to `add failed-*`/`add timeout` STRIPS the live `done` completion label via
-    # the workflow-label mutual-exclusion group (only `add blocked-*` keeps
-    # `done`); and even the eviction's own `add blocked-dispatcher` — which keeps
-    # `done` — still misclassifies a finished issue as blocked/unfinished, a
-    # regression §11 then refuses to correct because it skips just-evicted IIDs.
-    # reconcile can no longer recover a stripped label either. So consult
-    # GitLab live labels BEFORE any regressing write: if the issue is already
-    # completed/closed, drain the stale ghost WITHOUT regressing and let §11's
-    # reconcile correction classify it completed (we do NOT add it to
-    # EVICTED_IIDS_JSON, so §11 does not skip it). We do NOT call phase6_process
-    # for the ghost on purpose — the later attempt already wrote the terminal
-    # state files and counted quota; re-running phase6_process with a synthesized
-    # reply would clobber that completion metadata with nulls and double-count.
-    # Best-effort: on reconcile failure the eviction proceeds, so the stuck-
-    # eviction backstop stays live when GitLab is unreachable.
+    # → phase6_sync_labels → set_issue_label.sh: the eviction's `add timeout` /
+    # `add blocked-dispatcher` STRIPS the live `pr` completion label via the
+    # workflow-label mutual-exclusion group (the keep-table never preserves
+    # `pr`) — silently destroying a finished issue's terminal state. reconcile
+    # can no longer recover a stripped label (the
+    # ground truth is already overwritten) and §11 deliberately skips just-
+    # evicted IIDs. So consult GitLab live labels BEFORE any regressing write:
+    # if the issue is already completed/closed, drain the stale ghost WITHOUT
+    # regressing and let §11's reconcile correction classify it completed (we do
+    # NOT add it to EVICTED_IIDS_JSON, so §11 does not skip it). We do NOT call
+    # phase6_process for the ghost on purpose — the later attempt already wrote
+    # the terminal state files and counted quota; re-running phase6_process with
+    # a synthesized reply would clobber that completion metadata with nulls and
+    # double-count. Best-effort: on reconcile failure the eviction proceeds, so
+    # the stuck-eviction backstop stays live when GitLab is unreachable.
     if phase6_iid_completed_live "${piid}"; then
-      wrapper_log prepare_tick "completed-ghost-drain iid=${piid}: GitLab live labels show completed/closed — draining stale pending entry without regressing (was about to ${EVICT_KIND}-evict)"
+      wrapper_log prepare_tick "completed-ghost-drain iid=${piid}: GitLab live labels show completed/closed — draining stale pending entry without regressing (was about to ${EVICT_KIND}-evict synth=${EVICT_SYNTH})"
       STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${piid}" --arg project "${PROJECT}" '
         .pending_subagents       = (.pending_subagents | del(.[($iid|tostring)]))
         | .active_issue_iids     = (.pending_subagents | keys | map(tonumber) | sort)
         | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))')"
       continue
     fi
-    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} reason='${REASON}'"
-    REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
+    wrapper_log prepare_tick "${EVICT_KIND}-evict iid=${piid} synth=${EVICT_SYNTH} reason='${REASON}'"
+    if [ "${EVICT_SYNTH}" = "timeout" ]; then
+      REPLY_JSON="$(phase6_synthesize_timeout "${piid}" "${PA_NUM}" "${REASON}")"
+    else
+      REPLY_JSON="$(phase6_synthesize_blocked "${piid}" "${PA_NUM}" "${REASON}")"
+    fi
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     EVICTED_IIDS_JSON="$(printf '%s' "${EVICTED_IIDS_JSON}" | jq -c --argjson v "${piid}" '. + [$v]')"
@@ -741,37 +679,10 @@ persist_state "${STATE_JSON}"
 # AFTER reconcile + disk-cache correction (§11 below), so live labels are synced
 # on EVERY scheduled tick. See "§11b. Pending gate" just after the correction.
 
-# Configuration-driven model tier list (ordered, comma-separated). Two values:
-#   MODEL_TIERS_CSV     — the FULL configured list (model_tiers, default
-#                         "flash,pro,max" = the wisdom order flash<pro<max).
-#                         Drives ensure_labels.sh (creates every model:<tier>
-#                         label) and the model-tier set_issue_label.sh call's
-#                         model:* mutual-exclusion clear-set.
-#   EFFECTIVE_TIERS_CSV — the subset whose ${MODEL_SETTINGS_DIR}/<tier>-settings.json
-#                         exists (order preserved); empty MODEL_SETTINGS_DIR →
-#                         equals the full list. Drives reconcile.sh's integer
-#                         model_tier index and the per-tick MODEL selection
-#                         pinned from pin_model_tier, so the resolvable tiers
-#                         match the settings files actually present (tier
-#                         auto-discovery: e.g. only pro+max on disk → pin_model_tier
-#                         picks from {pro,max}).
-MODEL_TIERS_CSV="$(printf '%s' "${STATE_JSON}" | jq -r '(.model_tiers // ["flash","pro","max"]) | join(",")')"
-EFFECTIVE_TIERS_CSV="$(derive_effective_model_tiers "${MODEL_TIERS_CSV}" "${MODEL_SETTINGS_DIR:-}")"
-if [ -n "${MODEL_SETTINGS_DIR:-}" ] && [ -z "${EFFECTIVE_TIERS_CSV}" ]; then
-  # Stable classification prefix + the configured tier list (no absolute path —
-  # the path would leak internal layout into the orchestrator chat and is not
-  # needed to classify; same spirit as ui_account_pool_too_small carrying sizes
-  # but not paths). The full path is left out of chat by design.
-  emit_chat_failure "no_model_settings_files: model_settings_dir is configured but contains none of the model_tiers (${MODEL_TIERS_CSV}) <tier>-settings.json files"
-fi
-
 # ─── 10. Reconcile ────────────────────────────────────────────────
-# reconcile maps model:{tier} labels to integer indices against the EFFECTIVE
-# tier list (must match the per-tick MODEL pinned from pin_model_tier below).
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
-  MODEL_TIERS="${EFFECTIVE_TIERS_CSV}")
+  RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}")
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
@@ -824,11 +735,12 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
       | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid // {})
       | if (($pending | index($e.iid)) != null) or (($evicted | index($e.iid)) != null) then
           # In-flight (doing) IID owned by Phase 6, or an IID this same tick
-          # eviction loop just classified blocked: the live-label pass must NOT
-          # reclassify or drain it. Skipping protects pending bookkeeping and
-          # the blocked_cooldown_ticks stamp the eviction just wrote (GitLab may
-          # still show a slow subagent as doing if its blocked-label sync has
-          # not landed, which would otherwise look like user_reopened).
+          # eviction loop just classified blocked/timeout: the live-label pass
+          # must NOT reclassify or drain it. Skipping protects pending
+          # bookkeeping and the blocked_cooldown_ticks stamp the eviction just
+          # wrote (GitLab may still show a slow subagent as doing if its
+          # terminal-label sync has not landed, which would otherwise look
+          # like user_reopened).
           .
         elif $e.is_closed_on_gitlab == true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
@@ -837,32 +749,32 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
           | .failed_iids     = (.failed_iids     - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
           | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
-        elif $e.has_retry == true then
-          # A live `retry` label re-enqueues from scratch and WINS over a
-          # lingering blocked-* / failed-* / timeout (a reviewer asked to
-          # re-run). user_reopened is false whenever any blocked-*/failed-*
-          # label is present, so this explicit branch is what makes a stacked
-          # blocked-cc+retry / failed-cc+retry actually re-run instead of
-          # falling through to the no-op else.
+        elif $e.has_done_pr == true and $e.needs_continue != true then
+          .completed_iids = (([$e.iid] + .completed_iids) | unique)
+          | .unfinished_iids = (.unfinished_iids - [$e.iid])
+          | .blocked_iids    = (.blocked_iids - [$e.iid])
+          | .failed_iids     = (.failed_iids - [$e.iid])
+          | .timeout_iids    = (.timeout_iids    - [$e.iid])
+          | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
+        elif $e.needs_continue == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
           | .completed_iids = (.completed_iids - [$e.iid])
           | .blocked_iids   = (.blocked_iids - [$e.iid])
           | .failed_iids    = (.failed_iids - [$e.iid])
           | .timeout_iids   = (.timeout_iids - [$e.iid])
           | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
-        elif $e.is_done_on_gitlab == true then
-          # benchmark-test: `done` (a live label on a still-opened issue, OR a
-          # closed issue) is a SUCCESS terminal. Drain it like a closed issue so
-          # the campaign converges and a finished round is NOT re-run every tick.
-          # This branch sits AFTER has_retry on purpose: a done+retry issue takes
-          # the has_retry branch above and re-runs, so the operator launches the
-          # next model round explicitly (add `retry`, or name the IID in the
-          # trigger range) rather than relying on auto re-enqueue.
-          .completed_iids = (([$e.iid] + .completed_iids) | unique)
-          | .unfinished_iids = (.unfinished_iids - [$e.iid])
-          | .blocked_iids    = (.blocked_iids    - [$e.iid])
-          | .failed_iids     = (.failed_iids     - [$e.iid])
-          | .timeout_iids    = (.timeout_iids    - [$e.iid])
+          | .campaign_status = "running"
+        elif $e.has_retry == true then
+          # A live `retry` label re-enqueues from scratch and WINS over a
+          # lingering blocked / failed / timeout (a reviewer asked to re-run).
+          # user_reopened is false whenever blocked/failed is present, so this
+          # explicit branch is what makes a stacked blocked+retry / failed+retry
+          # actually re-run instead of falling through to the no-op else.
+          .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
+          | .completed_iids = (.completed_iids - [$e.iid])
+          | .blocked_iids   = (.blocked_iids - [$e.iid])
+          | .failed_iids    = (.failed_iids - [$e.iid])
+          | .timeout_iids   = (.timeout_iids - [$e.iid])
           | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
         elif $e.user_reopened == true then
           .unfinished_iids = (([$e.iid] + .unfinished_iids) | unique)
@@ -911,12 +823,7 @@ ALL_DONE="$(printf '%s' "${STATE_JSON}" | jq -r --argjson ev "${EVIDENCE_JSON}" 
   if (.issue_iids_whitelist | length) > 0 then false
   elif ((.pending_subagents // {}) | length) > 0 then false
   else
-    # unfinished_iids must be empty too: a done+retry issue is re-enqueued there
-    # by the reduce above even though its reconcile evidence still reads
-    # is_done_on_gitlab==true, so without this guard ALL_DONE would short-circuit
-    # to completed and the operator-driven retry round would never launch.
-    (((.unfinished_iids // []) | length) == 0)
-    and ($ev | map(.is_done_on_gitlab == true) | all)
+    ($ev | map(.is_done_on_gitlab == true and .needs_continue != true) | all)
     and (($universe | length) == ($ev | length))
   end')"
 if [ "${ALL_DONE}" = "true" ]; then
@@ -934,7 +841,7 @@ set +e
 PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
   REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
   RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-  MODEL_TIERS="${MODEL_TIERS_CSV}" \
+  MODEL_TIERS="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // empty')" \
   bash "${SCRIPT_DIR}/ensure_labels.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
 EL_RC=$?
 set -e
@@ -1064,15 +971,15 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
         | ($byiid[($i|tostring)] // null) as $e
         | $e != null
         and ($e.is_closed_on_gitlab // false) != true
+        and (($e.has_done_pr // false) != true or ($e.needs_continue // false) == true)
       ))) as $eligible
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
       and (($s.timeout_iids // []) | index($i) | not)
       and (($s.unfinished_iids // []) | index($i))
       and (($byiid[($i|tostring)] // {}) as $e
-           | ((($e.has_blocked_cc // false) != true) and (($e.has_blocked_dispatcher // false) != true)
-              and (($e.has_failed_cc // false) != true) and (($e.has_failed_dispatcher // false) != true))
-             or (($e.has_retry // false) == true))
+           | ((($e.has_blocked // false) != true) and (($e.has_failed // false) != true))
+             or (($e.has_retry // false) == true) or (($e.needs_continue // false) == true))
     )) | sort) as $backlog
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
@@ -1082,9 +989,8 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
       and (($s.timeout_iids // []) | index($i) | not)
       and ($i >= $next_new)
       and (($byiid[($i|tostring)] // {}) as $e
-           | ((($e.has_blocked_cc // false) != true) and (($e.has_blocked_dispatcher // false) != true)
-              and (($e.has_failed_cc // false) != true) and (($e.has_failed_dispatcher // false) != true))
-             or (($e.has_retry // false) == true))
+           | ((($e.has_blocked // false) != true) and (($e.has_failed // false) != true))
+             or (($e.has_retry // false) == true) or (($e.needs_continue // false) == true))
     )) | sort) as $fresh
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i))
@@ -1094,7 +1000,10 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     # Phase 6 promotes blocked → failed (and moves the IID into failed_iids)
     # whenever retry_count > blocked_retry_limit. Launch-side synthesized
     # blocked replies (dispatch_record_spawn.sh STATUS=launch_failed) and
-    # stuck-pending evictions (dispatch_prepare_tick.sh) both DO NOT
+    # the rare early stuck-pending evictions that stay blocked (run did NOT
+    # outlive acpx_timeout_seconds — possible only under an operator-shortened
+    # stuck_after_minutes; budget-exhausted evictions synthesize timeout and
+    # land in timeout_iids instead) both DO NOT
     # increment retry_count, but they also do not violate the invariant —
     # they just defer one extra tick before another launch attempt. Per-
     # issue retry_count lives in issues/issue-<iid>/state.json and is
@@ -1127,51 +1036,6 @@ if [ "${BATCH_SIZE}" = "0" ]; then
     --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   exit 0
-fi
-
-# ─── 16b. Environment precheck (only when configured) ─────────────
-# Runs after the batch is known (so a required failure can tag exactly the batch
-# IIDs) and BEFORE §17 per-IID prep (the heavy work). The manifest lives in the
-# cloned repo — clone_or_pull.sh (§13) has already populated it. A required
-# failure (or a malformed manifest) tags this tick's batch IIDs with
-# `precheck-failed` (best-effort) and aborts the whole tick; the tag is cleared
-# when the issue next enters `doing` (§20 REMOVE_LBLS). Skipped entirely when
-# PRECHECK_RELPATH is empty (neither trigger nor persisted state configured it).
-# Placed before the fresh-issue cursor advance below so an abort here does not
-# move the cursor (the advance is not persisted until §19 anyway).
-if [ -n "${PRECHECK_RELPATH}" ]; then
-  PRECHECK_OUT="$(mktemp)"
-  set +e
-  PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-    REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-    RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-    UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-    PRECHECK_RELPATH="${PRECHECK_RELPATH}" \
-    bash "${SCRIPT_DIR}/precheck.sh" >"${PRECHECK_OUT}" 2>&1
-  PRECHECK_RC=$?
-  set -e
-  cat "${PRECHECK_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
-  rm -f "${PRECHECK_OUT}"
-  if [ "${PRECHECK_RC}" -ne 0 ]; then
-    # Tag the batch IIDs (best-effort) then abort. precheck-failed is a
-    # non-workflow marker (set_issue_label.sh adds it without disturbing the
-    # workflow label) and does NOT consume retry or upgrade the model tier.
-    mapfile -t PRECHECK_BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
-    for piid in "${PRECHECK_BATCH_IIDS[@]}"; do
-      PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-        RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" \
-        UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}" \
-        ISSUE_IID="${piid}" \
-        bash "${SCRIPT_DIR}/set_issue_label.sh" add precheck-failed \
-        >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
-    done
-    case "${PRECHECK_RC}" in
-      2) PRECHECK_REASON="precheck_manifest_error" ;;
-      *) PRECHECK_REASON="precheck_failed" ;;
-    esac
-    emit_chat_failure "${PRECHECK_REASON} (exit ${PRECHECK_RC}; batch=[${PRECHECK_BATCH_IIDS[*]}]; see ${DISPATCHER_LOG_DIR}/precheck-*.json)"
-  fi
 fi
 
 # Move the fresh-issue cursor past any fresh IID selected for this batch. The
@@ -1278,10 +1142,14 @@ done
 # Build the placeholder additions in one jq pass to avoid quoting hell.
 # active_issue_sessions uses the canonical "issue-<project>-<iid>" format
 # per state_schema.md §active_issue_iids / active_issue_sessions.
-PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" )
+# acpx_timeout_seconds pins the wall-clock budget in effect at spawn time:
+# the timeout-shaped classification (followup empty/unparseable callback,
+# stuck eviction) must compare elapsed time against THIS run's budget, not
+# against whatever a later trigger overrode the campaign-level value to.
+PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" --argjson acpx_timeout "${ACPX_TIMEOUT}" )
 FILTER='.pending_subagents = (.pending_subagents // {})'
 for iid in "${BATCH_IIDS[@]}"; do
-  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, ui_account_index_start: \$off_${iid}, ui_account_count: \$cnt_${iid}, spawned_at: null, placeholder: true}"
+  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, ui_account_index_start: \$off_${iid}, ui_account_count: \$cnt_${iid}, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout}"
 done
 FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)'
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
@@ -1307,38 +1175,29 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_LABELS=""
   ISSUE_BODY=""
   ISSUE_TITLE_QUOTED="''"
-  # continue is disabled on benchmark-test, so the cached continue count is
-  # always 0; the issue-state initializer below writes it verbatim
-  # (`--argjson continue_count "${NEW_CONTINUE_COUNT}"`).
-  NEW_CONTINUE_COUNT=0
 
-  # Per-IID env for env_paths-derived paths. MODEL_TIERS is carried so the
-  # model:{tier} set_issue_label.sh call below resolves its internal model
-  # mutual-exclusion against the same configured tier list (the other
-  # workflow-label ops ignore it). MODEL carries the per-tick pinned tier
-  # (pin_model_tier, validated as required at parse time so it is always set
-  # here) — env_paths.sh REQUIRES it because LOG_DIR / LOCAL_ATTEMPT_BRANCH now
-  # embed the tier as a `-<tier>` suffix; putting it in iid_env covers every
-  # per-issue env_paths derivation below in one place (prepare_attempt,
-  # set_issue_label, build_prompt, and the WORKTREE_DIR/LOG_DIR/OUTPUT_DIR
-  # extraction subshells). The per-IID effective-tier membership of the pin is
-  # validated below before any env "${iid_env[@]}" invocation runs.
+  # Per-IID env for env_paths-derived paths.
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
     RESULT_BASENAME="${RESULT_BASENAME}" DATA_BASENAME="${DATA_BASENAME}" UI_ACCOUNTS_RELPATH="${UI_ACCOUNTS_RELPATH}"
-    MODEL_TIERS="${MODEL_TIERS_CSV}"
-    MODEL="${PIN_MODEL_TIER}"
     ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
   )
 
-  # prep_blocked: mark THIS iid blocked-dispatcher (synthesize a Phase 6 blocked
-  # reply, persist state, record the tick outcome); the caller then `continue`s
-  # to the next iid. Defined HERE at the top of the per-iid body — before the
-  # model-tier resolve block that may call it on a pin-membership failure — so
-  # the very first iteration has it available (bash defines functions at runtime;
-  # a definition placed later in the loop body would be undefined on the first
-  # iteration's earlier lines).
+  # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
+  # resume signal. Every other entry path (`todo`, `retry`, `new`,
+  # `blocked`, trigger require_labels) resets from the clean DEV_BRANCH
+  # baseline, even if this IID has prior attempts on disk.
+  ISSUE_MODE="fresh"
+  NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
+  RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
+    (.[] | select(.iid==$i) | .labels // []) as $labels
+    | (($labels | index("retry") != null) or ($labels | index("todo") != null))
+  ')"
+  if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
+    ISSUE_MODE="continue"
+  fi
+
   prep_blocked() {
     local reason="$1"
     wrapper_log prepare_tick "iid=${iid} blocked during prep: ${reason}"
@@ -1348,33 +1207,6 @@ for iid in "${BATCH_IIDS[@]}"; do
     persist_state "${STATE_JSON}"
     TICK_OUTCOMES="$(printf '%s' "${TICK_OUTCOMES}" | jq -c --arg k "${iid}" --arg v "blocked: ${reason}" '. + {($k):$v}')"
   }
-
-  # benchmark-test: every attempt runs FRESH from the clean DEV_BRANCH baseline
-  # so different pinned models are compared on identical inputs. continue/resume
-  # is disabled on this branch — there is no mode resolution, ISSUE_MODE is
-  # always "fresh".
-  ISSUE_MODE="fresh"
-
-  # ─── model tier (pinned) ─────────────────────────────────────────
-  # benchmark-test: the model is pinned per tick by the REQUIRED pin_model_tier
-  # trigger field (validated at parse time, so it is always set here). There is
-  # NO failure-escalation ladder and NO model:{tier} monotonic-raise invariant —
-  # the issue is stamped exactly model:<pin>. set_issue_label.sh's model:* mutual
-  # exclusion clears any other model:<tier> in the same update, so pinning a
-  # LOWER tier than the issue's prior label is fine. EFFECTIVE_TIERS_CSV (the
-  # tiers whose <tier>-settings.json exist on disk) was derived at the top of the
-  # tick; the pin MUST be one of them.
-  case ",${EFFECTIVE_TIERS_CSV}," in
-    *",${PIN_MODEL_TIER},"*) ;;
-    *) prep_blocked "pin_model_tier '${PIN_MODEL_TIER}' not in effective tiers (${EFFECTIVE_TIERS_CSV})"; continue ;;
-  esac
-  MODEL="${PIN_MODEL_TIER}"
-  MODEL_TIER_LABEL="model:${PIN_MODEL_TIER}"
-  # NEW_TIER = the pin's 0-based index in EFFECTIVE_TIERS_CSV, for the cached
-  # integer model_tier written into issue state.json (membership confirmed above,
-  # so grep always matches).
-  NEW_TIER="$(printf '%s' "${EFFECTIVE_TIERS_CSV}" | tr ',' '\n' | grep -nxF "${PIN_MODEL_TIER}" | head -n1 | cut -d: -f1)"
-  NEW_TIER=$(( NEW_TIER - 1 ))
 
   # prepare_attempt.sh — keep stdout clean (the script's contract is two
   # lines on stdout: mode_actual, LOCAL_ATTEMPT_BRANCH). `git fetch` /
@@ -1418,26 +1250,107 @@ for iid in "${BATCH_IIDS[@]}"; do
       ;;
   esac
 
-  # model settings (per-tier): copy ${MODEL}-settings.json → .claude/settings.json
-  # so acpx claude exec actually runs on the tier's model. MODEL was resolved
-  # above from pin_model_tier (never null). The `cp`
-  # target is a file path, so the source `<tier>-settings.json` lands renamed as
-  # the `settings.json` Claude Code reads by default. This replaces the retired
-  # claude_settings_path single-file override. When MODEL_SETTINGS_DIR is unset
-  # (trigger never configured it and none is persisted) the whole step is skipped
-  # and the worktree's committed .claude/settings.json is used as-is. A configured
-  # dir with a missing/unreadable tier file FAILS the IID (blocked-dispatcher) per
-  # the strict no-fallback policy — no downgrade to a default tier file.
-  if [ -n "${MODEL_SETTINGS_DIR:-}" ]; then
-    msf="${MODEL_SETTINGS_DIR}/${MODEL}-settings.json"
-    if [ ! -r "${msf}" ]; then
-      prep_blocked "model settings file not found or not readable: ${msf}"; continue
+  # ── resolve_model_tier（D：model:{tier} 文件式自动升档；仅当 model_tiers 配置）──
+  RESOLVED_MODEL_TIER=""
+  MODEL_SETTINGS_SRC=""
+  MT_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.model_tiers // empty')"
+  if [ -n "${MT_JSON}" ] && [ "${MT_JSON}" != "null" ] && [ "$(printf '%s' "${MT_JSON}" | jq 'length')" -gt 0 ]; then
+    mapfile -t MT_TIERS < <(printf '%s' "${MT_JSON}" | jq -r '.[].tier')
+    if [ "${#MT_TIERS[@]}" -eq 0 ]; then
+      prep_blocked "model_tiers configured but empty/invalid"; continue
+    fi
+    DEFAULT_TIER="${MT_TIERS[0]}"
+    CAP_TIER="${MT_TIERS[$(( ${#MT_TIERS[@]} - 1 ))]}"
+    # 当前档：live model 标签（reconcile evidence）→ state.json 缓存 → TIER_0
+    CUR_TIER="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .model_tier // empty')"
+    [ -n "${CUR_TIER}" ] || CUR_TIER="$( [ -f "${ISSUES_ROOT}/issue-${iid}/state.json" ] && jq -r '.model_tier // empty' "${ISSUES_ROOT}/issue-${iid}/state.json" || true )"
+    [ -n "${CUR_TIER}" ] || CUR_TIER="${DEFAULT_TIER}"
+    PRIOR_STATE="$( [ -f "${ISSUES_ROOT}/issue-${iid}/state.json" ] && cat "${ISSUES_ROOT}/issue-${iid}/state.json" || echo '{}' )"
+    PRIOR_STATUS="$(printf '%s' "${PRIOR_STATE}" | jq -r '.status // ""')"
+    PRIOR_SIDE="$(printf '%s' "${PRIOR_STATE}" | jq -r '.block_side // ""')"
+    CONT_COUNT="$(printf '%s' "${PRIOR_STATE}" | jq -r '.continue_count // 0')"
+    CONT_THRESHOLD="$(printf '%s' "${STATE_JSON}" | jq -r '.continue_upgrade_threshold // 2')"
+    HAS_QUALITY_LOW="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | (.labels // []) | index("quality:low") != null')"
+    UPGRADE="no"
+    # 硬触发：CC 侧 {blocked-cc, timeout, failed-cc}（timeout 恒 CC）
+    case "${PRIOR_STATUS}" in
+      timeout) UPGRADE="yes" ;;
+      blocked|failed) [ "${PRIOR_SIDE}" = "cc" ] && UPGRADE="yes" ;;
+    esac
+    # 软触发：quality:low ∨ continue 累计 ≥ 阈值（自动评分=占位 no-op）
+    [ "${HAS_QUALITY_LOW}" = "true" ] && UPGRADE="yes"
+    # 计入当前这次 continue：本 tick 的 continue_count 自增发生在 state.json init（晚于本块），
+    # 故这里用 effective = 磁盘值 + 当前是否 continue，确保第 N 次 continue 即触发（而非第 N+1 次）。
+    EFFECTIVE_CONT_COUNT="${CONT_COUNT}"
+    [ "${MODE_ACTUAL}" = "continue" ] && EFFECTIVE_CONT_COUNT=$(( CONT_COUNT + 1 ))
+    [ "${EFFECTIVE_CONT_COUNT}" -ge "${CONT_THRESHOLD}" ] && [ "${CONT_THRESHOLD}" -ge 1 ] && UPGRADE="yes"
+    # 定位当前档索引；未知/失效缓存档（如运维改了 tier 名）→ 回落 DEFAULT_TIER（TIER_0）
+    cur_idx=-1
+    for i_t in "${!MT_TIERS[@]}"; do [ "${MT_TIERS[$i_t]}" = "${CUR_TIER}" ] && cur_idx="${i_t}"; done
+    if [ "${cur_idx}" -lt 0 ]; then
+      echo "resolve_model_tier: iid=${iid} cached model_tier '${CUR_TIER}' not in current model_tiers; resetting to default '${DEFAULT_TIER}'" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
+      CUR_TIER="${DEFAULT_TIER}"; cur_idx=0
+    fi
+    # 求新档（单调升、封顶）；cur_idx 此时恒有效 → NEW_TIER 恒为列表内合法档
+    NEW_TIER="${CUR_TIER}"
+    if [ "${UPGRADE}" = "yes" ] && [ "$(( cur_idx + 1 ))" -lt "${#MT_TIERS[@]}" ]; then
+      NEW_TIER="${MT_TIERS[$(( cur_idx + 1 ))]}"
+    fi
+    RESOLVED_MODEL_TIER="${NEW_TIER}"
+    MODEL_SETTINGS_SRC="$(printf '%s' "${MT_JSON}" | jq -r --arg t "${NEW_TIER}" '.[] | select(.tier==$t) | .settings // empty')"
+    # model 维度互斥：移除该 issue 现有所有 model:* 标签（除新档），再 add 新档。
+    # 按 reconcile 证据枚举现有标签，可一并清掉因 tier 改名残留的孤儿档。
+    while IFS= read -r _ml; do
+      [ -z "${_ml}" ] && continue
+      [ "${_ml}" = "model:${NEW_TIER}" ] && continue
+      env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "${_ml}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    done < <(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | (.labels // [])[] | select(startswith("model:"))')
+    env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" add "model:${NEW_TIER}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    if [ "${HAS_QUALITY_LOW}" = "true" ]; then
+      env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" remove "quality:low" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || true
+    fi
+  fi
+
+  # claude_settings_path
+  # model_tiers 档位 settings 优先（D）
+  if [ -n "${MODEL_SETTINGS_SRC}" ]; then
+    case "${MODEL_SETTINGS_SRC}" in
+      /) prep_blocked "model_tiers settings must not be /"; continue ;;
+      /*) : ;;
+      *) prep_blocked "model_tiers settings must be absolute: ${MODEL_SETTINGS_SRC}"; continue ;;
+    esac
+    case "${MODEL_SETTINGS_SRC}" in
+      *..*|*' '*|*[!A-Za-z0-9_./-]*) prep_blocked "invalid model_tiers settings path: ${MODEL_SETTINGS_SRC}"; continue ;;
+    esac
+    if [ ! -r "${MODEL_SETTINGS_SRC}" ]; then
+      prep_blocked "model_tiers settings file not found or not readable: ${MODEL_SETTINGS_SRC}"; continue
     fi
     # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
     # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
     WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
-    if ! cp "${msf}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
-      prep_blocked "model settings copy failed"; continue
+    if ! cp "${MODEL_SETTINGS_SRC}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
+      prep_blocked "model_tiers settings copy failed"; continue
+    fi
+    git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
+  elif [ -n "${T[claude_settings_path]:-}" ]; then
+    csp="${T[claude_settings_path]}"
+    case "${csp}" in
+      /) prep_blocked "claude_settings_path must not be /"; continue ;;
+      /*) ;;
+      *) prep_blocked "claude_settings_path must be absolute: ${csp}"; continue ;;
+    esac
+    case "${csp}" in
+      *"/.."|*"/../"*|*"/."|*"/./"*|*$'\n'*|*$'\r'*|*$'\t'*|*" "*|*[!A-Za-z0-9_./-]*)
+        prep_blocked "invalid_claude_settings_path: ${csp}"; continue ;;
+    esac
+    if [ ! -r "${csp}" ]; then
+      prep_blocked "claude_settings_path file not found or not readable: ${csp}"; continue
+    fi
+    # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
+    # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
+    WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
+    if ! cp "${csp}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
+      prep_blocked "claude_settings copy failed"; continue
     fi
     git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
   fi
@@ -1458,20 +1371,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '(.description // "")[0:4096]')"
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
-  # Transition labels: remove entry labels + add doing (the v2 "进 doing 清除集"
-  # = the entire workflow mutual-exclusion group). `timeout` and the failed-*
-  # variants are included so a reviewer who re-enqueued the IID (e.g. by adding
-  # `retry` on top of `timeout` / `failed-cc`) doesn't end up with a stale
-  # workflow label alongside `doing`.
-  #
-  # The persistent `model:{tier}` dimension and the one-shot `quality:low`
-  # signal are DELIBERATELY NOT in this list — model tier must survive into
-  # `doing` (it follows the issue for life, though pin_model_tier re-pins it
-  # each tick), and `quality:low` is not consumed on this branch (no upgrade
-  # ladder exists here), so it is left untouched rather than stripped.
-  # precheck-failed (the dispatcher-side §16b tick gate) is cleared here too:
-  # reaching `doing` means this tick's precheck passed, so the marker is stale.
-  REMOVE_LBLS=(todo retry new blocked-cc blocked-dispatcher done timeout failed-cc failed-dispatcher precheck-failed)
+  # Transition labels: remove entry labels + add doing.
+  # `timeout` is included so that a reviewer who re-enqueued the IID (e.g. by
+  # adding `retry` on top of `timeout`) doesn't end up with a `timeout +
+  # doing` mix between this prep and `set_issue_label.sh add doing`.
+  REMOVE_LBLS=(todo retry new continue contiune blocked blocked-cc blocked-dispatcher failed failed-cc failed-dispatcher done pr timeout)
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \
@@ -1496,21 +1400,10 @@ for iid in "${BATCH_IIDS[@]}"; do
     continue
   fi
 
-  # Apply the resolved model:{tier} label (model dimension is internally
-  # exclusive in set_issue_label.sh — adding the new tier removes any other
-  # model:* without touching the workflow group or quality:low). Stamping it
-  # every PREPARE keeps a brand-new issue at TIER_0 explicit (model:flash).
-  # A model-label failure marks the IID blocked, same as any other prep step.
-  if ! env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" add "${MODEL_TIER_LABEL}" \
-        >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1; then
-    prep_blocked "set_issue_label add ${MODEL_TIER_LABEL} failed"
-    continue
-  fi
-  # build_prompt.sh — inject the resolved model name via MODEL.
+  # build_prompt.sh
   set +e
   env "${iid_env[@]}" BRANCH="${T[branch]}" DEV_BRANCH="${T[dev_branch]}" \
     ISSUE_MODE="${MODE_ACTUAL}" \
-    MODEL="${MODEL}" \
     UI_ACCOUNTS="${UI_ACCOUNTS_JSON[$iid]}" \
     bash "${SCRIPT_DIR}/build_prompt.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
   BP_RC=$?
@@ -1528,8 +1421,10 @@ for iid in "${BATCH_IIDS[@]}"; do
   ATTEMPT_STATE_X="${ISSUE_ROOT_X}/attempt_state.json"
   ISSUE_STATE_X="${ISSUE_ROOT_X}/state.json"
   NOW="$(utc_now)"
-  # mode is always "fresh" on benchmark-test; mode_downgraded_from stays null.
   MODE_DOWNGRADED="null"
+  if [ "${ISSUE_MODE}" = "continue" ] && [ "${MODE_ACTUAL}" = "fresh" ]; then
+    MODE_DOWNGRADED='"continue"'
+  fi
   jq -n \
     --argjson iid "${iid}" \
     --argjson attempt_number "${attempt}" \
@@ -1547,20 +1442,25 @@ for iid in "${BATCH_IIDS[@]}"; do
       status:"in_progress"}' | atomic_write_json "${ATTEMPT_STATE_X}"
 
   PRIOR_RETRY="$(test -f "${ISSUE_STATE_X}" && jq -r '.retry_count // 0' "${ISSUE_STATE_X}" || echo 0)"
+  PRIOR_CONTINUE_COUNT="$( [ -f "${ISSUE_STATE_X}" ] && jq -r '.continue_count // 0' "${ISSUE_STATE_X}" || echo 0 )"
+  NEW_CONTINUE_COUNT="${PRIOR_CONTINUE_COUNT}"
+  [ "${MODE_ACTUAL}" = "continue" ] && NEW_CONTINUE_COUNT=$(( PRIOR_CONTINUE_COUNT + 1 ))
+  PRIOR_MODEL_TIER="$( [ -f "${ISSUE_STATE_X}" ] && jq -r '.model_tier // empty' "${ISSUE_STATE_X}" || true )"
   jq -n \
     --argjson iid "${iid}" \
     --argjson attempts_total "${attempt}" \
     --argjson latest_attempt_number "${attempt}" \
     --arg latest_attempt_dir "${ISSUE_ROOT_X}" \
     --argjson retry_count "${PRIOR_RETRY}" \
-    --argjson model_tier "${NEW_TIER}" \
-    --arg model "${MODEL}" \
     --argjson continue_count "${NEW_CONTINUE_COUNT}" \
+    --arg model_tier "${RESOLVED_MODEL_TIER:-}" \
+    --arg prior_model_tier "${PRIOR_MODEL_TIER}" \
     --arg session "issue-${PROJECT}-${iid}" \
     --arg mode "${MODE_ACTUAL}" \
     --arg updated_at "${NOW}" \
     '{iid:$iid, session:$session, status:"in_progress", mode:$mode,
-      model_tier:$model_tier, model:$model, continue_count:$continue_count,
+      continue_count:$continue_count,
+      model_tier:(if $model_tier == "" then (if $prior_model_tier == "" then null else $prior_model_tier end) else $model_tier end),
       attempts_total:$attempts_total, latest_attempt_number:$latest_attempt_number,
       latest_attempt_dir:$latest_attempt_dir, retry_count:$retry_count,
       block_reason:null, commit_sha:null, merge_request_url:null,
@@ -1630,7 +1530,6 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_DEV_BRANCH="${T[dev_branch]}" \
               TPL_WORK_BRANCH="${WORK_BRANCH_X}" \
               TPL_LOCAL_ATTEMPT_BRANCH="${LOCAL_ATTEMPT_BRANCH}" \
-              TPL_MODEL="${MODEL}" \
               TPL_REPO_PATH="${REPO_PATH}" \
               TPL_WORKTREE_DIR="${WORKTREE_DIR_X}" \
               TPL_OUTPUT_DIR="${OUTPUT_DIR_X}" \
