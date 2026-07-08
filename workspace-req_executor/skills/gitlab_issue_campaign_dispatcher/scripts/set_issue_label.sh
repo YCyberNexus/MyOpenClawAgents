@@ -15,7 +15,7 @@
 # so manually-added labels on the issue are preserved. Adding a workflow label
 # also removes conflicting workflow labels to keep the issue in a single
 # workflow state. Allowed transient pairs: done+blocked-cc and done+blocked-dispatcher
-# (failure after `done` wiki, before `pr`). `pr` replaces `done` (done removed when pr added).
+# (failure after `done`, before `pr`). `pr` replaces `done` (done removed when pr added).
 # model:<tier> and quality:low are orthogonal (not in WORKFLOW_LABELS) — adding/removing
 # them never disturbs work labels, and adding a work label never disturbs them.
 

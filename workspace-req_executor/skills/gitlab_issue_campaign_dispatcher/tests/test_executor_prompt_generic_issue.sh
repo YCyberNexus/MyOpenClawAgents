@@ -48,6 +48,17 @@ if ! printf '%s\n' "${rendered_block}" | grep -Fq "run_acpx_attempt.sh"; then
   fail "outer executor prompt no longer delegates acpx execution to run_acpx_attempt.sh"
 fi
 
+for removed_wiki_term in \
+  "upload_attempt_artifacts.sh" \
+  "WIKI evidence" \
+  "Do NOT skip Wiki" \
+  "attempt wiki artifact publication"
+do
+  if printf '%s\n' "${rendered_block}" | grep -Fq "${removed_wiki_term}"; then
+    fail "outer executor prompt still publishes attempt evidence to wiki: ${removed_wiki_term}"
+  fi
+done
+
 if ! grep -Fq 'acpx --auth-policy skip claude exec -f "${prompt_file}"' "${RUN_SCRIPT}"; then
   fail "run_acpx_attempt.sh acpx invocation changed unexpectedly"
 fi

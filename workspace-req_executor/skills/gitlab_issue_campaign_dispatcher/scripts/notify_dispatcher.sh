@@ -27,7 +27,7 @@
 #     DISPATCHER_CALLBACK_TIMEOUT_SECONDS  openclaw agent 超时，默认 300
 #     PROJECT                        group/project（信封 project 字段）
 #     MR_URL                         成功时的 MR URL（信封 mr_url）
-#     WIKI_URL                       Wiki URL（信封 wiki_url）
+#     WIKI_URL                       legacy compatibility only; normally empty
 #     REASON                         失败/超时原因（信封 reason）
 #
 # 注意：本脚本**不**强制 source env_paths.sh —— 它是纯本地留痕、不碰 glab，不应被

@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-07.10] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh."
+description: "[SKILL_VERSION=2026-07-08.1] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -39,7 +39,7 @@ the subagent will then bypass `run_acpx_attempt.sh`, and the whole
 | -- | -- | -- |
 | Built from | rendering [`references/executor_prompt.md`](references/executor_prompt.md), written by `dispatch_prepare_tick.sh` to `${LOG_DIR}/spawn_payload.txt` | running `scripts/build_prompt.sh`, which writes `${LOG_DIR}/prompt.txt` |
 | Audience | the OUTER subagent (the runtime-spawned model) | the INNER Claude Code session that `acpx claude exec -f ${LOG_DIR}/prompt.txt` starts |
-| Tells it to | run Steps 0–10: `bash run_acpx_attempt.sh` → stage → push → verify → wiki → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue and write its deliverables (code / tests / specs / docs — whatever the issue asks for) |
+| Tells it to | run Steps 0–9: `bash run_acpx_attempt.sh` → stage → push → verify → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue and write its deliverables (code / tests / specs / docs — whatever the issue asks for) |
 | Shape | starts with sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
 | Sent how | `sessions_spawn(payload=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", timeoutSeconds=30, runTimeoutSeconds=<run_timeout_seconds>, cleanup="keep")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
 | File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`, force-added into the MR diff by `stage_and_guard.sh` |
@@ -216,7 +216,7 @@ and lets the scheduled wrapper infer branch from `origin/HEAD` when omitted:
 ```
 
 The driven path reuses the entire existing campaign machine — subagent Steps
-0–10, per-issue worktree, anonymous spawn, the callback path — completely
+0–9, per-issue worktree, anonymous spawn, the callback path — completely
 unchanged. The only two new pieces are this entry script (which just pins
 config + records the origin + delegates) and the Phase 6 callback below.
 
@@ -240,7 +240,7 @@ issue carries a driven origin:
 result envelope** (one compact JSON line):
 
 ```json
-{"correlation_id":"<echo of I1>","iid":<int>,"project":"<group/project>","status":"done|failed|timeout","mr_url":<string|null>,"wiki_url":<string|null>,"reason":<string|null>}
+{"correlation_id":"<echo of I1>","iid":<int>,"project":"<group/project>","status":"done|failed|timeout","mr_url":<string|null>,"wiki_url":null,"reason":<string|null>}
 ```
 
 `status` is the Phase 6 `final_status`. Isolation matches `post_result_note.sh`:
@@ -455,7 +455,7 @@ depends on following them literally.
 ## Subagent contract (unchanged)
 
 The subagent receives the rendered fixed-format executor prompt as the
-entire `sessions_spawn` payload and runs Steps 0–10 from the prompt's
+entire `sessions_spawn` payload and runs Steps 0–9 from the prompt's
 `<instructions>` block. **It does NOT load this SKILL, NOT read
 SOUL.md / AGENTS.md, NOT call `sessions_spawn` / `sessions_history`,
 NOT write any state file.** Its compact JSON reply is the single

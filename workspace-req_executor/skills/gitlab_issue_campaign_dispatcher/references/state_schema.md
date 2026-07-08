@@ -68,7 +68,7 @@ The subagent's final reply is compact JSON with:
 - `attempt_number`
 - `status`: `done`, `blocked`, `failed`, or `timeout`
 - optional `mr_url`
-- optional `wiki_url`
+- optional `wiki_url` legacy compatibility field; new req_executor replies keep it empty
 - optional `reason`
 - optional `summary`
 
