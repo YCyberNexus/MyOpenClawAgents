@@ -47,6 +47,21 @@ if [ "${payload_with_branch}" != "${expected_with_branch}" ]; then
   exit 1
 fi
 
+payload_with_legacy_branch_env="$(
+  PROJECT="ai-infra/veqp_server_v3" \
+  IID="312" \
+  CORRELATION_ID="reqd-7" \
+  DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
+  BRANCH="sex" \
+  bash "${SKILL_DIR}/scripts/build_executor_payload.sh"
+)"
+
+if grep -q '^branch=' <<<"${payload_with_legacy_branch_env}"; then
+  echo "expected legacy BRANCH env to be ignored by req_dispatcher payload builder" >&2
+  printf '%s\n' "${payload_with_legacy_branch_env}" >&2
+  exit 1
+fi
+
 if PROJECT="veqp_server_v3" \
    IID="312" \
    CORRELATION_ID="reqd-7" \
@@ -89,6 +104,21 @@ fi
 if ! grep -q "branch must be a safe Git ref name" "${TEST_ROOT}/build-executor-branch.err"; then
   echo "expected clear branch error" >&2
   cat "${TEST_ROOT}/build-executor-branch.err" >&2
+  exit 1
+fi
+
+if PROJECT="ai-infra/veqp_server_v3" \
+   IID="312" \
+   CORRELATION_ID="reqd-7" \
+   TARGET_BRANCH="-c" \
+   bash "${SKILL_DIR}/scripts/build_executor_payload.sh" >/dev/null 2>"${TEST_ROOT}/build-executor-dash-branch.err"; then
+  echo "expected leading-dash target branch to fail" >&2
+  exit 1
+fi
+
+if ! grep -q "branch must be a safe Git ref name" "${TEST_ROOT}/build-executor-dash-branch.err"; then
+  echo "expected clear leading-dash branch error" >&2
+  cat "${TEST_ROOT}/build-executor-dash-branch.err" >&2
   exit 1
 fi
 

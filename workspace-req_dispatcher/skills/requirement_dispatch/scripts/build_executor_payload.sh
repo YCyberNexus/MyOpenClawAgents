@@ -7,12 +7,12 @@ set -euo pipefail
 : "${CORRELATION_ID:?CORRELATION_ID required}"
 
 DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}"
-TARGET_BRANCH="${TARGET_BRANCH:-${BRANCH:-}}"
+TARGET_BRANCH="${TARGET_BRANCH:-}"
 
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
-    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
       return 1
       ;;
   esac

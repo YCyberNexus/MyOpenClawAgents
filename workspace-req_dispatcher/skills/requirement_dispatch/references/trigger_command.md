@@ -2,13 +2,13 @@
 
 > 状态：**已落成明确契约**。`req_dispatcher` 发起下游 agent turn 固定通过 `scripts/run_agent_turn.sh` 包装 `openclaw agent`；executor 结果回调固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。不再使用未确认参数名的旧占位原语。
 >
-> 编排器先根据 WebUI/智伴 prompt 判定动作，再选择下游调用：只建单/变更 issue 时调用 `git_issuer`；明确处理既有 issue 时调用 `req_executor`；明确要求"建单并处理"时才允许先 `git_issuer` 后 executor queue。入口消息若包含 GitLab wiki URL，`prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；非 wiki 建单文本用 `prepare_downstream_payloads.sh` 从显式 project locator 整理成单条建单消息；既有 issue 执行文本用 `prepare_executor_issue_payload.sh` 提取 `project` / `iid` / `target_branch`。`git_issuer` 段只做本轮审计 record/drain；executor 段由 durable queue active 记录 pending，等待后续 I2 结果回调。
+> 编排器先根据 WebUI/智伴 prompt 判定动作，再选择下游调用：只建单/变更 issue 时调用 `git_issuer`；明确处理既有 issue 时调用 `req_executor`；明确要求"建单并处理"时才允许先 `git_issuer` 后 executor queue。入口消息若包含 GitLab wiki URL，`prepare_wiki_downstream_payloads.sh` 只读拉取 wiki Markdown、拆分需求并生成一组面向 `git_issuer` 的标准化建单消息；非 wiki 建单文本用 `prepare_downstream_payloads.sh` 从显式 project locator 整理成单条建单消息；既有 issue 执行文本用 `prepare_executor_issue_payload.sh` 提取 `project` / `iid` / `target_branch`。`target_branch` 是用户 prompt 指定的本次执行分支，最终作为 executor `branch=` 下发；`git_issuer` 段只做本轮审计 record/drain；executor 段由 durable queue active 记录 pending，等待后续 I2 结果回调。
 
 ## 接入消息（114 → req_dispatcher）
 
 - 形态：自由文本，经网关 `agent run --agent req_dispatcher "<需求原文或 wiki URL>" --deliver`（架构图"114 侧调用特定 agent"方式 A）或等价 HTTP 桥接（方式 B）。
 - req_dispatcher 收到的就是一段需求文本，**不是结构化 trigger 信封**。orchestrator 据"路径判定"识别为接入路径。
-- `req_dispatcher` 不再把这段文本原样透传给下游，也不因看到需求或 wiki URL 就自动执行。它先判定动作为 `create_issue`、`execute_issue`、`create_and_execute` 或 `clarify_or_reject`。建单动作使用 `prepare_wiki_downstream_payloads.sh` / `prepare_downstream_payloads.sh` 生成 `git_issuer` 消息；执行既有 issue 动作使用 `prepare_executor_issue_payload.sh` 提取 `project` / `iid` / `target_branch`。任一入口准备失败时，req_dispatcher 直接推用户失败说明，不调用下游 agent。
+- `req_dispatcher` 不再把这段文本原样透传给下游，也不因看到需求或 wiki URL 就自动执行。它先判定动作为 `create_issue`、`execute_issue`、`create_and_execute` 或 `clarify_or_reject`。建单动作使用 `prepare_wiki_downstream_payloads.sh` / `prepare_downstream_payloads.sh` 生成 `git_issuer` 消息；执行既有 issue 动作使用 `prepare_executor_issue_payload.sh` 提取 `project` / `iid` / `target_branch`。分支可由 `branch=...`、`target_branch=...`、`目标分支：...`、`合到 ...` 或“基于 ... 分支开发”表达。任一入口准备失败时，req_dispatcher 直接推用户失败说明，不调用下游 agent。
 
 ## origin 元数据（运行时来源优先，文本兜底）
 
@@ -204,10 +204,10 @@ group=<可选，缺省取执行器 pin 配置>
 | `iid` | 是 | `execute_issue` 来自 `prepare_executor_issue_payload.sh`；`create_and_execute` 来自 git_issuer 返回透传的 `issue_iid`（正整数）。 |
 | `correlation_id` | 是 | req_dispatcher 生成（见 §correlation_id），原样回显在 I2 供二次校验。 |
 | `dispatcher_callback_target` | 是 | `config/dispatcher.env` 的 `DISPATCHER_CALLBACK_TARGET`（支持 `agent:req_dispatcher:main`；留空则执行器侧 `notify_dispatcher.sh` no-op）。 |
-| `branch` | 否 | 入口消息中明确写出的目标分支，随 executor queue 的 `target_branch` 透传；缺省时 executor 解析 `origin/HEAD`。 |
+| `branch` | 否 | 入口消息中明确写出的本次执行分支，随 executor queue 的 `target_branch` 透传；executor 基于该分支 checkout，MR/PR 目标也指向该分支；缺省时 executor 解析 `origin/HEAD`。 |
 | `group` | 否 | 缺省取执行器 pin 配置。 |
 
-**其余 campaign 字段一律不传**（`gitlab_token`/`dev_branch`/`quota`/`concurrency`/… 全部由执行器侧 `config/campaign_defaults.env` pin，token 永不经 req_dispatcher）。`branch` 是唯一允许由 req_dispatcher 从用户自然语言中提取并透传给 executor 的 campaign 字段。
+**其余 campaign 字段一律不传**（`gitlab_token`、`dev_branch`、quota、concurrency 等都不经 req_dispatcher，token 永不经 req_dispatcher）。`branch` 是唯一允许由 req_dispatcher 从用户自然语言中提取并透传给 executor 的 campaign 字段。
 
 ### §correlation_id（executor 段二次校验 token）
 

@@ -39,6 +39,56 @@ if [ "$(jq -r '.target_branch' <<<"${issue_url_input}")" != "release/2026.07" ];
   exit 1
 fi
 
+branch_equals_input="$(
+  MESSAGE='branch=sex，请处理 GitLab ai-infra/veqp_server_v3 issue #312。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${branch_equals_input}")" != "sex" ]; then
+  echo "expected branch= syntax to set target_branch sex" >&2
+  printf '%s\n' "${branch_equals_input}" >&2
+  exit 1
+fi
+
+target_branch_equals_input="$(
+  MESSAGE='target_branch=release/2026.08，请处理 GitLab ai-infra/veqp_server_v3 issue #312。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${target_branch_equals_input}")" != "release/2026.08" ]; then
+  echo "expected target_branch= syntax to set target_branch release/2026.08" >&2
+  printf '%s\n' "${target_branch_equals_input}" >&2
+  exit 1
+fi
+
+merge_to_input="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，合到 release/2026.09。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${merge_to_input}")" != "release/2026.09" ]; then
+  echo "expected merge wording to set target_branch release/2026.09" >&2
+  printf '%s\n' "${merge_to_input}" >&2
+  exit 1
+fi
+
+natural_base_branch="$(
+  MESSAGE='请基于“sex”分支开发，处理 GitLab ai-infra/veqp_server_v3 issue #312。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${natural_base_branch}")" != "success" ]; then
+  echo "expected natural base-branch input to succeed" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.target_branch' <<<"${natural_base_branch}")" != "sex" ]; then
+  echo "expected natural base-branch wording to set target_branch sex" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
 project_hash_input="$(
   MESSAGE='[来自114] 用户wuyun请求：请执行 GitLab ai-infra/veqp_server_v3 issue #312。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
@@ -110,6 +160,72 @@ fi
 if ! jq -r '.reason' <<<"${invalid_branch}" | grep -q 'safe Git ref'; then
   echo "expected invalid branch reason to mention safe Git ref" >&2
   printf '%s\n' "${invalid_branch}" >&2
+  exit 1
+fi
+
+leading_dash_branch="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=-c。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${leading_dash_branch}")" != "failed" ]; then
+  echo "expected leading-dash branch to fail" >&2
+  printf '%s\n' "${leading_dash_branch}" >&2
+  exit 1
+fi
+
+semicolon_branch="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=release;evil。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_branch}")" != "failed" ]; then
+  echo "expected semicolon branch to fail instead of truncating" >&2
+  printf '%s\n' "${semicolon_branch}" >&2
+  exit 1
+fi
+
+semicolon_space_branch="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=release; evil。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_space_branch}")" != "failed" ]; then
+  echo "expected semicolon-space branch to fail instead of trimming semicolon" >&2
+  printf '%s\n' "${semicolon_space_branch}" >&2
+  exit 1
+fi
+
+semicolon_after_space_branch="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=release ;evil。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_after_space_branch}")" != "failed" ]; then
+  echo "expected branch with spaced semicolon tail to fail instead of truncating" >&2
+  printf '%s\n' "${semicolon_after_space_branch}" >&2
+  exit 1
+fi
+
+bracket_tail_branch="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，target_branch=feature [bad]。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${bracket_tail_branch}")" != "failed" ]; then
+  echo "expected branch with bracket tail to fail instead of truncating" >&2
+  printf '%s\n' "${bracket_tail_branch}" >&2
+  exit 1
+fi
+
+space_branch="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，target_branch=feature space。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${space_branch}")" != "failed" ]; then
+  echo "expected branch containing spaces to fail instead of truncating" >&2
+  printf '%s\n' "${space_branch}" >&2
   exit 1
 fi
 

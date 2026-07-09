@@ -56,7 +56,7 @@ schema 详见 [`skills/requirement_dispatch/references/state_schema.md`](skills/
 
 ## req_executor 衔接依赖（重要，记录在案）
 
-req_dispatcher 只在用户明确要求执行时**把目标 req_executor 的单次 issue 执行放入 durable FIFO queue**，再由 `drain_executor_queue.sh` 主动调用队首 `RUN_SINGLE_ISSUE`。只建单请求在 `git_issuer` 成功后结束，不入队。**前提**：`DEFAULT_EXECUTOR_AGENT` 对应的 req_executor 部署已就绪，且其 GitLab token/branch pin 能覆盖蓝区目标项目；少数需要专属 executor 的 project 可在 [`config/routing.env`](config/routing.env) 写覆盖行。合法 `group/project` 未命中覆盖表时不得失败，应路由到默认执行器。
+req_dispatcher 只在用户明确要求执行时**把目标 req_executor 的单次 issue 执行放入 durable FIFO queue**，再由 `drain_executor_queue.sh` 主动调用队首 `RUN_SINGLE_ISSUE`。只建单请求在 `git_issuer` 成功后结束，不入队。**前提**：`DEFAULT_EXECUTOR_AGENT` 对应的 req_executor 部署已就绪，且其 GitLab token 能覆盖蓝区目标项目；少数需要专属 executor 的 project 可在 [`config/routing.env`](config/routing.env) 写覆盖行。合法 `group/project` 未命中覆盖表时不得失败，应路由到默认执行器。执行分支只来自用户 prompt 的明确分支语义，未指定时由 executor 解析远端默认分支。
 
 **执行结果闭环**（已改为主动编排）：req_executor Phase 6 终态把结果回调（I2 信封）回投 req_dispatcher，req_dispatcher 据 executor `run_id` 或 `correlation_id` 匹配 executor 段 pending、取出全程携带的 origin，经 `notify_user.sh` 在 origin 为合法 object 时把结论推回发起需求的企微用户；随后清 queue active 并 drain 下一条，保证 #11 完成后 #12 不依赖人工追问。`origin.reply_agent` 指定 114 上接收结果的 agent，缺省才用默认 `DEFAULT_REPLY_AGENT`。手动 WebUI 入口没有 origin 时只留 ledger/log，不给 114 或企微发消息。**这条闭环现在经过 req_dispatcher**（与旧设计的 `req_origin`/`req_result` note 闭环不同；driven 路径不再依赖那套 note 机器，执行器侧机器保留供 cron 路径）。端到端契约见 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)；旧 [`docs/integration/result_notify_loop.md`](docs/integration/result_notify_loop.md) 仅适用于保留的 cron 路径。
 

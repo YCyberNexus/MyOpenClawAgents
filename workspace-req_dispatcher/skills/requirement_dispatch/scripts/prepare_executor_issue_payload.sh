@@ -261,7 +261,7 @@ extract_iid() {
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
-    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
       return 1
       ;;
   esac
@@ -277,23 +277,41 @@ extract_target_branch() {
       gsub(/[[:space:]"'\''`“”‘’)，,。;；]+$/, "", value)
       print value
     }
+    function emit_explicit(rest, candidate, tail, trimmed_tail) {
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", rest)
+      if (match(rest, /^[A-Za-z0-9._\/-]+/)) {
+        candidate = substr(rest, RSTART, RLENGTH)
+        tail = substr(rest, RLENGTH + 1)
+        trimmed_tail = tail
+        gsub(/^[[:space:]"'\''`“”‘’]+/, "", trimmed_tail)
+        if (trimmed_tail != "" && trimmed_tail !~ /^[，,。)）]/) {
+          candidate = candidate tail
+        }
+      } else {
+        candidate = rest
+      }
+      emit(candidate)
+    }
     {
       line = $0
-      if (match(line, /(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._\/-]+/)) {
-        value = substr(line, RSTART, RLENGTH)
-        sub(/^[^:=]*[:=][[:space:]]*/, "", value)
-        emit(value)
+      if (match(line, /(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*/)) {
+        emit_explicit(substr(line, RSTART + RLENGTH))
         exit
       }
-      if (match(line, /(目标分支|分支)[[:space:]]*[：:=][[:space:]]*[A-Za-z0-9._\/-]+/)) {
-        value = substr(line, RSTART, RLENGTH)
-        sub(/^.*[：:=][[:space:]]*/, "", value)
-        emit(value)
+      if (match(line, /(目标分支|分支)[[:space:]]*[：:=][[:space:]]*/)) {
+        emit_explicit(substr(line, RSTART + RLENGTH))
         exit
       }
-      if (match(line, /(合并到|合到|merge[[:space:]]+to)[[:space:]]*[A-Za-z0-9._\/-]+/)) {
-        value = substr(line, RSTART, RLENGTH)
-        sub(/^(合并到|合到|merge[[:space:]]+to)[[:space:]]*/, "", value)
+      if (match(line, /(合并到|合到|merge[[:space:]]+to)[[:space:]]*/)) {
+        emit_explicit(substr(line, RSTART + RLENGTH))
+        exit
+      }
+      normalized = line
+      gsub(/["'\''`“”‘’]/, "", normalized)
+      if (match(normalized, /(基于|从|以)[[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*(分支|branch)/)) {
+        value = substr(normalized, RSTART, RLENGTH)
+        sub(/^(基于|从|以)[[:space:]]*/, "", value)
+        sub(/[[:space:]]*(分支|branch).*$/, "", value)
         emit(value)
         exit
       }
@@ -313,6 +331,7 @@ strip_target_branch_directive() {
       gsub(/[[:space:]]*(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*[，,;；]?/, " ", line)
       gsub(/[[:space:]]*(目标分支|分支)[[:space:]]*[：:=][[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*[，,;；]?/, " ", line)
       gsub(/[[:space:]]*(合并到|合到|merge[[:space:]]+to)[[:space:]]*[A-Za-z0-9._\/-]+[[:space:]]*[，,;；]?/, " ", line)
+      gsub(/[[:space:]]*(请)?[[:space:]]*(基于|从|以)[[:space:]]*["'\''`“”‘’]?[A-Za-z0-9._\/-]+["'\''`“”‘’]?[[:space:]]*(分支|branch)[[:space:]]*(开发|处理|执行|实现|修改|修复)?[[:space:]]*[，,;；]?/, " ", line)
       line = trim(line)
       if (line != "") print line
     }'

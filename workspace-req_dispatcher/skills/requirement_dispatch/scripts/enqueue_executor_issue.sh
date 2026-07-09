@@ -14,12 +14,12 @@ ensure_state_dirs
 ISSUE_URL="${ISSUE_URL:-}"
 ORIGIN_JSON="${ORIGIN_JSON:-}"
 REQ_DIGEST="${REQ_DIGEST:-}"
-TARGET_BRANCH="${TARGET_BRANCH:-${BRANCH:-}}"
+TARGET_BRANCH="${TARGET_BRANCH:-}"
 
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
-    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
       return 1
       ;;
   esac

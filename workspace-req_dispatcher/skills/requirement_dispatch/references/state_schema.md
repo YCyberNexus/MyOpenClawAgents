@@ -102,7 +102,7 @@ ${STATE_ROOT}/_dispatcher/
 - `queue`：等待执行的 FIFO 列表。只有明确执行动作才追加队尾，不抢占 active。
 - `project` / `iid` / `issue_url`：要执行的 issue 事实；既有 issue 执行来自 `prepare_executor_issue_payload.sh`，显式建单并执行来自 `git_issuer` 成功返回。
 - `executor_agent`：`route_project.sh` 选出的目标 executor agent。
-- `target_branch`：入口消息明确指定的 MR 目标分支；未指定时为 `null`，executor 继续用 `origin/HEAD` 兜底。
+- `target_branch`：入口消息明确指定的本次执行分支；未指定时为 `null`，executor 继续用 `origin/HEAD` 兜底。下发给 executor 后，executor 基于该分支 checkout，MR/PR 目标也指向该分支。
 - `origin` / `req_digest` / `queued_at`：从接入路径携带的回推与审计信息。
 - `correlation_id`：下发给 executor 并由 I2 回显的关联 token，用于回调二次校验和 active 清理。
 - `run_id`：queue 生成的稳定 executor run id，形如 `executor-execq-N`。同一个 active 重试必须复用该值，避免重复 pending key。

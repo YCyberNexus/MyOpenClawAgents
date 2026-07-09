@@ -70,25 +70,13 @@ req_dispatcher 仍**不碰 GitLab**（不持 token、不调 glab、不建 issue�
 | `dispatcher_callback_target` | 是 | 结果回调的目标（req_dispatcher 的 agent/session 标识；确切形态待对齐，§9） |
 | `group` | 否 | 缺省取 pin 配置 |
 
-**其余字段一律不收**——`gitlab_token` / `branch` / `dev_branch` / `hourly_issue_quota` / `max_concurrent_subagents` / `max_accounts_per_issue` / `ui_accounts_relpath` / `acpx_timeout_seconds` / `run_timeout_seconds` / `stuck_after_minutes` / `result_basename` / `data_basename` 等全部从 §3.2 的 pin 配置取。
+**其余字段一律不收**——`gitlab_token` / `dev_branch` / `hourly_issue_quota` / `max_concurrent_subagents` / `max_accounts_per_issue` / `ui_accounts_relpath` / `acpx_timeout_seconds` / `run_timeout_seconds` / `stuck_after_minutes` / `result_basename` / `data_basename` 等都不经 req_dispatcher。当前契约只允许 req_dispatcher 从用户 prompt 明确分支语义中提取可选 `branch` 并透传给 executor。
 
 ### 3.2 新增 pin 配置：`config/campaign_defaults.env`
 
-把今天靠 scheduled trigger 一次性喂的 campaign 字段，挪成部署期 pin（per-project 部署各自一份）：
+本节是早期设计草案，实际落地后已收窄：executor driven path 的 tracked `campaign_defaults.env` 只 pin clone parent。分支不再是部署期 pin，用户 prompt 明确指定时才由 req_dispatcher 透传可选 `branch=`；未指定时 executor 解析远端默认分支。
 
 ```
-GITLAB_TOKEN_SOURCE=...        # token 注入方式(pin 值 / 读 env / 读文件)，§9 待定
-BRANCH=master
-DEV_BRANCH=dev
-HOURLY_ISSUE_QUOTA=1           # driven 单次 issue 执行固定 1
-MAX_CONCURRENT_SUBAGENTS=1     # driven 单次 issue 执行固定 1
-MAX_ACCOUNTS_PER_ISSUE=14
-UI_ACCOUNTS_RELPATH=           # 可选
-ACPX_TIMEOUT_SECONDS=18000
-RUN_TIMEOUT_SECONDS=18120
-STUCK_AFTER_MINUTES=...        # 默认派生
-RESULT_BASENAME=ifp-result
-DATA_BASENAME=ifp-data
 REPO_PARENT_PATH=/data
 ```
 

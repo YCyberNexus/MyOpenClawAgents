@@ -60,9 +60,9 @@ group=<可选>
 
 **Files:** Create `workspace-req_executor/config/campaign_defaults.env`；Modify `workspace-req_executor/config/README.md`。
 
-**Produces:** 一份可 `source` 的 pin 配置，供 `dispatch_single_issue.sh`（A2）合成 campaign 字段。
+**Produces:** 一份可 `source` 的 pin 配置，供 `dispatch_single_issue.sh`（A2）定位 clone parent。实际落地后该配置已收窄为只 pin clone parent；分支由用户 prompt 明确指定时经 req_dispatcher 透传可选 `branch=`，未指定时 executor 解析远端默认分支。
 
-- [ ] 写 `campaign_defaults.env`：`BRANCH=master` / `DEV_BRANCH=dev` / `HOURLY_ISSUE_QUOTA=1` / `MAX_CONCURRENT_SUBAGENTS=1` / `MAX_ACCOUNTS_PER_ISSUE=14` / `UI_ACCOUNTS_RELPATH=` / `ACPX_TIMEOUT_SECONDS=18000` / `RUN_TIMEOUT_SECONDS=18120` / `RESULT_BASENAME=ifp-result` / `DATA_BASENAME=ifp-data` / `REPO_PARENT_PATH=/data`，每项带注释；token 注入方式留显式注释块标 `待对齐`（pin 值 vs env 注入）。
+- [ ] 写 `campaign_defaults.env`：`REPO_PARENT_PATH=/data`，带注释说明这是 driven 单次 issue 执行的 clone parent；不要在这里放分支、quota、timeout、token、runtime basename、data directory 或 account-pool 字段。
 - [ ] `config/README.md` 加一节说明 `campaign_defaults.env` 各字段与"driven 单次 issue 执行固定 quota=1/concurrency=1"。
 - [ ] 验证：`/opt/homebrew/bin/bash -n` 不适用于 env，改用 `set -a && source config/campaign_defaults.env && set +a` 在临时 shell 跑通、echo 关键变量非空。
 - [ ] Gate：code-review（trivial 可由主 agent 酌情）。
@@ -74,7 +74,7 @@ group=<可选>
 **Consumes:** I1 入参；`config/gitlab.env`+`campaign_defaults.env`。
 **Produces:** 合成出与 `RUN_SCHEDULED_ISSUE_CAMPAIGN`（`issue_iids=[iid]`、quota=1、concurrency=1）等价的 campaign env，把 `correlation_id`+`dispatcher_callback_target` 写进该 issue 的 `state.json`，再 `exec`/调既有 `dispatch_prepare_tick.sh` 主体。
 
-- [ ] Step1 写脚本：`set -euo pipefail` → 校验 `project`/`iid`/`correlation_id` 必填（iid 正整数校验，仿 post_result_note.sh）→ `source gitlab.env`+`campaign_defaults.env` → 导出合成 env（`PROJECT/GROUP/GITLAB_TOKEN/BRANCH/DEV_BRANCH/ISSUE_IIDS=$iid/ISSUE_MIN_IID=$iid/ISSUE_MAX_IID=$iid/HOURLY_ISSUE_QUOTA=1/...`）→ 把 `{correlation_id,dispatcher_callback_target}` 经 jq 写入 `${ISSUE_ROOT}/issue-<iid>/dispatch_origin.json`（Phase 6 读）→ 调 `bash dispatch_prepare_tick.sh`。
+- [ ] Step1 写脚本：`set -euo pipefail` → 校验 `project`/`iid`/`correlation_id` 必填（iid 正整数校验，仿 post_result_note.sh）→ `source gitlab.env`+`campaign_defaults.env` → 导出合成 env（`PROJECT/GROUP/GITLAB_TOKEN/ISSUE_IIDS=$iid/ISSUE_MIN_IID=$iid/ISSUE_MAX_IID=$iid/HOURLY_ISSUE_QUOTA=1/...`，只有 I1 明确携带分支时追加 `branch=<value>`）→ 把 `{correlation_id,dispatcher_callback_target}` 经 jq 写入 `${ISSUE_ROOT}/issue-<iid>/dispatch_origin.json`（Phase 6 读）→ 调 `bash dispatch_prepare_tick.sh`。
 - [ ] Step2 验证：`/opt/homebrew/bin/bash -n scripts/dispatch_single_issue.sh`。
 - [ ] Step3 冒烟：临时 `STATE_ROOT`，桩掉 `dispatch_prepare_tick.sh`（PATH 前置假脚本只 echo env），断言合成 env 正确、`dispatch_origin.json` 内容 = 入参；缺 iid/非整数 iid 时非零退出。
 - [ ] Gate：code-review。

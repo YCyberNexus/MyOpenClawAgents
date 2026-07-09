@@ -72,6 +72,84 @@ if jq -r '.git_issuer_payloads[0]' <<<"${branch_prepared}" | grep -q '目标分�
   exit 1
 fi
 
+branch_equals_prepared="$(
+  MESSAGE="branch=sex，请处理 ${WIKI_URL}" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${branch_equals_prepared}")" != "sex" ]; then
+  echo "expected wiki branch= syntax to set target_branch sex" >&2
+  printf '%s\n' "${branch_equals_prepared}" >&2
+  exit 1
+fi
+
+target_branch_equals_prepared="$(
+  MESSAGE="target_branch=release/2026.08，请处理 ${WIKI_URL}" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${target_branch_equals_prepared}")" != "release/2026.08" ]; then
+  echo "expected wiki target_branch= syntax to set target_branch release/2026.08" >&2
+  printf '%s\n' "${target_branch_equals_prepared}" >&2
+  exit 1
+fi
+
+merge_to_prepared="$(
+  MESSAGE="请处理 ${WIKI_URL}，合到 release/2026.09。" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${merge_to_prepared}")" != "release/2026.09" ]; then
+  echo "expected wiki merge wording to set target_branch release/2026.09" >&2
+  printf '%s\n' "${merge_to_prepared}" >&2
+  exit 1
+fi
+
+natural_base_branch="$(
+  MESSAGE="请基于“sex”分支开发，处理 ${WIKI_URL}" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${natural_base_branch}")" != "success" ]; then
+  echo "expected natural base-branch wiki input to succeed" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.target_branch' <<<"${natural_base_branch}")" != "sex" ]; then
+  echo "expected natural base-branch wiki wording to set target_branch sex" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
+semicolon_after_space_branch="$(
+  MESSAGE="branch=release ;evil，请处理 ${WIKI_URL}" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_after_space_branch}")" != "failed" ]; then
+  echo "expected wiki branch with spaced semicolon tail to fail instead of truncating" >&2
+  printf '%s\n' "${semicolon_after_space_branch}" >&2
+  exit 1
+fi
+
+bracket_tail_branch="$(
+  MESSAGE="target_branch=feature [bad]，请处理 ${WIKI_URL}" \
+  WIKI_CONTENT="${WIKI_CONTENT}" \
+  bash "${SKILL_DIR}/scripts/prepare_wiki_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${bracket_tail_branch}")" != "failed" ]; then
+  echo "expected wiki branch with bracket tail to fail instead of truncating" >&2
+  printf '%s\n' "${bracket_tail_branch}" >&2
+  exit 1
+fi
+
 dotted="$(
   MESSAGE="请处理 http://localhost:8081/claw_gitlab/px_ifp_hulat_test/-/wikis/product/spec.v1" \
   WIKI_CONTENT='只有一段需求正文。' \

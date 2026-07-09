@@ -103,6 +103,129 @@ if jq -r '.git_issuer_payload' <<<"${branch_input}" | grep -q '目标分支'; th
   exit 1
 fi
 
+branch_equals_input="$(
+  MESSAGE='branch=sex，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${branch_equals_input}")" != "sex" ]; then
+  echo "expected branch= syntax to set target_branch sex" >&2
+  printf '%s\n' "${branch_equals_input}" >&2
+  exit 1
+fi
+
+target_branch_equals_input="$(
+  MESSAGE='target_branch=release/2026.08，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${target_branch_equals_input}")" != "release/2026.08" ]; then
+  echo "expected target_branch= syntax to set target_branch release/2026.08" >&2
+  printf '%s\n' "${target_branch_equals_input}" >&2
+  exit 1
+fi
+
+merge_to_input="$(
+  MESSAGE='请在 GitLab ai-infra/veqp_server_v3 中修复导出流程，合到 release/2026.09。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${merge_to_input}")" != "release/2026.09" ]; then
+  echo "expected merge wording to set target_branch release/2026.09" >&2
+  printf '%s\n' "${merge_to_input}" >&2
+  exit 1
+fi
+
+natural_base_branch="$(
+  MESSAGE='请基于“sex”分支开发，在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${natural_base_branch}")" != "success" ]; then
+  echo "expected natural base-branch input to succeed" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
+if [ "$(jq -r '.target_branch' <<<"${natural_base_branch}")" != "sex" ]; then
+  echo "expected natural base-branch wording to set target_branch sex" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
+natural_base_requirement="$(jq -r '.requirement_text' <<<"${natural_base_branch}")"
+if [ "${natural_base_requirement}" != "修复导出流程。" ]; then
+  echo "expected natural base-branch directive to be stripped from requirement_text" >&2
+  printf '%s\n' "${natural_base_branch}" >&2
+  exit 1
+fi
+
+leading_dash_branch="$(
+  MESSAGE='branch=-c，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${leading_dash_branch}")" != "failed" ]; then
+  echo "expected leading-dash branch to fail" >&2
+  printf '%s\n' "${leading_dash_branch}" >&2
+  exit 1
+fi
+
+semicolon_branch="$(
+  MESSAGE='branch=release;evil，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_branch}")" != "failed" ]; then
+  echo "expected semicolon branch to fail instead of truncating" >&2
+  printf '%s\n' "${semicolon_branch}" >&2
+  exit 1
+fi
+
+semicolon_space_branch="$(
+  MESSAGE='branch=release; evil，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_space_branch}")" != "failed" ]; then
+  echo "expected semicolon-space branch to fail instead of trimming semicolon" >&2
+  printf '%s\n' "${semicolon_space_branch}" >&2
+  exit 1
+fi
+
+semicolon_after_space_branch="$(
+  MESSAGE='branch=release ;evil，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${semicolon_after_space_branch}")" != "failed" ]; then
+  echo "expected branch with spaced semicolon tail to fail instead of truncating" >&2
+  printf '%s\n' "${semicolon_after_space_branch}" >&2
+  exit 1
+fi
+
+bracket_tail_branch="$(
+  MESSAGE='target_branch=feature [bad]，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${bracket_tail_branch}")" != "failed" ]; then
+  echo "expected branch with bracket tail to fail instead of truncating" >&2
+  printf '%s\n' "${bracket_tail_branch}" >&2
+  exit 1
+fi
+
+space_branch="$(
+  MESSAGE='target_branch=feature space，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
+  bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
+)"
+
+if [ "$(jq -r '.status' <<<"${space_branch}")" != "failed" ]; then
+  echo "expected branch containing spaces to fail instead of truncating" >&2
+  printf '%s\n' "${space_branch}" >&2
+  exit 1
+fi
+
 branch_before_project="$(
   MESSAGE='目标分支：release/2026.07，请在 GitLab ai-infra/veqp_server_v3 中修复导出流程。' \
   bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"
