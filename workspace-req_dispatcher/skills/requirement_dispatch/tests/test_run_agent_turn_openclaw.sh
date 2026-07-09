@@ -28,8 +28,8 @@ create issue for ai-infra/veqp_server_v3
 EOF
 )"
 
-if ! grep -q -- 'agent --agent git_issuer --session-id agent:git_issuer:main' "${OPENCLAW_LOG}"; then
-  echo "expected wrapper to call openclaw agent with target and session id" >&2
+if ! grep -q -- 'agent --agent git_issuer --session-key agent:git_issuer:main' "${OPENCLAW_LOG}"; then
+  echo "expected wrapper to call openclaw agent with target and session key" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi
@@ -88,18 +88,18 @@ numeric_session="$(
   RUN_ID="run-git-numeric" \
   TARGET_AGENT="git_issuer" \
   TARGET_SESSION_ID="12345" \
-  MESSAGE="create issue with explicit session id" \
+  MESSAGE="create issue with deprecated explicit session id" \
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"
 
-if ! grep -q -- 'agent --agent git_issuer --session-id 12345' "${OPENCLAW_LOG}"; then
-  echo "expected explicit numeric TARGET_SESSION_ID to use --session-id" >&2
+if ! grep -q -- 'agent --agent git_issuer --session-key 12345' "${OPENCLAW_LOG}"; then
+  echo "expected explicit numeric TARGET_SESSION_ID to use --session-key" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi
 
 if [ "$(printf '%s' "${numeric_session}" | jq -r '.status')" != "success" ]; then
-  echo "expected numeric session-id call to succeed:" >&2
+  echo "expected deprecated numeric session id call to succeed:" >&2
   printf '%s\n' "${numeric_session}" >&2
   exit 1
 fi
@@ -172,14 +172,14 @@ dispatcher_callback_target=agent:req_dispatcher:main' \
 )"
 
 expected_issue_session="agent:req_executor:issue-ai-infra-veqp-server-v3-11"
-if ! grep -q -- "agent --agent req_executor --session-id ${expected_issue_session}" "${OPENCLAW_LOG}"; then
-  echo "expected executor RUN_SINGLE_ISSUE to use issue-scoped session id" >&2
+if ! grep -q -- "agent --agent req_executor --session-key ${expected_issue_session}" "${OPENCLAW_LOG}"; then
+  echo "expected executor RUN_SINGLE_ISSUE to use issue-scoped session key" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi
 
 if [ "$(printf '%s' "${executor_issue_scoped_session}" | jq -r '.child_session_key')" != "${expected_issue_session}" ]; then
-  echo "expected issue-scoped session id in wrapper envelope:" >&2
+  echo "expected issue-scoped session key in wrapper envelope:" >&2
   printf '%s\n' "${executor_issue_scoped_session}" >&2
   exit 1
 fi
@@ -202,20 +202,20 @@ dispatcher_callback_target=agent:req_dispatcher:main' \
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"
 
-if grep -q -- 'agent --agent req_executor --session-id agent:req_executor:main' "${OPENCLAW_LOG}"; then
+if grep -q -- 'agent --agent req_executor --session-key agent:req_executor:main' "${OPENCLAW_LOG}"; then
   echo "expected explicit main session override to be ignored for executor RUN_SINGLE_ISSUE" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi
 
-if ! grep -q -- "agent --agent req_executor --session-id ${expected_issue_session}" "${OPENCLAW_LOG}"; then
-  echo "expected executor RUN_SINGLE_ISSUE with explicit main override to use issue-scoped session id" >&2
+if ! grep -q -- "agent --agent req_executor --session-key ${expected_issue_session}" "${OPENCLAW_LOG}"; then
+  echo "expected executor RUN_SINGLE_ISSUE with explicit main override to use issue-scoped session key" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi
 
 if [ "$(printf '%s' "${executor_explicit_main_session}" | jq -r '.child_session_key')" != "${expected_issue_session}" ]; then
-  echo "expected issue-scoped session id in explicit-main wrapper envelope:" >&2
+  echo "expected issue-scoped session key in explicit-main wrapper envelope:" >&2
   printf '%s\n' "${executor_explicit_main_session}" >&2
   exit 1
 fi

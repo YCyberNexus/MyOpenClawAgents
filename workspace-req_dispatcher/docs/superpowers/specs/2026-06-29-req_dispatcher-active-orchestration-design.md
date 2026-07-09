@@ -60,7 +60,7 @@ req_dispatcher 仍**不碰 GitLab**（不持 token、不调 glab、不建 issue�
 
 ### 3.1 新 trigger `RUN_SINGLE_ISSUE`（driven 入口）
 
-发往 executor 的 issue 级 session。`req_dispatcher` 不手写 `TARGET_SESSION_ID` 时，`run_agent_turn.sh` 会根据 I1 payload 的 `project` 与 `iid` 自动生成 `agent:<executor>:issue-<sanitized-project>-<iid>`，避免多个 issue 堆在 `agent:req_executor:main`。入参（多行 key=value，沿用现有 trigger 文本格式）：
+发往 executor 的 issue 级 session。`req_dispatcher` 不手写 `TARGET_SESSION_KEY` 时，`run_agent_turn.sh` 会根据 I1 payload 的 `project` 与 `iid` 自动生成 `agent:<executor>:issue-<sanitized-project>-<iid>`，避免多个 issue 堆在 `agent:req_executor:main`。旧 `TARGET_SESSION_ID` 只作为兼容别名保留。入参（多行 key=value，沿用现有 trigger 文本格式）：
 
 | 字段 | 必填 | 含义 |
 |---|---|---|

@@ -33,8 +33,8 @@ if ! grep -q -- '--agent req_dispatcher' "${OPENCLAW_LOG}"; then
   exit 1
 fi
 
-if ! grep -q -- '--session-id agent:req_dispatcher:main' "${OPENCLAW_LOG}"; then
-  echo "expected notify_dispatcher.sh to target dispatcher session id" >&2
+if ! grep -q -- '--session-key agent:req_dispatcher:main' "${OPENCLAW_LOG}"; then
+  echo "expected notify_dispatcher.sh to target dispatcher session key" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi

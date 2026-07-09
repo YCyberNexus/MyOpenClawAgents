@@ -13,7 +13,7 @@
 # 静默丢；仅入参/发送形态写错才非零退出（status 非法 exit 2）。
 #
 # 跨 agent send 原语：当前本地对齐形态使用 `openclaw agent` 把
-# RUN_EXECUTOR_RESULT_CALLBACK 投回 dispatcher 目标 session；同时继续把信封 JSON
+# RUN_EXECUTOR_RESULT_CALLBACK 投回 dispatcher 目标 session key；同时继续把信封 JSON
 # 追加到 dispatcher_callbacks.jsonl 留痕（仿 post_result_note.sh 的 best-effort 语义）。
 #
 # 入参（env，I4 契约）：
@@ -96,10 +96,10 @@ case "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}" in
 esac
 
 TARGET_AGENT="${DISPATCHER_CALLBACK_TARGET}"
-TARGET_SESSION_ID=""
+TARGET_SESSION_KEY=""
 case "${DISPATCHER_CALLBACK_TARGET}" in
   agent:*:*)
-    TARGET_SESSION_ID="${DISPATCHER_CALLBACK_TARGET}"
+    TARGET_SESSION_KEY="${DISPATCHER_CALLBACK_TARGET}"
     rest="${DISPATCHER_CALLBACK_TARGET#agent:}"
     TARGET_AGENT="${rest%%:*}"
     ;;
@@ -117,8 +117,8 @@ fi
 
 CALLBACK_MESSAGE="$(printf 'RUN_EXECUTOR_RESULT_CALLBACK\nworker_result_json=%s\n' "${ENVELOPE}")"
 openclaw_args=(agent --agent "${TARGET_AGENT}")
-if [ -n "${TARGET_SESSION_ID}" ]; then
-  openclaw_args+=(--session-id "${TARGET_SESSION_ID}")
+if [ -n "${TARGET_SESSION_KEY}" ]; then
+  openclaw_args+=(--session-key "${TARGET_SESSION_KEY}")
 fi
 openclaw_args+=(--message "${CALLBACK_MESSAGE}" --timeout "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}")
 

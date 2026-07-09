@@ -29,10 +29,10 @@
 req_dispatcher 经 `scripts/run_agent_turn.sh` 调用下游 agent。脚本内部固定执行：
 
 ```bash
-openclaw agent --agent <target> --session-id <session-id> --message <payload> --timeout <seconds>
+openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>
 ```
 
-脚本 stdout 固定为 `{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；默认 session 由脚本自动生成并走 `--session-id`：普通下游调用用 `agent:<target>:main`，executor 的 `RUN_SINGLE_ISSUE` 用 payload 的 `project`/`iid` 生成 `agent:<target>:issue-<sanitized-project>-<iid>`，避免多个 issue 堆在 executor main session；普通下游调用不要手写 `TARGET_SESSION_ID`；历史 `TARGET_SESSION_KEY` 输入仅作兼容且同样转为 `--session-id`，但 `RUN_SINGLE_ISSUE` 若显式传了 `agent:<target>:main` 会改投 issue 级 session；openclaw 调用失败返回 `status=failed` 且脚本 exit 0，供 orchestrator 做 3 次固定退避；入参形态错误才 exit 2。下游 agent turn 可能超过本地 shell tool 的短轮询窗口，若进程仍在运行必须继续 poll 到最终 stdout，不得因暂时无输出而 kill。executor 结果回调已固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。用户出站推送通道**已对齐**：`notify_user.sh` 仅在 `ORIGIN_JSON` 是合法 object 时反向网关推 114 接收 agent（`openclaw agent run`，连接 pin `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；`origin.reply_agent` 由 `capture_origin.sh` 优先从运行时来源元数据推导；空/null/非 object origin 视为手动入口不推 114；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制超时）。
+脚本 stdout 固定为 `{status,run_id,child_session_key,exit_code,worker_result_json,raw_output}`；默认 session key 由脚本自动生成并走 `--session-key`：普通下游调用用 `agent:<target>:main`，executor 的 `RUN_SINGLE_ISSUE` 用 payload 的 `project`/`iid` 生成 `agent:<target>:issue-<sanitized-project>-<iid>`，避免多个 issue 堆在 executor main session；普通下游调用不要手写 `TARGET_SESSION_KEY`；旧 `TARGET_SESSION_ID` 输入仅作兼容且同样转为 `--session-key`，但 `RUN_SINGLE_ISSUE` 若显式传了 `agent:<target>:main` 会改投 issue 级 session；openclaw 调用失败返回 `status=failed` 且脚本 exit 0，供 orchestrator 做 3 次固定退避；入参形态错误才 exit 2。下游 agent turn 可能超过本地 shell tool 的短轮询窗口，若进程仍在运行必须继续 poll 到最终 stdout，不得因暂时无输出而 kill。executor 结果回调已固定为 `RUN_EXECUTOR_RESULT_CALLBACK` + `worker_result_json=<I2>`。用户出站推送通道**已对齐**：`notify_user.sh` 仅在 `ORIGIN_JSON` 是合法 object 时反向网关推 114 接收 agent（`openclaw agent run`，连接 pin `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；`origin.reply_agent` 由 `capture_origin.sh` 优先从运行时来源元数据推导；空/null/非 object origin 视为手动入口不推 114；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制超时）。
 
 ## State 布局
 

@@ -123,7 +123,7 @@ source /Users/yuanchenxiang/.openclaw-local-gitlab/env
 
 openclaw agent \
   --agent req_dispatcher \
-  --session-id agent:req_dispatcher:main \
+  --session-key agent:req_dispatcher:main \
   --message "${GITLAB_URL}/${PROJECT_FULL}/-/wikis/req-dispatcher-wiki-smoke" \
   --timeout 1800 \
   --json

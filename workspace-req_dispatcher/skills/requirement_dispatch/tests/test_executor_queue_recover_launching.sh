@@ -22,7 +22,7 @@ message=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent) target_agent="$2"; shift 2 ;;
-    --session-id) session_id="$2"; shift 2 ;;
+    --session-key) session_id="$2"; shift 2 ;;
     --message) message="$2"; shift 2 ;;
     --timeout) shift 2 ;;
     *) echo "unexpected openclaw arg: $1" >&2; exit 8 ;;

@@ -2,11 +2,12 @@
 # run_agent_turn.sh — 明确的 req_dispatcher → 下游 OpenClaw agent 调用包装。
 #
 # 本脚本把跨 agent 调用固定为 OpenClaw CLI 的可验证形态：
-#   openclaw agent --agent <TARGET_AGENT> --session-id <TARGET_SESSION_ID> \
+#   openclaw agent --agent <TARGET_AGENT> --session-key <TARGET_SESSION_KEY> \
 #     --message <MESSAGE> --timeout <AGENT_TIMEOUT_SECONDS>
 #
-# TARGET_SESSION_KEY 作为历史兼容输入保留；底层 CLI 统一使用 --session-id。
-# 未显式传 TARGET_SESSION_ID/TARGET_SESSION_KEY 时，普通下游调用默认
+# TARGET_SESSION_KEY 是新版 OpenClaw CLI 的主输入；TARGET_SESSION_ID 作为历史
+# 兼容输入保留。底层 CLI 统一使用 --session-key。
+# 未显式传 TARGET_SESSION_KEY/TARGET_SESSION_ID 时，普通下游调用默认
 # agent:<target>:main；RUN_SINGLE_ISSUE 自动按 project+iid 生成
 # agent:<target>:issue-<sanitized-project>-<iid>，避免多个 issue 堆在 executor main session。
 #
@@ -145,12 +146,12 @@ if [ -n "${MESSAGE_FOR_SESSION}" ]; then
   unset derived_selector
 fi
 
-if [ -n "${TARGET_SESSION_ID:-}" ]; then
-  TARGET_SESSION_SELECTOR="${TARGET_SESSION_ID}"
-  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
-elif [ -n "${TARGET_SESSION_KEY:-}" ]; then
+if [ -n "${TARGET_SESSION_KEY:-}" ]; then
   TARGET_SESSION_SELECTOR="${TARGET_SESSION_KEY}"
   TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_KEY"
+elif [ -n "${TARGET_SESSION_ID:-}" ]; then
+  TARGET_SESSION_SELECTOR="${TARGET_SESSION_ID}"
+  TARGET_SESSION_SELECTOR_SOURCE="TARGET_SESSION_ID"
 else
   if [ -n "${RUN_SINGLE_ISSUE_SESSION_SELECTOR}" ]; then
     TARGET_SESSION_SELECTOR="${RUN_SINGLE_ISSUE_SESSION_SELECTOR}"
@@ -182,7 +183,7 @@ RUN_ID="${RUN_ID:-openclaw-${SAFE_TARGET}-${NOW_UTC}-$$}"
 
 openclaw_args=(agent --agent "${TARGET_AGENT}")
 if [ -n "${TARGET_SESSION_SELECTOR}" ]; then
-  openclaw_args+=(--session-id "${TARGET_SESSION_SELECTOR}")
+  openclaw_args+=(--session-key "${TARGET_SESSION_SELECTOR}")
 fi
 if [ -n "${MESSAGE_FILE}" ]; then
   openclaw_args+=(--message-file "${MESSAGE_FILE}")
