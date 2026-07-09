@@ -13,7 +13,7 @@
 | `STUCK_AFTER_MINUTES` | 是 | stuck/timeout 兜底阈值（分钟）。pending 超过该时长仍没等到终态回调 → 合成失败并 drain，避免 pending 永久泄漏。应覆盖 git_issuer 建 issue 与 executor 单 issue 执行的最长合理时间 + 余量；默认配置为 `240`，覆盖 3 小时 executor 外层超时。 |
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
-| `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
+| `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。只有用户明确要求处理 issue 时才使用；所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
 | `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
 | `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，默认配置为 `10800`（3 小时）。目标 agent 不等于 `GIT_ISSUER_AGENT` 时按 executor 处理；git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
 | `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` | 否 | executor queue active 卡在 `launching` 多久后可由下一次 drain 复用同一 `run_id` / `correlation_id` 重新启动，默认配置为 `11100`（3 小时 executor 外层超时 + 5 分钟余量）。用于恢复 OpenClaw 会话被用户或运行时中断，同时避免正常长 executor turn 尚未返回时重复启动。 |
@@ -35,7 +35,7 @@
 
 ## `routing.env`（多 project 路由表）
 
-git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 调用队首 `<executor> RUN_SINGLE_ISSUE`。消费方 `scripts/route_project.sh`。
+当 action 是 `execute_issue` 或 `create_and_execute` 时，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 调用队首 `<executor> RUN_SINGLE_ISSUE`。只建单 action 不查本表、不入 executor queue。消费方 `scripts/route_project.sh`。
 
 行格式：每行一条 `PROJECT=AGENT`。
 
@@ -54,7 +54,7 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 
 `req_dispatcher` 是**全公司共用**的需求接入链路。不同员工/团队的需求会落到不同的 GitLab project。把 project 写死在 config 里会让这个 agent 变成单租户、违背"共用接入点"的目标。
 
-因此：**114 发送的 wiki URL 或自由文本决定目标 project**。wiki 入口从 URL 的 `<group>/<project>/-/wikis/<slug>` 解析 project，并用只读 `WIKI_GITLAB_*` 拉取 wiki 文档；自由文本入口从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project。`req_dispatcher` 会生成带 `repo=<group/project>` 的 `git_issuer_payload`；若 project 缺失或 wiki 读取失败则在调用 git_issuer 前失败并通知用户。`req_dispatcher` 仍不写 GitLab，issue 事实仍以 git_issuer 返回 JSON 为准。
+因此：**114/WebUI 发送的 prompt 决定目标 project 和动作**。建单入口从 wiki URL 的 `<group>/<project>/-/wikis/<slug>` 或自由文本里的 `group/project`、GitLab 仓库/Wiki URL、`glab api projects/<encoded-group%2Fproject>/...` 片段确定 project，并生成带 `repo=<group/project>` 的 `git_issuer_payload`；既有 issue 执行入口从 GitLab issue URL 或显式 `group/project` + issue IID 提取 project/iid。若必需字段缺失则在调用下游前失败并通知用户。`req_dispatcher` 仍不写 GitLab，建单事实仍以 git_issuer 返回 JSON 为准。
 
 ## 部署校验清单
 
@@ -62,10 +62,10 @@ git_issuer 返回 `project`（group/project）后，req_dispatcher 先查本表�
 2. `GIT_ISSUER_AGENT` 指向的下游 agent 已在同一 OpenClaw 上线，可被 `run_agent_turn.sh` 通过 `openclaw agent` 调用。
 3. wiki 入口部署时，`WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` 可读目标蓝区 GitLab wiki；该 token 权限保持只读。
 4. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
-5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token/branch pin。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。
+5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token/branch pin。只有执行动作会用到它；只建单动作不会入队。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
 7. `DISPATCHER_CALLBACK_TARGET` 按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。未填时执行器结果回调字段为空。
-8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 正在执行且未超时时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且无 active 时会继续推进。这个唤醒是 #11 完成后 #12 不依赖人工追问的恢复兜底。
+8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 正在执行且未超时时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且无 active 时会继续推进。这个唤醒是执行队列恢复兜底；只建单请求不会进入该队列。
 
 ## 与 acpx 工作区的差异
 

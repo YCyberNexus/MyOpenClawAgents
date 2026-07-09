@@ -2,7 +2,7 @@
 
 > 状态：**req_dispatcher 侧最小依赖已定**。蓝区 `git_issuer` 是 104 OpenClaw 上的 agent（"根据需求构建 GitLab issue"）。本机 `workspace-git_issuer` 仅作测试工件，不作为蓝区行为依据。req_dispatcher 通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer`，并只依赖它最后一行输出的紧凑 JSON。
 >
-> 主动编排（driven 路径）下，req_dispatcher **不依赖 git_issuer 写 `req_origin` 标记 note，也不依赖 git_issuer 通知用户**。origin 由 req_dispatcher 在接入路径自己 capture 并全程随 pending 携带，建 issue 成功/失败由 req_dispatcher 推回用户。req_dispatcher 会先把 114 自由文本整理成带 `repo=<group/project>` 的 `git_issuer_payload`，但只复用 `git_issuer` 最后一行 JSON 里的 `project` / `issue_iid`(=iid) / `issue_url` 作为 issue 事实，据此 route 到 req_executor 并调用 `RUN_SINGLE_ISSUE {project, iid, ...}`。
+> prompt 路由模式下，req_dispatcher **不依赖 git_issuer 写 `req_origin` 标记 note，也不依赖 git_issuer 通知用户**。origin 由 req_dispatcher 在接入路径自己 capture 并全程随 pending 携带，建 issue 成功/失败由 req_dispatcher 推回用户。req_dispatcher 会先把 114/WebUI 文本整理成带 `repo=<group/project>` 的 `git_issuer_payload`，但只复用 `git_issuer` 最后一行 JSON 里的 `project` / `issue_iid`(=iid) / `issue_url` 作为 issue 事实。只有用户明确要求执行时，req_dispatcher 才据此 route 到 req_executor 并调用 `RUN_SINGLE_ISSUE {project, iid, ...}`。
 >
 > 本文件覆盖 **创建 issue** 流程。需求在变成 issue 后还要**变更/撤销/取代**的对接契约见 [`gitissuer_change_request.md`](gitissuer_change_request.md)。
 
@@ -12,14 +12,14 @@ req_dispatcher 对蓝区 git_issuer 的硬依赖是：
 
 1. **接受一段自由文本需求**作为输入。req_dispatcher 通过 `run_agent_turn.sh` 把需求原文作为 `openclaw agent --message` 的正文传入。
 2. **从 req_dispatcher 准备后的文本解析并校验目标 project/group**。新 payload 会显式包含 `repo=<group/project>`；git_issuer 仍应按自身配置校验项目，不能因为 req_dispatcher 提供了 repo 行就绕过项目白名单。
-3. **建好 GitLab issue 后，打上执行器入口标签**（如 `todo`/`new`），使 `req_executor` 既有 cron 流程能被动捞起。
+3. **建好 GitLab issue 后，不应让只建单请求被 executor cron 自动捞起**。若 git_issuer 仍按旧配置添加执行器入口标签（如 `todo`/`new`），部署侧必须确保 req_executor cron 不会绕过 req_dispatcher 的新动作判定；显式执行由 req_dispatcher 的 `RUN_SINGLE_ISSUE` driven 路径负责。
 4. **最后一行输出终态 JSON**：成功/失败，成功时带 `project`、issue IID 与 URL，失败时带原因。
 
 ## 蓝区 git_issuer 输出清单
 
 - **成功表达**：`status="success"`，`issue_iid` 为正整数，`issue_url` 为完整 issue URL，`project` 为完整 `group/project`。
 - **失败表达**：`status="failed"`，`reason` 为失败原因；project 解析失败也按失败 JSON 返回。
-- **入口标签**：git_issuer 负责给新 issue 打执行器入口标签。req_dispatcher 不依赖具体标签名；执行器 driven 路径由 req_dispatcher 直接调用。
+- **入口标签**：prompt 路由模式下，req_dispatcher 不要求 git_issuer 给新 issue 打执行器入口标签；执行器 driven 路径由 req_dispatcher 直接调用。若蓝区 git_issuer 仍保留旧入口标签，需配套调整 req_executor cron/标签策略，避免只建单请求被旁路执行。
 - **origin 标记**：driven 路径不依赖 git_issuer 写 `req_origin` note；cron 路径若仍使用旧闭环，按 [`result_notify_loop.md`](result_notify_loop.md) 另行处理。
 - **用户通知归属**：driven 路径由 req_dispatcher 推建单失败、启动失败和最终执行结果；git_issuer 不需要直接通知企微用户。
 
@@ -30,7 +30,7 @@ git_issuer 建完 issue 后，在它**最后一轮的最后一行**只输出**�
 **成功**（实际就输出这一行）：
 
 ```
-{"status":"success","issue_iid":312,"issue_url":"http://<host>/<group>/<project>/-/issues/312","project":"<group>/<project>","entry_label":"todo","reason":null,"correlation_id":null}
+{"status":"success","issue_iid":312,"issue_url":"http://<host>/<group>/<project>/-/issues/312","project":"<group>/<project>","entry_label":null,"reason":null,"correlation_id":null}
 ```
 
 **失败**：
@@ -47,7 +47,7 @@ git_issuer 建完 issue 后，在它**最后一轮的最后一行**只输出**�
 | `issue_iid` | success | 整数 IID → `ISSUE_IID`。正整数、无前导零。 |
 | `issue_url` | success | issue 完整 URL → `ISSUE_URL`。 |
 | `project` | success 必填 | git_issuer 从需求文本解析出的实际 `<group>/<project>`。req_dispatcher 用它调用 `route_project.sh`；合法 project 未命中覆盖表时会走 `DEFAULT_EXECUTOR_AGENT`。 |
-| `entry_label` | 建议 | 实际打上的执行器入口标签（如 `todo`/`new`）。供排查"为何 req_executor 没捞起"。 |
+| `entry_label` | 可选 | 实际打上的标签；prompt 路由模式下应允许为 `null`，req_dispatcher 不依赖它触发执行。 |
 | `reason` | failed | 失败原因（解析不出 project / `glab` 建 issue 失败 / 打标签失败……）→ `REASON`。 |
 | `correlation_id` | 可选 | **默认 `null`**。driven 路径不依赖 git_issuer 回显此字段。 |
 

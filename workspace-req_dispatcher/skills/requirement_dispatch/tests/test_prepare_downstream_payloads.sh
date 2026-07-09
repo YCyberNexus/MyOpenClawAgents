@@ -67,6 +67,12 @@ if ! grep -q '最后一行输出 req_dispatcher 契约 JSON' <<<"${git_payload}"
   exit 1
 fi
 
+if ! grep -q '不要添加执行器入口标签' <<<"${git_payload}"; then
+  echo "expected git_issuer payload to forbid executor entry labels by default" >&2
+  printf '%s\n' "${git_payload}" >&2
+  exit 1
+fi
+
 branch_input="$(
   MESSAGE='请在 GitLab ai-infra/veqp_server_v3 中处理，目标分支：release/2026.07，修复导出流程。' \
   bash "${SKILL_DIR}/scripts/prepare_downstream_payloads.sh"

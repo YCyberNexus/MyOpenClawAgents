@@ -77,13 +77,14 @@ Unsupported fields are ignored by the shell parser only if they are not referenc
 
 ## Driven Single Issue
 
-`RUN_SINGLE_ISSUE` is the `req_dispatcher` entry point. It accepts only:
+`RUN_SINGLE_ISSUE` is the `req_dispatcher` entry point. It accepts:
 
 - `project`
 - `iid`
+- or `issue_url` as an alternative source for `project` and `iid`
 - `correlation_id`
 - `dispatcher_callback_target`
 - optional `branch`
 - optional `group`
 
-`dispatch_single_issue.sh` loads GitLab token from process env or `config/gitlab.env`, loads only the clone parent from `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`, writes `dispatch_origin.json`, synthesizes a one-IID scheduled trigger, forwards optional `branch=`, and uses the same prepare/followup machinery as scheduled runs. The scheduled wrapper resolves the target branch from `origin/HEAD` unless the trigger explicitly supplies `branch=`.
+`dispatch_single_issue.sh` parses `issue_url` values containing `/-/issues/<iid>` into `project` and `iid`; if explicit `project` or `iid` are also sent, they must match the URL. It then loads GitLab token from process env or `config/gitlab.env`, loads only the clone parent from `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`, writes `dispatch_origin.json`, synthesizes a one-IID scheduled trigger, forwards optional `branch=`, and uses the same prepare/followup machinery as scheduled runs. The scheduled wrapper resolves the target branch from `origin/HEAD` unless the trigger explicitly supplies `branch=`.

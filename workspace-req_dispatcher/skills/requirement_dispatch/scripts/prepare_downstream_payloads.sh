@@ -275,6 +275,7 @@ source=req_dispatcher
 
 请根据下面的需求创建一个 GitLab issue；不要反问 repo，repo 已在上方给出。
 只负责创建或变更 issue，不要调用 req_executor，不要回复企微用户。
+默认只建单，不要添加执行器入口标签；执行由 req_dispatcher 在用户明确要求时单独触发。
 完成后最后一行输出 req_dispatcher 契约 JSON。
 
 需求正文：

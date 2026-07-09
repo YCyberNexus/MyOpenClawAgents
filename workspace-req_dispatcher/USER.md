@@ -1,6 +1,6 @@
 # req_dispatcher User Contract
 
-把本工作区用作"企微需求 → 自动处理"链路在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里；新主入口是智伴给出的蓝区 GitLab wiki 链接。本 agent 会从 wiki URL 解析目标 `group/project`，只读拉取 wiki 文档，拆分需求，再主动驱动整条链：调用蓝区 `git_issuer` 为每个拆分需求建 issue → 按 project 选择目标 `req_executor` 部署（合法 `group/project` 默认走 `DEFAULT_EXECUTOR_AGENT`，覆盖项见 `routing.env`）→ 把 issue 和可选目标分支放入 durable executor FIFO queue → 由队列 drain 启动单次 issue 执行入口 → 收执行结果回调 → 清 active 并继续下一条 → 把结论推回发起需求的企微用户。自由文本入口仍兼容，可从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取 project；如果无法确定 project，会在调用 git_issuer 前直接返回失败说明。本 agent 不写 GitLab（不建 issue、不打标签、不写 note）。
+把本工作区用作 WebUI/智伴 prompt 在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里，WebUI 也可以直接输入自然语言。`req_dispatcher` 会先判断用户意图：只要分析/拆分/创建/变更 issue，就调用蓝区 `git_issuer`；明确要求处理既有 issue，就调用 `req_executor`；明确要求"建 issue 并处理"，才会先建单再执行。它不再因为消息里有 wiki URL 或需求正文就自动进入执行链。本 agent 不写 GitLab（不建 issue、不打标签、不写 note、不跑 issue）。
 
 ## 114 如何调用
 
@@ -16,20 +16,24 @@ openclaw --gateway-url ws://<104-host>:<port> \
 
 或等价 HTTP 桥接（方式 B）。要点：
 
-- 发的就是**一段文本消息**，不是结构化字段。新主形态是包含 GitLab wiki URL，例如 `http://<gitlab>/<group>/<project>/-/wikis/<slug>`。
-- wiki URL 会决定目标 project，req_dispatcher 会读取 wiki Markdown 并按标题/编号块拆分需求；拆不出多条时整页作为一条需求。
-- 自由文本入口仍支持：目标 project 必须能从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取。req_dispatcher 会先提取这个 project 并生成给 `git_issuer` 的 `repo=<group/project>` 标准化消息；如果自由文本里无法确定 project，会在调用 git_issuer 前直接返回失败说明。
-- 需要指定 MR 目标分支时，可在同一条自然语言消息里明确写 `branch=release/xxx`、`target_branch=release/xxx`、`目标分支：release/xxx` 或 `合到 release/xxx`；无论消息是否包含 wiki URL，req_dispatcher 都会把它作为 executor 的 `branch=` 透传，并从给 git_issuer 的需求正文中剥离。
+- 发的就是**一段文本消息**，不是结构化字段。消息可以要求创建 issue，也可以要求处理既有 issue。
+- 建单入口支持 GitLab wiki URL，例如 `http://<gitlab>/<group>/<project>/-/wikis/<slug>`；也支持能确定 project 的自由文本，目标 project 必须能从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取。无法确定 project 时，会在调用 git_issuer 前直接返回失败说明。
+- 执行入口必须包含 GitLab issue URL，或同时包含 `group/project` 与 issue IID（例如 `issue #312`）。缺 project 或缺 IID 时不会调用 executor，会要求补充。
+- 需要指定 MR 目标分支时，可在同一条自然语言消息里明确写 `branch=release/xxx`、`target_branch=release/xxx`、`目标分支：release/xxx` 或 `合到 release/xxx`；只有执行动作会把它作为 executor 的 `branch=` 透传。建单动作会从给 git_issuer 的需求正文中剥离该路由指令。
 - 若需把处理结果推回**发起需求的具体企微用户**，`req_dispatcher` 会先从 OpenClaw 网关/运行时来源元数据捕获 origin（如 source agent/session、deliver origin），再 fallback 到需求文本里的 `[origin] channel=... user=... conversation=... reply_agent=...` 行。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；只有捕获到合法 origin object 时才允许出站推 114，`reply_agent` 缺省时才退回部署期默认 `DEFAULT_REPLY_AGENT`。手动 WebUI 入口通常没有 origin，结果只落 ledger/log 留痕，不给 114 或企微发消息。
 - `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 接收 agent，再由该 agent 投回企微（不在 ack 里）。
 
 ## 你会收到什么
 
-- **同步：来自 req_dispatcher 的最小受理 ack**，例如：
-  > 需求已受理，正在创建 issue 并自动处理，结果稍后通知。
+- **同步：来自 req_dispatcher 的最小 ack**，例如：
+  > 需求已受理，正在创建 issue。
 
-  （ack 同步返回；issue 创建、入队与队首执行器启动由 req_dispatcher 编排，处理结论稍后异步返回。）
-- **异步：来自 req_dispatcher 的终态结论**（受理 ack 之外的实质通知，仅终态推一次）：
+  或：
+
+  > issue 已加入执行队列，处理结果稍后通知。
+
+  （只建单请求同步返回 issue 创建结果；执行请求的处理结论稍后异步返回。）
+- **异步：来自 req_dispatcher 的终态结论**（只有执行动作才有；受理 ack 之外的实质通知，仅终态推一次）：
   - 处理完成 → "#<iid> 已处理完成，MR：<mr_url>"
   - 处理未通过 → "#<iid> 处理未通过：<reason>"
   - 处理超时 → "#<iid> 处理超时未完成，已停放待人工处理"
@@ -40,7 +44,9 @@ openclaw --gateway-url ws://<104-host>:<port> \
 ## 预期行为
 
 - 同一个编排器 session 承接接入消息、executor 回调、executor queue drain 三类唤醒。
-- 每条需求 → `run_agent_turn.sh` 调蓝区 git_issuer 建 issue → 按路由入 executor durable FIFO queue → 队首由 `drain_executor_queue.sh` 起 req_executor 单次 issue 执行 → 记录 executor pending → executor 回调 drain → 清 active → 继续 drain 下一条 → 终态推用户一次。
+- 只建单请求 → `run_agent_turn.sh` 调蓝区 git_issuer 建 issue → drain git_issuer 审计 stage → 返回 issue 创建结果，不进入 executor queue。
+- 执行既有 issue 请求 → `prepare_executor_issue_payload.sh` 提取 project/iid → 按路由入 executor durable FIFO queue → 队首由 `drain_executor_queue.sh` 起 req_executor 单次 issue 执行 → 记录 executor pending → executor 回调 drain → 清 active → 继续 drain 下一条 → 终态推用户一次。
+- 显式建单并执行请求 → 先按建单流程创建 issue；成功后才入 executor queue。
 - 多条需求可并发接入并建 issue；executor 执行按队列 FIFO 推进，active 未完成时后续 issue 保持排队。
 - 失败（下游调用耗尽重试 / git_issuer 报失败 / 默认执行器未配置 / 执行 failed/timeout / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 推用户对应说明 + 可选 ops 通知。**不自动重试业务**——重试请重发需求。
 - wiki URL 无法解析、wiki 读取失败、wiki 内容为空，或自由文本无法确定 GitLab project 时，不会调用 git_issuer 或 executor；会直接提示补充 `group/project` 或具体 GitLab/Wiki URL。

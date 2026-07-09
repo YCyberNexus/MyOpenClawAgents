@@ -2,7 +2,7 @@
 
 `req_dispatcher` 的 state 极小：一张以 `run_id` 为主键的 pending 表、一个 durable executor FIFO queue、一个 append-only 审计 ledger。**没有** campaign_state / worktree / glab / 标签机。所有路径由 `scripts/env_paths.sh` 从 `STATE_ROOT` 派生。
 
-编排器对一条需求做两段下游 agent 调用：先 `git_issuer` 段（建 issue），成功后把 issue 追加到 durable executor FIFO queue；`drain_executor_queue.sh` 是唯一启动 `executor` 段（驱动 `req_executor` 单次 issue 执行）的脚本。`git_issuer` 段用 `run_agent_turn.sh` envelope 的 `run_id` 做同轮审计 record/drain；`executor` 段由 queue active 生成稳定 `run_id` / `correlation_id`，启动成功后进入 pending，等待后续 I2 结果回调。
+编排器先按 prompt 判定 action：`create_issue` 只进入 `git_issuer` 段并同轮审计 record/drain；`execute_issue` 直接把既有 issue 追加到 durable executor FIFO queue；`create_and_execute` 先 `git_issuer` 建单，成功后才入 executor queue。`drain_executor_queue.sh` 是唯一启动 `executor` 段（驱动 `req_executor` 单次 issue 执行）的脚本。`git_issuer` 段用 `run_agent_turn.sh` envelope 的 `run_id` 做同轮审计 record/drain；`executor` 段由 queue active 生成稳定 `run_id` / `correlation_id`，启动成功后进入 pending，等待后续 I2 结果回调。
 
 ## 磁盘布局
 
@@ -85,7 +85,7 @@ ${STATE_ROOT}/_dispatcher/
 
 职责边界：
 
-- `enqueue_executor_issue.sh` 只把 `git_issuer` 已创建成功的 issue 追加到 `.queue` 队尾，并生成单调 `queue_id`。
+- `enqueue_executor_issue.sh` 只把用户明确要求执行的 issue 追加到 `.queue` 队尾，并生成单调 `queue_id`。来源可以是 `prepare_executor_issue_payload.sh` 解析出的既有 issue，也可以是 `create_and_execute` 中 `git_issuer` 已创建成功的 issue。
 - `drain_executor_queue.sh` 是唯一允许把 `.queue[0]` 移入 `.active` 并启动 executor 的入口。它在认领 active 时同步预写同 `run_id` 的 executor pending 占位，避免 executor 很快回调时找不到 pending；启动失败会删除该占位，启动成功会补 `child_session_key` 并把 active 标为 `launched`。
 - `finish_executor_queue_active.sh` 只在 executor I2 回调的 `correlation_id` 匹配当前 `.active` 时清空 active；随后必须再次调用 `drain_executor_queue.sh` 继续推进队首。
 - `evict_stuck.sh` 驱逐 executor pending 时，如果该 pending 的 `run_id` 或 `correlation_id` 匹配当前 `.active`，会同步清空 active；后续 queue drain 可继续启动下一条。
@@ -99,8 +99,8 @@ ${STATE_ROOT}/_dispatcher/
 
 - `next_id`：下一条入队 issue 的数字序号。`queue_id` 形如 `execq-N`。
 - `active`：当前正在启动或等待回调的 executor issue。为 `null` 时可启动队首。
-- `queue`：等待执行的 FIFO 列表。新 wiki 或自由文本需求只追加队尾，不抢占 active。
-- `project` / `iid` / `issue_url`：`git_issuer` 成功返回的 issue 事实。
+- `queue`：等待执行的 FIFO 列表。只有明确执行动作才追加队尾，不抢占 active。
+- `project` / `iid` / `issue_url`：要执行的 issue 事实；既有 issue 执行来自 `prepare_executor_issue_payload.sh`，显式建单并执行来自 `git_issuer` 成功返回。
 - `executor_agent`：`route_project.sh` 选出的目标 executor agent。
 - `target_branch`：入口消息明确指定的 MR 目标分支；未指定时为 `null`，executor 继续用 `origin/HEAD` 兜底。
 - `origin` / `req_digest` / `queued_at`：从接入路径携带的回推与审计信息。

@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-08.3] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, accept an optional branch field from req_dispatcher, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages and are not committed into MR changes."
+description: "[SKILL_VERSION=2026-07-09.1] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, accept project+iid or a GitLab issue_url from req_dispatcher, accept an optional branch field, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages and are not committed into MR changes."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -170,15 +170,18 @@ requester. It is NOT the cron path — the scheduled `RUN_SCHEDULED_ISSUE_CAMPAI
 (§3.6 of the active-orchestration design).
 
 **I1 trigger inputs** (multi-line key=value, same text format as the scheduled
-trigger). Only these five are sent. The driven wrapper reads GitLab token from
+trigger). `req_dispatcher` normally sends `project` + `iid`; it may instead send
+`issue_url=<GitLab issue URL>`, which `dispatch_single_issue.sh` parses into the
+same project/iid facts. The driven wrapper reads GitLab token from
 process env or `config/gitlab.env`, reads only the clone parent from
 `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`,
 and lets the scheduled wrapper infer branch from `origin/HEAD` when omitted:
 
 | Field | Required | Meaning |
 | ----- | -------- | ------- |
-| `project` | yes | GitLab project slug to process (透传 from the git_issuer callback by req_dispatcher). |
-| `iid` | yes | The single issue IID to process (positive integer). |
+| `project` | yes unless `issue_url` is present | GitLab project slug to process. Full `group/project` is preferred; bare slugs require `group`. |
+| `iid` | yes unless `issue_url` is present | The single issue IID to process (positive integer). |
+| `issue_url` | no | GitLab issue URL containing `/-/issues/<iid>`. When present, it can supply `project` and `iid`; explicit `project`/`iid` must match it if also sent. |
 | `correlation_id` | yes | req_dispatcher's关联 token. Echoed back verbatim in the I2 result envelope so req_dispatcher can match its pending entry. |
 | `dispatcher_callback_target` | yes (I2) | The callback target req_dispatcher reports to. Supports `agent:req_dispatcher:main` or a bare agent id; carried opaquely into `dispatch_origin.json`. |
 | `group` | no | Usually unnecessary when `project` is `<group>/<project>`. Falls back to `GROUP` env/local config only for bare project slugs. |
@@ -188,6 +191,7 @@ and lets the scheduled wrapper infer branch from `origin/HEAD` when omitted:
    RUN_SINGLE_ISSUE
    project=<project>
    iid=<iid>
+   issue_url=<GitLab issue URL>  # optional alternative to project+iid
    correlation_id=<correlation_id>
    dispatcher_callback_target=<dispatcher_callback_target>
    group=<group>            # optional; omit to use the pin
@@ -195,8 +199,8 @@ and lets the scheduled wrapper infer branch from `origin/HEAD` when omitted:
    # Same `cd`-chaining + heredoc rules as Path A.
    #
    # dispatch_single_issue.sh:
-   #   • validates project / iid (positive integer) / correlation_id (exit 2 on
-   #     malformed CONFIG-shape input — surface it and stop per §No-Fallback);
+   #   • validates project / iid (positive integer) / issue_url / correlation_id
+   #     (exit 2 on malformed CONFIG-shape input — surface it and stop per §No-Fallback);
    #   • sources config/gitlab.env + config/campaign_defaults.env, then optional
    #     ignored config/campaign_defaults.local.env; requires
    #     GITLAB_TOKEN from process env or config/gitlab.env (never sent

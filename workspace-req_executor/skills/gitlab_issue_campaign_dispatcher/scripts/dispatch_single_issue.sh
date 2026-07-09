@@ -10,9 +10,10 @@
 #
 # What it does:
 #   1. Reads the I1 trigger from stdin (multi-line key=value, same text format as
-#      dispatch_prepare_tick.sh). Required keys: project, iid, correlation_id.
-#      Optional: dispatcher_callback_target, group, branch.
-#   2. Validates project / iid (positive integer) / correlation_id.
+#      dispatch_prepare_tick.sh). Required keys: correlation_id plus either
+#      project+iid or issue_url. Optional: dispatcher_callback_target, group,
+#      branch.
+#   2. Validates project / iid (positive integer) / issue_url / correlation_id.
 #   3. Sources config/gitlab.env (host pin), config/campaign_defaults.env
 #      (clone parent pin), then optional config/campaign_defaults.local.env
 #      (ignored local override) to obtain the clone parent. GitLab token comes
@@ -74,6 +75,103 @@ trim_ws() {
   printf '%s' "${s}"
 }
 
+url_decode_path_component() {
+  local value="$1"
+  local rest="$1"
+  local hex=""
+
+  while [[ "${rest}" == *%* ]]; do
+    rest="${rest#*%}"
+    if [ "${#rest}" -lt 2 ]; then
+      return 1
+    fi
+    hex="${rest:0:2}"
+    case "${hex}" in
+      [0-9A-Fa-f][0-9A-Fa-f]) ;;
+      *) return 1 ;;
+    esac
+    rest="${rest:2}"
+  done
+
+  printf '%b' "${value//%/\\x}"
+}
+
+validate_project_path() {
+  local project="$1"
+  case "${project}" in
+    ""|/*|*/|*//*|*[[:space:]]*) return 1 ;;
+  esac
+  [[ "${project}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]
+}
+
+normalize_issue_url() {
+  local url="$1"
+  local last=""
+  url="${url%%\#*}"
+  url="${url%%\?*}"
+  while [ -n "${url}" ]; do
+    last="${url: -1}"
+    case "${last}" in
+      "。"|"."|"!"|"！"|","|"，"|";"|"；") url="${url%?}" ;;
+      *) break ;;
+    esac
+  done
+  printf '%s' "${url}"
+}
+
+parse_issue_url() {
+  local url="$1"
+  local after_scheme=""
+  local url_host=""
+  local url_host_lc=""
+  local url_path=""
+  local project_raw=""
+  local issue_part=""
+  local decoded_project=""
+
+  url="$(normalize_issue_url "${url}")"
+  PARSE_ISSUE_URL_ERROR="issue_url must be a GitLab issue URL containing /-/issues/<iid>"
+  case "${url}" in
+    http://*|https://*) ;;
+    *) return 1 ;;
+  esac
+  after_scheme="${url#*://}"
+  url_host="${after_scheme%%/*}"
+  url_host_lc="$(printf '%s' "${url_host}" | tr '[:upper:]' '[:lower:]')"
+  case "${url_host_lc}" in
+    *gitlab*) ;;
+    *)
+      PARSE_ISSUE_URL_ERROR="GitLab host must contain gitlab"
+      return 1
+      ;;
+  esac
+  url_path="${after_scheme#*/}"
+  case "${url_path}" in
+    */-/issues/*) ;;
+    *) return 1 ;;
+  esac
+
+  project_raw="${url_path%%/-/issues/*}"
+  issue_part="${url_path#*/-/issues/}"
+  issue_part="${issue_part%%/*}"
+  case "${issue_part}" in
+    *[!0-9]*|""|0) return 1 ;;
+  esac
+
+  if ! decoded_project="$(url_decode_path_component "${project_raw}")"; then
+    PARSE_ISSUE_URL_ERROR="GitLab project path in issue_url contains malformed percent encoding"
+    return 1
+  fi
+  if ! validate_project_path "${decoded_project}"; then
+    PARSE_ISSUE_URL_ERROR="GitLab project path in issue_url contains unsafe characters"
+    return 1
+  fi
+
+  PARSED_URL_PROJECT="${decoded_project}"
+  PARSED_URL_IID="${issue_part}"
+  return 0
+}
+
 declare -A T
 TRIGGER_NAME=""
 while IFS= read -r line || [ -n "${line}" ]; do
@@ -105,8 +203,18 @@ if [ -n "${TRIGGER_NAME}" ] && [ "${TRIGGER_NAME}" != "RUN_SINGLE_ISSUE" ]; then
 fi
 
 # ─── 2. Validate the required I1 fields ────────────────────────────
-PROJECT_IN="${T[project]:-}"
-IID_IN="${T[iid]:-}"
+ISSUE_URL_IN="${T[issue_url]:-}"
+PARSED_URL_PROJECT=""
+PARSED_URL_IID=""
+if [ -n "${ISSUE_URL_IN}" ]; then
+  if ! parse_issue_url "${ISSUE_URL_IN}"; then
+    echo "dispatch_single_issue.sh: ${PARSE_ISSUE_URL_ERROR:-issue_url must be a GitLab issue URL containing /-/issues/<iid>}, got: ${ISSUE_URL_IN}" >&2
+    exit 2
+  fi
+fi
+
+PROJECT_IN="${T[project]:-${PARSED_URL_PROJECT}}"
+IID_IN="${T[iid]:-${PARSED_URL_IID}}"
 CORRELATION_ID="${T[correlation_id]:-}"
 DISPATCHER_CALLBACK_TARGET="${T[dispatcher_callback_target]:-}"
 GROUP_IN="${T[group]:-}"
@@ -115,6 +223,15 @@ BRANCH_IN="${T[branch]:-${T[target_branch]:-}}"
 [ -n "${PROJECT_IN}" ]    || { echo "dispatch_single_issue.sh: missing required trigger field: project" >&2; exit 2; }
 [ -n "${IID_IN}" ]        || { echo "dispatch_single_issue.sh: missing required trigger field: iid" >&2; exit 2; }
 [ -n "${CORRELATION_ID}" ] || { echo "dispatch_single_issue.sh: missing required trigger field: correlation_id" >&2; exit 2; }
+
+if [ -n "${PARSED_URL_PROJECT}" ] && [ -n "${T[project]:-}" ] && [ "${PROJECT_IN}" != "${PARSED_URL_PROJECT}" ]; then
+  echo "dispatch_single_issue.sh: project does not match issue_url project (${PROJECT_IN} != ${PARSED_URL_PROJECT})" >&2
+  exit 2
+fi
+if [ -n "${PARSED_URL_IID}" ] && [ -n "${T[iid]:-}" ] && [ "${IID_IN}" != "${PARSED_URL_IID}" ]; then
+  echo "dispatch_single_issue.sh: iid does not match issue_url iid (${IID_IN} != ${PARSED_URL_IID})" >&2
+  exit 2
+fi
 
 # iid must be a positive integer (mirror post_result_note.sh's IID guard, and
 # additionally reject a bare 0 — issue IIDs start at 1).

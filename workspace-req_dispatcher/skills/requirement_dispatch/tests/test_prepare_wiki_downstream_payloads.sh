@@ -123,6 +123,12 @@ if ! grep -q 'Implement password reset' <<<"${first_payload}"; then
   exit 1
 fi
 
+if ! grep -q '不要添加执行器入口标签' <<<"${first_payload}"; then
+  echo "expected wiki git_issuer payload to forbid executor entry labels by default" >&2
+  printf '%s\n' "${first_payload}" >&2
+  exit 1
+fi
+
 if ! grep -q '^wiki_item_ordinal=2$' <<<"${second_payload}"; then
   echo "expected second payload ordinal" >&2
   printf '%s\n' "${second_payload}" >&2
