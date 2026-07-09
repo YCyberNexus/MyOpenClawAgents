@@ -84,6 +84,42 @@ if ! grep -qx 'config-token' "${TOKEN_LOG}"; then
   exit 1
 fi
 
+write_gitlab_env "GITLAB_TOKEN=config-token"
+FAKE_GLAB_TOKEN_LOG="${TOKEN_LOG}" \
+  GLAB_BIN="${FAKE_GLAB}" \
+  GITLAB_TOKEN="masked-prefix…masked-suffix" \
+  PROJECT="req_executor_test" \
+  GROUP="claw_gitlab" \
+  REPO_PARENT_PATH="${REPO_PARENT}" \
+  bash -c 'source "$1"; printf "%s\n" "${GITLAB_TOKEN}"' _ "${SCRIPTS_DIR}/env_paths.sh" \
+  >"${TEST_ROOT}/masked-token.out" 2>"${TEST_ROOT}/masked-token.err"
+
+if ! grep -qx 'masked-prefix…masked-suffix' "${TEST_ROOT}/masked-token.out"; then
+  echo "expected env_paths.sh to preserve masked-looking process env GITLAB_TOKEN" >&2
+  cat "${TEST_ROOT}/masked-token.err" >&2
+  exit 1
+fi
+if ! grep -qx 'masked-prefix…masked-suffix' "${TOKEN_LOG}"; then
+  echo "expected glab auth bootstrap to receive masked-looking process env GITLAB_TOKEN" >&2
+  exit 1
+fi
+
+write_gitlab_env "GITLAB_TOKEN=config-token"
+GITLAB_HOST="gitlab-b.pxsemic.tech:30000" \
+  GITLAB_API_PROTOCOL="http" \
+  GITLAB_TOKEN="masked-prefix…masked-suffix" \
+  PROJECT="req_executor_test" \
+  GROUP="claw_gitlab" \
+  REPO_PARENT_PATH="${REPO_PARENT}" \
+  bash -c 'source "$1"; printf "%s\n" "${GITLAB_TOKEN}"' _ "${SCRIPTS_DIR}/env_paths.sh" \
+  >"${TEST_ROOT}/masked-token-with-host.out" 2>"${TEST_ROOT}/masked-token-with-host.err"
+
+if ! grep -qx 'masked-prefix…masked-suffix' "${TEST_ROOT}/masked-token-with-host.out"; then
+  echo "expected env_paths.sh to preserve masked-looking GITLAB_TOKEN when host/protocol are already set" >&2
+  cat "${TEST_ROOT}/masked-token-with-host.err" >&2
+  exit 1
+fi
+
 write_gitlab_env "GITLAB_TOKEN=" "WIKI_GITLAB_TOKEN=wiki-token"
 if FAKE_GLAB_TOKEN_LOG="${TOKEN_LOG}" \
   GLAB_BIN="${FAKE_GLAB}" \

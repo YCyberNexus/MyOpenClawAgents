@@ -48,6 +48,14 @@ if ! printf '%s\n' "${rendered_block}" | grep -Fq "run_acpx_attempt.sh"; then
   fail "outer executor prompt no longer delegates acpx execution to run_acpx_attempt.sh"
 fi
 
+if ! printf '%s\n' "${rendered_block}" | grep -Fq "GITLAB_TOKEN={GITLAB_TOKEN}"; then
+  fail "outer executor prompt must render the GitLab token into subagent context"
+fi
+
+if ! printf '%s\n' "${rendered_block}" | grep -Fq "PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \\"; then
+  fail "outer executor prompt must tell the subagent to pass GitLab token env vars"
+fi
+
 for removed_wiki_term in \
   "upload_attempt_artifacts.sh" \
   "WIKI evidence" \
