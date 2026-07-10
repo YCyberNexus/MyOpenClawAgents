@@ -23,7 +23,6 @@ Important fields:
 - `blocked_cooldown_ticks`
 - `max_concurrent_subagents`
 - `stuck_after_minutes`
-- `run_timeout_seconds`
 - `acpx_timeout_seconds`
 - `kill_subagent_on_terminal`
 - `result_note_enabled`
@@ -41,6 +40,8 @@ Important fields:
 - `updated_at`
 
 There are no persisted runtime basename, data directory, or account-pool fields.
+Legacy state files may still contain `run_timeout_seconds`; `load_state` deletes
+that field in memory and the next state write persists the migrated shape.
 
 ## Per-Issue State
 

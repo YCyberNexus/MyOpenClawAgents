@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-09.3] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, accept project+iid or a GitLab issue_url from req_dispatcher, accept an optional branch field, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages and are not committed into MR changes."
+description: "[SKILL_VERSION=2026-07-10.1] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, accept project+iid or a GitLab issue_url from req_dispatcher, accept an optional branch field, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages and are not committed into MR changes."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -41,7 +41,7 @@ the subagent will then bypass `run_acpx_attempt.sh`, and the whole
 | Audience | the OUTER subagent (the runtime-spawned model) | the INNER Claude Code session that `acpx claude exec -f ${LOG_DIR}/prompt.txt` starts |
 | Tells it to | run Steps 0–9: `bash run_acpx_attempt.sh` → stage → push → verify → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue and write its deliverables (code / tests / specs / docs — whatever the issue asks for) |
 | Shape | starts with sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
-| Sent how | `sessions_spawn(payload=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", timeoutSeconds=30, runTimeoutSeconds=<run_timeout_seconds>, cleanup="keep")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
+| Sent how | `sessions_spawn(task=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", runtime="subagent", mode="run", cleanup="keep", context="isolated")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
 | File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`; it stays on the runner and is not committed into the MR diff |
 
 **HARD RULE: `${LOG_DIR}/prompt.txt` is NEVER the spawn payload.** The
@@ -98,11 +98,12 @@ reduced to a small fixed shape.
        attempts += 1
        try:
          ack = sessions_spawn(
-                 payload=payload,
+                 task=payload,
                  label=entry.child_label,
-                 timeoutSeconds=30,
-                 runTimeoutSeconds=envelope.run_timeout_seconds,
-                 cleanup="keep")
+                 runtime="subagent",
+                 mode="run",
+                 cleanup="keep",
+                 context="isolated")
          # ack is valid iff both runId AND childSessionKey are non-empty.
          if ack.runId is empty or ack.childSessionKey is empty: ack = null
        except: ack = null
@@ -356,8 +357,8 @@ the wrappers cannot enforce:
 1. **`sessions_spawn` retry contract.** Up to 3 total attempts per IID
    with a fixed 2-second backoff between attempts. Every attempt
    re-issues the IDENTICAL payload (same contents from `payload_path`,
-   same `label`, same `timeoutSeconds=30`, same `runTimeoutSeconds`,
-   same `cleanup="keep"`). Do NOT mutate the payload between attempts;
+   same `label`, same `runtime="subagent"`, same `mode="run"`, same
+   `cleanup="keep"`, same `context="isolated"`). Do NOT mutate the payload between attempts;
    do NOT add a session-name parameter; do NOT switch to a different
    spawn mode; do NOT call any other LLM tool inline. A launch failure
    is anything where the ack does not carry both `runId` AND
@@ -369,8 +370,8 @@ the wrappers cannot enforce:
    parameter".**
 2. **Strictly serial `sessions_spawn` calls.** Never batch multiple
    spawns in a single parallel tool-call block. The local loopback
-   gateway serializes spawn handling per channel with a ~10s forwarding
-   ceiling that `timeoutSeconds=30` cannot override; parallel batching
+   gateway serializes spawn handling per channel with a finite forwarding
+   ceiling; parallel batching
    causes the 2nd+ spawn to return `gateway timeout after 10000ms` with
    an orphaned `childSessionKey`. Issue spawn-1, wait for its ack,
    record it, THEN issue spawn-2.

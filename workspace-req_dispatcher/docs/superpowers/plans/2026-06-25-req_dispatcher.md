@@ -1,5 +1,7 @@
 # req_dispatcher Implementation Plan
 
+> **2026-07-10 兼容性说明：** 本文记录历史决策，不再作为当前运行时调用契约。req_dispatcher 当前通过 `openclaw agent --agent ... --session-key ... --message ... --timeout ...` 调用命名下游 agent；它不调用 `sessions_spawn`。req_executor 内部若派发匿名子代理，任务正文使用 `task`，不传逐次 timeout 参数。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 在 104 OpenClaw 上新建独立 agent `req_dispatcher`，作为企微需求接入点：接收 114 转发的自由文本需求，跨 agent 异步派发给 `git_issuer` 建 issue，被动衔接 `acpx_auto_tester` 既有 issue 流程。

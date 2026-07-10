@@ -27,6 +27,33 @@ The agent runs unattended for long stretches. Re-parsing the host out of `${GITL
 
 This workspace assumes a single GitLab deployment per runner. If you ever need to point a different runner at a different GitLab, change `gitlab.env` on that runner. Do not try to make the agent multi-tenant by reading the host from trigger inputs — that defeats the whole point of pinning.
 
+## OpenClaw subagent timeout
+
+OpenClaw 2026.6.11 rejects per-call timeout fields on `sessions_spawn`. The
+optional outer limit is read internally from one global runtime setting:
+
+```bash
+openclaw config get agents.defaults.subagents.runTimeoutSeconds
+openclaw config validate
+```
+
+The gateway hot-applies valid `agents.*` changes. Run these commands as the
+same service account and with the same OpenClaw profile/config path used by the
+gateway; otherwise they may inspect a different `~/.openclaw/openclaw.json`.
+The value is global across all agents and is intentionally absent from each
+individual `sessions_spawn` call.
+
+When the value is positive, choose at least the largest deployed
+`acpx_timeout_seconds + 120`. For the current 36000-second acpx budget, use:
+
+```bash
+openclaw config set agents.defaults.subagents.runTimeoutSeconds 36120 --strict-json
+openclaw config validate
+```
+
+The previous value `18120` only covers the default 18000-second acpx budget;
+it cannot provide the required outer headroom for a 36000-second run.
+
 ## UI account pool: `${UI_ACCOUNTS_RELPATH}` (optional — no default)
 
 Pins the pool of UI test accounts the dispatcher draws from when allocating credentials to issue subagents. This file is committed/maintained by the test team inside the cloned project repo, not edited in this agent workspace.

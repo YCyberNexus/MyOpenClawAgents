@@ -60,4 +60,10 @@ if ! grep -q '^gitlab_token=gitlab-env-token$' "${TEST_ROOT}/stdout"; then
   exit 1
 fi
 
+if grep -q '^run_timeout_seconds=' "${TEST_ROOT}/stdout"; then
+  echo "synthesized trigger must not expose run_timeout_seconds" >&2
+  cat "${TEST_ROOT}/stdout" >&2
+  exit 1
+fi
+
 echo "ok dispatch_single_issue accepts minimal campaign config"
