@@ -620,6 +620,36 @@ fence_token="$(jq -r '.claim_token' <<<"${fence_claim}")"
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=spawned \
   CLAIM_TOKEN="${fence_token}" NOW_EPOCH=402 bash "${RECORD}" >/dev/null
 fence_event_id="${fence_job_id}:claim-1:terminal-1"
+cp "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/fence-before-missing-marker.scheduler.json"
+cp "${SCHEDULER_ROOT}/batches/X/state.json" \
+  "${TEST_ROOT}/fence-before-missing-marker.batch-x.json"
+cp "${SCHEDULER_ROOT}/batches/Y/state.json" \
+  "${TEST_ROOT}/fence-before-missing-marker.batch-y.json"
+set +e
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${fence_token}" FINALIZATION_EVENT_ID="${fence_event_id}" \
+  NOW_EPOCH=403 bash "${RECORD}" \
+  >"${TEST_ROOT}/fence-terminal-missing-marker.out" \
+  2>"${TEST_ROOT}/fence-terminal-missing-marker.err"
+missing_marker_rc=$?
+set -e
+if [ "${missing_marker_rc}" -ne 3 ]; then
+  echo "terminal event without finalization fence exited ${missing_marker_rc}, expected 3" >&2
+  exit 1
+fi
+for unchanged_pair in \
+  "${SCHEDULER_ROOT}/scheduler_state.json:${TEST_ROOT}/fence-before-missing-marker.scheduler.json" \
+  "${SCHEDULER_ROOT}/batches/X/state.json:${TEST_ROOT}/fence-before-missing-marker.batch-x.json" \
+  "${SCHEDULER_ROOT}/batches/Y/state.json:${TEST_ROOT}/fence-before-missing-marker.batch-y.json"
+do
+  current_file="${unchanged_pair%%:*}"
+  before_file="${unchanged_pair#*:}"
+  cmp -s "${current_file}" "${before_file}" || {
+    echo "missing finalization fence rejection changed durable state" >&2
+    exit 1
+  }
+done
 jq \
   --arg job_id "${fence_job_id}" \
   --arg event_id "${fence_event_id}" \

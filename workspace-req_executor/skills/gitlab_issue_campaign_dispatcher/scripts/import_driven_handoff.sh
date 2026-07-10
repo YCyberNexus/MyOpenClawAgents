@@ -9,7 +9,9 @@ CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
 HANDOFF_FILE="${HANDOFF_FILE:-}"
 IMPORTED_AT="${NOW_EPOCH:-$(date +%s)}"
 PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
+MIGRATION_SCRIPT="${DRIVEN_MIGRATION_SCRIPT:-${SCRIPT_DIR}/reserve_driven_batch_items.sh}"
 RECORD_SCRIPT="${DRIVEN_RECORD_SCRIPT:-${SCRIPT_DIR}/record_driven_batch_launch.sh}"
+MIGRATION_RECOVERY_LIMIT=3
 
 import_die() {
   echo "import_driven_handoff.sh: $1" >&2
@@ -28,6 +30,15 @@ atomic_write_json() {
   jq -e . "${candidate}" >/dev/null \
     || import_die "refusing to publish invalid JSON for ${destination_name}" 3
   mv "${candidate}" "${destination}"
+}
+
+run_scheduler_migration() {
+  CONFIG_DIR="${CONFIG_DIR}" \
+  NOW_EPOCH="${IMPORTED_AT}" \
+  DRIVEN_PREPARING_LEASE_SECONDS="${PREPARING_LEASE_SECONDS}" \
+  DRIVEN_SCHEDULER_MIGRATION_ONLY=1 \
+  bash "${MIGRATION_SCRIPT}" >/dev/null \
+    || import_die "scheduler migration-only recovery failed" 3
 }
 
 release_delivery_gate() {
@@ -82,6 +93,15 @@ esac
 if [[ "${PREPARING_LEASE_SECONDS}" =~ ^0+$ ]]; then
   import_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer"
 fi
+case "${MIGRATION_SCRIPT}" in
+  /*) ;;
+  *) import_die "DRIVEN_MIGRATION_SCRIPT must be an absolute path" ;;
+esac
+case "${MIGRATION_SCRIPT}" in
+  *$'\n'*|*$'\r'*|*$'\t'*) import_die "DRIVEN_MIGRATION_SCRIPT contains control characters" ;;
+esac
+[ -f "${MIGRATION_SCRIPT}" ] && [ -x "${MIGRATION_SCRIPT}" ] \
+  || import_die "DRIVEN_MIGRATION_SCRIPT must be an executable regular file"
 [ -n "${HANDOFF_FILE}" ] || import_die "HANDOFF_FILE is required"
 [ -f "${HANDOFF_FILE}" ] || import_die "handoff file does not exist: ${HANDOFF_FILE}" 3
 
@@ -134,33 +154,47 @@ HANDOFF_JSON="$(jq -ce '
 JOB_ID="$(jq -r '.job_id' <<<"${HANDOFF_JSON}")"
 HANDOFF_EVENT_ID="$(jq -r '.event_id' <<<"${HANDOFF_JSON}")"
 
-# Task4 owns scheduler migration and pending-transaction recovery. Run only
-# that entry point before reading scheduler state; it takes and releases its
-# own scheduler lock and performs no reservation pass.
-CONFIG_DIR="${CONFIG_DIR}" \
-NOW_EPOCH="${IMPORTED_AT}" \
-DRIVEN_PREPARING_LEASE_SECONDS="${PREPARING_LEASE_SECONDS}" \
-DRIVEN_SCHEDULER_MIGRATION_ONLY=1 \
-bash "${SCRIPT_DIR}/reserve_driven_batch_items.sh" >/dev/null \
-  || import_die "scheduler migration-only recovery failed" 3
+# Task4 owns scheduler migration and pending-transaction recovery. Use only
+# its migration-only entry point: first before reading state, then again only
+# after releasing our lock if the locked read observes a newer transaction.
+run_scheduler_migration
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/scheduler_env.sh" >/dev/null
 
 RECEIPT_FILE="${CALLBACK_INBOX}/${HANDOFF_EVENT_ID}.json"
 
-exec {IMPORT_SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-flock -x "${IMPORT_SCHEDULER_LOCK_FD}"
+MIGRATION_RECOVERY_COUNT=0
+while :; do
+  exec {IMPORT_SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+  flock -x "${IMPORT_SCHEDULER_LOCK_FD}"
 
-SCHEDULER_STATE="$(jq -ce '
-  if type == "object"
-    and .version == 1
-    and (.active_jobs | type == "object")
-    and (.batch_order | type == "array")
-  then .
-  else error("invalid scheduler state")
-  end
-' "${SCHEDULER_STATE_FILE}")" || import_die "scheduler state is invalid" 3
+  SCHEDULER_STATE="$(jq -ce '
+    if type == "object"
+      and .version == 1
+      and (.active_jobs | type == "object")
+      and (.batch_order | type == "array")
+    then .
+    else error("invalid scheduler state")
+    end
+  ' "${SCHEDULER_STATE_FILE}")" || import_die "scheduler state is invalid" 3
+
+  if ! jq -e 'has("pending_transaction")' \
+      <<<"${SCHEDULER_STATE}" >/dev/null; then
+    break
+  fi
+
+  # Migration owns pending-transaction recovery and needs this same lock.
+  # Never install a fence into the stale outer state and never call migration
+  # while holding scheduler.lock.
+  flock -u "${IMPORT_SCHEDULER_LOCK_FD}"
+  exec {IMPORT_SCHEDULER_LOCK_FD}>&-
+  if [ "${MIGRATION_RECOVERY_COUNT}" -ge "${MIGRATION_RECOVERY_LIMIT}" ]; then
+    import_die "scheduler transaction recovery retry limit exhausted" 3
+  fi
+  MIGRATION_RECOVERY_COUNT=$((MIGRATION_RECOVERY_COUNT + 1))
+  run_scheduler_migration
+done
 
 ACTIVE_JOB="$(jq -c --arg job_id "${JOB_ID}" \
   '.active_jobs[$job_id] // null' <<<"${SCHEDULER_STATE}")"

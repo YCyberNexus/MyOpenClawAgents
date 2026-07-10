@@ -200,6 +200,7 @@ create_batch_fixture() {
 
 create_batch_fixture batch-A agent:req_dispatcher:batch-a preparing
 create_batch_fixture batch-B agent:req_dispatcher:batch-b attached
+create_batch_fixture batch-R agent:req_dispatcher:batch-r attached
 
 # batch-C is registered by the fake recorder only after importer released the
 # scheduler lock. It models a late same-intent membership in the crash window.
@@ -263,10 +264,12 @@ jq -cnS '{
 PHYSICAL_EVENT_ID='batch-A:snapshot-0:claim-1:terminal-1'
 EVENT_A='batch-A:snapshot-0:terminal-1'
 EVENT_B='batch-B:snapshot-0:terminal-1'
+EVENT_R='batch-R:snapshot-0:terminal-1'
 HANDOFF_FILE="${TEST_ROOT}/driven-handoff.json"
 RECEIPT_FILE="${SCHEDULER_ROOT}/callback_inbox/${PHYSICAL_EVENT_ID}.json"
 OUTBOX_A="${SCHEDULER_ROOT}/callback_outbox/${EVENT_A}.json"
 OUTBOX_B="${SCHEDULER_ROOT}/callback_outbox/${EVENT_B}.json"
+OUTBOX_R="${SCHEDULER_ROOT}/callback_outbox/${EVENT_R}.json"
 RECORD_LOG="${TEST_ROOT}/record.log"
 
 jq -cnS \
@@ -337,6 +340,109 @@ jq -e '.active_jobs["batch-A:snapshot-0"] | has("finalization") | not' \
 cp "${TEST_ROOT}/scheduler-before-expired-claim.json" \
   "${SCHEDULER_ROOT}/scheduler_state.json"
 
+# Deterministically model a scheduler writer committing after the importer's
+# first migration-only call but before it acquires scheduler.lock. The nested
+# transaction adds batch-R to the physical job, so reading the stale outer
+# state would both lose the finalization marker during recovery and omit fanout.
+MIGRATION_WRAPPER="${TEST_ROOT}/migration-wrapper.sh"
+MIGRATION_INJECTED="${TEST_ROOT}/migration-injected"
+MIGRATION_CALL_LOG="${TEST_ROOT}/migration-calls.log"
+cat >"${MIGRATION_WRAPPER}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+exec 8>"${EXPECT_SCHEDULER_LOCK:?}"
+if ! flock -n 8; then
+  echo "migration-only was called while importer held scheduler.lock" >&2
+  exit 88
+fi
+flock -u 8
+exec 8>&-
+
+printf '%s\n' called >>"${MIGRATION_CALL_LOG:?}"
+CONFIG_DIR="${CONFIG_DIR:?}" \
+NOW_EPOCH="${NOW_EPOCH:-0}" \
+DRIVEN_PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}" \
+DRIVEN_SCHEDULER_MIGRATION_ONLY=1 \
+bash "${ACTUAL_MIGRATION:?}" >/dev/null
+
+if [ "${MIGRATION_ALWAYS_INJECT:-false}" = true ] \
+    || [ ! -e "${MIGRATION_INJECTED:?}" ]; then
+  exec 8>"${EXPECT_SCHEDULER_LOCK}"
+  flock -x 8
+  jq \
+    --arg job_id 'batch-A:snapshot-0' \
+    --slurpfile batch_r_state "${BATCH_R_STATE:?}" '
+    . as $persisted
+    | .pending_transaction = {
+        version:1,
+        scheduler_state:($persisted
+          | del(.pending_transaction)
+          | if (.batch_order | index("batch-R")) == null
+            then .batch_order += ["batch-R"] else . end
+          | if ([.active_jobs[$job_id].memberships[]
+              | select(.batch_id == "batch-R" and .snapshot_index == 0)]
+              | length) == 0
+            then .active_jobs[$job_id].memberships += [{
+                batch_id:"batch-R",
+                snapshot_index:0
+              }]
+            else . end),
+        batch_states:{"batch-R":$batch_r_state[0]}
+      }
+  ' "${EXPECT_SCHEDULER_STATE:?}" \
+    >"${EXPECT_SCHEDULER_STATE}.pending-race"
+  mv "${EXPECT_SCHEDULER_STATE}.pending-race" "${EXPECT_SCHEDULER_STATE}"
+  printf '%s\n' injected >"${MIGRATION_INJECTED}"
+  flock -u 8
+  exec 8>&-
+fi
+EOF
+chmod +x "${MIGRATION_WRAPPER}"
+
+# A continuously competing writer must not turn the recovery loop into an
+# unbounded wait or allow an outer-state marker. After the fixed retry budget,
+# importer fails closed before receipt/outbox persistence.
+cp "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/scheduler-before-recovery-exhaustion.json"
+MIGRATION_EXHAUST_LOG="${TEST_ROOT}/migration-exhaust-calls.log"
+set +e
+CONFIG_DIR="${CONFIG_DIR}" \
+HANDOFF_FILE="${HANDOFF_FILE}" \
+DRIVEN_MIGRATION_SCRIPT="${MIGRATION_WRAPPER}" \
+ACTUAL_MIGRATION="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
+EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+EXPECT_SCHEDULER_STATE="${SCHEDULER_ROOT}/scheduler_state.json" \
+BATCH_R_STATE="${SCHEDULER_ROOT}/batches/batch-R/state.json" \
+MIGRATION_INJECTED="${TEST_ROOT}/migration-exhaust-injected" \
+MIGRATION_CALL_LOG="${MIGRATION_EXHAUST_LOG}" \
+MIGRATION_ALWAYS_INJECT=true \
+NOW_EPOCH=102 \
+DRIVEN_PREPARING_LEASE_SECONDS=10 \
+bash "${IMPORT_HANDOFF}" >"${TEST_ROOT}/migration-exhaust.out" \
+  2>"${TEST_ROOT}/migration-exhaust.err"
+MIGRATION_EXHAUST_RC=$?
+set -e
+[ "${MIGRATION_EXHAUST_RC}" -eq 3 ] \
+  || fail "transaction recovery retry exhaustion did not exit 3"
+grep -q 'transaction recovery retry limit exhausted' \
+  "${TEST_ROOT}/migration-exhaust.err" \
+  || fail "transaction recovery exhaustion did not fail closed explicitly"
+[ "$(wc -l <"${MIGRATION_EXHAUST_LOG}" | tr -d ' ')" = 4 ] \
+  || fail "transaction recovery did not enforce its fixed retry budget"
+[ ! -e "${RECEIPT_FILE}" ] \
+  && [ ! -e "${OUTBOX_A}" ] \
+  && [ ! -e "${OUTBOX_B}" ] \
+  && [ ! -e "${OUTBOX_R}" ] \
+  || fail "retry exhaustion persisted callback delivery state"
+jq -e '
+  has("pending_transaction")
+  and (.active_jobs["batch-A:snapshot-0"] | has("finalization") | not)
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "retry exhaustion installed a fence into the outer scheduler state"
+cp "${TEST_ROOT}/scheduler-before-recovery-exhaustion.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
 FAKE_RECORD="${TEST_ROOT}/fake-record.sh"
 cat >"${FAKE_RECORD}" <<'EOF'
 #!/usr/bin/env bash
@@ -350,10 +456,17 @@ fi
 flock -u 8
 exec 8>&-
 
+CONFIG_DIR="${CONFIG_DIR:?}" \
+NOW_EPOCH="${NOW_EPOCH:-0}" \
+DRIVEN_PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}" \
+DRIVEN_SCHEDULER_MIGRATION_ONLY=1 \
+bash "${PRE_RECORD_MIGRATION_SCRIPT:?}" >/dev/null
+
 for required_file in \
   "${EXPECT_RECEIPT:?}" \
   "${EXPECT_OUTBOX_A:?}" \
-  "${EXPECT_OUTBOX_B:?}"
+  "${EXPECT_OUTBOX_B:?}" \
+  "${EXPECT_OUTBOX_R:?}"
 do
   [ -f "${required_file}" ] || {
     echo "record ran before durable callback file: ${required_file}" >&2
@@ -369,7 +482,8 @@ jq -e \
   and .active_jobs[$job_id].finalization.claim_token == "claim-token-42"
   and .active_jobs[$job_id].finalization.membership_keys == [
     "batch-A:snapshot-0",
-    "batch-B:snapshot-0"
+    "batch-B:snapshot-0",
+    "batch-R:snapshot-0"
   ]
 ' "${EXPECT_SCHEDULER_STATE:?}" >/dev/null || {
   echo "record ran without a complete finalization fence" >&2
@@ -399,7 +513,7 @@ if [ ! -e "${INJECT_FENCE_ONCE_FILE:?}" ]; then
     exit 93
   }
   jq -e --arg job_id "${JOB_ID:-}" '
-    [.active_jobs[$job_id].memberships[].batch_id] == ["batch-A","batch-B"]
+    [.active_jobs[$job_id].memberships[].batch_id] == ["batch-A","batch-B","batch-R"]
   ' "${EXPECT_SCHEDULER_STATE}" >/dev/null || {
     echo "late membership changed the finalization snapshot" >&2
     exit 93
@@ -431,13 +545,20 @@ chmod +x "${FAKE_RECORD}"
 set +e
 CONFIG_DIR="${CONFIG_DIR}" \
 HANDOFF_FILE="${HANDOFF_FILE}" \
+DRIVEN_MIGRATION_SCRIPT="${MIGRATION_WRAPPER}" \
 DRIVEN_RECORD_SCRIPT="${FAKE_RECORD}" \
+ACTUAL_MIGRATION="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
 ACTUAL_RECORD="${RECORD_LAUNCH}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
 EXPECT_SCHEDULER_STATE="${SCHEDULER_ROOT}/scheduler_state.json" \
 EXPECT_RECEIPT="${RECEIPT_FILE}" \
 EXPECT_OUTBOX_A="${OUTBOX_A}" \
 EXPECT_OUTBOX_B="${OUTBOX_B}" \
+EXPECT_OUTBOX_R="${OUTBOX_R}" \
+PRE_RECORD_MIGRATION_SCRIPT="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
+BATCH_R_STATE="${SCHEDULER_ROOT}/batches/batch-R/state.json" \
+MIGRATION_INJECTED="${MIGRATION_INJECTED}" \
+MIGRATION_CALL_LOG="${MIGRATION_CALL_LOG}" \
 RECORD_LOG="${RECORD_LOG}" \
 INJECT_FENCE_ONCE_FILE="${TEST_ROOT}/fence-injected" \
 RESERVE_SCRIPT="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
@@ -451,15 +572,31 @@ FAILED_IMPORT_RC=$?
 set -e
 [ "${FAILED_IMPORT_RC}" -ne 0 ] \
   || fail "importer treated a failed terminal record as success"
+MIGRATION_CALLS=0
+if [ -f "${MIGRATION_CALL_LOG}" ]; then
+  MIGRATION_CALLS="$(wc -l <"${MIGRATION_CALL_LOG}" | tr -d ' ')"
+fi
+[ "${MIGRATION_CALLS}" = 2 ] \
+  || fail "importer did not recover a transaction injected after migration-only"
 jq -e '
   has("terminal_recorded")
   and .terminal_recorded == false
+  and [.memberships[].batch_id] == ["batch-A","batch-B","batch-R"]
 ' "${RECEIPT_FILE}" >/dev/null \
   || fail "failed terminal record did not leave a replayable false receipt gate"
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e 'has("ready_at") and .ready_at == null' "${outbox_file}" >/dev/null \
     || fail "failed terminal record exposed an outbox entry for delivery"
 done
+jq -e '
+  (has("pending_transaction") | not)
+  and .active_jobs["batch-A:snapshot-0"].finalization.membership_keys == [
+    "batch-A:snapshot-0",
+    "batch-B:snapshot-0",
+    "batch-R:snapshot-0"
+  ]
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "finalization fence was not installed on recovered scheduler state"
 
 NOT_READY_OPENCLAW_LOG="${TEST_ROOT}/not-ready-openclaw.log"
 NOT_READY_OPENCLAW="${TEST_ROOT}/not-ready-openclaw.sh"
@@ -476,16 +613,38 @@ bash "${DRAIN_OUTBOX}" >/dev/null
 [ ! -s "${NOT_READY_OPENCLAW_LOG}" ] \
   || fail "drain sent an outbox entry before terminal record completed"
 
+# A crash may also leave an already-installed marker inside the transaction's
+# nested scheduler state. Migration recovery must preserve that exact fence so
+# the replay can satisfy the recorder's mandatory event contract.
+jq '
+  . as $persisted
+  | .pending_transaction = {
+      version:1,
+      scheduler_state:($persisted | del(.pending_transaction)),
+      batch_states:{}
+    }
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.nested-finalization"
+mv "${SCHEDULER_ROOT}/scheduler_state.nested-finalization" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
 IMPORT_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" \
   HANDOFF_FILE="${HANDOFF_FILE}" \
+  DRIVEN_MIGRATION_SCRIPT="${MIGRATION_WRAPPER}" \
   DRIVEN_RECORD_SCRIPT="${FAKE_RECORD}" \
+  ACTUAL_MIGRATION="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
   ACTUAL_RECORD="${RECORD_LAUNCH}" \
   EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
   EXPECT_SCHEDULER_STATE="${SCHEDULER_ROOT}/scheduler_state.json" \
   EXPECT_RECEIPT="${RECEIPT_FILE}" \
   EXPECT_OUTBOX_A="${OUTBOX_A}" \
   EXPECT_OUTBOX_B="${OUTBOX_B}" \
+  EXPECT_OUTBOX_R="${OUTBOX_R}" \
+  PRE_RECORD_MIGRATION_SCRIPT="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
+  BATCH_R_STATE="${SCHEDULER_ROOT}/batches/batch-R/state.json" \
+  MIGRATION_INJECTED="${MIGRATION_INJECTED}" \
+  MIGRATION_CALL_LOG="${MIGRATION_CALL_LOG}" \
   RECORD_LOG="${RECORD_LOG}" \
   INJECT_FENCE_ONCE_FILE="${TEST_ROOT}/fence-injected" \
   RESERVE_SCRIPT="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
@@ -494,23 +653,27 @@ NOW_EPOCH=5000 \
 DRIVEN_PREPARING_LEASE_SECONDS=10 \
 bash "${IMPORT_HANDOFF}"
 )"
+[ "$(wc -l <"${MIGRATION_CALL_LOG}" | tr -d ' ')" = 3 ] \
+  || fail "nested finalization transaction was not recovered before replay"
 jq -e '
   .status == "imported"
   and .job_id == "batch-A:snapshot-0"
-  and .outbox_count == 2
+  and .outbox_count == 3
   and .terminal_recorded == true
 ' <<<"${IMPORT_OUTPUT}" >/dev/null \
-  || fail "importer did not report a completed two-membership import"
+  || fail "importer did not report a completed recovered-membership import"
 
 [ -f "${RECEIPT_FILE}" ] || fail "import receipt was not persisted"
 [ -f "${OUTBOX_A}" ] || fail "batch-A outbox entry was not persisted"
 [ -f "${OUTBOX_B}" ] || fail "batch-B outbox entry was not persisted"
+[ -f "${OUTBOX_R}" ] || fail "recovered batch-R outbox entry was not persisted"
 jq -e '
   .event_id == "batch-A:snapshot-0:claim-1:terminal-1"
   and .job_id == "batch-A:snapshot-0"
   and [.memberships[] | {batch_id,snapshot_index,target}] == [
     {batch_id:"batch-A",snapshot_index:0,target:"agent:req_dispatcher:batch-a"},
-    {batch_id:"batch-B",snapshot_index:0,target:"agent:req_dispatcher:batch-b"}
+    {batch_id:"batch-B",snapshot_index:0,target:"agent:req_dispatcher:batch-b"},
+    {batch_id:"batch-R",snapshot_index:0,target:"agent:req_dispatcher:batch-r"}
   ]
   and .claim_generation == 1
   and .claim_token == "claim-token-42"
@@ -519,7 +682,7 @@ jq -e '
 ' "${RECEIPT_FILE}" >/dev/null \
   || fail "receipt did not freeze the scheduler-locked membership resolution"
 
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .version == 1
     and (.target | startswith("agent:req_dispatcher:"))
@@ -544,6 +707,9 @@ jq -e --arg event_id "${EVENT_A}" \
 jq -e --arg event_id "${EVENT_B}" \
   '.event_id == $event_id and .body.event_id == $event_id and .body.batch_id == "batch-B"' \
   "${OUTBOX_B}" >/dev/null || fail "batch-B event identity is unstable"
+jq -e --arg event_id "${EVENT_R}" \
+  '.event_id == $event_id and .body.event_id == $event_id and .body.batch_id == "batch-R"' \
+  "${OUTBOX_R}" >/dev/null || fail "batch-R event identity is unstable"
 jq -e '.active_jobs | has("batch-A:snapshot-0") | not' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
   || fail "scheduler job was not recorded terminal"
@@ -553,6 +719,9 @@ jq -e '.memberships["0"].status == "terminal"' \
 jq -e '.memberships["0"].status == "terminal"' \
   "${SCHEDULER_ROOT}/batches/batch-B/state.json" >/dev/null \
   || fail "attached membership was not recorded terminal"
+jq -e '.memberships["0"].status == "terminal"' \
+  "${SCHEDULER_ROOT}/batches/batch-R/state.json" >/dev/null \
+  || fail "recovered membership was not recorded terminal"
 jq -e '
   length == 1
   and .[0].job_id == "batch-A:snapshot-0"
@@ -568,7 +737,7 @@ jq -e '
 jq '.terminal_recorded = false' "${RECEIPT_FILE}" \
   >"${RECEIPT_FILE}.crash-window"
 mv "${RECEIPT_FILE}.crash-window" "${RECEIPT_FILE}"
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq '.ready_at = null' "${outbox_file}" >"${outbox_file}.crash-window"
   mv "${outbox_file}.crash-window" "${outbox_file}"
 done
@@ -590,11 +759,25 @@ bash "${IMPORT_HANDOFF}" >/dev/null
   || fail "receipt replay recursively recorded an already-terminal job"
 jq -e '.terminal_recorded == true' "${RECEIPT_FILE}" >/dev/null \
   || fail "active-missing receipt replay did not repair terminal_recorded"
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '(.ready_at | type == "number" and . >= 0)' \
     "${outbox_file}" >/dev/null \
     || fail "active-missing receipt replay did not repair outbox readiness"
 done
+
+cp "${RECEIPT_FILE}" "${TEST_ROOT}/receipt-before-invalid-migration-path.json"
+if CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${HANDOFF_FILE}" \
+  DRIVEN_MIGRATION_SCRIPT='scripts/reserve_driven_batch_items.sh' \
+  bash "${IMPORT_HANDOFF}" >"${TEST_ROOT}/invalid-migration-path.out" \
+  2>"${TEST_ROOT}/invalid-migration-path.err"; then
+  fail "importer accepted a relative migration override"
+fi
+grep -q 'DRIVEN_MIGRATION_SCRIPT must be an absolute path' \
+  "${TEST_ROOT}/invalid-migration-path.err" \
+  || fail "invalid migration override did not fail strict validation"
+cmp -s "${RECEIPT_FILE}" \
+  "${TEST_ROOT}/receipt-before-invalid-migration-path.json" \
+  || fail "invalid migration override changed durable receipt state"
 
 CONFLICT_HANDOFF="${TEST_ROOT}/conflicting-handoff.json"
 jq '.status = "failed" | .reason = "changed terminal body"' \

@@ -242,6 +242,9 @@ CURRENT_CLAIM_GENERATION="$(jq -r '.claim_generation' <<<"${JOB_JSON}")"
 CURRENT_CLAIM_TOKEN="$(jq -r '.claim_token // empty' <<<"${JOB_JSON}")"
 IS_LEGACY_RUNNING="$(jq -r '.legacy_running // false' <<<"${JOB_JSON}")"
 FINALIZATION_JSON="$(jq -c '.finalization // null' <<<"${JOB_JSON}")"
+if [ -n "${FINALIZATION_EVENT_ID_INPUT}" ] && [ "${FINALIZATION_JSON}" = null ]; then
+  record_die "FINALIZATION_EVENT_ID requires an active finalization fence: ${JOB_ID}" 3
+fi
 if [ "${FINALIZATION_JSON}" != null ] && [ "${STATUS}" != terminal ]; then
   record_die "finalizing job only accepts terminal: ${JOB_ID}" 3
 fi
