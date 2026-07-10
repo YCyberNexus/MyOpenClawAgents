@@ -52,7 +52,6 @@ Common optional fields:
 - `branch` (omitted means the remote default branch from `origin/HEAD`)
 - `repo_path`
 - `max_concurrent_subagents`
-- `run_timeout_seconds`
 - `acpx_timeout_seconds`
 - `stuck_after_minutes`
 - `issue_iids`
@@ -63,6 +62,9 @@ Common optional fields:
 - `continue_upgrade_threshold`
 
 Do not send runtime basename, data directory, or UI account-pool fields.
+Do not send the legacy `run_timeout_seconds` field. OpenClaw 2026.6.11 reads
+the optional global `agents.defaults.subagents.runTimeoutSeconds` internally;
+it is not visible in an individual `sessions_spawn` call.
 
 ## Runtime Layout
 

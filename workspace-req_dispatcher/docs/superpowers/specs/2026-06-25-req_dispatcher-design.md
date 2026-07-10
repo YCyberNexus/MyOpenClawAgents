@@ -1,5 +1,7 @@
 # Spec：req_dispatcher —— 企微需求接入与下游派发编排器
 
+> **2026-07-10 兼容性说明：** 本文记录历史决策，不再作为当前运行时调用契约。req_dispatcher 当前通过 `openclaw agent --agent ... --session-key ... --message ... --timeout ...` 调用命名下游 agent；它不调用 `sessions_spawn`。req_executor 内部若派发匿名子代理，任务正文使用 `task`，不传逐次 timeout 参数。
+
 > 日期：2026-06-25
 > 目标：在 104 OpenClaw 上新建一个独立 agent `req_dispatcher`，作为"企微需求 → 自动测试"链路在 104 侧的统一接入点与薄派发器：接收 114 转发来的需求，调度 `git_issuer` 建 GitLab issue，再由 `git_issuer` 打上 acpx 入口标签，从而被动衔接 `acpx_auto_tester` 既有的基于 issue 的流程。
 

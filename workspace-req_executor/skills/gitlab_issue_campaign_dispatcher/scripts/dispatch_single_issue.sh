@@ -308,7 +308,6 @@ GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN_GITLAB_ENV_PIN:-}}
 [ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in config/gitlab.env)" >&2; exit 2; }
 
 ACPX_TIMEOUT_EFF=18000
-RUN_TIMEOUT_EFF=""
 MAX_RUNTIME_MINUTES_EFF=300
 BLOCKED_RETRY_LIMIT_EFF=3
 BLOCKED_COOLDOWN_TICKS_EFF=1
@@ -379,7 +378,6 @@ EOF
 )"
 # Append the optional fields only when a non-empty value exists, so we never feed
 # dispatch_prepare_tick.sh an empty key it would reject.
-[ -n "${RUN_TIMEOUT_EFF}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"run_timeout_seconds=${RUN_TIMEOUT_EFF}"
 [ -n "${BRANCH_IN}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"branch=${BRANCH_IN}"
 
 # ─── 7. Hand off to the existing prepare-tick body ─────────────────

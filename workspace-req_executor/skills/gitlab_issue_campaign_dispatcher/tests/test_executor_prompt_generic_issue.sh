@@ -10,6 +10,7 @@ DISPATCH_SINGLE="${SKILL_DIR}/scripts/dispatch_single_issue.sh"
 DISPATCH_PREPARE="${SKILL_DIR}/scripts/dispatch_prepare_tick.sh"
 PREPARE_ATTEMPT="${SKILL_DIR}/scripts/prepare_attempt.sh"
 ENV_PATHS="${SKILL_DIR}/scripts/env_paths.sh"
+SKILL_FILE="${SKILL_DIR}/SKILL.md"
 
 rendered_block="$(awk '
   /^# REQ_EXECUTOR_EXECUTOR_PROMPT_V1$/ { found=1 }
@@ -25,6 +26,14 @@ fail() {
 }
 
 [ -n "${rendered_block}" ] || fail "rendered executor prompt block was not found"
+
+grep -Fq 'task=payload,' "${SKILL_FILE}" \
+  || fail "SKILL.md must pass the rendered executor prompt through sessions_spawn task"
+for forbidden_spawn_form in 'sessions_spawn(payload=' 'timeoutSeconds=' 'runTimeoutSeconds='; do
+  if grep -Fq "${forbidden_spawn_form}" "${SKILL_FILE}" "${PROMPT_TEMPLATE}"; then
+    fail "executor contract still contains unsupported sessions_spawn form: ${forbidden_spawn_form}"
+  fi
+done
 
 for old_term in \
   "hu""lat" \

@@ -50,6 +50,14 @@ set -euo pipefail
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
+# Return the first line without creating a producer/consumer pipe. Long prompt
+# payloads can make `printf ... | head -n 1` terminate the producer with
+# SIGPIPE; under `set -o pipefail` that aborts the dispatcher with exit 141.
+first_line() {
+  local text="${1-}"
+  printf '%s\n' "${text%%$'\n'*}"
+}
+
 # Parse an ISO-8601 UTC timestamp into epoch seconds. Echoes 0 when the
 # input is empty / null / unparseable so callers can branch on `-gt 0`.
 iso_to_epoch() {
@@ -109,10 +117,15 @@ ensure_safety_bin_executable() {
 
 load_state() {
   if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-    cat "${CAMPAIGN_STATE_FILE}"
+    jq 'del(.run_timeout_seconds)' "${CAMPAIGN_STATE_FILE}"
   else
     fresh_init_state
   fi
+}
+
+derive_stuck_after_minutes() {
+  local acpx_timeout_seconds="$1"
+  printf '%s\n' "$(( (acpx_timeout_seconds + 120 + 59) / 60 + 30 ))"
 }
 
 fresh_init_state() {
@@ -131,7 +144,6 @@ fresh_init_state() {
       blocked_cooldown_ticks: null,
       max_concurrent_subagents: 1,
       stuck_after_minutes: 332,
-      run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
       kill_subagent_on_terminal: false,
       kill_subagent_on_done: false,

@@ -55,8 +55,7 @@ Optional fields:
 - `branch`: target branch. When omitted, the wrapper resolves the repository's remote default branch from `origin/HEAD`.
 - `repo_path`: absolute clone parent. `env_paths.sh` derives the final repo root as `${repo_path}/${project}`. Defaults to `/data`.
 - `max_concurrent_subagents`: integer >= 1. Defaults to `1`.
-- `stuck_after_minutes`: integer >= 5. Defaults to `ceil(run_timeout_seconds / 60) + 30`.
-- `run_timeout_seconds`: integer >= 60. Defaults to `acpx_timeout_seconds + 120`.
+- `stuck_after_minutes`: integer >= 5. Defaults to `ceil((acpx_timeout_seconds + 120) / 60) + 30`.
 - `acpx_timeout_seconds`: integer >= 60. Defaults to `18000`.
 - `kill_subagent_on_terminal`: legacy compatibility boolean. Defaults to `false`; terminal child sessions are preserved for diagnosis and no `subagents kill` cleanup is requested.
 - `kill_subagent_on_done`: legacy compatibility boolean, only parsed for validation when `kill_subagent_on_terminal` is omitted.
@@ -70,6 +69,11 @@ Optional fields:
 - `gitlab_address`: verification-only host/protocol check against `config/gitlab.env`; new triggers should omit it.
 
 Unsupported fields are ignored by the shell parser only if they are not referenced by wrappers; operators should not send them. In particular, do not send runtime basename, data directory, or account-pool fields.
+
+Legacy `run_timeout_seconds` is explicitly rejected. OpenClaw 2026.6.11 does
+not accept a per-call subagent timeout; deployments may configure the optional
+global `agents.defaults.subagents.runTimeoutSeconds`. When positive, it should
+be at least `acpx_timeout_seconds + 120`.
 
 ## Callback
 

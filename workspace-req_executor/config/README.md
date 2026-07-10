@@ -52,6 +52,32 @@ The runner has to know where to clone repositories before it can read issue cont
 
 Do not put branch, per-project quota, timeout, token, runtime basename, project data directory, or account-pool fields in `campaign_defaults.env`.
 
+## OpenClaw subagent timeout
+
+OpenClaw 2026.6.11 rejects per-call `timeoutSeconds` and
+`runTimeoutSeconds` fields on `sessions_spawn`. The optional outer limit is a
+global runtime setting:
+
+```bash
+openclaw config get agents.defaults.subagents.runTimeoutSeconds
+openclaw config validate
+```
+
+The gateway hot-applies valid `agents.*` changes. Run these commands as the
+same service account and with the same OpenClaw profile/config path used by the
+gateway; otherwise they may inspect a different `~/.openclaw/openclaw.json`.
+The value is global across all agents. When positive, choose at least the
+largest deployed `acpx_timeout_seconds + 120`; for a 36000-second acpx budget,
+use at least `36120`.
+
+The absence of a timeout parameter in the `sessions_spawn` tool call is
+expected and does not mean the global timeout was dropped.
+
+If logs report that an outer `GITLAB_TOKEN` differs from the deployment pin,
+remember that the process environment wins by contract. Update or unset the
+stale token in the OpenClaw service environment if `config/gitlab.env` should
+provide the fallback; never print either token while diagnosing.
+
 ## Runtime Layout
 
 `req_executor` stores its own state under the fixed in-repo directory `${REPO_PATH}/.req_executor/`. This directory is not configurable through trigger fields or tracked config. `clone_or_pull.sh` adds `/.req_executor/` and `logs/` to the local `.git/info/exclude`; `stage_and_guard.sh` force-adds only the current issue's output directory and removes `${LOG_DIR}` plus any `logs/` path from the commit index.

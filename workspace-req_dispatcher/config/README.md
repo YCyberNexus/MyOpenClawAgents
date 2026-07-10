@@ -33,6 +33,24 @@
 | `DISPATCHER_CALLBACK_TARGET` | 否 | 结果回调目标：调用 `req_executor` 的 `RUN_SINGLE_ISSUE` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。支持 `agent:req_dispatcher:main` 这类 session key selector 或裸 agent 名；留空＝该字段为空，执行器侧回调 no-op。 |
 | 跨 agent 调用契约 | 已定 | `scripts/run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>`；普通调用默认 `agent:<target>:main`，`RUN_SINGLE_ISSUE` 默认 `agent:<target>:issue-<sanitized-project>-<iid>`；旧 `TARGET_SESSION_ID` 输入仅作兼容且同样转为 `--session-key`，但 `RUN_SINGLE_ISSUE` 显式传 `agent:<target>:main` 时会改投 issue 级 session；CLI 使用 runner 已配置的 OpenClaw Gateway，不在本文件重复 pin 网关地址/token。 |
 
+## 两类 timeout 的边界
+
+`req_dispatcher` 的 `EXECUTOR_AGENT_TIMEOUT_SECONDS` 控制同步
+`openclaw agent --timeout` CLI 等待，必须继续保留。它与
+`agents.defaults.subagents.runTimeoutSeconds` 不是同一个参数：后者由
+OpenClaw 运行时内部应用到 `req_executor` 派发的匿名 subagent，允许缺失
+或为 `0`，也不会显示在单次 `sessions_spawn` 调用中。
+
+若全局 subagent timeout 为正数，应至少覆盖所有直接派发 agent 中最大的
+`acpx_timeout_seconds + 120`。当前 `acpx_auto_tester` 使用 36000 秒预算时，
+全局值至少为 `36120`；`18120` 只覆盖默认 18000 秒预算。检查配置时必须
+使用网关相同的 service account 和 OpenClaw profile/config path：
+
+```bash
+openclaw config get agents.defaults.subagents.runTimeoutSeconds
+openclaw config validate
+```
+
 ## `routing.env`（多 project 路由表）
 
 当 action 是 `execute_issue` 或 `create_and_execute` 时，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 调用队首 `<executor> RUN_SINGLE_ISSUE`。只建单 action 不查本表、不入 executor queue。消费方 `scripts/route_project.sh`。

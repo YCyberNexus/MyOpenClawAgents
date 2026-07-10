@@ -1,5 +1,7 @@
 # req_dispatcher 主动端到端编排设计（方案 B）
 
+> **2026-07-10 兼容性说明：** 本文记录历史决策，不再作为当前运行时调用契约。req_dispatcher 当前通过 `openclaw agent --agent ... --session-key ... --message ... --timeout ...` 调用命名下游 agent；它不调用 `sessions_spawn`。req_executor 内部若派发匿名子代理，任务正文使用 `task`，不传逐次 timeout 参数。
+
 > 状态：**已与用户对齐方向，部分跨团队/部署项待对齐**。本设计把"企微需求 → 自动处理"链路从
 > **被动标签衔接（req_dispatcher 建带标签 issue → 独立 cron 捞起）** 改为
 > **req_dispatcher 主动端到端编排（链式 spawn git_issuer → req_executor，执行结果回流 req_dispatcher → 推回用户）**。
