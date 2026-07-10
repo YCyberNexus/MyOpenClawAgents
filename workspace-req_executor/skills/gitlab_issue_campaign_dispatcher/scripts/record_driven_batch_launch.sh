@@ -5,10 +5,22 @@ set -euo pipefail
 
 RECORD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORDED_AT="${NOW_EPOCH:-$(date +%s)}"
+PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
+CLAIM_TOKEN_INPUT="${CLAIM_TOKEN:-}"
 
 record_die() {
   echo "record_driven_batch_launch.sh: $1" >&2
   exit "${2:-2}"
+}
+
+generate_claim_token() {
+  local job_id="$1"
+  local generation="$2"
+
+  printf 'claim-v1:%s:%s:%s:%s:%04x%04x%04x%04x%04x%04x%04x%04x' \
+    "${job_id}" "${generation}" "${RECORDED_AT}" "$$" \
+    "${RANDOM}" "${RANDOM}" "${RANDOM}" "${RANDOM}" \
+    "${RANDOM}" "${RANDOM}" "${RANDOM}" "${RANDOM}"
 }
 
 atomic_write_json() {
@@ -64,7 +76,21 @@ recover_pending_transaction() {
           (.value.reservation_seq | type == "number"
             and . == floor and . > 0)
           and (.value.updated_at | type == "number"
-            and . == floor and . >= 0)))
+            and . == floor and . >= 0)
+          and (.value.claim_generation | type == "number"
+            and . == floor and . >= 0)
+          and ((.value.claim_token == null)
+            or (.value.claim_token | type == "string" and length > 0))
+          and (if (.value | has("legacy_running"))
+            then .value.legacy_running == true
+              and .value.status == "running"
+              and .value.claim_generation == 0
+              and .value.claim_token == null
+            elif .value.status == "reserved"
+            then .value.claim_token == null
+            else (.value.status == "preparing" or .value.status == "running")
+              and (.value.claim_token | type == "string" and length > 0)
+            end)))
         and (([.scheduler_state.active_jobs[].reservation_seq] | length)
           == ([.scheduler_state.active_jobs[].reservation_seq] | unique | length))
         and (.scheduler_state.batch_order | type == "array")
@@ -112,9 +138,27 @@ esac
 case "${RECORDED_AT}" in
   ''|*[!0-9]*) record_die "NOW_EPOCH must be a non-negative integer" ;;
 esac
+case "${PREPARING_LEASE_SECONDS}" in
+  ''|*[!0-9]*) record_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer" ;;
+esac
+if [[ "${PREPARING_LEASE_SECONDS}" =~ ^0+$ ]]; then
+  record_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer"
+fi
+case "${CLAIM_TOKEN_INPUT}" in
+  *$'\n'*|*$'\r'*|*$'\t'*) record_die "CLAIM_TOKEN contains control characters" ;;
+esac
 
 # shellcheck disable=SC1091
 source "${RECORD_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
+
+# Keep the migration implementation single-sourced in reserve. Its private
+# migration-only entry point takes and releases the same scheduler lock, runs
+# no scheduling pass, and leaves a strictly validated state for record.
+CONFIG_DIR="${CONFIG_DIR}" \
+  NOW_EPOCH="${RECORDED_AT}" \
+  DRIVEN_PREPARING_LEASE_SECONDS="${PREPARING_LEASE_SECONDS}" \
+  DRIVEN_SCHEDULER_MIGRATION_ONLY=1 \
+  bash "${RECORD_SCRIPT_DIR}/reserve_driven_batch_items.sh" >/dev/null
 
 exec {SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
 flock -x "${SCHEDULER_LOCK_FD}"
@@ -126,6 +170,23 @@ SCHEDULER_STATE="$(jq -ce '
     and .version == 1
     and (.active_jobs | type == "object")
     and (.batch_order | type == "array")
+    and (.active_jobs | to_entries | all(
+      (.value.reservation_seq | type == "number" and . == floor and . > 0)
+      and (.value.claim_generation | type == "number" and . == floor and . >= 0)
+      and ((.value.claim_token == null)
+        or (.value.claim_token | type == "string" and length > 0))
+      and (if (.value | has("legacy_running"))
+        then .value.legacy_running == true
+          and .value.status == "running"
+          and .value.claim_generation == 0
+          and .value.claim_token == null
+        elif .value.status == "reserved"
+        then .value.claim_token == null
+        else (.value.status == "preparing" or .value.status == "running")
+          and (.value.claim_token | type == "string" and length > 0)
+        end)))
+    and (([.active_jobs[].reservation_seq] | length)
+      == ([.active_jobs[].reservation_seq] | unique | length))
   then .
   else error("invalid scheduler state")
   end
@@ -148,6 +209,18 @@ JOB_JSON="$(jq -ce --arg job_id "${JOB_ID}" '
       and (.status == "reserved" or .status == "preparing" or .status == "running")
       and (.reservation_seq | type == "number" and . == floor and . > 0)
       and (.updated_at | type == "number" and . == floor and . >= 0)
+      and (.claim_generation | type == "number" and . == floor and . >= 0)
+      and ((.claim_token == null) or (.claim_token | type == "string" and length > 0))
+      and (if has("legacy_running")
+        then .legacy_running == true
+          and .status == "running"
+          and .claim_generation == 0
+          and .claim_token == null
+        elif .status == "reserved"
+        then .claim_token == null
+        else (.status == "preparing" or .status == "running")
+          and (.claim_token | type == "string" and length > 0)
+        end)
       and (.owner | type == "object")
       and (.owner.batch_id | type == "string")
       and (.owner.snapshot_index | type == "number" and . == floor and . >= 0)
@@ -161,12 +234,57 @@ JOB_JSON="$(jq -ce --arg job_id "${JOB_ID}" '
     end
 ' <<<"${SCHEDULER_STATE}")" || record_die "active job state is invalid: ${JOB_ID}" 3
 CURRENT_STATUS="$(jq -r '.status' <<<"${JOB_JSON}")"
+CURRENT_CLAIM_GENERATION="$(jq -r '.claim_generation' <<<"${JOB_JSON}")"
+CURRENT_CLAIM_TOKEN="$(jq -r '.claim_token // empty' <<<"${JOB_JSON}")"
+IS_LEGACY_RUNNING="$(jq -r '.legacy_running // false' <<<"${JOB_JSON}")"
 SHOULD_SPAWN=false
+RESPONSE_CLAIM_TOKEN=""
+NEXT_CLAIM_GENERATION="${CURRENT_CLAIM_GENERATION}"
+NEXT_CLAIM_TOKEN="${CURRENT_CLAIM_TOKEN}"
 
-case "${STATUS}:${CURRENT_STATUS}" in
-  preparing:reserved|preparing:preparing|spawned:reserved|spawned:preparing|spawned:running|launch_failed:reserved|launch_failed:preparing|terminal:*) ;;
-  *) record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3 ;;
-esac
+if [ "${CURRENT_STATUS}" = preparing ]; then
+  claim_expired="$(jq -nr \
+    --argjson now "${RECORDED_AT}" \
+    --argjson updated_at "$(jq -r '.updated_at' <<<"${JOB_JSON}")" \
+    --arg lease_seconds "${PREPARING_LEASE_SECONDS}" '
+    ($lease_seconds | tonumber) as $lease
+    | (($now - $updated_at) >= $lease)
+  ')"
+  if [ "${claim_expired}" = true ]; then
+    record_die "preparing claim lease expired: ${JOB_ID}" 3
+  fi
+fi
+
+if [ "${IS_LEGACY_RUNNING}" = true ]; then
+  if [ "${STATUS}" != terminal ] || [ -n "${CLAIM_TOKEN_INPUT}" ]; then
+    record_die "legacy running job only accepts terminal without CLAIM_TOKEN: ${JOB_ID}" 3
+  fi
+else
+  case "${STATUS}:${CURRENT_STATUS}" in
+    preparing:reserved|preparing:preparing) ;;
+    spawned:preparing|spawned:running) ;;
+    launch_failed:reserved|launch_failed:preparing) ;;
+    terminal:reserved|terminal:preparing|terminal:running) ;;
+    *) record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3 ;;
+  esac
+
+  case "${STATUS}" in
+    spawned)
+      [ -n "${CURRENT_CLAIM_TOKEN}" ] \
+        && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] || \
+        record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
+      ;;
+    launch_failed|terminal)
+      if [ "${CURRENT_STATUS}" = preparing ] || [ "${CURRENT_STATUS}" = running ]; then
+        [ -n "${CURRENT_CLAIM_TOKEN}" ] \
+          && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] || \
+          record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
+      elif [ "${CURRENT_CLAIM_GENERATION}" -ne 0 ] || [ -n "${CLAIM_TOKEN_INPUT}" ]; then
+        record_die "reserved job has no current claim: ${JOB_ID}" 3
+      fi
+      ;;
+  esac
+fi
 
 case "${STATUS}" in
   preparing) NEXT_JOB_STATUS=preparing ;;
@@ -177,6 +295,9 @@ esac
 
 if [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = reserved ]; then
   SHOULD_SPAWN=true
+  NEXT_CLAIM_GENERATION=$((CURRENT_CLAIM_GENERATION + 1))
+  NEXT_CLAIM_TOKEN="$(generate_claim_token "${JOB_ID}" "${NEXT_CLAIM_GENERATION}")"
+  RESPONSE_CLAIM_TOKEN="${NEXT_CLAIM_TOKEN}"
 elif [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = preparing ]; then
   # The lock makes the first reserved -> preparing transition the sole spawn
   # claim. A duplicate caller observes the existing claim without refreshing
@@ -189,8 +310,10 @@ elif [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = preparing ]; then
     --arg job_status "${NEXT_JOB_STATUS}" \
     --argjson active_count "${ACTIVE_COUNT}" \
     --argjson should_spawn false \
+    --argjson claim_token null \
     '{status:"recorded",job_id:$job_id,job_status:$job_status,
-      active_count:$active_count,should_spawn:$should_spawn}'
+      active_count:$active_count,should_spawn:$should_spawn,
+      claim_token:$claim_token}'
   exit 0
 fi
 
@@ -273,7 +396,19 @@ while IFS=$'\t' read -r batch_id snapshot_index; do
   CHANGED_BATCHES["${batch_id}"]=1
 done < <(jq -r '.memberships[] | [.batch_id, (.snapshot_index | tostring)] | @tsv' <<<"${JOB_JSON}")
 
-if [ "${STATUS}" = preparing ] || [ "${STATUS}" = spawned ]; then
+if [ "${STATUS}" = preparing ]; then
+  SCHEDULER_STATE="$(jq -c \
+    --arg job_id "${JOB_ID}" \
+    --arg status "${NEXT_JOB_STATUS}" \
+    --argjson recorded_at "${RECORDED_AT}" \
+    --argjson claim_generation "${NEXT_CLAIM_GENERATION}" \
+    --arg claim_token "${NEXT_CLAIM_TOKEN}" '
+    .active_jobs[$job_id].status = $status
+    | .active_jobs[$job_id].updated_at = $recorded_at
+    | .active_jobs[$job_id].claim_generation = $claim_generation
+    | .active_jobs[$job_id].claim_token = $claim_token
+  ' <<<"${SCHEDULER_STATE}")"
+elif [ "${STATUS}" = spawned ]; then
   SCHEDULER_STATE="$(jq -c \
     --arg job_id "${JOB_ID}" \
     --arg status "${NEXT_JOB_STATUS}" \
@@ -320,5 +455,7 @@ jq -cn \
   --arg job_status "${NEXT_JOB_STATUS}" \
   --argjson active_count "${ACTIVE_COUNT}" \
   --argjson should_spawn "${SHOULD_SPAWN}" \
+  --arg claim_token "${RESPONSE_CLAIM_TOKEN}" \
   '{status:"recorded",job_id:$job_id,job_status:$job_status,
-    active_count:$active_count,should_spawn:$should_spawn}'
+    active_count:$active_count,should_spawn:$should_spawn,
+    claim_token:(if $should_spawn then $claim_token else null end)}'

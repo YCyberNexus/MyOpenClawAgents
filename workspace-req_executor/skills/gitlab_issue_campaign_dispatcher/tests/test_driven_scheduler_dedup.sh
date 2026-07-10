@@ -108,17 +108,23 @@ jq -e --arg job_id "${a_job_id}" '
   and .memberships["0"].blocked_by_job_id == $job_id
 ' "${SCHEDULER_ROOT}/batches/D/state.json" >/dev/null
 
+declare -A CLAIM_TOKENS=()
 while IFS= read -r reserved_job_id; do
-  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${reserved_job_id}" STATUS=preparing \
-    bash "${RECORD}" >/dev/null
+  claim_output="$(
+    CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${reserved_job_id}" STATUS=preparing \
+      bash "${RECORD}"
+  )"
+  CLAIM_TOKENS["${reserved_job_id}"]="$(jq -r '.claim_token' <<<"${claim_output}")"
 done < <(jq -r '.grants[].job_id' <<<"${first_reserve}")
 
 spawned_once="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${e_job_id}" STATUS=spawned \
+    CLAIM_TOKEN="${CLAIM_TOKENS[${e_job_id}]}" \
     bash "${RECORD}"
 )"
 spawned_again="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${e_job_id}" STATUS=spawned \
+    CLAIM_TOKEN="${CLAIM_TOKENS[${e_job_id}]}" \
     bash "${RECORD}"
 )"
 jq -e '.job_status == "running" and .should_spawn == false' \
@@ -164,6 +170,7 @@ jq -e --arg job_id "${a_job_id}" '
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${CLAIM_TOKENS[${a_job_id}]}" \
   bash "${RECORD}" >/dev/null
 jq -e '
   .status == "completed"
@@ -189,14 +196,18 @@ jq -e '
   and (.memberships["0"] | has("blocked_by_job_id") | not)
 ' "${SCHEDULER_ROOT}/batches/D/state.json" >/dev/null
 
-CONFIG_DIR="${CONFIG_DIR}" JOB_ID="$(jq -r '.grants[0].job_id' <<<"${after_terminal}")" STATUS=preparing \
-  bash "${RECORD}" >/dev/null
+d_claim_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="$(jq -r '.grants[0].job_id' <<<"${after_terminal}")" STATUS=preparing \
+    bash "${RECORD}"
+)"
+d_claim_token="$(jq -r '.claim_token' <<<"${d_claim_output}")"
 final_replay="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
 jq -e '.grants == [] and .active_count == 2' <<<"${final_replay}" >/dev/null
 
 d_job_id="$(jq -r '.grants[0].job_id' <<<"${after_terminal}")"
 launch_failed_out="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${d_job_id}" STATUS=launch_failed \
+    CLAIM_TOKEN="${d_claim_token}" \
     bash "${RECORD}"
 )"
 jq -e '.job_status == "launch_failed" and .active_count == 1' \
@@ -428,5 +439,147 @@ jq -e '
   .memberships["0"].status == "pending"
   and (.memberships["0"].blocked_by_job_id | type == "string")
 ' "${SCHEDULER_ROOT}/batches/FRESH/state.json" >/dev/null
+
+# An old pending transaction must be migrated before recovery validates its
+# nested scheduler state. record is deliberately the first entry point: it
+# must preserve old reserved work, roll old preparing back, and let only the
+# legacy running job finish without a token.
+SCHEDULER_ROOT="${TEST_ROOT}/legacy-pending-scheduler"
+CONFIG_DIR="${TEST_ROOT}/legacy-pending-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=3' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_single_fixture Q group/pending 41 main false
+create_single_fixture W group/pending 42 main false
+create_single_fixture Z group/pending 43 main false
+
+for pending_spec in 'Q 41 reserved' 'W 42 preparing' 'Z 43 running'; do
+  pending_batch_id="${pending_spec%% *}"
+  pending_rest="${pending_spec#* }"
+  pending_iid="${pending_rest%% *}"
+  pending_status="${pending_rest#* }"
+  pending_job_id="${pending_batch_id}:snapshot-0"
+  jq \
+    --arg status "${pending_status}" \
+    --arg job_id "${pending_job_id}" \
+    --argjson iid "${pending_iid}" '
+    .status = "running"
+    | .next_snapshot_index = 1
+    | .memberships["0"] = {
+        snapshot_index:0,
+        iid:$iid,
+        status:$status,
+        job_id:$job_id
+      }
+  ' "${SCHEDULER_ROOT}/batches/${pending_batch_id}/state.json" \
+    >"${TEST_ROOT}/legacy-pending-${pending_batch_id}.json"
+done
+
+jq -cnS \
+  --slurpfile q_state "${TEST_ROOT}/legacy-pending-Q.json" \
+  --slurpfile w_state "${TEST_ROOT}/legacy-pending-W.json" \
+  --slurpfile z_state "${TEST_ROOT}/legacy-pending-Z.json" '{
+  version:1,
+  round_robin_cursor:null,
+  active_jobs:{},
+  batch_order:["Q","W","Z"],
+  pending_transaction:{
+    version:1,
+    scheduler_state:{
+      version:1,
+      round_robin_cursor:"Z",
+      batch_order:["Q","W","Z"],
+      active_jobs:{
+        "Q:snapshot-0":{
+          job_id:"Q:snapshot-0",physical_key:"group/pending#41",
+          project:"group/pending",iid:41,branch:"main",entry_mode:"auto",
+          force_rerun_pr:false,status:"reserved",reserved_at:90,updated_at:90,
+          owner:{batch_id:"Q",snapshot_index:0},
+          memberships:[{batch_id:"Q",snapshot_index:0}]
+        },
+        "W:snapshot-0":{
+          job_id:"W:snapshot-0",physical_key:"group/pending#42",
+          project:"group/pending",iid:42,branch:"main",entry_mode:"auto",
+          force_rerun_pr:false,status:"preparing",reserved_at:90,updated_at:91,
+          owner:{batch_id:"W",snapshot_index:0},
+          memberships:[{batch_id:"W",snapshot_index:0}]
+        },
+        "Z:snapshot-0":{
+          job_id:"Z:snapshot-0",physical_key:"group/pending#43",
+          project:"group/pending",iid:43,branch:"main",entry_mode:"auto",
+          force_rerun_pr:false,status:"running",reserved_at:80,updated_at:92,
+          owner:{batch_id:"Z",snapshot_index:0},
+          memberships:[{batch_id:"Z",snapshot_index:0}]
+        }
+      }
+    },
+    batch_states:{Q:$q_state[0],W:$w_state[0],Z:$z_state[0]}
+  }
+}' >"${SCHEDULER_ROOT}/scheduler_state.json"
+
+set +e
+legacy_pending_terminal="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='Z:snapshot-0' STATUS=terminal \
+    NOW_EPOCH=300 bash "${RECORD}" 2>&1
+)"
+legacy_pending_status=$?
+set -e
+if [ "${legacy_pending_status}" -ne 0 ]; then
+  echo "expected legacy pending transaction recovery to succeed, got ${legacy_pending_status}: ${legacy_pending_terminal}" >&2
+  exit 1
+fi
+jq -e '.job_status == "terminal" and .active_count == 2' \
+  <<<"${legacy_pending_terminal}" >/dev/null
+jq -e '.memberships["0"].status == "terminal"' \
+  "${SCHEDULER_ROOT}/batches/Z/state.json" >/dev/null
+
+legacy_pending_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=301 bash "${RESERVE}"
+)"
+if ! jq -e '
+  [.grants[] | {batch_id,iid}] == [
+    {batch_id:"Q",iid:41},
+    {batch_id:"W",iid:42}
+  ]
+  and .active_count == 2
+  and .available_slots == 1
+' <<<"${legacy_pending_reserve}" >/dev/null; then
+  echo "expected migrated pending grants without legacy running replay, got ${legacy_pending_reserve}" >&2
+  exit 1
+fi
+jq -e '
+  (.pending_transaction | not)
+  and .active_jobs["Q:snapshot-0"].reservation_seq == 2
+  and .active_jobs["Q:snapshot-0"].claim_generation == 0
+  and .active_jobs["Q:snapshot-0"].claim_token == null
+  and .active_jobs["W:snapshot-0"].reservation_seq == 3
+  and .active_jobs["W:snapshot-0"].status == "reserved"
+  and .active_jobs["W:snapshot-0"].claim_generation == 0
+  and .active_jobs["W:snapshot-0"].claim_token == null
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+jq -e '.memberships["0"].status == "reserved"' \
+  "${SCHEDULER_ROOT}/batches/W/state.json" >/dev/null
+
+legacy_w_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=preparing \
+    NOW_EPOCH=302 bash "${RECORD}"
+)"
+legacy_w_token="$(jq -r '.claim_token' <<<"${legacy_w_claim}")"
+jq -e '
+  .should_spawn == true
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${legacy_w_claim}" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=spawned \
+  CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=303 \
+  bash "${RECORD}" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=terminal \
+  CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=304 \
+  bash "${RECORD}" >/dev/null
+jq -e '.active_jobs | has("W:snapshot-0") | not' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 echo 'ok driven scheduler dedup'

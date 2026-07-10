@@ -131,22 +131,53 @@ jq -e '
 ' "${SCHEDULER_ROOT}/batches/B/state.json" >/dev/null
 
 a1_job_id="$(jq -r '.grants[] | select(.batch_id == "A" and .iid == 1) | .job_id' <<<"${first_reserve}")"
+reserved_scheduler_before="$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")"
+reserved_batch_before="$(jq -cS . "${SCHEDULER_ROOT}/batches/A/state.json")"
+set +e
+reserved_spawn_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=spawned \
+    bash "${RECORD}" 2>&1
+)"
+reserved_spawn_status=$?
+set -e
+if [ "${reserved_spawn_status}" -ne 3 ]; then
+  echo "expected spawned:reserved to exit 3, got ${reserved_spawn_status}: ${reserved_spawn_output}" >&2
+  exit 1
+fi
+[ "$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")" = "${reserved_scheduler_before}" ] || {
+  echo "expected rejected spawned:reserved to leave scheduler state unchanged" >&2
+  exit 1
+}
+[ "$(jq -cS . "${SCHEDULER_ROOT}/batches/A/state.json")" = "${reserved_batch_before}" ] || {
+  echo "expected rejected spawned:reserved to leave batch state unchanged" >&2
+  exit 1
+}
+
 first_claim="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=preparing \
     bash "${RECORD}"
 )"
-if ! jq -e '.job_status == "preparing" and .should_spawn == true' \
+if ! jq -e '
+  .job_status == "preparing"
+  and .should_spawn == true
+  and (.claim_token | type == "string" and length > 0)
+' \
   <<<"${first_claim}" >/dev/null; then
-  echo "expected first preparing claim to set should_spawn=true, got ${first_claim}" >&2
+  echo "expected first preparing claim to return an actionable token, got ${first_claim}" >&2
   exit 1
 fi
+a1_claim_token="$(jq -r '.claim_token' <<<"${first_claim}")"
 duplicate_claim="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=preparing \
     bash "${RECORD}"
 )"
-if ! jq -e '.job_status == "preparing" and .should_spawn == false' \
+if ! jq -e '
+  .job_status == "preparing"
+  and .should_spawn == false
+  and .claim_token == null
+' \
   <<<"${duplicate_claim}" >/dev/null; then
-  echo "expected duplicate preparing claim to set should_spawn=false, got ${duplicate_claim}" >&2
+  echo "expected duplicate preparing claim to withhold an actionable token, got ${duplicate_claim}" >&2
   exit 1
 fi
 while IFS= read -r reserved_job_id; do
@@ -155,6 +186,7 @@ while IFS= read -r reserved_job_id; do
 done < <(jq -r --arg a1_job_id "${a1_job_id}" \
   '.grants[].job_id | select(. != $a1_job_id)' <<<"${first_reserve}")
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=spawned \
+  CLAIM_TOKEN="${a1_claim_token}" \
   bash "${RECORD}" >/dev/null
 
 set +e
@@ -181,6 +213,7 @@ jq -e --arg job_id "${a1_job_id}" \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${a1_claim_token}" \
   bash "${RECORD}" >/dev/null
 
 # This is a fresh process invocation: the next choice must start after the
@@ -329,13 +362,28 @@ jq -e '
 lease_sequences_before="$(jq -c '
   [.active_jobs[] | {job_id,reservation_seq}] | sort_by(.reservation_seq)
 ' "${LEASE_ROOT}/scheduler_state.json")"
-while IFS= read -r lease_job_id; do
-  lease_claim="$(
-    CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=preparing \
-      NOW_EPOCH=101 bash "${RECORD}"
-  )"
-  jq -e '.should_spawn == true' <<<"${lease_claim}" >/dev/null
-done < <(jq -r '.grants[].job_id' <<<"${lease_first_reserve}")
+lease_job_id="$(jq -r '.grants[0].job_id' <<<"${lease_first_reserve}")"
+lease_other_job_id="$(jq -r '.grants[1].job_id' <<<"${lease_first_reserve}")"
+lease_claim1="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=preparing \
+    NOW_EPOCH=101 bash "${RECORD}"
+)"
+if ! jq -e '
+  .should_spawn == true
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${lease_claim1}" >/dev/null; then
+  echo "expected lease claim1 to return an actionable token, got ${lease_claim1}" >&2
+  exit 1
+fi
+lease_claim1_token="$(jq -r '.claim_token' <<<"${lease_claim1}")"
+lease_other_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_other_job_id}" STATUS=preparing \
+    NOW_EPOCH=101 bash "${RECORD}"
+)"
+jq -e '
+  .should_spawn == true
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${lease_other_claim}" >/dev/null
 
 before_lease_expiry="$(
   CONFIG_DIR="${CONFIG_DIR}" \
@@ -351,6 +399,32 @@ if ! jq -e '
   echo "expected preparing grants to stay claimed before lease expiry, got ${before_lease_expiry}" >&2
   exit 1
 fi
+
+# record must reject an expired token even if reserve has not yet performed the
+# lease rollback. The rejected stale transition may not mutate either file.
+expired_record_scheduler_before="$(jq -cS . "${LEASE_ROOT}/scheduler_state.json")"
+expired_record_batch_before="$(jq -cS . "${LEASE_ROOT}/batches/L/state.json")"
+set +e
+expired_record_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=spawned \
+    CLAIM_TOKEN="${lease_claim1_token}" \
+    DRIVEN_PREPARING_LEASE_SECONDS=10 NOW_EPOCH=112 \
+    bash "${RECORD}" 2>&1
+)"
+expired_record_status=$?
+set -e
+if [ "${expired_record_status}" -ne 3 ]; then
+  echo "expected record to reject an expired preparing token with exit 3, got ${expired_record_status}: ${expired_record_output}" >&2
+  exit 1
+fi
+[ "$(jq -cS . "${LEASE_ROOT}/scheduler_state.json")" = "${expired_record_scheduler_before}" ] || {
+  echo "expected expired token rejection to leave scheduler state unchanged" >&2
+  exit 1
+}
+[ "$(jq -cS . "${LEASE_ROOT}/batches/L/state.json")" = "${expired_record_batch_before}" ] || {
+  echo "expected expired token rejection to leave batch state unchanged" >&2
+  exit 1
+}
 
 after_lease_expiry="$(
   CONFIG_DIR="${CONFIG_DIR}" \
@@ -376,6 +450,79 @@ jq -e '
 jq -e '
   [.memberships[].status] == ["reserved","reserved"]
 ' "${LEASE_ROOT}/batches/L/state.json" >/dev/null
+jq -e --arg job_id "${lease_job_id}" '
+  .active_jobs[$job_id].claim_generation == 1
+  and .active_jobs[$job_id].claim_token == null
+' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
+
+lease_claim2="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=preparing \
+    NOW_EPOCH=113 bash "${RECORD}"
+)"
+if ! jq -e '
+  .should_spawn == true
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${lease_claim2}" >/dev/null; then
+  echo "expected lease claim2 to return an actionable token, got ${lease_claim2}" >&2
+  exit 1
+fi
+lease_claim2_token="$(jq -r '.claim_token' <<<"${lease_claim2}")"
+if [ "${lease_claim2_token}" = "${lease_claim1_token}" ]; then
+  echo "expected lease claim2 token to differ from claim1 token" >&2
+  exit 1
+fi
+jq -e --arg job_id "${lease_job_id}" --arg token "${lease_claim2_token}" '
+  .active_jobs[$job_id].claim_generation == 2
+  and .active_jobs[$job_id].claim_token == $token
+' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
+
+for stale_status in spawned launch_failed terminal; do
+  stale_scheduler_before="$(jq -cS . "${LEASE_ROOT}/scheduler_state.json")"
+  stale_batch_before="$(jq -cS . "${LEASE_ROOT}/batches/L/state.json")"
+  set +e
+  stale_output="$(
+    CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS="${stale_status}" \
+      CLAIM_TOKEN="${lease_claim1_token}" \
+      DRIVEN_PREPARING_LEASE_SECONDS=10 NOW_EPOCH=114 \
+      bash "${RECORD}" 2>&1
+  )"
+  stale_status_code=$?
+  set -e
+  if [ "${stale_status_code}" -ne 3 ]; then
+    echo "expected stale claim1 ${stale_status} to exit 3, got ${stale_status_code}: ${stale_output}" >&2
+    exit 1
+  fi
+  [ "$(jq -cS . "${LEASE_ROOT}/scheduler_state.json")" = "${stale_scheduler_before}" ] || {
+    echo "expected stale claim1 ${stale_status} to leave scheduler state unchanged" >&2
+    exit 1
+  }
+  [ "$(jq -cS . "${LEASE_ROOT}/batches/L/state.json")" = "${stale_batch_before}" ] || {
+    echo "expected stale claim1 ${stale_status} to leave batch state unchanged" >&2
+    exit 1
+  }
+done
+
+claim2_spawned="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=spawned \
+    CLAIM_TOKEN="${lease_claim2_token}" NOW_EPOCH=115 \
+    bash "${RECORD}"
+)"
+jq -e '.job_status == "running"' <<<"${claim2_spawned}" >/dev/null
+claim2_spawned_replay="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=spawned \
+    CLAIM_TOKEN="${lease_claim2_token}" NOW_EPOCH=116 \
+    bash "${RECORD}"
+)"
+jq -e '.job_status == "running"' <<<"${claim2_spawned_replay}" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${lease_claim2_token}" NOW_EPOCH=117 \
+  bash "${RECORD}" >/dev/null
+jq -e --arg job_id "${lease_job_id}" '
+  (.active_jobs | has($job_id) | not)
+' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
+jq -e '
+  .memberships["0"].status == "terminal"
+' "${LEASE_ROOT}/batches/L/state.json" >/dev/null
 
 set +e
 invalid_lease_output="$(
@@ -389,5 +536,156 @@ if [ "${invalid_lease_status}" -ne 2 ]; then
   echo "expected zero preparing lease to exit 2, got ${invalid_lease_status}: ${invalid_lease_output}" >&2
   exit 1
 fi
+
+# Migrate an old version=1 normal state before strict schema validation. Old
+# reserved work remains replayable, old preparing rolls back to reserved, and
+# old running keeps its physical lock without becoming spawnable again.
+MIGRATION_ROOT="${TEST_ROOT}/legacy-normal-scheduler"
+CONFIG_DIR="${TEST_ROOT}/legacy-normal-config"
+SCHEDULER_ROOT="${MIGRATION_ROOT}"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${MIGRATION_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=3' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_batch_fixture R '[31]'
+create_batch_fixture P '[32]'
+create_batch_fixture N '[33]'
+
+for legacy_spec in 'R 31 reserved' 'P 32 preparing' 'N 33 running'; do
+  legacy_batch_id="${legacy_spec%% *}"
+  legacy_rest="${legacy_spec#* }"
+  legacy_iid="${legacy_rest%% *}"
+  legacy_status="${legacy_rest#* }"
+  legacy_job_id="${legacy_batch_id}:snapshot-0"
+  jq \
+    --arg status "${legacy_status}" \
+    --arg job_id "${legacy_job_id}" \
+    --argjson iid "${legacy_iid}" '
+    .status = "running"
+    | .next_snapshot_index = 1
+    | .memberships["0"] = {
+        snapshot_index:0,
+        iid:$iid,
+        status:$status,
+        job_id:$job_id
+      }
+  ' "${MIGRATION_ROOT}/batches/${legacy_batch_id}/state.json" \
+    >"${MIGRATION_ROOT}/batches/${legacy_batch_id}/state.next.json"
+  /bin/mv "${MIGRATION_ROOT}/batches/${legacy_batch_id}/state.next.json" \
+    "${MIGRATION_ROOT}/batches/${legacy_batch_id}/state.json"
+done
+
+jq -cnS '{
+  version:1,
+  round_robin_cursor:"N",
+  batch_order:["R","P","N"],
+  active_jobs:{
+    "R:snapshot-0":{
+      job_id:"R:snapshot-0",physical_key:"group/repo#31",
+      project:"group/repo",iid:31,branch:"main",entry_mode:"auto",
+      force_rerun_pr:false,status:"reserved",reserved_at:100,updated_at:100,
+      owner:{batch_id:"R",snapshot_index:0},
+      memberships:[{batch_id:"R",snapshot_index:0}]
+    },
+    "P:snapshot-0":{
+      job_id:"P:snapshot-0",physical_key:"group/repo#32",
+      project:"group/repo",iid:32,branch:"main",entry_mode:"auto",
+      force_rerun_pr:false,status:"preparing",reserved_at:100,updated_at:101,
+      owner:{batch_id:"P",snapshot_index:0},
+      memberships:[{batch_id:"P",snapshot_index:0}]
+    },
+    "N:snapshot-0":{
+      job_id:"N:snapshot-0",physical_key:"group/repo#33",
+      project:"group/repo",iid:33,branch:"main",entry_mode:"auto",
+      force_rerun_pr:false,status:"running",reserved_at:90,updated_at:102,
+      owner:{batch_id:"N",snapshot_index:0},
+      memberships:[{batch_id:"N",snapshot_index:0}]
+    }
+  }
+}' >"${MIGRATION_ROOT}/scheduler_state.json"
+
+set +e
+legacy_normal_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=200 bash "${RESERVE}" 2>&1
+)"
+legacy_normal_status=$?
+set -e
+if [ "${legacy_normal_status}" -ne 0 ]; then
+  echo "expected legacy normal state migration to succeed, got ${legacy_normal_status}: ${legacy_normal_output}" >&2
+  exit 1
+fi
+if ! jq -e '
+  [.grants[] | {batch_id,iid}] == [
+    {batch_id:"P",iid:32},
+    {batch_id:"R",iid:31}
+  ]
+  and .active_count == 3
+  and .available_slots == 0
+' <<<"${legacy_normal_output}" >/dev/null; then
+  echo "expected migrated legacy reserved grants in deterministic order, got ${legacy_normal_output}" >&2
+  exit 1
+fi
+jq -e '
+  (.pending_transaction | not)
+  and .active_jobs["N:snapshot-0"].reservation_seq == 1
+  and .active_jobs["N:snapshot-0"].status == "running"
+  and .active_jobs["N:snapshot-0"].legacy_running == true
+  and .active_jobs["N:snapshot-0"].claim_generation == 0
+  and .active_jobs["N:snapshot-0"].claim_token == null
+  and .active_jobs["P:snapshot-0"].reservation_seq == 2
+  and .active_jobs["P:snapshot-0"].status == "reserved"
+  and .active_jobs["P:snapshot-0"].claim_generation == 0
+  and .active_jobs["P:snapshot-0"].claim_token == null
+  and .active_jobs["R:snapshot-0"].reservation_seq == 3
+  and .active_jobs["R:snapshot-0"].status == "reserved"
+  and .active_jobs["R:snapshot-0"].claim_generation == 0
+  and .active_jobs["R:snapshot-0"].claim_token == null
+' "${MIGRATION_ROOT}/scheduler_state.json" >/dev/null
+jq -e '.memberships["0"].status == "reserved"' \
+  "${MIGRATION_ROOT}/batches/P/state.json" >/dev/null
+jq -e '.memberships["0"].status == "running"' \
+  "${MIGRATION_ROOT}/batches/N/state.json" >/dev/null
+
+legacy_p_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='P:snapshot-0' STATUS=preparing \
+    NOW_EPOCH=201 bash "${RECORD}"
+)"
+jq -e '
+  .should_spawn == true
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${legacy_p_claim}" >/dev/null
+
+legacy_running_scheduler_before="$(jq -cS . "${MIGRATION_ROOT}/scheduler_state.json")"
+legacy_running_batch_before="$(jq -cS . "${MIGRATION_ROOT}/batches/N/state.json")"
+for forbidden_legacy_status in spawned launch_failed; do
+  set +e
+  forbidden_legacy_output="$(
+    CONFIG_DIR="${CONFIG_DIR}" JOB_ID='N:snapshot-0' STATUS="${forbidden_legacy_status}" \
+      NOW_EPOCH=202 bash "${RECORD}" 2>&1
+  )"
+  forbidden_legacy_code=$?
+  set -e
+  if [ "${forbidden_legacy_code}" -ne 3 ]; then
+    echo "expected legacy running ${forbidden_legacy_status} to exit 3, got ${forbidden_legacy_code}: ${forbidden_legacy_output}" >&2
+    exit 1
+  fi
+  [ "$(jq -cS . "${MIGRATION_ROOT}/scheduler_state.json")" = "${legacy_running_scheduler_before}" ] || {
+    echo "expected forbidden legacy running transition to leave scheduler state unchanged" >&2
+    exit 1
+  }
+  [ "$(jq -cS . "${MIGRATION_ROOT}/batches/N/state.json")" = "${legacy_running_batch_before}" ] || {
+    echo "expected forbidden legacy running transition to leave batch state unchanged" >&2
+    exit 1
+  }
+done
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID='N:snapshot-0' STATUS=terminal \
+  NOW_EPOCH=203 bash "${RECORD}" >/dev/null
+jq -e '.active_jobs | has("N:snapshot-0") | not' \
+  "${MIGRATION_ROOT}/scheduler_state.json" >/dev/null
+jq -e '.memberships["0"].status == "terminal"' \
+  "${MIGRATION_ROOT}/batches/N/state.json" >/dev/null
 
 echo 'ok driven scheduler fairness'

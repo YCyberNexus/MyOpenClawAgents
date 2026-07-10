@@ -28,6 +28,202 @@ atomic_write_json() {
   mv "${candidate}" "${destination}"
 }
 
+migrate_legacy_scheduler_state() {
+  local persisted_state=""
+  local migration_target=""
+  local pending_mode=false
+  local migration_needed=""
+  local migrated_state=""
+  local migration_batch_states='{}'
+  local legacy_job_id=""
+  local legacy_job=""
+  local owner_batch_id=""
+  local owner_snapshot_index=""
+  local owner_state_file=""
+  local owner_state=""
+  local marker_state=""
+  local -a legacy_preparing_job_ids=()
+
+  persisted_state="$(jq -ce '
+    if type == "object"
+      and .version == 1
+      and ((.round_robin_cursor == null) or (.round_robin_cursor | type == "string"))
+      and (.active_jobs | type == "object")
+      and (.batch_order | type == "array")
+      and (.batch_order | all(
+        type == "string"
+        and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")))
+      and ((.batch_order | length) == (.batch_order | unique | length))
+    then .
+    else error("invalid version=1 scheduler state")
+    end
+  ' "${SCHEDULER_STATE_FILE}")" || reserve_die "scheduler state is invalid" 3
+
+  if jq -e 'has("pending_transaction")' <<<"${persisted_state}" >/dev/null; then
+    pending_mode=true
+    migration_target="$(jq -ce '
+      .pending_transaction
+      | if type == "object"
+          and .version == 1
+          and (.scheduler_state | type == "object")
+          and .scheduler_state.version == 1
+          and ((.scheduler_state.round_robin_cursor == null)
+            or (.scheduler_state.round_robin_cursor | type == "string"))
+          and (.scheduler_state.active_jobs | type == "object")
+          and (.scheduler_state.batch_order | type == "array")
+          and (.scheduler_state | has("pending_transaction") | not)
+          and (.batch_states | type == "object")
+        then .scheduler_state
+        else error("invalid legacy pending transaction")
+        end
+    ' <<<"${persisted_state}")" || reserve_die "pending scheduler transaction is invalid" 3
+  else
+    migration_target="${persisted_state}"
+  fi
+
+  migration_needed="$(jq -r '
+    any(.active_jobs[];
+      (has("reservation_seq") | not)
+      or (has("claim_generation") | not)
+      or (has("claim_token") | not))
+  ' <<<"${migration_target}")"
+  [ "${migration_needed}" = true ] || return 0
+
+  migration_target="$(jq -ce '
+    if (.batch_order | all(
+          type == "string"
+          and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")))
+      and ((.batch_order | length) == (.batch_order | unique | length))
+      and (.active_jobs | to_entries | all(
+        (.key | type == "string" and length > 0)
+        and (.value | type == "object")
+        and .value.job_id == .key
+        and (.value.project | type == "string"
+          and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
+        and (.value.iid | type == "number" and . == floor and . > 0)
+        and (.value as $job
+          | $job.physical_key == ($job.project + "#" + ($job.iid | tostring)))
+        and ((.value.branch == null) or (.value.branch | type == "string"))
+        and (.value.entry_mode == "auto"
+          or .value.entry_mode == "fresh"
+          or .value.entry_mode == "continue")
+        and (.value.force_rerun_pr | type == "boolean")
+        and (.value.status == "reserved"
+          or .value.status == "preparing"
+          or .value.status == "running")
+        and (.value.reserved_at | type == "number" and . == floor and . >= 0)
+        and (.value.updated_at | type == "number" and . == floor and . >= 0)
+        and (.value.owner | type == "object")
+        and (.value.owner.batch_id | type == "string"
+          and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+        and (.value.owner.snapshot_index | type == "number" and . == floor and . >= 0)
+        and (.value.memberships | type == "array" and length > 0)
+        and (.value.memberships | all(
+          (.batch_id | type == "string"
+            and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+          and (.snapshot_index | type == "number" and . == floor and . >= 0)))
+      ))
+    then . else error("invalid legacy active job") end
+  ' <<<"${migration_target}")" || reserve_die "legacy scheduler state is invalid" 3
+
+  mapfile -t legacy_preparing_job_ids < <(jq -r '
+    .active_jobs | to_entries[]
+    | select(.value.status == "preparing"
+      and ((.value | has("claim_generation") | not)
+        or (.value | has("claim_token") | not)))
+    | .key
+  ' <<<"${migration_target}")
+  for legacy_job_id in "${legacy_preparing_job_ids[@]}"; do
+    legacy_job="$(jq -c --arg job_id "${legacy_job_id}" \
+      '.active_jobs[$job_id]' <<<"${migration_target}")"
+    owner_batch_id="$(jq -r '.owner.batch_id' <<<"${legacy_job}")"
+    owner_snapshot_index="$(jq -r '.owner.snapshot_index' <<<"${legacy_job}")"
+    owner_state_file="${BATCHES_ROOT}/${owner_batch_id}/state.json"
+    if jq -e --arg batch_id "${owner_batch_id}" '.[$batch_id] != null' \
+      <<<"${migration_batch_states}" >/dev/null; then
+      owner_state="$(jq -c --arg batch_id "${owner_batch_id}" \
+        '.[$batch_id]' <<<"${migration_batch_states}")"
+    elif [ "${pending_mode}" = true ] \
+      && jq -e --arg batch_id "${owner_batch_id}" \
+        '.pending_transaction.batch_states[$batch_id] != null' \
+        <<<"${persisted_state}" >/dev/null; then
+      owner_state="$(jq -c --arg batch_id "${owner_batch_id}" \
+        '.pending_transaction.batch_states[$batch_id]' <<<"${persisted_state}")"
+    else
+      [ -f "${owner_state_file}" ] || \
+        reserve_die "legacy preparing owner batch state is missing: ${owner_batch_id}" 3
+      owner_state="$(jq -c . "${owner_state_file}")"
+    fi
+    owner_state="$(jq -ce \
+      --arg batch_id "${owner_batch_id}" \
+      --arg index "${owner_snapshot_index}" \
+      --arg job_id "${legacy_job_id}" '
+      if type == "object"
+        and .version == 1
+        and .batch_id == $batch_id
+        and (.memberships | type == "object")
+        and .memberships[$index].job_id == $job_id
+        and .memberships[$index].status == "preparing"
+      then .memberships[$index].status = "reserved" | .status = "running"
+      else error("inconsistent legacy preparing owner membership")
+      end
+    ' <<<"${owner_state}")" || \
+      reserve_die "legacy preparing owner membership is invalid: ${owner_batch_id}/${owner_snapshot_index}" 3
+    migration_batch_states="$(jq -c \
+      --arg batch_id "${owner_batch_id}" \
+      --slurpfile batch_state <(printf '%s\n' "${owner_state}") '
+      .[$batch_id] = $batch_state[0]
+    ' <<<"${migration_batch_states}")"
+  done
+
+  migrated_state="$(jq -c '
+    ([.active_jobs | to_entries[]
+        | select(.value | has("reservation_seq"))
+        | .value.reservation_seq
+        | select(type == "number" and . == floor and . > 0)]
+      | max // 0) as $max_sequence
+    | ([.active_jobs | to_entries[]
+        | select(.value | has("reservation_seq") | not)]
+      | sort_by(.value.reserved_at, .key)) as $missing_sequences
+    | reduce range(0; ($missing_sequences | length)) as $index (.;
+        .active_jobs[$missing_sequences[$index].key].reservation_seq =
+          ($max_sequence + $index + 1))
+    | reduce (.active_jobs | keys[]) as $job_id (.;
+        if ((.active_jobs[$job_id] | has("claim_generation"))
+            and (.active_jobs[$job_id] | has("claim_token")))
+        then .
+        elif .active_jobs[$job_id].status == "running"
+        then .active_jobs[$job_id].claim_generation = 0
+          | .active_jobs[$job_id].claim_token = null
+          | .active_jobs[$job_id].legacy_running = true
+        else .active_jobs[$job_id].status = "reserved"
+          | .active_jobs[$job_id].claim_generation = 0
+          | .active_jobs[$job_id].claim_token = null
+          | del(.active_jobs[$job_id].legacy_running)
+        end)
+  ' <<<"${migration_target}")"
+  if [ "${pending_mode}" = true ]; then
+    marker_state="$(jq -c \
+      --slurpfile final_scheduler_state <(printf '%s\n' "${migrated_state}") \
+      --slurpfile batch_states <(printf '%s\n' "${migration_batch_states}") '
+      .pending_transaction.scheduler_state = $final_scheduler_state[0]
+      | .pending_transaction.batch_states =
+          (.pending_transaction.batch_states + $batch_states[0])
+    ' <<<"${persisted_state}")"
+  else
+    marker_state="$(jq -c \
+      --slurpfile final_scheduler_state <(printf '%s\n' "${migrated_state}") \
+      --slurpfile batch_states <(printf '%s\n' "${migration_batch_states}") '
+      .pending_transaction = {
+        version:1,
+        scheduler_state:$final_scheduler_state[0],
+        batch_states:$batch_states[0]
+      }
+    ' <<<"${persisted_state}")"
+  fi
+  atomic_write_json "${SCHEDULER_STATE_FILE}" "${marker_state}"
+}
+
 recover_pending_transaction() {
   local persisted_state=""
   local transaction_json=""
@@ -66,7 +262,21 @@ recover_pending_transaction() {
           (.value.reservation_seq | type == "number"
             and . == floor and . > 0)
           and (.value.updated_at | type == "number"
-            and . == floor and . >= 0)))
+            and . == floor and . >= 0)
+          and (.value.claim_generation | type == "number"
+            and . == floor and . >= 0)
+          and ((.value.claim_token == null)
+            or (.value.claim_token | type == "string" and length > 0))
+          and (if (.value | has("legacy_running"))
+            then .value.legacy_running == true
+              and .value.status == "running"
+              and .value.claim_generation == 0
+              and .value.claim_token == null
+            elif .value.status == "reserved"
+            then .value.claim_token == null
+            else (.value.status == "preparing" or .value.status == "running")
+              and (.value.claim_token | type == "string" and length > 0)
+            end)))
         and (([.scheduler_state.active_jobs[].reservation_seq] | length)
           == ([.scheduler_state.active_jobs[].reservation_seq] | unique | length))
         and (.scheduler_state.batch_order | type == "array")
@@ -123,6 +333,7 @@ source "${RESERVE_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
 exec {SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
 flock -x "${SCHEDULER_LOCK_FD}"
 
+migrate_legacy_scheduler_state
 recover_pending_transaction
 
 SCHEDULER_STATE="$(jq -ce '
@@ -151,6 +362,19 @@ SCHEDULER_STATE="$(jq -ce '
       and (.value.reservation_seq | type == "number" and . == floor and . > 0)
       and (.value.reserved_at | type == "number" and . == floor and . >= 0)
       and (.value.updated_at | type == "number" and . == floor and . >= 0)
+      and (.value.claim_generation | type == "number" and . == floor and . >= 0)
+      and ((.value.claim_token == null)
+        or (.value.claim_token | type == "string" and length > 0))
+      and (if (.value | has("legacy_running"))
+        then .value.legacy_running == true
+          and .value.status == "running"
+          and .value.claim_generation == 0
+          and .value.claim_token == null
+        elif .value.status == "reserved"
+        then .value.claim_token == null
+        else (.value.status == "preparing" or .value.status == "running")
+          and (.value.claim_token | type == "string" and length > 0)
+        end)
       and (.value.owner | type == "object")
       and (.value.owner.batch_id | type == "string"
         and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
@@ -168,6 +392,11 @@ SCHEDULER_STATE="$(jq -ce '
   end
 ' "${SCHEDULER_STATE_FILE}")" || reserve_die "scheduler state is invalid" 3
 BASE_SCHEDULER_STATE="${SCHEDULER_STATE}"
+if [ "${DRIVEN_SCHEDULER_MIGRATION_ONLY:-0}" = 1 ]; then
+  flock -u "${SCHEDULER_LOCK_FD}"
+  exec {SCHEDULER_LOCK_FD}>&-
+  exit 0
+fi
 SCHEDULER_CHANGED=false
 
 mapfile -t BATCH_ORDER < <(jq -r '.batch_order[]' <<<"${SCHEDULER_STATE}")
@@ -297,6 +526,7 @@ for expired_job_id in "${EXPIRED_PREPARING_JOB_IDS[@]}"; do
     --argjson recorded_at "${RESERVED_AT}" '
     .active_jobs[$job_id].status = "reserved"
     | .active_jobs[$job_id].updated_at = $recorded_at
+    | .active_jobs[$job_id].claim_token = null
   ' <<<"${SCHEDULER_STATE}")"
   BATCH_STATES["${expired_batch_id}"]="${expired_batch_state}"
   CHANGED_BATCHES["${expired_batch_id}"]=1
@@ -519,6 +749,8 @@ while [ "${batch_order_length}" -gt 0 ]; do
         force_rerun_pr:$force_rerun_pr,
         status:"reserved",
         reservation_seq:$reservation_seq,
+        claim_generation:0,
+        claim_token:null,
         reserved_at:$reserved_at,
         updated_at:$reserved_at,
         owner:{batch_id:$batch_id,snapshot_index:$snapshot_index},
