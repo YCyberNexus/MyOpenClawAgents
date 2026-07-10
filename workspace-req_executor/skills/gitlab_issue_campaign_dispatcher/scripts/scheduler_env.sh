@@ -38,9 +38,27 @@ if [ "${CONCURRENCY_ENV_SET}" = x ]; then
 fi
 
 case "${EXECUTOR_SCHEDULER_ROOT}" in
+  *//*) die "EXECUTOR_SCHEDULER_ROOT must not contain double slashes" ;;
+esac
+while [ "${EXECUTOR_SCHEDULER_ROOT}" != "/" ] && [[ "${EXECUTOR_SCHEDULER_ROOT}" == */ ]]; do
+  EXECUTOR_SCHEDULER_ROOT="${EXECUTOR_SCHEDULER_ROOT%/}"
+done
+
+case "${EXECUTOR_SCHEDULER_ROOT}" in
   /*) ;;
   *) die "EXECUTOR_SCHEDULER_ROOT must be an absolute path" ;;
 esac
+case "${EXECUTOR_SCHEDULER_ROOT}" in
+  /|/data|/tmp|/var|/home|/Users|/private|/private/tmp|/private/var)
+    die "EXECUTOR_SCHEDULER_ROOT must not be a protected filesystem root"
+    ;;
+  */./*|*/.|*/../*|*/..)
+    die "EXECUTOR_SCHEDULER_ROOT must not contain current or parent path segments"
+    ;;
+esac
+if [[ ! "${EXECUTOR_SCHEDULER_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
+  die "EXECUTOR_SCHEDULER_ROOT contains whitespace, control, or unsupported characters"
+fi
 
 case "${EXECUTOR_MAX_CONCURRENCY}" in
   ''|*[!0-9]*) die "EXECUTOR_MAX_CONCURRENCY must be a positive integer" ;;
