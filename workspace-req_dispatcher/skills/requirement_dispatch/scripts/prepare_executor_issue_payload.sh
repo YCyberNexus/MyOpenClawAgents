@@ -27,10 +27,18 @@ emit_json() {
   local issue_url="$5"
   local request_text="$6"
   local reason="$7"
+  local selector="${8:-null}"
+  local force_rerun_pr="${9:-false}"
+
+  if [ "${selector}" = "null" ] && [ -n "${iid}" ]; then
+    selector="$(jq -nc --arg iid "${iid}" '{type:"single",iid:($iid | tonumber)}')"
+  fi
+
   jq -nc \
     --arg status "${status}" \
     --arg project "${project}" \
-    --arg iid "${iid}" \
+    --argjson selector "${selector}" \
+    --argjson force_rerun_pr "${force_rerun_pr}" \
     --arg target_branch "${target_branch}" \
     --arg issue_url "${issue_url}" \
     --arg request_text "${request_text}" \
@@ -38,7 +46,9 @@ emit_json() {
     {
       status: $status,
       project: (if $project == "" then null else $project end),
-      iid: (if $iid == "" then null else ($iid | tonumber) end),
+      iid: (if $selector.type == "single" then $selector.iid else null end),
+      selector: $selector,
+      force_rerun_pr: $force_rerun_pr,
       target_branch: (if $target_branch == "" then null else $target_branch end),
       issue_url: (if $issue_url == "" then null else $issue_url end),
       request_text: (if $request_text == "" then null else $request_text end),
@@ -258,6 +268,40 @@ extract_iid() {
     }'
 }
 
+extract_iid_range() {
+  local text="$1"
+  local range_pattern='#?([0-9]+)[[:space:]]*(到|至)[[:space:]]*#?([0-9]+)'
+
+  RANGE_IID_MIN=""
+  RANGE_IID_MAX=""
+  if [[ "${text}" =~ ${range_pattern} ]]; then
+    RANGE_IID_MIN="${BASH_REMATCH[1]}"
+    RANGE_IID_MAX="${BASH_REMATCH[3]}"
+  fi
+}
+
+extract_open_label() {
+  local text="$1"
+  printf '%s\n' "${text}" | awk '
+    function trim(value) {
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", value)
+      gsub(/[[:space:]"'\''`“”‘’，,。;；]+$/, "", value)
+      return value
+    }
+    {
+      line = $0
+      if (match(line, /(label|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+        value = substr(line, RSTART + RLENGTH)
+        sub(/[[:space:]]+(的[[:space:]]*)?([Ii]ssue|[Ii]ssues).*$/, "", value)
+        value = trim(value)
+        if (value != "") {
+          print value
+          exit
+        }
+      }
+    }'
+}
+
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
@@ -382,6 +426,11 @@ fi
 PARSED_ISSUE_URL=""
 PARSED_PROJECT=""
 PARSED_IID=""
+FORCE_RERUN_PR=false
+case "${NORMALIZED}" in
+  *重跑*|*重新处理*|*重新执行*) FORCE_RERUN_PR=true ;;
+esac
+
 ISSUE_URL="$(extract_issue_url "${PROJECT_SOURCE}")"
 if [ -n "${ISSUE_URL}" ]; then
   if ! parse_issue_url "${ISSUE_URL}"; then
@@ -392,42 +441,77 @@ fi
 
 PROJECT="${PARSED_PROJECT:-}"
 IID="${PARSED_IID:-}"
+SELECTOR_JSON="null"
+SELECTOR_ERROR=""
 
 if [ -z "${PROJECT}" ]; then
   PROJECT="$(extract_project "${PROJECT_SOURCE}")"
 fi
 
-if [ -z "${IID}" ]; then
-  IID="$(extract_iid "${PROJECT_SOURCE}")"
+if [ -n "${IID}" ]; then
+  SELECTOR_JSON="$(jq -nc --arg iid "${IID}" '{type:"single",iid:($iid | tonumber)}')"
+else
+  extract_iid_range "${PROJECT_SOURCE}"
+  if [ -n "${RANGE_IID_MIN}" ]; then
+    if [ "${RANGE_IID_MIN}" -gt "${RANGE_IID_MAX}" ]; then
+      SELECTOR_ERROR="issue IID 范围必须满足 iid_min <= iid_max"
+    else
+      SELECTOR_JSON="$(
+        jq -nc \
+          --arg iid_min "${RANGE_IID_MIN}" \
+          --arg iid_max "${RANGE_IID_MAX}" \
+          '{type:"range",iid_min:($iid_min | tonumber),iid_max:($iid_max | tonumber)}'
+      )"
+    fi
+  else
+    OPEN_LABEL="$(extract_open_label "${PROJECT_SOURCE}")"
+    if [ -n "${OPEN_LABEL}" ]; then
+      SELECTOR_JSON="$(jq -nc --arg label "${OPEN_LABEL}" '{type:"open_label",label:$label}')"
+    elif [[ "${PROJECT_SOURCE}" == *未完成* ]] && [[ "${PROJECT_SOURCE}" == *issue* || "${PROJECT_SOURCE}" == *Issue* ]]; then
+      SELECTOR_JSON='{"type":"open_unfinished"}'
+    else
+      IID="$(extract_iid "${PROJECT_SOURCE}")"
+      if [ -n "${IID}" ]; then
+        SELECTOR_JSON="$(jq -nc --arg iid "${IID}" '{type:"single",iid:($iid | tonumber)}')"
+      fi
+    fi
+  fi
 fi
 
 if [ -z "${PROJECT}" ]; then
-  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 GitLab project（格式 group/project）或具体 GitLab issue URL"
+  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 GitLab project（格式 group/project）或具体 GitLab issue URL" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
   exit 0
 fi
 
 case "${PROJECT}" in
   */*) ;;
   *)
-    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project 必须是 group/project 格式"
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project 必须是 group/project 格式" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
     exit 0
     ;;
 esac
 if ! validate_project_path "${PROJECT}"; then
-  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project path contains unsafe characters"
+  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project path contains unsafe characters" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
   exit 0
 fi
 
-if [ -z "${IID}" ]; then
-  emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 issue IID 或具体 GitLab issue URL"
+if [ -n "${SELECTOR_ERROR}" ]; then
+  emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "${SELECTOR_ERROR}" null "${FORCE_RERUN_PR}"
   exit 0
 fi
 
-case "${IID}" in
-  *[!0-9]*|""|0)
-    emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "issue IID 必须是正整数"
-    exit 0
-    ;;
-esac
+if [ "${SELECTOR_JSON}" = "null" ]; then
+  emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 issue IID、IID 范围、未完成选择器、label 选择器或具体 GitLab issue URL" null "${FORCE_RERUN_PR}"
+  exit 0
+fi
 
-emit_json success "${PROJECT}" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" ""
+if [ "$(jq -r '.type' <<<"${SELECTOR_JSON}")" = "single" ]; then
+  case "${IID}" in
+    *[!0-9]*|""|0)
+      emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "issue IID 必须是正整数" null "${FORCE_RERUN_PR}"
+      exit 0
+      ;;
+  esac
+fi
+
+emit_json success "${PROJECT}" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"

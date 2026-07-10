@@ -112,6 +112,56 @@ if [ "$(jq -r '.iid' <<<"${project_hash_input}")" != "312" ]; then
   exit 1
 fi
 
+if ! jq -e '.selector == {type:"single",iid:312} and .force_rerun_pr == false' <<<"${project_hash_input}" >/dev/null; then
+  echo "expected legacy single-IID input to expose a compatible single selector" >&2
+  printf '%s\n' "${project_hash_input}" >&2
+  exit 1
+fi
+
+range_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #100 到 #250' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"range",iid_min:100,iid_max:250} and .iid == null' <<<"${range_json}" >/dev/null; then
+  echo "expected an IID range to produce a range selector and null legacy iid" >&2
+  printf '%s\n' "${range_json}" >&2
+  exit 1
+fi
+
+unfinished_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 中未完成的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_unfinished"} and .iid == null' <<<"${unfinished_json}" >/dev/null; then
+  echo "expected unfinished wording to produce an open_unfinished selector" >&2
+  printf '%s\n' "${unfinished_json}" >&2
+  exit 1
+fi
+
+label_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .iid == null and .force_rerun_pr == false' <<<"${label_json}" >/dev/null; then
+  echo "expected label wording to produce an open_label selector without forcing rerun" >&2
+  printf '%s\n' "${label_json}" >&2
+  exit 1
+fi
+
+rerun_json="$(
+  MESSAGE='重新执行 ai-infra/veqp_server_v3 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .force_rerun_pr == true' <<<"${rerun_json}" >/dev/null; then
+  echo "expected explicit rerun wording to force rerunning pr-labelled issues" >&2
+  printf '%s\n' "${rerun_json}" >&2
+  exit 1
+fi
+
 missing_iid="$(
   MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 的 issue。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
