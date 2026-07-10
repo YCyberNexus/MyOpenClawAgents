@@ -71,7 +71,7 @@ normalize_origin() {
   esac
 }
 
-if [ -d "${LEGACY_PATH}/.git" ]; then
+if [ -e "${LEGACY_PATH}/.git" ]; then
   if legacy_origin="$(git -C "${LEGACY_PATH}" remote get-url origin 2>/dev/null)"; then
     normalized_origin="$(normalize_origin "${legacy_origin}")"
     if [ "${normalized_origin}" = "${EXPECTED_ORIGIN}" ]; then

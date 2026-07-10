@@ -27,7 +27,16 @@ EOF
 cat >"${PREPARE_TICK}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-cat
+trigger="$(cat)"
+project="$(printf '%s\n' "${trigger}" | sed -n 's/^project=//p')"
+repo_parent="$(printf '%s\n' "${trigger}" | sed -n 's/^repo_path=//p')"
+[ -n "${project}" ] && [ -n "${repo_parent}" ] || exit 98
+repo_target="${repo_parent}/${project}"
+if [ -e "${repo_target}" ] && [ ! -e "${repo_target}/.git" ]; then
+  exit 91
+fi
+mkdir -p "${repo_target}/.git"
+printf '%s\n' "${trigger}"
 EOF
 chmod +x "${PREPARE_TICK}"
 

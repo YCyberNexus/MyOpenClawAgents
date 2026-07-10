@@ -21,15 +21,12 @@
 #   4. Synthesizes the equivalent RUN_SCHEDULED_ISSUE_CAMPAIGN trigger for a single
 #      IID (issue_iids=[iid], issue_min_iid=issue_max_iid=iid, hourly_issue_quota=1,
 #      max_concurrent_subagents=1, …) and exports the dispatcher bootstrap env.
-#   5. Writes {correlation_id, dispatcher_callback_target} to the per-issue
-#      ${ISSUE_ROOT}/dispatch_origin.json so the Phase 6 callback (A3/A4) can find
-#      the req_dispatcher to report back to. At this point no attempt has been
-#      allocated yet (env_paths.sh derives ISSUE_ROOT only with ISSUE_IID +
-#      ATTEMPT_NUMBER), so the file is written under the dispatcher-level
-#      ${ISSUES_ROOT}/issue-${iid}/ — which is exactly ${ISSUE_ROOT} once the
-#      attempt is later derived.
-#   6. Pipes the synthesized trigger on stdin into dispatch_prepare_tick.sh (which
-#      reads its trigger from stdin) and forwards its stdout envelope unchanged.
+#   5. Pipes the synthesized trigger into dispatch_prepare_tick.sh, captures its
+#      stdout envelope, and requires the prepare/clone phase to leave the resolved
+#      final repo target with a `.git` entry.
+#   6. Only after the clone exists, writes {correlation_id,
+#      dispatcher_callback_target} to ${ISSUES_ROOT}/issue-${iid}/dispatch_origin.json
+#      for the Phase 6 callback, then forwards the captured prepare envelope.
 #
 # Exit codes:
 #   0  — handed off to dispatch_prepare_tick.sh (its envelope is on stdout); the
@@ -38,6 +35,8 @@
 #        field, missing pinned token/group). This is a CONFIG-shape error, surfaced
 #        to the caller so it can stop and classify (No-Fallback) rather than spawn a
 #        half-set-up issue.
+#   12 — prepare reported success without leaving the resolved clone target.
+#   Other non-zero prepare statuses are propagated unchanged.
 #
 # Required input env (forwarded to env_paths.sh / dispatch_prepare_tick.sh):
 #   (none mandatory on the command line — project/iid/correlation_id arrive on
@@ -47,8 +46,8 @@
 #   GITLAB_TOKEN          overrides config/gitlab.env GITLAB_TOKEN
 #   GROUP                 smoke-test override when trigger project is bare
 #   PREPARE_TICK_CMD      path to the prepare-tick script to invoke (default:
-#                         the sibling dispatch_prepare_tick.sh). Smoke tests stub
-#                         this with a fake that just echoes its env + stdin.
+#                         the sibling dispatch_prepare_tick.sh). Smoke tests may
+#                         stub this with a fake that simulates the clone result.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -289,6 +288,11 @@ case "${PROJECT_IN}" in
 esac
 [ -n "${PROJECT_SLUG}" ] || { echo "dispatch_single_issue.sh: project resolves to an empty slug: ${PROJECT_IN}" >&2; exit 2; }
 
+if [ -n "${GROUP_FROM_PROJECT}" ] && [ -n "${GROUP_IN}" ] && [ "${GROUP_IN}" != "${GROUP_FROM_PROJECT}" ]; then
+  echo "dispatch_single_issue.sh: group does not match full project group (${GROUP_IN} != ${GROUP_FROM_PROJECT})" >&2
+  exit 2
+fi
+
 # GROUP: explicit I1 group wins, then the group split out of a full-name project,
 # then the process env override used by smoke tests. dispatch_prepare_tick.sh
 # requires `group`.
@@ -341,32 +345,7 @@ export GROUP="${GROUP_EFF}"
 export GITLAB_TOKEN="${GITLAB_TOKEN_EFF}"
 export REPO_PARENT_PATH="${REPO_PARENT_EFF}"
 
-# ─── 5. Persist the driven origin for the Phase 6 callback ─────────
-# env_paths.sh derives ISSUES_ROOT at the dispatcher level (no ISSUE_IID needed).
-# ISSUE_ROOT proper is ${ISSUES_ROOT}/issue-${iid}, which is what we write under here
-# — identical to the path env_paths.sh will export once an attempt is allocated.
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/env_paths.sh"
-
-: "${ISSUES_ROOT:?dispatch_single_issue.sh: env_paths.sh did not export ISSUES_ROOT}"
-ISSUE_ROOT_FOR_IID="${ISSUES_ROOT}/issue-${IID_IN}"
-DISPATCH_ORIGIN_FILE="${ISSUE_ROOT_FOR_IID}/dispatch_origin.json"
-
-mkdir -p "${ISSUE_ROOT_FOR_IID}"
-ORIGIN_TMP="$(mktemp "${DISPATCH_ORIGIN_FILE}.tmp.XXXXXX")"
-jq -nc \
-  --arg correlation_id "${CORRELATION_ID}" \
-  --arg dispatcher_callback_target "${DISPATCHER_CALLBACK_TARGET}" \
-  --arg project "${PROJECT_FULL}" \
-  --argjson iid "${IID_IN}" '
-  {correlation_id: $correlation_id,
-   dispatcher_callback_target: ($dispatcher_callback_target | select(. != "") // null),
-   project: $project,
-   iid: $iid}' >"${ORIGIN_TMP}"
-mv -f "${ORIGIN_TMP}" "${DISPATCH_ORIGIN_FILE}"
-echo "dispatch_single_issue.sh: wrote dispatch_origin.json for #${IID_IN} (correlation_id=${CORRELATION_ID})" >&2
-
-# ─── 6. Synthesize the equivalent single-IID scheduled trigger ─────
+# ─── 5. Synthesize the equivalent single-IID scheduled trigger ─────
 # dispatch_prepare_tick.sh reads its trigger from stdin as multi-line key=value.
 # The fixed-value preflight fields and the per-issue scope (issue_iids=[iid],
 # issue_min_iid=issue_max_iid=iid) are pinned here; quota / concurrency are forced
@@ -396,6 +375,46 @@ EOF
 # dispatch_prepare_tick.sh an empty key it would reject.
 [ -n "${BRANCH_IN}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"branch=${BRANCH_IN}"
 
-# ─── 7. Hand off to the existing prepare-tick body ─────────────────
+# ─── 6. Prepare/clone before creating any in-repo runtime path ─────
 PREPARE_TICK_CMD="${PREPARE_TICK_CMD:-${SCRIPT_DIR}/dispatch_prepare_tick.sh}"
-printf '%s\n' "${SYNTH_TRIGGER}" | bash "${PREPARE_TICK_CMD}"
+PREPARE_OUTPUT=""
+if PREPARE_OUTPUT="$(printf '%s\n' "${SYNTH_TRIGGER}" | bash "${PREPARE_TICK_CMD}")"; then
+  :
+else
+  PREPARE_STATUS=$?
+  [ -z "${PREPARE_OUTPUT}" ] || printf '%s\n' "${PREPARE_OUTPUT}"
+  exit "${PREPARE_STATUS}"
+fi
+
+if [ ! -e "${RESOLVED_REPO_PATH}/.git" ]; then
+  [ -z "${PREPARE_OUTPUT}" ] || printf '%s\n' "${PREPARE_OUTPUT}"
+  echo "dispatch_single_issue.sh: prepare tick succeeded without cloning ${RESOLVED_REPO_PATH}" >&2
+  exit 12
+fi
+
+# ─── 7. Persist the driven origin after the clone exists ───────────
+# env_paths.sh may create its runtime tree only now that clone_or_pull has
+# populated the final target. ISSUE_ROOT proper is ${ISSUES_ROOT}/issue-${iid}.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/env_paths.sh"
+
+: "${ISSUES_ROOT:?dispatch_single_issue.sh: env_paths.sh did not export ISSUES_ROOT}"
+ISSUE_ROOT_FOR_IID="${ISSUES_ROOT}/issue-${IID_IN}"
+DISPATCH_ORIGIN_FILE="${ISSUE_ROOT_FOR_IID}/dispatch_origin.json"
+
+mkdir -p "${ISSUE_ROOT_FOR_IID}"
+ORIGIN_TMP="$(mktemp "${DISPATCH_ORIGIN_FILE}.tmp.XXXXXX")"
+jq -nc \
+  --arg correlation_id "${CORRELATION_ID}" \
+  --arg dispatcher_callback_target "${DISPATCHER_CALLBACK_TARGET}" \
+  --arg project "${PROJECT_FULL}" \
+  --argjson iid "${IID_IN}" '
+  {correlation_id: $correlation_id,
+   dispatcher_callback_target: ($dispatcher_callback_target | select(. != "") // null),
+   project: $project,
+   iid: $iid}' >"${ORIGIN_TMP}"
+mv -f "${ORIGIN_TMP}" "${DISPATCH_ORIGIN_FILE}"
+echo "dispatch_single_issue.sh: wrote dispatch_origin.json for #${IID_IN} (correlation_id=${CORRELATION_ID})" >&2
+
+# Preserve the prepare envelope on stdout after the origin is durable.
+[ -z "${PREPARE_OUTPUT}" ] || printf '%s\n' "${PREPARE_OUTPUT}"

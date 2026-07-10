@@ -19,6 +19,10 @@ if [ "$#" -ne 5 ] || [ "$1" != "-C" ] || [ "$3" != "remote" ] || [ "$4" != "get-
   echo "unexpected git invocation: $*" >&2
   exit 97
 fi
+if [ "$2" != "${EXPECTED_LEGACY_PATH:?}" ]; then
+  echo "unexpected legacy repo path: expected ${EXPECTED_LEGACY_PATH}, got $2" >&2
+  exit 96
+fi
 
 case "${FAKE_GIT_MODE:-}" in
   origin)
@@ -47,6 +51,7 @@ run_resolver() {
     GITLAB_HOST="gitlab-b.pxsemic.tech:30000" \
     FAKE_GIT_MODE="${git_mode}" \
     FAKE_GIT_ORIGIN="${git_origin}" \
+    EXPECTED_LEGACY_PATH="${repo_parent}/${project_full##*/}" \
     GIT_LOG="${GIT_LOG}" \
     PATH="${FAKE_BIN}:${PATH}" \
     "${BASH}" "${RESOLVER}"
@@ -122,15 +127,41 @@ mismatching_path="$(run_resolver \
   "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-a/repo.git")"
 assert_eq "${LEGACY_PARENT}/group-b/repo" "${mismatching_path}" "mismatching legacy origin"
 
+mismatching_origins=(
+  "https://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-a/repo.git"
+  "http://oauth2:masked-token@gitlab-other.pxsemic.tech:30000/group-a/repo.git"
+  "http://oauth2:masked-token@gitlab-b.pxsemic.tech/group-a/repo.git"
+  "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30001/group-a/repo.git"
+  "http://oauth2:masked-token@GitLab-b.pxsemic.tech:30000/group-a/repo.git"
+  "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-a/repo.git/"
+  "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-a/repo"
+  "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-a/repo.git.git"
+)
+for mismatching_origin in "${mismatching_origins[@]}"; do
+  mismatching_path="$(run_resolver "group-a/repo" "${LEGACY_PARENT}" origin "${mismatching_origin}")"
+  assert_eq "${LEGACY_PARENT}/group-a/repo" "${mismatching_path}" "strict legacy origin mismatch"
+done
+
 failed_query_path="$(run_resolver "group-c/repo" "${LEGACY_PARENT}" fail)"
 assert_eq "${LEGACY_PARENT}/group-c/repo" "${failed_query_path}" "failed legacy origin query"
+
+GIT_FILE_PARENT="${TEST_ROOT}/git-file/repos"
+GIT_FILE_LEGACY_PATH="${GIT_FILE_PARENT}/repo"
+mkdir -p "${GIT_FILE_LEGACY_PATH}"
+printf '%s\n' 'gitdir: ../objects/repo.git' >"${GIT_FILE_LEGACY_PATH}/.git"
+git_file_path="$(run_resolver \
+  "group-file/repo" \
+  "${GIT_FILE_PARENT}" \
+  origin \
+  "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-file/repo.git")"
+assert_eq "${GIT_FILE_LEGACY_PATH}" "${git_file_path}" "matching legacy origin with .git file"
 
 if grep -q 'set-url' "${GIT_LOG}"; then
   echo "resolver must never rewrite a legacy origin" >&2
   cat "${GIT_LOG}" >&2
   exit 1
 fi
-if [ "$(grep -c ' remote get-url origin$' "${GIT_LOG}")" -ne 3 ]; then
+if [ "$(grep -c ' remote get-url origin$' "${GIT_LOG}")" -ne 12 ]; then
   echo "expected one read-only origin query for each legacy lookup" >&2
   cat "${GIT_LOG}" >&2
   exit 1
@@ -171,6 +202,7 @@ done
 DISPATCH_CONFIG="${TEST_ROOT}/dispatch-config"
 DISPATCH_PARENT="${TEST_ROOT}/dispatch/repos"
 PREPARE_TICK="${TEST_ROOT}/prepare_tick.sh"
+PREPARE_LOG="${TEST_ROOT}/prepare.log"
 mkdir -p "${DISPATCH_CONFIG}" "${DISPATCH_PARENT}"
 
 cat >"${DISPATCH_CONFIG}/gitlab.env" <<'EOF'
@@ -184,12 +216,36 @@ EOF
 cat >"${PREPARE_TICK}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-cat
+
+trigger="$(cat)"
+printf '%s\n' "${trigger}" >>"${PREPARE_LOG:?}"
+
+if [ "${FAKE_PREPARE_MODE:-clone}" = "fail" ]; then
+  printf '%s\n' '{"status":"prepare-failed"}'
+  exit 37
+fi
+if [ "${FAKE_PREPARE_MODE:-clone}" = "no-clone" ]; then
+  printf '%s\n' '{"status":"prepared-without-clone"}'
+  exit 0
+fi
+
+project="$(printf '%s\n' "${trigger}" | sed -n 's/^project=//p')"
+repo_parent="$(printf '%s\n' "${trigger}" | sed -n 's/^repo_path=//p')"
+repo_target="${repo_parent}/${project}"
+if [ -e "${repo_target}" ] && [ ! -e "${repo_target}/.git" ]; then
+  echo "prepare tick saw a pre-created non-git clone target: ${repo_target}" >&2
+  exit 91
+fi
+mkdir -p "${repo_target}/.git"
+printf '%s\n' '{"status":"prepared"}'
 EOF
 chmod +x "${PREPARE_TICK}"
+: >"${PREPARE_LOG}"
 
 if ! CONFIG_DIR="${DISPATCH_CONFIG}" \
   PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  PREPARE_LOG="${PREPARE_LOG}" \
+  FAKE_PREPARE_MODE="clone" \
   PATH="${FAKE_BIN}:${PATH}" \
   "${BASH}" "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
     >"${TEST_ROOT}/dispatch.out" 2>"${TEST_ROOT}/dispatch.err" <<'EOF'
@@ -206,9 +262,14 @@ then
   exit 1
 fi
 
-if ! grep -Fqx "repo_path=${DISPATCH_PARENT}/division/platform" "${TEST_ROOT}/dispatch.out"; then
-  echo "expected synthesized repo_path to be the resolved clone parent" >&2
+if ! grep -Fqx '{"status":"prepared"}' "${TEST_ROOT}/dispatch.out"; then
+  echo "expected captured prepare JSON to be forwarded unchanged" >&2
   cat "${TEST_ROOT}/dispatch.out" >&2
+  exit 1
+fi
+if ! grep -Fqx "repo_path=${DISPATCH_PARENT}/division/platform" "${PREPARE_LOG}"; then
+  echo "expected synthesized repo_path to be the resolved clone parent" >&2
+  cat "${PREPARE_LOG}" >&2
   exit 1
 fi
 EXPECTED_ORIGIN_FILE="${DISPATCH_PARENT}/division/platform/repo/.req_executor/issues/issue-42/dispatch_origin.json"
@@ -216,8 +277,172 @@ if [ ! -f "${EXPECTED_ORIGIN_FILE}" ]; then
   echo "expected dispatch origin under the resolved full project clone path" >&2
   exit 1
 fi
-if ! grep -Fqx 'branch=release/2026.07' "${TEST_ROOT}/dispatch.out"; then
+if ! grep -Fqx 'branch=release/2026.07' "${PREPARE_LOG}"; then
   echo "expected branch forwarding to survive repo path resolution" >&2
+  exit 1
+fi
+
+FAILED_PROJECT_PATH="${DISPATCH_PARENT}/failure/group/repo"
+if CONFIG_DIR="${DISPATCH_CONFIG}" \
+  PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  PREPARE_LOG="${PREPARE_LOG}" \
+  FAKE_PREPARE_MODE="fail" \
+  PATH="${FAKE_BIN}:${PATH}" \
+  "${BASH}" "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
+    >"${TEST_ROOT}/prepare-failed.out" 2>"${TEST_ROOT}/prepare-failed.err" <<'EOF'
+RUN_SINGLE_ISSUE
+project=failure/group/repo
+iid=43
+correlation_id=reqd-prepare-failed
+EOF
+then
+  echo "expected prepare failure to propagate" >&2
+  exit 1
+else
+  prepare_status=$?
+fi
+if [ "${prepare_status}" -ne 37 ]; then
+  echo "expected prepare failure status 37, got ${prepare_status}" >&2
+  exit 1
+fi
+if ! grep -Fqx '{"status":"prepare-failed"}' "${TEST_ROOT}/prepare-failed.out"; then
+  echo "expected failed prepare stdout to be preserved" >&2
+  cat "${TEST_ROOT}/prepare-failed.out" >&2
+  exit 1
+fi
+if [ -e "${FAILED_PROJECT_PATH}" ]; then
+  echo "prepare failure must not leave a repo target or dispatch origin" >&2
+  exit 1
+fi
+
+NO_CLONE_PROJECT_PATH="${DISPATCH_PARENT}/missing/clone/repo"
+if CONFIG_DIR="${DISPATCH_CONFIG}" \
+  PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  PREPARE_LOG="${PREPARE_LOG}" \
+  FAKE_PREPARE_MODE="no-clone" \
+  PATH="${FAKE_BIN}:${PATH}" \
+  "${BASH}" "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
+    >"${TEST_ROOT}/no-clone.out" 2>"${TEST_ROOT}/no-clone.err" <<'EOF'
+RUN_SINGLE_ISSUE
+project=missing/clone/repo
+iid=47
+correlation_id=reqd-no-clone
+EOF
+then
+  echo "expected successful prepare without .git to fail" >&2
+  exit 1
+else
+  no_clone_status=$?
+fi
+if [ "${no_clone_status}" -ne 12 ]; then
+  echo "expected no-clone status 12, got ${no_clone_status}" >&2
+  exit 1
+fi
+if ! grep -Fqx '{"status":"prepared-without-clone"}' "${TEST_ROOT}/no-clone.out"; then
+  echo "expected no-clone prepare stdout to be preserved" >&2
+  cat "${TEST_ROOT}/no-clone.out" >&2
+  exit 1
+fi
+if [ -e "${NO_CLONE_PROJECT_PATH}" ]; then
+  echo "successful prepare without .git must not leave a repo target or origin" >&2
+  exit 1
+fi
+
+CONFLICT_LEGACY_PATH="${DISPATCH_PARENT}/repo"
+mkdir -p "${CONFLICT_LEGACY_PATH}/.git"
+: >"${GIT_LOG}"
+: >"${PREPARE_LOG}"
+if CONFIG_DIR="${DISPATCH_CONFIG}" \
+  PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  PREPARE_LOG="${PREPARE_LOG}" \
+  FAKE_PREPARE_MODE="clone" \
+  FAKE_GIT_MODE="origin" \
+  FAKE_GIT_ORIGIN="http://gitlab-b.pxsemic.tech:30000/group-a/repo.git" \
+  EXPECTED_LEGACY_PATH="${CONFLICT_LEGACY_PATH}" \
+  GIT_LOG="${GIT_LOG}" \
+  PATH="${FAKE_BIN}:${PATH}" \
+  "${BASH}" "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
+    >"${TEST_ROOT}/group-conflict.out" 2>"${TEST_ROOT}/group-conflict.err" <<'EOF'
+RUN_SINGLE_ISSUE
+project=group-a/repo
+group=group-b
+iid=44
+correlation_id=reqd-group-conflict
+EOF
+then
+  group_conflict_status=0
+else
+  group_conflict_status=$?
+fi
+group_conflict_failed=0
+if [ "${group_conflict_status}" -ne 2 ]; then
+  echo "expected conflicting explicit group to exit 2, got ${group_conflict_status}" >&2
+  group_conflict_failed=1
+fi
+if [ -s "${PREPARE_LOG}" ]; then
+  echo "conflicting explicit group must be rejected before prepare" >&2
+  group_conflict_failed=1
+fi
+if [ -s "${GIT_LOG}" ]; then
+  echo "conflicting explicit group must be rejected before legacy origin lookup" >&2
+  cat "${GIT_LOG}" >&2
+  group_conflict_failed=1
+fi
+if [ -e "${CONFLICT_LEGACY_PATH}/.req_executor" ]; then
+  echo "conflicting explicit group must not write into the legacy repo" >&2
+  group_conflict_failed=1
+fi
+if [ "${group_conflict_failed}" -ne 0 ]; then
+  exit 1
+fi
+
+: >"${GIT_LOG}"
+: >"${PREPARE_LOG}"
+if ! CONFIG_DIR="${DISPATCH_CONFIG}" \
+  PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  PREPARE_LOG="${PREPARE_LOG}" \
+  FAKE_PREPARE_MODE="clone" \
+  FAKE_GIT_MODE="origin" \
+  FAKE_GIT_ORIGIN="http://gitlab-b.pxsemic.tech:30000/group-a/repo.git" \
+  EXPECTED_LEGACY_PATH="${CONFLICT_LEGACY_PATH}" \
+  GIT_LOG="${GIT_LOG}" \
+  PATH="${FAKE_BIN}:${PATH}" \
+  "${BASH}" "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
+    >"${TEST_ROOT}/group-equal.out" 2>"${TEST_ROOT}/group-equal.err" <<'EOF'
+RUN_SINGLE_ISSUE
+project=group-a/repo
+group=group-a
+iid=45
+correlation_id=reqd-group-equal
+EOF
+then
+  echo "matching explicit group should be accepted" >&2
+  cat "${TEST_ROOT}/group-equal.err" >&2
+  exit 1
+fi
+
+: >"${GIT_LOG}"
+: >"${PREPARE_LOG}"
+if ! CONFIG_DIR="${DISPATCH_CONFIG}" \
+  PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  PREPARE_LOG="${PREPARE_LOG}" \
+  FAKE_PREPARE_MODE="clone" \
+  FAKE_GIT_MODE="origin" \
+  FAKE_GIT_ORIGIN="http://gitlab-b.pxsemic.tech:30000/group-a/repo.git" \
+  EXPECTED_LEGACY_PATH="${CONFLICT_LEGACY_PATH}" \
+  GIT_LOG="${GIT_LOG}" \
+  PATH="${FAKE_BIN}:${PATH}" \
+  "${BASH}" "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
+    >"${TEST_ROOT}/multi-group-equal.out" 2>"${TEST_ROOT}/multi-group-equal.err" <<'EOF'
+RUN_SINGLE_ISSUE
+project=division/platform/repo
+group=division/platform
+iid=46
+correlation_id=reqd-multi-group-equal
+EOF
+then
+  echo "matching multi-level explicit group should be accepted" >&2
+  cat "${TEST_ROOT}/multi-group-equal.err" >&2
   exit 1
 fi
 
