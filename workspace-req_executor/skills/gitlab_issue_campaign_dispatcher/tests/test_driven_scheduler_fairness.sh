@@ -688,4 +688,170 @@ jq -e '.active_jobs | has("N:snapshot-0") | not' \
 jq -e '.memberships["0"].status == "terminal"' \
   "${MIGRATION_ROOT}/batches/N/state.json" >/dev/null
 
+# Once importer installs a finalization fence, preparing-lease recovery must
+# not mint a new claim or erase the claim identity carried by the handoff.
+SCHEDULER_ROOT="${TEST_ROOT}/finalizing-preparing-scheduler"
+CONFIG_DIR="${TEST_ROOT}/finalizing-preparing-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=3' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_batch_fixture FP '[88]'
+jq '.batch_order = ["FP"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+finalizing_reserve="$(CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=1 bash "${RESERVE}")"
+finalizing_job_id="$(jq -r '.grants[0].job_id' <<<"${finalizing_reserve}")"
+finalizing_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${finalizing_job_id}" STATUS=preparing \
+    NOW_EPOCH=2 bash "${RECORD}"
+)"
+finalizing_token="$(jq -r '.claim_token' <<<"${finalizing_claim}")"
+finalizing_event="${finalizing_job_id}:claim-1:terminal-1"
+jq \
+  --arg job_id "${finalizing_job_id}" \
+  --arg event_id "${finalizing_event}" \
+  --arg token "${finalizing_token}" '
+  .active_jobs[$job_id].finalization = {
+    event_id:$event_id,
+    claim_generation:1,
+    claim_token:$token,
+    membership_keys:["FP:snapshot-0"]
+  }
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.finalizing.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.finalizing.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+# Migration may need to complete inside an older pending transaction. The
+# finalization fence is already current-schema data and must survive both the
+# legacy field migration and transaction recovery byte-for-byte canonically.
+finalization_before_recovery="$(jq -cS \
+  --arg job_id "${finalizing_job_id}" \
+  '.active_jobs[$job_id].finalization' \
+  "${SCHEDULER_ROOT}/scheduler_state.json")"
+jq --arg job_id "${finalizing_job_id}" '
+  . as $persisted
+  | .pending_transaction = {
+      version:1,
+      scheduler_state:($persisted
+        | del(.pending_transaction)
+        | del(.active_jobs[$job_id].reservation_seq)),
+      batch_states:{}
+    }
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.pending-finalization.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.pending-finalization.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=3 \
+DRIVEN_SCHEDULER_MIGRATION_ONLY=1 bash "${RESERVE}" >/dev/null
+finalization_after_recovery="$(jq -cS \
+  --arg job_id "${finalizing_job_id}" \
+  '.active_jobs[$job_id].finalization' \
+  "${SCHEDULER_ROOT}/scheduler_state.json")"
+[ "${finalization_after_recovery}" = "${finalization_before_recovery}" ] || {
+  echo "migration or transaction recovery rewrote finalization fence" >&2
+  exit 1
+}
+jq -e \
+  --arg job_id "${finalizing_job_id}" \
+  --arg event_id "${finalizing_event}" \
+  --arg token "${finalizing_token}" '
+  (has("pending_transaction") | not)
+  and .active_jobs[$job_id].reservation_seq == 1
+  and .active_jobs[$job_id].finalization == {
+    event_id:$event_id,
+    claim_generation:1,
+    claim_token:$token,
+    membership_keys:["FP:snapshot-0"]
+  }
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null || {
+  echo "recovered finalization fence has an inconsistent schema" >&2
+  exit 1
+}
+cp "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/finalizing-preparing-before-expiry.json"
+CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=5000 \
+DRIVEN_PREPARING_LEASE_SECONDS=10 bash "${RESERVE}" >/dev/null
+cmp -s "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/finalizing-preparing-before-expiry.json" \
+  || {
+    echo "preparing lease recovery rewrote a finalization claim" >&2
+    exit 1
+  }
+jq -e \
+  --arg job_id "${finalizing_job_id}" \
+  --arg token "${finalizing_token}" '
+  .active_jobs[$job_id].status == "preparing"
+  and .active_jobs[$job_id].claim_generation == 1
+  and .active_jobs[$job_id].claim_token == $token
+  and .active_jobs[$job_id].finalization.event_id == (
+    $job_id + ":claim-1:terminal-1")
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${finalizing_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${finalizing_token}" \
+  FINALIZATION_EVENT_ID="${finalizing_event}" \
+  NOW_EPOCH=5001 DRIVEN_PREPARING_LEASE_SECONDS=10 \
+  bash "${RECORD}" >/dev/null || {
+    echo "expired preparing finalization could not complete terminal" >&2
+    exit 1
+  }
+jq -e --arg job_id "${finalizing_job_id}" \
+  '.active_jobs | has($job_id) | not' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
+# A reserved claim-0 job may be finalized as a preflight skip. The fence must
+# suppress grant replay, while terminal remains valid without CLAIM_TOKEN.
+SCHEDULER_ROOT="${TEST_ROOT}/finalizing-reserved-scheduler"
+CONFIG_DIR="${TEST_ROOT}/finalizing-reserved-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=3' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_batch_fixture FR '[89]'
+jq '.batch_order = ["FR"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+finalizing_reserved="$(CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=1 bash "${RESERVE}")"
+reserved_job_id="$(jq -r '.grants[0].job_id' <<<"${finalizing_reserved}")"
+reserved_event="${reserved_job_id}:claim-0:terminal-1"
+jq \
+  --arg job_id "${reserved_job_id}" \
+  --arg event_id "${reserved_event}" '
+  .active_jobs[$job_id].finalization = {
+    event_id:$event_id,
+    claim_generation:0,
+    claim_token:null,
+    membership_keys:["FR:snapshot-0"]
+  }
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.finalizing.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.finalizing.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+reserved_fence_replay="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=2 bash "${RESERVE}"
+)"
+jq -e '.grants == [] and .active_count == 1' \
+  <<<"${reserved_fence_replay}" >/dev/null || {
+    echo "reserved finalization job was replayed as a grant" >&2
+    exit 1
+  }
+env -u CLAIM_TOKEN \
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${reserved_job_id}" STATUS=terminal \
+  FINALIZATION_EVENT_ID="${reserved_event}" NOW_EPOCH=3 \
+  bash "${RECORD}" >/dev/null
+jq -e --arg job_id "${reserved_job_id}" \
+  '.active_jobs | has($job_id) | not' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
 echo 'ok driven scheduler fairness'

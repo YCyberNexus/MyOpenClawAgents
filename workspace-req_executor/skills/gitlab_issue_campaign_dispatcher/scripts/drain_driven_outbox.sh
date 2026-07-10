@@ -36,14 +36,10 @@ if [[ "${DELIVERY_TIMEOUT_SECONDS}" =~ ^0+$ ]]; then
 fi
 
 # scheduler_env initializes and exports callback paths under its own short
-# lock. It releases that lock before this script acquires the independent
-# outbox lock or performs any network call.
+# lock. It releases that lock before this script acquires an independent
+# per-entry outbox lock or performs any network call.
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/scheduler_env.sh" >/dev/null
-
-OUTBOX_LOCK_FILE="${CALLBACK_OUTBOX}/.drain.lock"
-exec {OUTBOX_LOCK_FD}>"${OUTBOX_LOCK_FILE}"
-flock -x "${OUTBOX_LOCK_FD}"
 
 shopt -s nullglob
 OUTBOX_FILES=("${CALLBACK_OUTBOX}"/*.json)
@@ -55,10 +51,21 @@ FAILED_COUNT=0
 
 for outbox_file in "${OUTBOX_FILES[@]}"; do
   SCANNED_COUNT=$((SCANNED_COUNT + 1))
-  if ! entry_json="$(jq -ce '
+  entry_name="$(basename "${outbox_file}" .json)"
+  entry_lock_file="${CALLBACK_OUTBOX}/.${entry_name}.lock"
+  exec {ENTRY_LOCK_FD}>"${entry_lock_file}"
+  if ! flock -n "${ENTRY_LOCK_FD}"; then
+    exec {ENTRY_LOCK_FD}>&-
+    continue
+  fi
+
+  # Always re-read after acquiring the event lock. Another drain or importer
+  # may have advanced delivered_at/ready_at after the initial directory scan.
+  if ! entry_json="$(jq -ce --arg expected_event_id "${entry_name}" '
     if type == "object"
       and .version == 1
       and (.event_id | type == "string" and length > 0)
+      and .event_id == $expected_event_id
       and (.target | type == "string" and length > 0)
       and (.body | type == "object")
       and (.body | keys | sort) == [
@@ -69,6 +76,8 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
       and ((.last_error == null) or (.last_error | type == "string"))
       and ((.delivered_at == null)
         or (.delivered_at | type == "number" and . == floor and . >= 0))
+      and ((.ready_at == null)
+        or (.ready_at | type == "number" and . == floor and . >= 0))
       and (.created_at | type == "number" and . == floor and . >= 0)
       and (.updated_at | type == "number" and . == floor and . >= 0)
     then .
@@ -77,10 +86,19 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
   ' "${outbox_file}" 2>/dev/null)"; then
     FAILED_COUNT=$((FAILED_COUNT + 1))
     echo "drain_driven_outbox.sh: invalid outbox entry retained: ${outbox_file}" >&2
+    flock -u "${ENTRY_LOCK_FD}"
+    exec {ENTRY_LOCK_FD}>&-
     continue
   fi
 
   if [ "$(jq -r '.delivered_at != null' <<<"${entry_json}")" = true ]; then
+    flock -u "${ENTRY_LOCK_FD}"
+    exec {ENTRY_LOCK_FD}>&-
+    continue
+  fi
+  if [ "$(jq -r '.ready_at == null' <<<"${entry_json}")" = true ]; then
+    flock -u "${ENTRY_LOCK_FD}"
+    exec {ENTRY_LOCK_FD}>&-
     continue
   fi
 
@@ -160,10 +178,9 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
     FAILED_COUNT=$((FAILED_COUNT + 1))
   fi
   atomic_write_json "${outbox_file}" "${next_entry}"
+  flock -u "${ENTRY_LOCK_FD}"
+  exec {ENTRY_LOCK_FD}>&-
 done
-
-flock -u "${OUTBOX_LOCK_FD}"
-exec {OUTBOX_LOCK_FD}>&-
 
 jq -cn \
   --argjson scanned "${SCANNED_COUNT}" \

@@ -492,6 +492,7 @@ mapfile -t EXPIRED_PREPARING_JOB_IDS < <(jq -r \
   ($lease_seconds | tonumber) as $lease
   | [.active_jobs | to_entries[]
       | select(.value.status == "preparing"
+        and (.value.finalization // null) == null
         and (($now - .value.updated_at) >= $lease))]
   | sort_by(.value.reservation_seq)
   | .[].key
@@ -546,7 +547,8 @@ NEXT_RESERVATION_SEQ="$(jq -r \
 # stable public grant without exposing its internal reservation sequence.
 GRANTS_JSON="$(jq -c '
   [.active_jobs | to_entries[]
-    | select(.value.status == "reserved")
+    | select(.value.status == "reserved"
+      and (.value.finalization // null) == null)
     | .value
     | {
         job_id,
@@ -641,8 +643,31 @@ while [ "${batch_order_length}" -gt 0 ]; do
         and (.[0].value.entry_mode == $entry_mode)
         and (.[0].value.force_rerun_pr == $force_rerun_pr)
       ' <<<"${matching_jobs}")"
+      finalization_present="$(jq -r \
+        '.[0].value.finalization != null' <<<"${matching_jobs}")"
 
-      if [ "${same_intent}" = true ]; then
+      if [ "${finalization_present}" = true ]; then
+        old_blocker="$(jq -r --arg index "${pending_index}" '.memberships[$index].blocked_by_job_id // empty' <<<"${batch_state}")"
+        if [ "${candidate_is_new}" = true ] || [ "${old_blocker}" != "${active_job_id}" ]; then
+          batch_state="$(jq -c \
+            --arg index "${pending_index}" \
+            --argjson snapshot_index "${pending_index}" \
+            --argjson iid "${iid}" \
+            --arg job_id "${active_job_id}" \
+            --argjson candidate_is_new "${candidate_is_new}" '
+            .memberships[$index] = {
+              snapshot_index:$snapshot_index,
+              iid:$iid,
+              status:"pending",
+              blocked_by_job_id:$job_id
+            }
+            | if $candidate_is_new then .next_snapshot_index += 1 else . end
+          ' <<<"${batch_state}")"
+          BATCH_STATES["${batch_id}"]="${batch_state}"
+          CHANGED_BATCHES["${batch_id}"]=1
+        fi
+        continue
+      elif [ "${same_intent}" = true ]; then
         batch_state="$(jq -c \
           --arg index "${pending_index}" \
           --argjson snapshot_index "${pending_index}" \

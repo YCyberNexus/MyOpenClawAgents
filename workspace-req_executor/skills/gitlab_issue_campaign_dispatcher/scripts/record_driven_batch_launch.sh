@@ -7,6 +7,7 @@ RECORD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORDED_AT="${NOW_EPOCH:-$(date +%s)}"
 PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
 CLAIM_TOKEN_INPUT="${CLAIM_TOKEN:-}"
+FINALIZATION_EVENT_ID_INPUT="${FINALIZATION_EVENT_ID:-}"
 
 record_die() {
   echo "record_driven_batch_launch.sh: $1" >&2
@@ -147,6 +148,9 @@ fi
 case "${CLAIM_TOKEN_INPUT}" in
   *$'\n'*|*$'\r'*|*$'\t'*) record_die "CLAIM_TOKEN contains control characters" ;;
 esac
+case "${FINALIZATION_EVENT_ID_INPUT}" in
+  *$'\n'*|*$'\r'*|*$'\t'*) record_die "FINALIZATION_EVENT_ID contains control characters" ;;
+esac
 
 # shellcheck disable=SC1091
 source "${RECORD_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
@@ -237,12 +241,54 @@ CURRENT_STATUS="$(jq -r '.status' <<<"${JOB_JSON}")"
 CURRENT_CLAIM_GENERATION="$(jq -r '.claim_generation' <<<"${JOB_JSON}")"
 CURRENT_CLAIM_TOKEN="$(jq -r '.claim_token // empty' <<<"${JOB_JSON}")"
 IS_LEGACY_RUNNING="$(jq -r '.legacy_running // false' <<<"${JOB_JSON}")"
+FINALIZATION_JSON="$(jq -c '.finalization // null' <<<"${JOB_JSON}")"
+if [ "${FINALIZATION_JSON}" != null ] && [ "${STATUS}" != terminal ]; then
+  record_die "finalizing job only accepts terminal: ${JOB_ID}" 3
+fi
+if [ "${FINALIZATION_JSON}" != null ]; then
+  FINALIZATION_JSON="$(jq -ce --arg job_id "${JOB_ID}" '
+    if type == "object"
+      and (.claim_generation | type == "number" and . == floor and . >= 0)
+      and ((.claim_token == null)
+        or (.claim_token | type == "string" and length > 0))
+      and .event_id == ($job_id + ":claim-"
+        + (.claim_generation | tostring) + ":terminal-1")
+      and (.membership_keys | type == "array" and length > 0)
+      and (.membership_keys | all(
+        type == "string"
+        and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:snapshot-(0|[1-9][0-9]*)$")))
+      and .membership_keys == (.membership_keys | sort | unique)
+    then .
+    else error("invalid finalization fence")
+    end
+  ' <<<"${FINALIZATION_JSON}")" \
+    || record_die "active job finalization fence is invalid: ${JOB_ID}" 3
+  EXPECTED_FINALIZATION_EVENT_ID="$(jq -r '.event_id' <<<"${FINALIZATION_JSON}")"
+  CURRENT_MEMBERSHIP_KEYS="$(jq -c '
+    [.memberships[]
+      | (.batch_id + ":snapshot-" + (.snapshot_index | tostring))]
+    | sort
+  ' <<<"${JOB_JSON}")"
+  if [ "${FINALIZATION_EVENT_ID_INPUT}" != "${EXPECTED_FINALIZATION_EVENT_ID}" ]; then
+    record_die "FINALIZATION_EVENT_ID does not match finalization fence: ${JOB_ID}" 3
+  fi
+  if ! jq -e \
+    --argjson claim_generation "${CURRENT_CLAIM_GENERATION}" \
+    --argjson claim_token "$(jq -c '.claim_token' <<<"${JOB_JSON}")" \
+    --argjson membership_keys "${CURRENT_MEMBERSHIP_KEYS}" '
+    .claim_generation == $claim_generation
+    and .claim_token == $claim_token
+    and .membership_keys == $membership_keys
+  ' <<<"${FINALIZATION_JSON}" >/dev/null; then
+    record_die "finalization fence no longer matches active job: ${JOB_ID}" 3
+  fi
+fi
 SHOULD_SPAWN=false
 RESPONSE_CLAIM_TOKEN=""
 NEXT_CLAIM_GENERATION="${CURRENT_CLAIM_GENERATION}"
 NEXT_CLAIM_TOKEN="${CURRENT_CLAIM_TOKEN}"
 
-if [ "${CURRENT_STATUS}" = preparing ]; then
+if [ "${CURRENT_STATUS}" = preparing ] && [ "${FINALIZATION_JSON}" = null ]; then
   claim_expired="$(jq -nr \
     --argjson now "${RECORDED_AT}" \
     --argjson updated_at "$(jq -r '.updated_at' <<<"${JOB_JSON}")" \
@@ -310,10 +356,11 @@ elif [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = preparing ]; then
     --arg job_status "${NEXT_JOB_STATUS}" \
     --argjson active_count "${ACTIVE_COUNT}" \
     --argjson should_spawn false \
+    --argjson claim_generation null \
     --argjson claim_token null \
     '{status:"recorded",job_id:$job_id,job_status:$job_status,
       active_count:$active_count,should_spawn:$should_spawn,
-      claim_token:$claim_token}'
+      claim_generation:$claim_generation,claim_token:$claim_token}'
   exit 0
 fi
 
@@ -455,7 +502,9 @@ jq -cn \
   --arg job_status "${NEXT_JOB_STATUS}" \
   --argjson active_count "${ACTIVE_COUNT}" \
   --argjson should_spawn "${SHOULD_SPAWN}" \
+  --argjson claim_generation "${NEXT_CLAIM_GENERATION}" \
   --arg claim_token "${RESPONSE_CLAIM_TOKEN}" \
   '{status:"recorded",job_id:$job_id,job_status:$job_status,
     active_count:$active_count,should_spawn:$should_spawn,
+    claim_generation:(if $should_spawn then $claim_generation else null end),
     claim_token:(if $should_spawn then $claim_token else null end)}'

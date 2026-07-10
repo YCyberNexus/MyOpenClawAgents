@@ -582,4 +582,162 @@ CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=terminal \
 jq -e '.active_jobs | has("W:snapshot-0") | not' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
+# A finalization fence freezes the exact membership snapshot that the importer
+# will fan out. A same-intent batch registered in the importer->record window
+# must remain pending, then receive an independent physical job after terminal.
+SCHEDULER_ROOT="${TEST_ROOT}/finalization-fence-scheduler"
+CONFIG_DIR="${TEST_ROOT}/finalization-fence-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=3' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_single_fixture X group/fence 71 main false
+create_single_fixture Y group/fence 71 main false
+jq '.batch_order = ["X","Y"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+fence_reserve="$(CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=400 bash "${RESERVE}")"
+fence_job_id="$(jq -r '.grants[0].job_id' <<<"${fence_reserve}")"
+fence_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=preparing \
+    NOW_EPOCH=401 bash "${RECORD}"
+)"
+jq -e '
+  .should_spawn == true
+  and .claim_generation == 1
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${fence_claim}" >/dev/null || {
+  echo "preparing claim response omitted the bind generation"
+  exit 1
+}
+fence_token="$(jq -r '.claim_token' <<<"${fence_claim}")"
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=spawned \
+  CLAIM_TOKEN="${fence_token}" NOW_EPOCH=402 bash "${RECORD}" >/dev/null
+fence_event_id="${fence_job_id}:claim-1:terminal-1"
+jq \
+  --arg job_id "${fence_job_id}" \
+  --arg event_id "${fence_event_id}" \
+  --arg token "${fence_token}" '
+  .active_jobs[$job_id].finalization = {
+    event_id:$event_id,
+    claim_generation:1,
+    claim_token:$token,
+    membership_keys:["X:snapshot-0","Y:snapshot-0"]
+  }
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.finalizing.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.finalizing.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+create_single_fixture ZF group/fence 71 main false
+jq '.batch_order += ["ZF"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.with-zf.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.with-zf.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+fence_window_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=403 bash "${RESERVE}"
+)"
+jq -e '.grants == [] and .active_count == 1' \
+  <<<"${fence_window_reserve}" >/dev/null
+jq -e --arg job_id "${fence_job_id}" '
+  .memberships["0"].status == "pending"
+  and .memberships["0"].blocked_by_job_id == $job_id
+' "${SCHEDULER_ROOT}/batches/ZF/state.json" >/dev/null \
+  || {
+    echo "finalization fence allowed a late membership to attach" >&2
+    exit 1
+  }
+jq -e --arg job_id "${fence_job_id}" '
+  [.active_jobs[$job_id].memberships[].batch_id] == ["X","Y"]
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
+cp "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/fence-before-rejected-spawned.scheduler.json"
+cp "${SCHEDULER_ROOT}/batches/X/state.json" \
+  "${TEST_ROOT}/fence-before-rejected-spawned.batch-x.json"
+if CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=spawned \
+  CLAIM_TOKEN="${fence_token}" NOW_EPOCH=404 bash "${RECORD}" \
+  >"${TEST_ROOT}/fence-spawned.out" 2>"${TEST_ROOT}/fence-spawned.err"; then
+  echo "finalization job accepted a non-terminal transition" >&2
+  exit 1
+fi
+cmp -s "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/fence-before-rejected-spawned.scheduler.json" \
+  || {
+    echo "rejected finalization transition changed scheduler state" >&2
+    exit 1
+  }
+cmp -s "${SCHEDULER_ROOT}/batches/X/state.json" \
+  "${TEST_ROOT}/fence-before-rejected-spawned.batch-x.json" \
+  || {
+    echo "rejected finalization transition changed batch state" >&2
+    exit 1
+  }
+
+if CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${fence_token}" NOW_EPOCH=405 bash "${RECORD}" \
+  >"${TEST_ROOT}/fence-terminal-no-event.out" \
+  2>"${TEST_ROOT}/fence-terminal-no-event.err"; then
+  echo "finalization terminal accepted a missing event identity" >&2
+  exit 1
+fi
+cmp -s "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/fence-before-rejected-spawned.scheduler.json" \
+  || {
+    echo "missing finalization event changed scheduler state" >&2
+    exit 1
+  }
+
+jq --arg job_id "${fence_job_id}" '
+  .active_jobs[$job_id].finalization.membership_keys = ["X:snapshot-0"]
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.bad-finalization-memberships.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.bad-finalization-memberships.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+cp "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/fence-before-membership-mismatch.scheduler.json"
+if CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${fence_token}" FINALIZATION_EVENT_ID="${fence_event_id}" \
+  NOW_EPOCH=406 bash "${RECORD}" \
+  >"${TEST_ROOT}/fence-terminal-membership-mismatch.out" \
+  2>"${TEST_ROOT}/fence-terminal-membership-mismatch.err"; then
+  echo "finalization terminal accepted a changed membership snapshot" >&2
+  exit 1
+fi
+cmp -s "${SCHEDULER_ROOT}/scheduler_state.json" \
+  "${TEST_ROOT}/fence-before-membership-mismatch.scheduler.json" \
+  || {
+    echo "membership mismatch changed scheduler state" >&2
+    exit 1
+  }
+jq --arg job_id "${fence_job_id}" '
+  .active_jobs[$job_id].finalization.membership_keys = [
+    "X:snapshot-0",
+    "Y:snapshot-0"
+  ]
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.restored-finalization.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.restored-finalization.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  CLAIM_TOKEN="${fence_token}" FINALIZATION_EVENT_ID="${fence_event_id}" \
+  NOW_EPOCH=407 bash "${RECORD}" >/dev/null
+after_fence_terminal="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=408 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,project,iid}] == [
+    {batch_id:"ZF",project:"group/fence",iid:71}
+  ]
+' <<<"${after_fence_terminal}" >/dev/null
+
 echo 'ok driven scheduler dedup'

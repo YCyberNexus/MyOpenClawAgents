@@ -8,6 +8,7 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
 HANDOFF_FILE="${HANDOFF_FILE:-}"
 IMPORTED_AT="${NOW_EPOCH:-$(date +%s)}"
+PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
 RECORD_SCRIPT="${DRIVEN_RECORD_SCRIPT:-${SCRIPT_DIR}/record_driven_batch_launch.sh}"
 
 import_die() {
@@ -29,9 +30,58 @@ atomic_write_json() {
   mv "${candidate}" "${destination}"
 }
 
+release_delivery_gate() {
+  local ready_at membership event_id target body outbox_file lock_file
+  local current_entry next_entry
+
+  ready_at="$(date +%s)"
+  RECEIPT_JSON="$(jq -c '.terminal_recorded = true' <<<"${RECEIPT_JSON}")"
+  atomic_write_json "${RECEIPT_FILE}" "${RECEIPT_JSON}"
+
+  while IFS= read -r membership; do
+    event_id="$(jq -r '.event_id' <<<"${membership}")"
+    target="$(jq -r '.target' <<<"${membership}")"
+    body="$(jq -c '.body' <<<"${membership}")"
+    outbox_file="${CALLBACK_OUTBOX}/${event_id}.json"
+    lock_file="${CALLBACK_OUTBOX}/.${event_id}.lock"
+    exec {READY_LOCK_FD}>"${lock_file}"
+    flock -x "${READY_LOCK_FD}"
+    current_entry="$(jq -ce \
+      --arg event_id "${event_id}" \
+      --arg target "${target}" \
+      --argjson body "${body}" '
+      if type == "object"
+        and .version == 1
+        and .event_id == $event_id
+        and .target == $target
+        and .body == $body
+        and ((.ready_at == null)
+          or (.ready_at | type == "number" and . == floor and . >= 0))
+      then .
+      else error("outbox changed before delivery release")
+      end
+    ' "${outbox_file}")" \
+      || import_die "outbox entry changed before delivery release: ${event_id}" 3
+    next_entry="$(jq -c \
+      --argjson ready_at "${ready_at}" '
+      .ready_at = (.ready_at // $ready_at)
+      | .updated_at = $ready_at
+    ' <<<"${current_entry}")"
+    atomic_write_json "${outbox_file}" "${next_entry}"
+    flock -u "${READY_LOCK_FD}"
+    exec {READY_LOCK_FD}>&-
+  done < <(jq -c '.memberships[]' <<<"${RECEIPT_JSON}")
+}
+
 case "${IMPORTED_AT}" in
   ''|*[!0-9]*) import_die "NOW_EPOCH must be a non-negative integer" ;;
 esac
+case "${PREPARING_LEASE_SECONDS}" in
+  ''|*[!0-9]*) import_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer" ;;
+esac
+if [[ "${PREPARING_LEASE_SECONDS}" =~ ^0+$ ]]; then
+  import_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer"
+fi
 [ -n "${HANDOFF_FILE}" ] || import_die "HANDOFF_FILE is required"
 [ -f "${HANDOFF_FILE}" ] || import_die "handoff file does not exist: ${HANDOFF_FILE}" 3
 
@@ -46,7 +96,15 @@ HANDOFF_JSON="$(jq -ce '
     and ((.version // 1) == 1)
     and (.event_id | safe_id)
     and (.job_id | safe_id)
-    and .event_id == (.job_id + ":terminal-1")
+    and (.claim_generation | type == "number" and . == floor and . >= 0)
+    and ((.claim_token == null)
+      or (.claim_token | type == "string" and length > 0))
+    and (if .claim_generation == 0
+      then .claim_token == null
+      else (.claim_token | type == "string" and length > 0)
+      end)
+    and .event_id == (.job_id + ":claim-"
+      + (.claim_generation | tostring) + ":terminal-1")
     and .memberships == []
     and .memberships_source == "scheduler_active_job"
     and (.project | safe_project)
@@ -61,6 +119,8 @@ HANDOFF_JSON="$(jq -ce '
     job_id,
     memberships:[],
     memberships_source,
+    claim_generation,
+    claim_token,
     project,
     iid,
     status,
@@ -79,6 +139,7 @@ HANDOFF_EVENT_ID="$(jq -r '.event_id' <<<"${HANDOFF_JSON}")"
 # own scheduler lock and performs no reservation pass.
 CONFIG_DIR="${CONFIG_DIR}" \
 NOW_EPOCH="${IMPORTED_AT}" \
+DRIVEN_PREPARING_LEASE_SECONDS="${PREPARING_LEASE_SECONDS}" \
 DRIVEN_SCHEDULER_MIGRATION_ONLY=1 \
 bash "${SCRIPT_DIR}/reserve_driven_batch_items.sh" >/dev/null \
   || import_die "scheduler migration-only recovery failed" 3
@@ -117,12 +178,15 @@ if [ -f "${RECEIPT_FILE}" ]; then
       and ((.mr_url == null) or (.mr_url | type == "string"))
       and ((.reason == null) or (.reason | type == "string"))
       and .memberships_source == "scheduler_active_job"
+      and (.claim_generation | type == "number"
+        and . == floor and . >= 0)
       and (.scheduler_status == "reserved"
         or .scheduler_status == "preparing"
         or .scheduler_status == "running")
       and ((.claim_token == null)
         or (.claim_token | type == "string" and length > 0))
       and (.legacy_running | type == "boolean")
+      and (.terminal_recorded | type == "boolean")
       and (.memberships | type == "array" and length > 0)
       and (.memberships | all(
         (.batch_id | type == "string")
@@ -146,6 +210,8 @@ if [ -f "${RECEIPT_FILE}" ]; then
     and .mr_url == $handoff.mr_url
     and .reason == $handoff.reason
     and .memberships_source == $handoff.memberships_source
+    and .claim_generation == $handoff.claim_generation
+    and .claim_token == $handoff.claim_token
   ' <<<"${EXISTING_RECEIPT}" >/dev/null \
     || import_die "handoff conflicts with existing import receipt" 3
 fi
@@ -158,12 +224,15 @@ TERMINAL_RECORD_NEEDED=false
 if [ "${ACTIVE_JOB}" != null ]; then
   ACTIVE_JOB="$(jq -ce --arg job_id "${JOB_ID}" \
     --arg project "$(jq -r '.project' <<<"${HANDOFF_JSON}")" \
-    --argjson iid "$(jq -r '.iid' <<<"${HANDOFF_JSON}")" '
+    --argjson iid "$(jq -r '.iid' <<<"${HANDOFF_JSON}")" \
+    --argjson expected_claim_generation "$(jq -r '.claim_generation' <<<"${HANDOFF_JSON}")" \
+    --argjson expected_claim_token "$(jq -c '.claim_token' <<<"${HANDOFF_JSON}")" '
     if type == "object"
       and .job_id == $job_id
       and .project == $project
       and .iid == $iid
       and (.status == "reserved" or .status == "preparing" or .status == "running")
+      and (.updated_at | type == "number" and . == floor and . >= 0)
       and (.memberships | type == "array" and length > 0)
       and (.memberships | all(
         (.batch_id | type == "string"
@@ -174,6 +243,8 @@ if [ "${ACTIVE_JOB}" != null ]; then
       and (.claim_generation | type == "number" and . == floor and . >= 0)
       and ((.claim_token == null)
         or (.claim_token | type == "string" and length > 0))
+      and .claim_generation == $expected_claim_generation
+      and .claim_token == $expected_claim_token
       and (if (.legacy_running // false) == true
         then .status == "running"
           and .claim_generation == 0
@@ -186,6 +257,21 @@ if [ "${ACTIVE_JOB}" != null ]; then
     else error("invalid active job")
     end
   ' <<<"${ACTIVE_JOB}")" || import_die "active scheduler job is invalid: ${JOB_ID}" 3
+
+  EXISTING_FINALIZATION="$(jq -c '.finalization // null' <<<"${ACTIVE_JOB}")"
+  if [ "$(jq -r '.status' <<<"${ACTIVE_JOB}")" = preparing ] \
+      && [ "${EXISTING_FINALIZATION}" = null ]; then
+    claim_expired="$(jq -nr \
+      --argjson now "${IMPORTED_AT}" \
+      --argjson updated_at "$(jq -r '.updated_at' <<<"${ACTIVE_JOB}")" \
+      --arg lease_seconds "${PREPARING_LEASE_SECONDS}" '
+      ($lease_seconds | tonumber) as $lease
+      | (($now - $updated_at) >= $lease)
+    ')"
+    if [ "${claim_expired}" = true ]; then
+      import_die "preparing claim lease expired: ${JOB_ID}" 3
+    fi
+  fi
 
   MEMBERSHIPS_JSON='[]'
   while IFS=$'\t' read -r batch_id snapshot_index; do
@@ -241,16 +327,47 @@ if [ "${ACTIVE_JOB}" != null ]; then
   done < <(jq -r '.memberships[] | [.batch_id, (.snapshot_index | tostring)] | @tsv' \
     <<<"${ACTIVE_JOB}")
 
+  MEMBERSHIP_KEYS="$(jq -c '
+    [.memberships[]
+      | (.batch_id + ":snapshot-" + (.snapshot_index | tostring))]
+    | sort
+  ' <<<"${ACTIVE_JOB}")"
+  FINALIZATION_JSON="$(jq -cnS \
+    --arg event_id "$(jq -r '.event_id' <<<"${HANDOFF_JSON}")" \
+    --argjson claim_generation "$(jq -r '.claim_generation' <<<"${HANDOFF_JSON}")" \
+    --argjson claim_token "$(jq -c '.claim_token' <<<"${HANDOFF_JSON}")" \
+    --argjson membership_keys "${MEMBERSHIP_KEYS}" '{
+      event_id:$event_id,
+      claim_generation:$claim_generation,
+      claim_token:$claim_token,
+      membership_keys:$membership_keys
+    }')"
+  if [ "${EXISTING_FINALIZATION}" = null ]; then
+    SCHEDULER_STATE="$(jq -c \
+      --arg job_id "${JOB_ID}" \
+      --argjson finalization "${FINALIZATION_JSON}" '
+      .active_jobs[$job_id].finalization = $finalization
+    ' <<<"${SCHEDULER_STATE}")"
+    atomic_write_json "${SCHEDULER_STATE_FILE}" "${SCHEDULER_STATE}"
+    ACTIVE_JOB="$(jq -c --arg job_id "${JOB_ID}" \
+      '.active_jobs[$job_id]' <<<"${SCHEDULER_STATE}")"
+  elif [ "$(jq -cS . <<<"${EXISTING_FINALIZATION}")" \
+      != "$(jq -cS . <<<"${FINALIZATION_JSON}")" ]; then
+    import_die "active scheduler job carries a conflicting finalization fence: ${JOB_ID}" 3
+  fi
+
   CREATED_AT="${IMPORTED_AT}"
+  TERMINAL_RECORDED=false
   if [ "${EXISTING_RECEIPT}" != null ]; then
     CREATED_AT="$(jq -r '.created_at' <<<"${EXISTING_RECEIPT}")"
+    TERMINAL_RECORDED="$(jq -r '.terminal_recorded' <<<"${EXISTING_RECEIPT}")"
   fi
   RECEIPT_JSON="$(jq -cnS \
     --argjson handoff "${HANDOFF_JSON}" \
     --arg scheduler_status "$(jq -r '.status' <<<"${ACTIVE_JOB}")" \
-    --argjson claim_token "$(jq -c '.claim_token' <<<"${ACTIVE_JOB}")" \
     --argjson legacy_running "$(jq -r '.legacy_running // false' <<<"${ACTIVE_JOB}")" \
     --argjson memberships "${MEMBERSHIPS_JSON}" \
+    --argjson terminal_recorded "${TERMINAL_RECORDED}" \
     --argjson created_at "${CREATED_AT}" '{
       version:1,
       event_id:$handoff.event_id,
@@ -261,9 +378,11 @@ if [ "${ACTIVE_JOB}" != null ]; then
       mr_url:$handoff.mr_url,
       reason:$handoff.reason,
       memberships_source:$handoff.memberships_source,
+      claim_generation:$handoff.claim_generation,
       scheduler_status:$scheduler_status,
-      claim_token:$claim_token,
+      claim_token:$handoff.claim_token,
       legacy_running:$legacy_running,
+      terminal_recorded:$terminal_recorded,
       memberships:$memberships,
       created_at:$created_at
     }')"
@@ -293,6 +412,8 @@ while IFS= read -r membership; do
       and ((.last_error == null) or (.last_error | type == "string"))
       and ((.delivered_at == null)
         or (.delivered_at | type == "number" and . == floor and . >= 0))
+      and ((.ready_at == null)
+        or (.ready_at | type == "number" and . == floor and . >= 0))
     ' "${outbox_file}" >/dev/null \
       || import_die "outbox event conflicts with persisted body: ${event_id}" 3
   fi
@@ -323,6 +444,7 @@ while IFS= read -r membership; do
       attempts:0,
       last_error:null,
       delivered_at:null,
+      ready_at:null,
       created_at:$created_at,
       updated_at:$created_at
     }')"
@@ -344,6 +466,7 @@ if [ "${TERMINAL_RECORD_NEEDED}" = true ]; then
       JOB_ID="${JOB_ID}" \
       STATUS=terminal \
       CLAIM_TOKEN="${CLAIM_TOKEN}" \
+      FINALIZATION_EVENT_ID="${HANDOFF_EVENT_ID}" \
       bash "${RECORD_SCRIPT}"
     )"
     RECORD_RC=$?
@@ -353,6 +476,7 @@ if [ "${TERMINAL_RECORD_NEEDED}" = true ]; then
       CONFIG_DIR="${CONFIG_DIR}" \
       JOB_ID="${JOB_ID}" \
       STATUS=terminal \
+      FINALIZATION_EVENT_ID="${HANDOFF_EVENT_ID}" \
       bash "${RECORD_SCRIPT}"
     )"
     RECORD_RC=$?
@@ -372,6 +496,11 @@ else
   # this replay window; all missing outbox files were recreated above.
   IMPORT_STATUS=replayed
 fi
+
+# Only a completed terminal transition opens delivery. This also repairs the
+# crash window where record removed active_jobs but the process stopped before
+# receipt/outbox readiness was published.
+release_delivery_gate
 
 jq -cn \
   --arg status "${IMPORT_STATUS}" \

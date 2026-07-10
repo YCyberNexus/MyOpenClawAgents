@@ -94,7 +94,8 @@ wrapper_log() {
 # fanout is resolved later by import_driven_handoff.sh under the scheduler lock.
 phase6_write_driven_handoff() {
   local pending_json="$1" iid="$2" final_status="$3" mr_url="$4" reason="$5"
-  local job_id event_id handoff_dir handoff_file handoff_json existing_json
+  local job_id claim_generation claim_token_json event_id
+  local handoff_dir handoff_file handoff_json existing_json
 
   case "${final_status}" in
     done|failed|timeout|skipped) ;;
@@ -118,6 +119,15 @@ phase6_write_driven_handoff() {
       and (.batch_id | type == "string"
         and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
       and (.snapshot_index | type == "number" and . == floor and . >= 0)
+      and ((if has("claim_generation") then .claim_generation else 0 end) as $generation
+        | (if has("claim_token") then .claim_token else null end) as $token
+        | ($generation | type == "number" and . == floor and . >= 0)
+          and (($token == null)
+            or ($token | type == "string" and length > 0))
+          and (if $generation == 0
+            then $token == null
+            else ($token | type == "string" and length > 0)
+            end))
     then .job_id
     else error("invalid scheduler-driven pending metadata")
     end
@@ -126,13 +136,21 @@ phase6_write_driven_handoff() {
     return 3
   fi
 
-  event_id="${job_id}:terminal-1"
+  claim_generation="$(jq -r '
+    if has("claim_generation") then .claim_generation else 0 end
+  ' <<<"${pending_json}")"
+  claim_token_json="$(jq -c '
+    if has("claim_token") then .claim_token else null end
+  ' <<<"${pending_json}")"
+  event_id="${job_id}:claim-${claim_generation}:terminal-1"
   handoff_dir="${ISSUES_ROOT}/issue-${iid}/driven_handoffs"
   handoff_file="${handoff_dir}/${event_id}.json"
   mkdir -p "${handoff_dir}"
   handoff_json="$(jq -cnS \
     --arg event_id "${event_id}" \
     --arg job_id "${job_id}" \
+    --argjson claim_generation "${claim_generation}" \
+    --argjson claim_token "${claim_token_json}" \
     --arg project "${PROJECT_FULL}" \
     --argjson iid "${iid}" \
     --arg status "${final_status}" \
@@ -143,6 +161,8 @@ phase6_write_driven_handoff() {
       job_id:$job_id,
       memberships:[],
       memberships_source:"scheduler_active_job",
+      claim_generation:$claim_generation,
+      claim_token:$claim_token,
       project:$project,
       iid:$iid,
       status:$status,
