@@ -58,8 +58,10 @@ if grep -q '^branch=' "${TEST_ROOT}/stdout"; then
   exit 1
 fi
 
-if ! grep -q "^repo_path=${REPO_PARENT}$" "${TEST_ROOT}/stdout"; then
-  echo "expected local env repo parent to be forwarded to synthesized trigger" >&2
+# The local override still supplies the base clone parent; the driven resolver
+# appends the full group path before forwarding the clone-parent trigger.
+if ! grep -q "^repo_path=${REPO_PARENT}/claw_gitlab$" "${TEST_ROOT}/stdout"; then
+  echo "expected local env base parent to produce a full-project clone parent" >&2
   cat "${TEST_ROOT}/stdout" >&2
   exit 1
 fi
@@ -78,7 +80,7 @@ if grep -Eq "${legacy_field_pattern}" "${TEST_ROOT}/stdout"; then
   exit 1
 fi
 
-DISPATCH_ORIGIN="${REPO_PARENT}/req_executor_test/.req_executor/issues/issue-42/dispatch_origin.json"
+DISPATCH_ORIGIN="${REPO_PARENT}/claw_gitlab/req_executor_test/.req_executor/issues/issue-42/dispatch_origin.json"
 if [ "$(jq -r '.dispatcher_callback_target' "${DISPATCH_ORIGIN}")" != "agent:req_dispatcher:local-test" ]; then
   echo "expected dispatch_origin.json to preserve dispatcher callback target" >&2
   cat "${DISPATCH_ORIGIN}" >&2

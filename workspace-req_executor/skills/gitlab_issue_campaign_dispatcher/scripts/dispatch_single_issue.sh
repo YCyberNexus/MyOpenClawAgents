@@ -315,6 +315,22 @@ BLOCKED_COOLDOWN_TICKS_EFF=1
 # env_paths.sh additionally validates it.
 REPO_PARENT_EFF="${REPO_PARENT_PATH:-/data}"
 
+# Resolve the collision-free final clone target before env_paths.sh derives its
+# runtime tree. The existing repo_path trigger contract carries a clone parent,
+# so pass the resolved target's parent downstream; env_paths.sh then appends the
+# bare PROJECT slug and lands on exactly the resolver's final path.
+if ! RESOLVED_REPO_PATH="$(
+  PROJECT_FULL="${PROJECT_FULL}" \
+    REPO_PARENT_PATH="${REPO_PARENT_EFF}" \
+    GITLAB_API_PROTOCOL="${GITLAB_API_PROTOCOL:-}" \
+    GITLAB_HOST="${GITLAB_HOST:-}" \
+    bash "${SCRIPT_DIR}/resolve_driven_repo_path.sh"
+)"; then
+  echo "dispatch_single_issue.sh: unable to resolve a safe clone path for ${PROJECT_FULL}" >&2
+  exit 2
+fi
+REPO_PARENT_EFF="${RESOLVED_REPO_PATH%/*}"
+
 # driven single-issue run is always quota=1, concurrency=1, IID-scoped to one issue.
 HOURLY_ISSUE_QUOTA_EFF=1
 MAX_CONCURRENT_SUBAGENTS_EFF=1

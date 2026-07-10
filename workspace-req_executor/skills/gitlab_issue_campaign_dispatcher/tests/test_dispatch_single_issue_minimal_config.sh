@@ -48,8 +48,10 @@ if grep -q '^branch=' "${TEST_ROOT}/stdout"; then
   exit 1
 fi
 
-if ! grep -q '^repo_path='"${REPO_PARENT}"'$' "${TEST_ROOT}/stdout"; then
-  echo "expected repo_path to come from the only campaign default" >&2
+# repo_path remains a clone-parent contract: env_paths.sh appends the bare
+# project slug and reaches ${REPO_PARENT}/claw_gitlab/req_executor_test.
+if ! grep -q '^repo_path='"${REPO_PARENT}/claw_gitlab"'$' "${TEST_ROOT}/stdout"; then
+  echo "expected repo_path to isolate the full project under the campaign default" >&2
   cat "${TEST_ROOT}/stdout" >&2
   exit 1
 fi
