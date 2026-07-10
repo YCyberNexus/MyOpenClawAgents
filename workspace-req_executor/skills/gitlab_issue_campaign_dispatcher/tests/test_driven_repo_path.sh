@@ -154,14 +154,16 @@ git_file_path="$(run_resolver \
   "${GIT_FILE_PARENT}" \
   origin \
   "http://oauth2:masked-token@gitlab-b.pxsemic.tech:30000/group-file/repo.git")"
-assert_eq "${GIT_FILE_LEGACY_PATH}" "${git_file_path}" "matching legacy origin with .git file"
+# A .git file identifies a linked worktree, not the parent clone required by
+# dispatch_prepare_tick/clone_or_pull. It must remain untouched and unqueried.
+assert_eq "${GIT_FILE_PARENT}/group-file/repo" "${git_file_path}" "legacy .git file uses nested parent-clone path"
 
 if grep -q 'set-url' "${GIT_LOG}"; then
   echo "resolver must never rewrite a legacy origin" >&2
   cat "${GIT_LOG}" >&2
   exit 1
 fi
-if [ "$(grep -c ' remote get-url origin$' "${GIT_LOG}")" -ne 12 ]; then
+if [ "$(grep -c ' remote get-url origin$' "${GIT_LOG}")" -ne 11 ]; then
   echo "expected one read-only origin query for each legacy lookup" >&2
   cat "${GIT_LOG}" >&2
   exit 1
