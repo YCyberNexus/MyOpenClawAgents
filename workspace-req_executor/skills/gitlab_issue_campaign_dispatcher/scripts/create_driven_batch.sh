@@ -251,9 +251,38 @@ if [ -e "${BATCH_DIR}" ]; then
      end' \
     "${BATCH_DIR}/state.json")" || batch_die "existing batch state is invalid" 3
 
+  exec {SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+  flock -x "${SCHEDULER_LOCK_FD}"
   BATCH_ORDER_COUNT="$(jq -r --arg batch_id "${BATCH_ID}" \
     '[.batch_order[] | select(. == $batch_id)] | length' "${SCHEDULER_STATE_FILE}")"
-  [ "${BATCH_ORDER_COUNT}" = 1 ] || batch_die "existing batch scheduler registration is invalid" 3
+  case "${BATCH_ORDER_COUNT}" in
+    0)
+      RECOVERED_SCHEDULER_STATE="$(jq -c --arg batch_id "${BATCH_ID}" \
+        '.batch_order += [$batch_id]' "${SCHEDULER_STATE_FILE}")" || {
+        flock -u "${SCHEDULER_LOCK_FD}"
+        exec {SCHEDULER_LOCK_FD}>&-
+        batch_die "failed to recover existing batch scheduler registration" 3
+      }
+      RECOVERED_STATE_TMP="$(mktemp "${EXECUTOR_SCHEDULER_ROOT}/.scheduler_state.json.XXXXXX")"
+      printf '%s' "${RECOVERED_SCHEDULER_STATE}" >"${RECOVERED_STATE_TMP}"
+      if ! mv "${RECOVERED_STATE_TMP}" "${SCHEDULER_STATE_FILE}"; then
+        mv \
+          "${RECOVERED_STATE_TMP}" \
+          "${FAILED_INTAKE_ROOT}/$(basename "${RECOVERED_STATE_TMP}")" 2>/dev/null || true
+        flock -u "${SCHEDULER_LOCK_FD}"
+        exec {SCHEDULER_LOCK_FD}>&-
+        batch_die "failed to publish recovered scheduler registration" 3
+      fi
+      ;;
+    1) ;;
+    *)
+      flock -u "${SCHEDULER_LOCK_FD}"
+      exec {SCHEDULER_LOCK_FD}>&-
+      batch_die "existing batch scheduler registration is duplicated" 3
+      ;;
+  esac
+  flock -u "${SCHEDULER_LOCK_FD}"
+  exec {SCHEDULER_LOCK_FD}>&-
 
   emit_success \
     "${BATCH_ID}" \

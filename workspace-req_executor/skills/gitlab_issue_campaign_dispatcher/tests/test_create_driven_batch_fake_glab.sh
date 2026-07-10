@@ -95,12 +95,13 @@ run_batch() {
   local batch_id="$1"
   local selector_lines="$2"
   local mode="${3:-success}"
+  local config_dir="${4:-${CONFIG_DIR}}"
 
   FAKE_GLAB_API_LOG="${API_LOG}" \
     FAKE_GLAB_MODE="${mode}" \
     GLAB_BIN="${FAKE_GLAB}" \
     GITLAB_TOKEN="executor-owned-token" \
-    CONFIG_DIR="${CONFIG_DIR}" \
+    CONFIG_DIR="${config_dir}" \
     bash "${CREATE_BATCH}" <<EOF
 RUN_DRIVEN_ISSUE_BATCH
 batch_id=${batch_id}
@@ -178,6 +179,69 @@ fi
   echo "conflicting replay mutated immutable snapshot.json" >&2
   exit 1
 }
+
+HALF_CONFIG_DIR="${TEST_ROOT}/half-published-config"
+HALF_SCHEDULER_ROOT="${TEST_ROOT}/half-published-scheduler"
+HALF_BATCH_ROOT="${HALF_SCHEDULER_ROOT}/batches"
+mkdir -p "${HALF_CONFIG_DIR}"
+cat >"${HALF_CONFIG_DIR}/campaign_defaults.env" <<EOF
+REPO_PARENT_PATH=/data
+EXECUTOR_SCHEDULER_ROOT=${HALF_SCHEDULER_ROOT}
+EXECUTOR_MAX_CONCURRENCY=3
+EOF
+CONFIG_DIR="${HALF_CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+mkdir -p "${HALF_BATCH_ROOT}/label"
+cp \
+  "${BATCH_ROOT}/label/request.json" \
+  "${BATCH_ROOT}/label/snapshot.json" \
+  "${BATCH_ROOT}/label/state.json" \
+  "${HALF_BATCH_ROOT}/label/"
+jq -e '.batch_order == []' "${HALF_SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
+half_snapshot_before="$(<"${HALF_BATCH_ROOT}/label/snapshot.json")"
+half_api_calls_before="$(wc -l <"${API_LOG}" | tr -d ' ')"
+if run_batch label $'selector_type=open_label\nlabel=other' success "${HALF_CONFIG_DIR}" \
+  >"${TEST_ROOT}/half-conflict.out" 2>"${TEST_ROOT}/half-conflict.err"; then
+  echo "expected a conflicting half-published replay to fail" >&2
+  exit 1
+fi
+[ "$(wc -l <"${API_LOG}" | tr -d ' ')" = "${half_api_calls_before}" ] || {
+  echo "conflicting half-published replay unexpectedly queried GitLab" >&2
+  exit 1
+}
+jq -e '.batch_order == []' "${HALF_SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
+half_recovery_out="$(run_batch label $'selector_type=open_label\nlabel=smoke' success "${HALF_CONFIG_DIR}")"
+[ "$(wc -l <"${API_LOG}" | tr -d ' ')" = "${half_api_calls_before}" ] || {
+  echo "half-published recovery unexpectedly queried GitLab" >&2
+  exit 1
+}
+jq -e \
+  --arg digest "$(jq -r '.snapshot_digest' <<<"${label_out}")" \
+  '.matched_count == 1 and .snapshot_digest == $digest and .scheduler_status == "queued"' \
+  <<<"${half_recovery_out}" >/dev/null
+[ "$(<"${HALF_BATCH_ROOT}/label/snapshot.json")" = "${half_snapshot_before}" ] || {
+  echo "half-published recovery mutated immutable snapshot.json" >&2
+  exit 1
+}
+jq -e \
+  '.batch_order == ["label"]
+    and ([.batch_order[] | select(. == "label")] | length) == 1' \
+  "${HALF_SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
+half_registered_replay_out="$(run_batch label $'selector_type=open_label\nlabel=smoke' success "${HALF_CONFIG_DIR}")"
+[ "$(wc -l <"${API_LOG}" | tr -d ' ')" = "${half_api_calls_before}" ] || {
+  echo "registered recovery replay unexpectedly queried GitLab" >&2
+  exit 1
+}
+jq -e \
+  --arg digest "$(jq -r '.snapshot_digest' <<<"${half_recovery_out}")" \
+  '.matched_count == 1 and .snapshot_digest == $digest' \
+  <<<"${half_registered_replay_out}" >/dev/null
+jq -e \
+  '.batch_order == ["label"]
+    and ([.batch_order[] | select(. == "label")] | length) == 1' \
+  "${HALF_SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 if run_batch failed-page-2 'selector_type=open_unfinished' fail_page_2 \
   >"${TEST_ROOT}/failed-page-2.out" 2>"${TEST_ROOT}/failed-page-2.err"; then
