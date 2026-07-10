@@ -302,6 +302,54 @@ extract_open_label() {
     }'
 }
 
+has_explicit_rerun_action() {
+  local text="$1"
+
+  printf '%s\n' "${text}" | awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function strip_label_selector_value(line, prefix, rest) {
+      if (!match(line, /(label|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+        return line
+      }
+
+      prefix = substr(line, 1, RSTART + RLENGTH - 1)
+      rest = substr(line, RSTART + RLENGTH)
+      if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Ii]ssue|[Ii]ssues)([[:space:]，,。;；]|$)/)) {
+        return prefix substr(rest, RSTART)
+      }
+
+      sub(/^[^[:space:]，,。;；]+/, "", rest)
+      return prefix rest
+    }
+    function is_positive_action(segment) {
+      segment = trim(segment)
+      if (segment ~ /^(重跑|重新处理|重新执行)/) {
+        return 1
+      }
+      if (segment ~ /(^|[[:space:]])(请|需要)[[:space:]]*(重跑|重新处理|重新执行)/) {
+        return 1
+      }
+      return 0
+    }
+    {
+      line = strip_label_selector_value($0)
+      segment_count = split(line, segments, /[，,。；;：:！!？?]/)
+      for (segment_index = 1; segment_index <= segment_count; segment_index++) {
+        if (is_positive_action(segments[segment_index])) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END {
+      exit(found ? 0 : 1)
+    }'
+}
+
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
@@ -427,17 +475,9 @@ PARSED_ISSUE_URL=""
 PARSED_PROJECT=""
 PARSED_IID=""
 FORCE_RERUN_PR=false
-RERUN_INTENT_SOURCE="$(
-  printf '%s\n' "${NORMALIZED}" | awk '
-    {
-      line = $0
-      gsub(/(不要|无需|无须|不用|不需要|不必|别|禁止|切勿|请勿)[[:space:]]*(再[[:space:]]*)?(重跑|重新处理|重新执行)/, "", line)
-      print line
-    }'
-)"
-case "${RERUN_INTENT_SOURCE}" in
-  *重跑*|*重新处理*|*重新执行*) FORCE_RERUN_PR=true ;;
-esac
+if has_explicit_rerun_action "${PROJECT_SOURCE}"; then
+  FORCE_RERUN_PR=true
+fi
 
 ISSUE_URL="$(extract_issue_url "${PROJECT_SOURCE}")"
 if [ -n "${ISSUE_URL}" ]; then

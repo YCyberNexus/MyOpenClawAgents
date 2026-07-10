@@ -184,6 +184,61 @@ if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"}
   exit 1
 fi
 
+cannot_rerun_json="$(
+  MESSAGE='不能重跑 ai-infra/veqp_server_v3 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .force_rerun_pr == false' <<<"${cannot_rerun_json}" >/dev/null; then
+  echo "expected cannot-rerun wording not to force rerunning pr-labelled issues" >&2
+  printf '%s\n' "${cannot_rerun_json}" >&2
+  exit 1
+fi
+
+disallowed_rerun_json="$(
+  MESSAGE='不允许重新执行 ai-infra/veqp_server_v3 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .force_rerun_pr == false' <<<"${disallowed_rerun_json}" >/dev/null; then
+  echo "expected disallowed rerun wording not to force rerunning pr-labelled issues" >&2
+  printf '%s\n' "${disallowed_rerun_json}" >&2
+  exit 1
+fi
+
+rerun_label_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 中 label 为 重跑 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"重跑"} and .force_rerun_pr == false' <<<"${rerun_label_json}" >/dev/null; then
+  echo "expected rerun text inside a label selector not to become an action" >&2
+  printf '%s\n' "${rerun_label_json}" >&2
+  exit 1
+fi
+
+explicit_rerun_json="$(
+  MESSAGE='请重跑 ai-infra/veqp_server_v3 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .force_rerun_pr == true' <<<"${explicit_rerun_json}" >/dev/null; then
+  echo "expected an explicit positive rerun command to force rerunning pr-labelled issues" >&2
+  printf '%s\n' "${explicit_rerun_json}" >&2
+  exit 1
+fi
+
+needed_rerun_json="$(
+  MESSAGE='需要重新执行 ai-infra/veqp_server_v3 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .force_rerun_pr == true' <<<"${needed_rerun_json}" >/dev/null; then
+  echo "expected an explicit needed-rerun command to force rerunning pr-labelled issues" >&2
+  printf '%s\n' "${needed_rerun_json}" >&2
+  exit 1
+fi
+
 missing_iid="$(
   MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 的 issue。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
