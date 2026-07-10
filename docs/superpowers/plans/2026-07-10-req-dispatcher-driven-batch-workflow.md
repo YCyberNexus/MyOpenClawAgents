@@ -219,7 +219,7 @@ fake `glab` 按 `page=1/2/3` 返回两页 Issue 和一页空数组，数据至�
 
 ```bash
 jq -e '.iids == [1]' "${BATCH_ROOT}/unfinished/snapshot.json"
-jq -e '.iids == [2,4]' "${BATCH_ROOT}/label/snapshot.json"
+jq -e '.iids == [4]' "${BATCH_ROOT}/label/snapshot.json"
 jq -e '.iids == [2,3,4]' "${BATCH_ROOT}/range/snapshot.json"
 ```
 
@@ -619,7 +619,7 @@ Run:
 ```bash
 git diff --check
 git diff --cached --check
-rg -n '/Users/|/private/tmp|gitlab\.example|test-token|local-session' workspace-req_dispatcher workspace-req_executor --glob '!*.local.env' --glob '!tests/**'
+rg -n '/Users/|/private/tmp|gitlab\.example|test-token|local-session' workspace-req_dispatcher workspace-req_executor --glob '!*.local.env' --glob '!**/tests/**'
 ```
 
 Expected: diff check 通过；`rg` 不出现本机路径、测试 token 或临时 endpoint。已存在的
