@@ -76,34 +76,86 @@ if CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_MAX_CONCURRENCY=0 bash "${SKILL_DIR}/scri
   exit 1
 fi
 
-if CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_SCHEDULER_ROOT=relative/path bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null 2>&1; then
-  echo 'expected relative scheduler root to fail' >&2
-  exit 1
-fi
+GUARD_BIN="${TEST_ROOT}/guard-bin"
+mkdir -p "${GUARD_BIN}"
+cat >"${GUARD_BIN}/mkdir" <<'EOF'
+#!/usr/bin/env bash
+echo 'scheduler test guard: mkdir reached' >&2
+exit 97
+EOF
+chmod +x "${GUARD_BIN}/mkdir"
+
+SCHEDULER_ROOT_SAFETY_ERROR='scheduler_env.sh: unsafe EXECUTOR_SCHEDULER_ROOT:'
+UNSAFE_CASE_INDEX=0
 
 assert_unsafe_scheduler_root() {
   local unsafe_root="$1"
   local effective_root="$2"
   local label="$3"
-  local accepted=false
+  local root_existed_before=false
+  local status=0
+  local failed=false
+  local stderr_file=""
+  local stdout_file=""
+  local derived_prefix="${effective_root%/}"
+  local protected_path=""
+  local -a protected_paths=(
+    "${derived_prefix}/scheduler_state.json"
+    "${derived_prefix}/scheduler.lock"
+    "${derived_prefix}/batches"
+    "${derived_prefix}/callback_inbox"
+    "${derived_prefix}/callback_outbox"
+  )
 
-  if CONFIG_DIR="${CONFIG_DIR}" \
+  if [ -e "${effective_root}" ]; then
+    root_existed_before=true
+  fi
+  for protected_path in "${protected_paths[@]}"; do
+    if [ -e "${protected_path}" ]; then
+      echo "unsafe-root test precondition path already exists: ${label}: ${protected_path}" >&2
+      return 1
+    fi
+  done
+
+  UNSAFE_CASE_INDEX=$((UNSAFE_CASE_INDEX + 1))
+  stderr_file="${TEST_ROOT}/unsafe-${UNSAFE_CASE_INDEX}.stderr"
+  stdout_file="${TEST_ROOT}/unsafe-${UNSAFE_CASE_INDEX}.stdout"
+
+  set +e
+  PATH="${GUARD_BIN}:${PATH}" \
+    CONFIG_DIR="${CONFIG_DIR}" \
     EXECUTOR_SCHEDULER_ROOT="${unsafe_root}" \
-    bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null 2>&1
-  then
-    accepted=true
-  fi
+    bash "${SKILL_DIR}/scripts/scheduler_env.sh" >"${stdout_file}" 2>"${stderr_file}"
+  status=$?
+  set -e
 
-  if [ "${accepted}" = true ]; then
-    echo "expected unsafe scheduler root to fail: ${label}" >&2
+  if [ "${status}" -ne 2 ]; then
+    echo "expected unsafe scheduler root to exit 2, got ${status}: ${label}" >&2
+    failed=true
   fi
-  if [ -e "${effective_root}/scheduler_state.json" ] || [ -e "${effective_root}/scheduler.lock" ]; then
-    echo "unsafe scheduler root created state or lock: ${label}" >&2
-    return 1
+  if ! grep -Fq "${SCHEDULER_ROOT_SAFETY_ERROR}" "${stderr_file}"; then
+    echo "expected scheduler root safety validation error: ${label}" >&2
+    cat "${stderr_file}" >&2
+    failed=true
   fi
-  [ "${accepted}" = false ] || return 1
+  if [ "${root_existed_before}" = false ] && [ -e "${effective_root}" ]; then
+    echo "unsafe scheduler root was created: ${label}: ${effective_root}" >&2
+    failed=true
+  fi
+  for protected_path in "${protected_paths[@]}"; do
+    if [ -e "${protected_path}" ]; then
+      echo "unsafe scheduler root created derived path: ${label}: ${protected_path}" >&2
+      failed=true
+    fi
+  done
+
+  [ "${failed}" = false ]
 }
 
+assert_unsafe_scheduler_root /etc/req_executor /etc/req_executor 'outside allowlist: /etc'
+assert_unsafe_scheduler_root /usr/local/req_executor /usr/local/req_executor 'outside allowlist: /usr/local'
+assert_unsafe_scheduler_root /opt/req_executor /opt/req_executor 'outside allowlist: /opt'
+assert_unsafe_scheduler_root relative/path "${PWD}/relative/path" 'relative path'
 assert_unsafe_scheduler_root "${TEST_ROOT}/safe/../escape" "${TEST_ROOT}/escape" 'parent segment'
 assert_unsafe_scheduler_root "${TEST_ROOT}/./dot" "${TEST_ROOT}/dot" 'current-directory segment'
 assert_unsafe_scheduler_root "${TEST_ROOT}/with space" "${TEST_ROOT}/with space" 'space'
@@ -112,6 +164,27 @@ assert_unsafe_scheduler_root / / 'filesystem root'
 assert_unsafe_scheduler_root "${TEST_ROOT}//double" "${TEST_ROOT}/double" 'double slash'
 assert_unsafe_scheduler_root "${TEST_ROOT}/trailing//" "${TEST_ROOT}/trailing" 'double trailing slash'
 assert_unsafe_scheduler_root "${TEST_ROOT}/colon:name" "${TEST_ROOT}/colon:name" 'unsupported character'
+
+set +e
+PATH="${GUARD_BIN}:${PATH}" \
+  CONFIG_DIR="${CONFIG_DIR}" \
+  EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler \
+  bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null 2>"${TEST_ROOT}/data-default.stderr"
+default_status=$?
+set -e
+if [ "${default_status}" -ne 97 ] || ! grep -Fq 'scheduler test guard: mkdir reached' "${TEST_ROOT}/data-default.stderr"; then
+  echo 'expected /data scheduler default to pass validation and reach mkdir guard' >&2
+  cat "${TEST_ROOT}/data-default.stderr" >&2
+  exit 1
+fi
+
+SAFE_NESTED_ROOT="${TEST_ROOT}/scheduler"
+safe_out="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+  EXECUTOR_SCHEDULER_ROOT="${SAFE_NESTED_ROOT}" \
+  bash "${SKILL_DIR}/scripts/scheduler_env.sh"
+)"
+jq -e --arg root "${SAFE_NESTED_ROOT}" '.scheduler_root == $root' <<<"${safe_out}" >/dev/null
 
 NORMALIZED_SCHEDULER_ROOT="${TEST_ROOT}/normalized/_scheduler"
 normalized_out="$(

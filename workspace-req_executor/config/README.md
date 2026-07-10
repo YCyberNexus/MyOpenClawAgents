@@ -2,7 +2,7 @@
 
 Files in this directory are **deployment-time pins** edited once on each runner where the agent is deployed. They are NOT generated from trigger inputs and they are NOT touched by the agent at runtime.
 
-Local clone-parent and scheduler overrides go in ignored `campaign_defaults.local.env`: executor scripts load `campaign_defaults.env` first, then `campaign_defaults.local.env` when present. An explicit process environment value for a scheduler field takes precedence over both files. Do not commit personal machine paths or extra workstation-only credentials to tracked config.
+Local clone-parent and scheduler overrides go in ignored `campaign_defaults.local.env`: executor scripts load `campaign_defaults.env` first, then `campaign_defaults.local.env` when present. An explicit process environment value for a scheduler field takes precedence over both files. A local `EXECUTOR_SCHEDULER_ROOT` must be strictly below the normalized `${HOME}` or `${TMPDIR:-/tmp}` directory; the base directory itself and paths outside those roots are rejected. Do not commit personal machine paths or extra workstation-only credentials to tracked config.
 
 ## `gitlab.env`
 
@@ -48,7 +48,7 @@ The runner has to know where to clone repositories before it can read issue cont
 | `EXECUTOR_SCHEDULER_ROOT` | `/data/req_executor/_scheduler` | Absolute agent-level root for scheduler state, lock, batch records, and callback inbox/outbox. |
 | `EXECUTOR_MAX_CONCURRENCY` | `3` | Positive integer physical concurrency limit shared across all driven batches. |
 
-`scheduler_env.sh` accepts workstation overrides for the two scheduler fields from ignored `campaign_defaults.local.env` or the process environment. It rejects relative scheduler roots and non-positive/non-integer concurrency values before creating state.
+`scheduler_env.sh` accepts workstation overrides for the two scheduler fields from ignored `campaign_defaults.local.env` or the process environment. Scheduler roots must be strictly nested below `/data`, normalized `${HOME}`, or normalized `${TMPDIR:-/tmp}`; this keeps the blue-zone default valid while limiting workstation overrides to the user's home or temporary tree. The script rejects paths equal to those allowed roots, paths outside them, relative/unsafe paths, and non-positive/non-integer concurrency values before creating state.
 
 Do not put branch, per-project quota, timeout, token, runtime basename, project data directory, or account-pool fields in `campaign_defaults.env`.
 

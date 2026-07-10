@@ -12,6 +12,24 @@ die() {
   exit 2
 }
 
+unsafe_scheduler_root() {
+  die "unsafe EXECUTOR_SCHEDULER_ROOT: $1"
+}
+
+normalize_allowed_root() {
+  local root="$1"
+  while [ "${root}" != "/" ] && [[ "${root}" == */ ]]; do
+    root="${root%/}"
+  done
+  printf '%s' "${root}"
+}
+
+is_strict_child_of() {
+  local path="$1"
+  local parent="$2"
+  [ -n "${parent}" ] && [ "${parent}" != "/" ] && [[ "${path}" == "${parent}/"* ]]
+}
+
 ROOT_ENV_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 ROOT_ENV_VALUE="${EXECUTOR_SCHEDULER_ROOT:-}"
 CONCURRENCY_ENV_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
@@ -38,7 +56,7 @@ if [ "${CONCURRENCY_ENV_SET}" = x ]; then
 fi
 
 case "${EXECUTOR_SCHEDULER_ROOT}" in
-  *//*) die "EXECUTOR_SCHEDULER_ROOT must not contain double slashes" ;;
+  *//*) unsafe_scheduler_root "must not contain double slashes" ;;
 esac
 while [ "${EXECUTOR_SCHEDULER_ROOT}" != "/" ] && [[ "${EXECUTOR_SCHEDULER_ROOT}" == */ ]]; do
   EXECUTOR_SCHEDULER_ROOT="${EXECUTOR_SCHEDULER_ROOT%/}"
@@ -46,18 +64,26 @@ done
 
 case "${EXECUTOR_SCHEDULER_ROOT}" in
   /*) ;;
-  *) die "EXECUTOR_SCHEDULER_ROOT must be an absolute path" ;;
+  *) unsafe_scheduler_root "must be an absolute path" ;;
 esac
 case "${EXECUTOR_SCHEDULER_ROOT}" in
-  /|/data|/tmp|/var|/home|/Users|/private|/private/tmp|/private/var)
-    die "EXECUTOR_SCHEDULER_ROOT must not be a protected filesystem root"
-    ;;
   */./*|*/.|*/../*|*/..)
-    die "EXECUTOR_SCHEDULER_ROOT must not contain current or parent path segments"
+    unsafe_scheduler_root "must not contain current or parent path segments"
     ;;
 esac
 if [[ ! "${EXECUTOR_SCHEDULER_ROOT}" =~ ^/[A-Za-z0-9._/-]+$ ]]; then
-  die "EXECUTOR_SCHEDULER_ROOT contains whitespace, control, or unsupported characters"
+  unsafe_scheduler_root "contains whitespace, control, or unsupported characters"
+fi
+
+ALLOWED_HOME_ROOT="$(normalize_allowed_root "${HOME:-}")"
+ALLOWED_TMP_ROOT="$(normalize_allowed_root "${TMPDIR:-/tmp}")"
+if [[ "${EXECUTOR_SCHEDULER_ROOT}" == /data/* ]] \
+  || is_strict_child_of "${EXECUTOR_SCHEDULER_ROOT}" "${ALLOWED_HOME_ROOT}" \
+  || is_strict_child_of "${EXECUTOR_SCHEDULER_ROOT}" "${ALLOWED_TMP_ROOT}"
+then
+  :
+else
+  unsafe_scheduler_root "must be strictly nested under /data, HOME, or TMPDIR"
 fi
 
 case "${EXECUTOR_MAX_CONCURRENCY}" in
