@@ -19,8 +19,10 @@ grep -Fq 'mode="run"' "${SKILL_DIR}/SKILL.md" \
   || fail "sessions_spawn must pin mode=run"
 grep -Fq 'context="isolated"' "${SKILL_DIR}/SKILL.md" \
   || fail "sessions_spawn must pin isolated context"
-grep -Fq 'SKILL_VERSION=2026-07-10.2' "${SKILL_DIR}/SKILL.md" \
-  || fail "acpx_auto_tester skill version must reflect the deployment-diagnostics update"
+grep -Fq 'timeout=1800' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatch_prepare_tick Bash invocation must pin timeout=1800"
+grep -Fq 'SKILL_VERSION=2026-07-10.3' "${SKILL_DIR}/SKILL.md" \
+  || fail "acpx_auto_tester skill version must reflect the prepare timeout contract"
 grep -Fq 'openclaw config get agents.defaults.subagents.runTimeoutSeconds' "${CONFIG_README}" \
   || fail "deployment docs must show how to verify the effective global subagent timeout"
 grep -Fq '36120' "${CONFIG_README}" \
