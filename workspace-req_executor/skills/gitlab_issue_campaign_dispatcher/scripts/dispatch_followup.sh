@@ -84,6 +84,17 @@ if [ "${PENDING_ENTRY}" = "null" ]; then
   exit 0
 fi
 
+# Task6 scheduler grants carry only a physical job identity and an explicit
+# dynamic-membership marker. Never resolve or freeze memberships while the
+# project campaign lock is held; the lock-external importer owns that step.
+IS_SCHEDULER_DRIVEN=false
+if jq -e '
+  .memberships_source == "scheduler_active_job"
+  and (.job_id | type == "string" and length > 0)
+' <<<"${PENDING_ENTRY}" >/dev/null; then
+  IS_SCHEDULER_DRIVEN=true
+fi
+
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 
 # Synthesized-reply status for a dead subagent (empty / unparseable /
@@ -196,12 +207,55 @@ fi
 REMAINING_PENDING="$(printf '%s' "${NEW_STATE}" | jq -c '.pending_subagents | keys | map(tonumber)')"
 BLOCK_REASON="$(printf '%s' "${REPLY_JSON}" | jq -r '.block_reason // ""')"
 
+# Scheduler-driven terminal outcomes use a durable two-lock handoff. Finish all
+# project-local Phase 6 mutations first, atomically write only the physical-job
+# handoff under the campaign lock, then explicitly release that lock before the
+# importer reads scheduler state. Retryable `blocked` never creates a handoff or
+# releases the scheduler job.
+HANDOFF_PATH=""
+HANDOFF_IMPORT_STATUS=""
+if [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
+  case "${FINAL_STATUS}" in
+    done|failed|timeout)
+      HANDOFF_PATH="$(phase6_write_driven_handoff \
+        "${PENDING_ENTRY}" "${IID}" "${FINAL_STATUS}" "${MR_URL}" "${BLOCK_REASON}")"
+      wrapper_log followup \
+        "driven handoff persisted iid=${IID} job_id=$(jq -r '.job_id' <<<"${PENDING_ENTRY}") path=${HANDOFF_PATH}"
+
+      # The importer and its terminal recorder must never inherit ownership of
+      # the project lock. Closing fd 9 also lets a fake importer prove the
+      # boundary with `flock -n`.
+      flock -u 9
+      exec 9>&-
+
+      HANDOFF_IMPORTER="${DRIVEN_HANDOFF_IMPORTER:-${SCRIPT_DIR}/import_driven_handoff.sh}"
+      set +e
+      HANDOFF_FILE="${HANDOFF_PATH}" \
+        bash "${HANDOFF_IMPORTER}" >/dev/null \
+        2>>"${DISPATCHER_LOG_DIR}/wrapper.log"
+      HANDOFF_IMPORT_RC=$?
+      set -e
+      if [ "${HANDOFF_IMPORT_RC}" -eq 0 ]; then
+        HANDOFF_IMPORT_STATUS="imported"
+        wrapper_log followup \
+          "handoff import completed iid=${IID} path=${HANDOFF_PATH}"
+      else
+        HANDOFF_IMPORT_STATUS="pending"
+        wrapper_log followup \
+          "handoff import pending iid=${IID} rc=${HANDOFF_IMPORT_RC} path=${HANDOFF_PATH}; durable handoff retained for retry"
+      fi
+      ;;
+  esac
+fi
+
 CHAT_SUMMARY="#${IID} ${FINAL_STATUS}"
 [ -n "${MR_URL}" ]       && CHAT_SUMMARY="${CHAT_SUMMARY} mr=${MR_URL}"
 [ -n "${BLOCK_REASON}" ] && CHAT_SUMMARY="${CHAT_SUMMARY} reason=${BLOCK_REASON}"
 CLEANUP_REASON="$(printf '%s' "${CLEANUP}" | jq -r '.reason')"
 CLEANUP_ACTION="$(printf '%s' "${CLEANUP}" | jq -r '.action')"
 CHAT_SUMMARY="${CHAT_SUMMARY} cleanup=${CLEANUP_ACTION}:${CLEANUP_REASON}"
+[ -n "${HANDOFF_IMPORT_STATUS}" ] \
+  && CHAT_SUMMARY="${CHAT_SUMMARY} handoff_import=${HANDOFF_IMPORT_STATUS}"
 
 # Best-effort 结果回报，仅在终态 done/failed/timeout（never `blocked` —
 # retryable, would re-post each attempt）。两条互斥路径，由本 issue 是否携带
@@ -247,7 +301,11 @@ fi
 RESULT_NOTE_ENABLED="$(printf '%s' "${NEW_STATE}" | jq -r '.result_note_enabled // false')"
 case "${FINAL_STATUS}" in
   done|failed|timeout)
-    if [ "${IS_DRIVEN}" = "true" ]; then
+    if [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
+      # Task6 batch callback is already durable in handoff/outbox. Never invoke
+      # the legacy best-effort direct notifier for this path.
+      :
+    elif [ "${IS_DRIVEN}" = "true" ]; then
       # driven：回投 req_dispatcher（I2 信封），跳过 post_result_note。
       set +e
       CORRELATION_ID="${DRIVEN_CORRELATION_ID}" \
@@ -283,6 +341,8 @@ jq -nc \
   --argjson cleanup "${CLEANUP}" \
   --argjson remaining_pending_iids "${REMAINING_PENDING}" \
   --arg campaign_status "${CAMPAIGN_STATUS}" \
+  --arg handoff_path "${HANDOFF_PATH}" \
+  --arg handoff_import_status "${HANDOFF_IMPORT_STATUS}" \
   --arg chat_summary "${CHAT_SUMMARY}" '
   {
     callback_status: "handled",
@@ -295,6 +355,12 @@ jq -nc \
     remaining_pending_iids: $remaining_pending_iids,
     campaign_status: $campaign_status,
     chat_summary: $chat_summary
-  }'
+  }
+  + (if $handoff_import_status == "" then {}
+     else {
+       handoff_path:$handoff_path,
+       handoff_import_status:$handoff_import_status
+     }
+     end)'
 
 wrapper_log followup "callback handled iid=${IID} attempt=${REPLY_ATTEMPT} final_status=${FINAL_STATUS} cleanup=${CLEANUP_ACTION}"
