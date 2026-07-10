@@ -38,20 +38,26 @@ source "${REQ_DISPATCHER_DIR}/config/dispatcher.env"
 assert_eq "gitlab-b.pxsemic.tech:30000" "${GITLAB_HOST:-}" "GITLAB_HOST"
 assert_eq "http" "${GITLAB_API_PROTOCOL:-}" "GITLAB_API_PROTOCOL"
 assert_eq "/data" "${REPO_PARENT_PATH:-}" "REPO_PARENT_PATH"
+assert_eq "/data/req_executor/_scheduler" "${EXECUTOR_SCHEDULER_ROOT:-}" "EXECUTOR_SCHEDULER_ROOT"
+assert_eq "3" "${EXECUTOR_MAX_CONCURRENCY:-}" "EXECUTOR_MAX_CONCURRENCY"
 assert_nonempty "${GITLAB_TOKEN:-}" "GITLAB_TOKEN"
 assert_eq "/data/req_dispatcher" "${STATE_ROOT:-}" "STATE_ROOT"
 assert_eq "agent:req_dispatcher:main" "${DISPATCHER_CALLBACK_TARGET:-}" "DISPATCHER_CALLBACK_TARGET"
 
 local_only_patterns=(
   "/Users/""yuanchenxiang"
+  "/Users/"
+  "/tmp/"
   "openclaw-local-""data"
   "flow""test"
+  "test-""token"
   "local""host:8081"
 )
 
 for config_file in \
   "${REQ_EXECUTOR_DIR}/config/gitlab.env" \
   "${REQ_EXECUTOR_DIR}/config/campaign_defaults.env" \
+  "${REQ_EXECUTOR_DIR}/config/campaign_defaults.local.env.example" \
   "${REQ_DISPATCHER_DIR}/config/dispatcher.env"
 do
   for pattern in "${local_only_patterns[@]}"; do
