@@ -29,16 +29,18 @@ if ! REQUEST_JSON="$(printf '%s' "${REQUEST_RAW}" | jq -ce '
           and (.job_id | clean_string)
           and (.batch_id | clean_string)
           and (.project | clean_string)
-          and (.branch | clean_string)
+          and (.branch == null or (.branch | clean_string))
           and (.snapshot_index | type == "number" and . == floor and . >= 0)
           and (.iid | type == "number" and . == floor and . >= 1)
           and (.entry_mode == "auto" or .entry_mode == "fresh" or .entry_mode == "continue")
           and (.force_rerun_pr | type == "boolean")) | not)
      or ([.grants[].project] | unique | length != 1)
      or ([.grants[] | [.project,.iid]] | group_by(.) | any(length > 1))
+     or ([.grants[].job_id] | group_by(.) | any(length > 1))
+     or ([.grants[] | [.batch_id,.snapshot_index]] | group_by(.) | any(length > 1))
   then error("invalid driven topup request") else . end
 ' 2>/dev/null)"; then
-  die "stdin must be one strict {owner_id,grants} JSON object with unique physical IIDs"
+  die "stdin must be strict {owner_id,grants} JSON with unique physical, job, and membership identities"
 fi
 
 PROJECT_FULL="$(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[0].project')"
@@ -63,7 +65,7 @@ validate_branch_name() {
 }
 while IFS= read -r branch; do
   validate_branch_name "${branch}" || die "grant branch is not a safe Git ref name"
-done < <(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[].branch')
+done < <(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[] | select(.branch != null) | .branch')
 
 [ -f "${CONFIG_DIR}/gitlab.env" ] \
   || die "missing config/gitlab.env at ${CONFIG_DIR}/gitlab.env"
@@ -80,7 +82,10 @@ if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
 fi
 
 GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"
-[ -n "${GITLAB_TOKEN_EFF}" ] || die "GITLAB_TOKEN is required from process env or config/gitlab.env"
+case "${GITLAB_TOKEN_EFF}" in
+  '') die "GITLAB_TOKEN is required from process env or config/gitlab.env" ;;
+  *[[:cntrl:]]*) die "GITLAB_TOKEN must not contain control characters" ;;
+esac
 : "${GITLAB_HOST:?dispatch_driven_topup.sh: GITLAB_HOST missing from gitlab.env}"
 : "${GITLAB_API_PROTOCOL:?dispatch_driven_topup.sh: GITLAB_API_PROTOCOL missing from gitlab.env}"
 REPO_PARENT_EFF="${REPO_PARENT_PATH:-/data}"
@@ -104,7 +109,6 @@ REPO_PARENT_EFF="${RESOLVED_REPO_PATH%/*}"
 IID_CSV="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | join(",")')"
 IID_MIN="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | min')"
 IID_MAX="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | max')"
-FIRST_BRANCH="$(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[0].branch')"
 
 export PROJECT="${PROJECT_SLUG}"
 export GROUP="${GROUP_EFF}"
@@ -132,7 +136,6 @@ max_runtime_minutes=300
 blocked_retry_limit=3
 blocked_cooldown_ticks=1
 acpx_timeout_seconds=18000
-branch=${FIRST_BRANCH}
 repo_path=${REPO_PARENT_EFF}
 EOF
 )"

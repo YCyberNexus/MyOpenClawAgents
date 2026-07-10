@@ -30,10 +30,17 @@ printf '%s\n' "$(basename "$0")" >>"${OWNER_TEST_CALL_LOG}"
 if [ "$(basename "$0")" = "reconcile.sh" ]; then
   path="${DISPATCHER_LOG_DIR}/reconcile-20260710T000000Z.json"
   mkdir -p "${DISPATCHER_LOG_DIR}"
-  jq -nc '[{iid:1,labels:["doing"],missing:false,is_closed_on_gitlab:false,
-    is_done_on_gitlab:false,has_done_pr:false,needs_continue:false,
-    has_retry:false,has_blocked:false,has_failed:false,has_timeout:false,
-    user_reopened:false}]' >"${path}"
+  if [ "${OWNER_TEST_EVIDENCE_MODE:-doing}" = "closed" ]; then
+    jq -nc '[{iid:1,labels:[],missing:false,is_closed_on_gitlab:true,
+      is_done_on_gitlab:true,has_done_pr:false,needs_continue:false,
+      has_retry:false,has_blocked:false,has_failed:false,has_timeout:false,
+      user_reopened:false}]' >"${path}"
+  else
+    jq -nc '[{iid:1,labels:["doing"],missing:false,is_closed_on_gitlab:false,
+      is_done_on_gitlab:false,has_done_pr:false,needs_continue:false,
+      has_retry:false,has_blocked:false,has_failed:false,has_timeout:false,
+      user_reopened:false}]' >"${path}"
+  fi
   printf '%s\n' "${path}"
 fi
 EOF
@@ -97,24 +104,29 @@ repo_path=${REPO_PARENT}
 EOF
 }
 
-write_owned_state() {
-  local mode="$1" owner_id="$2" now
+write_campaign_state() {
+  local mode="$1" owner_id="$2" with_pending="$3" now
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  jq -n --arg mode "${mode}" --arg owner_id "${owner_id}" --arg now "${now}" '{
+  jq -n --arg mode "${mode}" --arg owner_id "${owner_id}" --arg now "${now}" \
+    --argjson with_pending "${with_pending}" '{
     project:"project",branch:"main",issue_min_iid:1,issue_max_iid:1,
     hourly_issue_quota:1,max_runtime_minutes:300,blocked_retry_limit:3,
     blocked_cooldown_ticks:1,max_concurrent_subagents:1,stuck_after_minutes:332,
     acpx_timeout_seconds:18000,issue_iids_whitelist:[1],require_labels:[],
-    require_labels_match:"or",tick_seq:2,active_issue_iids:[1],
-    active_issue_sessions:["issue-project-1"],
-    pending_subagents:{"1":{attempt_number:1,run_id:"run-1",
+    require_labels_match:"or",tick_seq:2,
+    active_issue_iids:(if $with_pending then [1] else [] end),
+    active_issue_sessions:(if $with_pending then ["issue-project-1"] else [] end),
+    pending_subagents:(if $with_pending then {"1":{attempt_number:1,run_id:"run-1",
       child_session_key:"agent:child:one",spawned_at:$now,placeholder:false,
-      acpx_timeout_seconds:18000}},blocked_at_tick_by_iid:{},unfinished_iids:[],
+      acpx_timeout_seconds:18000}} else {} end),
+    blocked_at_tick_by_iid:{},unfinished_iids:[],
     completed_iids:[],blocked_iids:[],failed_iids:[],timeout_iids:[],
     campaign_status:"waiting_for_callbacks",quota_launched_this_tick:0,
-    last_reconcile_evidence:null,
-    dispatch_owner:{mode:$mode,owner_id:$owner_id,leased_at:$now},updated_at:$now
-  }' >"${STATE_FILE}"
+    last_reconcile_evidence:null,updated_at:$now
+  }
+  | if $mode == "" then . else
+      .dispatch_owner={mode:$mode,owner_id:$owner_id,leased_at:"2000-01-01T00:00:00Z"}
+    end' >"${STATE_FILE}"
 }
 
 run_prepare() {
@@ -122,7 +134,47 @@ run_prepare() {
     bash "${FIXTURE_SCRIPTS}/dispatch_prepare_tick.sh"
 }
 
-write_owned_state driven driven-A
+reset_call_log() {
+  : >"${CALL_LOG}"
+}
+
+# Legacy state with pending but no owner is acquirable by the default scheduled
+# owner and proceeds through the ordinary waiting path.
+write_campaign_state "" "" true
+reset_call_log
+LEGACY_OUT="$(scheduled_trigger | run_prepare)"
+printf '%s' "${LEGACY_OUT}" | jq -e \
+  '.status == "waiting_for_callbacks" and (has("skipped_entries") | not)' >/dev/null \
+  || fail "legacy state without owner must be acquirable"
+jq -e '.dispatch_owner.mode == "scheduled" and .dispatch_owner.owner_id == "scheduled"' \
+  "${STATE_FILE}" >/dev/null || fail "legacy state did not acquire scheduled owner"
+[ -s "${CALL_LOG}" ] || fail "legacy owner acquisition did not enter scheduled tick"
+
+# Same mode and same owner is reentrant and renews the lease.
+write_campaign_state scheduled scheduled true
+reset_call_log
+REENTRANT_OUT="$(scheduled_trigger | run_prepare)"
+printf '%s' "${REENTRANT_OUT}" | jq -e '.status == "waiting_for_callbacks"' >/dev/null \
+  || fail "same scheduled owner must be reentrant"
+jq -e '.dispatch_owner.mode == "scheduled"
+  and .dispatch_owner.owner_id == "scheduled"
+  and .dispatch_owner.leased_at != "2000-01-01T00:00:00Z"' "${STATE_FILE}" >/dev/null \
+  || fail "same owner reentry did not renew dispatch_owner lease"
+
+# Same mode but a different owner is busy while pending remains.
+write_campaign_state scheduled scheduled-other true
+reset_call_log
+cp "${STATE_FILE}" "${TEST_ROOT}/scheduled-other-before.json"
+SAME_MODE_BUSY_OUT="$(scheduled_trigger | run_prepare)"
+printf '%s' "${SAME_MODE_BUSY_OUT}" | jq -e \
+  '.status == "busy_owned_by_scheduled" and .dispatch_entries == []' >/dev/null \
+  || fail "different scheduled owner must report busy_owned_by_scheduled"
+cmp -s "${STATE_FILE}" "${TEST_ROOT}/scheduled-other-before.json" \
+  || fail "same-mode owner conflict changed campaign_state bytes"
+[ ! -s "${CALL_LOG}" ] || fail "same-mode owner conflict reached external work"
+
+write_campaign_state driven driven-A true
+reset_call_log
 cp "${STATE_FILE}" "${TEST_ROOT}/driven-before.json"
 SCHEDULED_OUT="$(scheduled_trigger | run_prepare)"
 printf '%s' "${SCHEDULED_OUT}" | jq -e '
@@ -130,9 +182,10 @@ printf '%s' "${SCHEDULED_OUT}" | jq -e '
 ' >/dev/null || fail "scheduled tick must report busy_owned_by_driven"
 cmp -s "${STATE_FILE}" "${TEST_ROOT}/driven-before.json" \
   || fail "scheduled conflict changed driven-owned campaign_state bytes"
-[ ! -e "${CALL_LOG}" ] || fail "scheduled conflict called GitLab/clone/reconcile before owner rejection"
+[ ! -s "${CALL_LOG}" ] || fail "scheduled conflict called GitLab/clone/reconcile before owner rejection"
 
-write_owned_state scheduled scheduled
+write_campaign_state scheduled scheduled true
+reset_call_log
 cp "${STATE_FILE}" "${TEST_ROOT}/scheduled-before.json"
 DRIVEN_OUT="$(driven_trigger | run_prepare)"
 printf '%s' "${DRIVEN_OUT}" | jq -e '
@@ -140,6 +193,20 @@ printf '%s' "${DRIVEN_OUT}" | jq -e '
 ' >/dev/null || fail "driven topup must report busy_owned_by_scheduled"
 cmp -s "${STATE_FILE}" "${TEST_ROOT}/scheduled-before.json" \
   || fail "driven conflict changed scheduled-owned campaign_state bytes"
-[ ! -e "${CALL_LOG}" ] || fail "driven conflict called GitLab/clone/reconcile before owner rejection"
+[ ! -s "${CALL_LOG}" ] || fail "driven conflict called GitLab/clone/reconcile before owner rejection"
 
-echo "ok campaign owner lease rejects cross-owner mutation before external work"
+# Once pending is empty, a new mode/owner replaces the old lease.
+write_campaign_state driven driven-A false
+reset_call_log
+export OWNER_TEST_EVIDENCE_MODE=closed
+IDLE_REPLACE_OUT="$(scheduled_trigger | run_prepare)"
+unset OWNER_TEST_EVIDENCE_MODE
+printf '%s' "${IDLE_REPLACE_OUT}" | jq -e \
+  '.status == "no_eligible_iids" and (has("skipped_entries") | not)' >/dev/null \
+  || fail "idle campaign owner replacement did not continue scheduled tick"
+jq -e '.pending_subagents == {}
+  and .dispatch_owner.mode == "scheduled"
+  and .dispatch_owner.owner_id == "scheduled"' "${STATE_FILE}" >/dev/null \
+  || fail "idle campaign did not replace driven owner with scheduled owner"
+
+echo "ok campaign owner lease covers legacy acquisition, reentry, busy, and idle replacement"

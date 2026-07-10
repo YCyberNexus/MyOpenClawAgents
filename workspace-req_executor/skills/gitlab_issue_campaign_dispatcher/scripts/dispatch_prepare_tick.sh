@@ -256,6 +256,9 @@ esac
 
 DRIVEN_REQUEST_JSON=""
 DRIVEN_GRANTS_JSON="[]"
+DRIVEN_EXECUTABLE_GRANTS_JSON="[]"
+DRIVEN_EXECUTABLE_GRANT_IIDS_JSON="[]"
+SKIPPED_ENTRIES_JSON="[]"
 if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
   DRIVEN_REQUEST_RAW="${T[driven_request_json]:-}"
   if ! DRIVEN_REQUEST_JSON="$(printf '%s' "${DRIVEN_REQUEST_RAW}" | jq -ce \
@@ -275,12 +278,14 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
             and (.job_id | clean_string)
             and (.batch_id | clean_string)
             and (.project == $project)
-            and (.branch | clean_string)
+            and (.branch == null or (.branch | clean_string))
             and (.snapshot_index | type == "number" and . == floor and . >= 0)
             and (.iid | type == "number" and . == floor and . >= 1)
             and (.entry_mode == "auto" or .entry_mode == "fresh" or .entry_mode == "continue")
             and (.force_rerun_pr | type == "boolean")) | not)
        or ([.grants[] | [.project,.iid]] | group_by(.) | any(length > 1))
+       or ([.grants[].job_id] | group_by(.) | any(length > 1))
+       or ([.grants[] | [.batch_id,.snapshot_index]] | group_by(.) | any(length > 1))
     then error("invalid") else . end
   ' 2>/dev/null)"; then
     emit_chat_failure "invalid_driven_request_json"
@@ -708,6 +713,34 @@ EV_KIND="$(printf '%s' "${EVIDENCE_JSON}" | jq -r 'type' 2>/dev/null || echo inv
 if [ "${EV_KIND}" != "array" ]; then
   emit_chat_failure "reconcile_failed: evidence file at ${EVIDENCE_PATH} is ${EV_KIND}, expected a JSON array (reconcile.sh produced an empty or malformed file)"
 fi
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  DRIVEN_PREFLIGHT_JSON="$(jq -nc \
+    --argjson grants "${DRIVEN_GRANTS_JSON}" \
+    --argjson evidence "${EVIDENCE_JSON}" '
+    ($evidence | map({key:(.iid|tostring), value:.}) | from_entries) as $by_iid
+    | reduce $grants[] as $grant ({executable:[], skipped:[]};
+        ($by_iid[($grant.iid|tostring)] // {}) as $live
+        | if ($live.is_closed_on_gitlab // false) == true then
+            .skipped += [($grant | {
+              job_id,batch_id,snapshot_index,project,iid,
+              status:"skipped",reason:"closed"
+            })]
+          elif (((($live.has_done_pr // false) == true)
+                  or (($live.is_done_on_gitlab // false) == true)
+                 ) and ($grant.force_rerun_pr == false)) then
+            .skipped += [($grant | {
+              job_id,batch_id,snapshot_index,project,iid,
+              status:"skipped",reason:"pr_without_force_rerun"
+            })]
+          else
+            .executable += [($grant
+              | if .force_rerun_pr then .entry_mode = "fresh" else . end)]
+          end)
+  ')"
+  DRIVEN_EXECUTABLE_GRANTS_JSON="$(printf '%s' "${DRIVEN_PREFLIGHT_JSON}" | jq -c '.executable')"
+  DRIVEN_EXECUTABLE_GRANT_IIDS_JSON="$(printf '%s' "${DRIVEN_EXECUTABLE_GRANTS_JSON}" | jq -c 'map(.iid)')"
+  SKIPPED_ENTRIES_JSON="$(printf '%s' "${DRIVEN_PREFLIGHT_JSON}" | jq -c '.skipped')"
+fi
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}" --argjson evicted "${EVICTED_IIDS_JSON}" '
   . as $s
   | ($s.pending_subagents | keys | map(tonumber)) as $pending
@@ -806,8 +839,19 @@ fi
 if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
   CURRENT_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
     | jq -c '.pending_subagents | keys | map(tonumber) | sort')"
+  DRIVEN_EXECUTABLE_GRANT_COUNT="$(printf '%s' "${DRIVEN_EXECUTABLE_GRANT_IIDS_JSON}" | jq 'length')"
+  if [ "${DRIVEN_EXECUTABLE_GRANT_COUNT}" -eq 0 ]; then
+    jq -nc \
+      --arg ev "${EVIDENCE_PATH}" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
+      '{status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+        cleanup_actions:$cleanup_actions, chat_summary:"all driven grants skipped by live preflight",
+        last_reconcile_evidence:$ev}'
+    exit 0
+  fi
   DRIVEN_NEW_GRANT_IIDS_JSON="$(jq -nc \
-    --argjson grants "${DRIVEN_GRANT_IIDS_JSON}" \
+    --argjson grants "${DRIVEN_EXECUTABLE_GRANT_IIDS_JSON}" \
     --argjson initial_pending "${INITIAL_PENDING_IIDS_JSON}" \
     --argjson current_pending "${CURRENT_PENDING_IIDS_JSON}" '
     $grants
@@ -828,10 +872,12 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
       --argjson evicted "${EVICTED_IIDS_JSON}" \
       --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
       --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
       --arg chat "waiting_for_callbacks; driven topup has no unoccupied grant slots" '
       {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
        evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
-       cleanup_actions:$cleanup_actions, last_reconcile_evidence:$ev, chat_summary:$chat}'
+       cleanup_actions:$cleanup_actions, skipped_entries:$skipped_entries,
+       last_reconcile_evidence:$ev, chat_summary:$chat}'
     exit 0
   fi
 fi
@@ -901,9 +947,17 @@ fi
 # ─── 16. Batch formation ──────────────────────────────────────────
 ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
 if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
-  jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
-    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
-    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
+      '{status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+        cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
+  else
+    jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
+  fi
   exit 0
 fi
 
@@ -1003,7 +1057,7 @@ BATCH_JSON="$(jq -nc \
 
 if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
   BATCH_JSON="$(jq -nc \
-    --argjson grants "${DRIVEN_GRANT_IIDS_JSON}" \
+    --argjson grants "${DRIVEN_EXECUTABLE_GRANT_IIDS_JSON}" \
     --argjson initial_pending "${INITIAL_PENDING_IIDS_JSON}" \
     --argjson current_pending "${CURRENT_PENDING_IIDS_JSON}" \
     --argjson cap "${BATCH_CAP}" '
@@ -1016,9 +1070,17 @@ fi
 
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
-  jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
-    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
-    '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
+      '{status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+        cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
+  else
+    jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      '{status:"no_eligible_iids", dispatch_entries:[], cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
+  fi
   exit 0
 fi
 
@@ -1103,12 +1165,18 @@ FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | so
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c "${PRE_PENDING_JQ_ARGS[@]}" "${FILTER}")"
 if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  # Task 7 contract: after this project campaign lock is released, Task 7 must
+  # resolve the latest memberships by job_id under the agent scheduler lock while
+  # the scheduler job is still active and before recording that scheduler job terminal.
+  # batch_id/snapshot_index below identify this grant only; they are never a
+  # frozen membership array, and this script never reads agent scheduler state.
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
-    --argjson grants "${DRIVEN_GRANTS_JSON}" \
+    --argjson grants "${DRIVEN_EXECUTABLE_GRANTS_JSON}" \
     --argjson batch "${BATCH_JSON}" '
     reduce ($grants[] | select(.iid as $iid | $batch | index($iid) != null)) as $grant (.;
       .pending_subagents[($grant.iid | tostring)] +=
-        ($grant | {job_id,batch_id,snapshot_index,branch,entry_mode,force_rerun_pr}))')"
+        (($grant | {job_id,batch_id,snapshot_index,branch,entry_mode,force_rerun_pr})
+         + {memberships_source:"scheduler_active_job"}))')"
 fi
 persist_state "${STATE_JSON}"
 
@@ -1134,9 +1202,10 @@ for iid in "${BATCH_IIDS[@]}"; do
   IID_BRANCH="${T[branch]}"
   GRANT_ENTRY_MODE="auto"
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
-    IID_GRANT_JSON="$(printf '%s' "${DRIVEN_GRANTS_JSON}" \
+    IID_GRANT_JSON="$(printf '%s' "${DRIVEN_EXECUTABLE_GRANTS_JSON}" \
       | jq -c --argjson iid "${iid}" '.[] | select(.iid == $iid)')"
-    IID_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.branch')"
+    IID_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" \
+      | jq -r --arg default_branch "${T[branch]}" '.branch // $default_branch')"
     GRANT_ENTRY_MODE="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.entry_mode')"
   fi
 
@@ -1557,7 +1626,8 @@ PYEOF
         payload_path:$path,
         job_id:$grant.job_id,
         batch_id:$grant.batch_id,
-        snapshot_index:$grant.snapshot_index
+        snapshot_index:$grant.snapshot_index,
+        memberships_source:"scheduler_active_job"
       }]')"
   else
     DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
@@ -1576,35 +1646,72 @@ SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s)' \
   "${SURVIVOR_COUNT}" "${BATCH_SIZE}" "${MAX_CONCURRENT}")"
 
 if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    jq -nc \
+      --argjson outcomes "${TICK_OUTCOMES}" \
+      --argjson evicted "${EVICTED_IIDS_JSON}" \
+      --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
+      --arg ev "${EVIDENCE_PATH}" \
+      --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
+      {status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+       evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+       cleanup_actions:$cleanup_actions,
+       max_launch_retries:3, backoff_seconds:2,
+       tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev, chat_summary:$chat}'
+  else
+    jq -nc \
+      --argjson outcomes "${TICK_OUTCOMES}" \
+      --argjson evicted "${EVICTED_IIDS_JSON}" \
+      --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --arg ev "${EVIDENCE_PATH}" \
+      --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
+      {status:"no_eligible_iids", dispatch_entries:[],
+       evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+       cleanup_actions:$cleanup_actions,
+       max_launch_retries:3, backoff_seconds:2,
+       tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev, chat_summary:$chat}'
+  fi
+  exit 0
+fi
+
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
   jq -nc \
+    --argjson dispatch_entries "${DISPATCH_ENTRIES}" \
+    --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
     --argjson outcomes "${TICK_OUTCOMES}" \
     --argjson evicted "${EVICTED_IIDS_JSON}" \
     --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
     --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
+    --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
     --arg ev "${EVIDENCE_PATH}" \
-    --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
-    {status:"no_eligible_iids", dispatch_entries:[],
+    --arg chat "${SUMMARY}" '
+    {status:"ready", dispatch_entries:$dispatch_entries, skipped_entries:$skipped_entries,
+     max_launch_retries:3, backoff_seconds:2,
      evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
      cleanup_actions:$cleanup_actions,
+     label_filtered_in:$label_in, label_filtered_out:$label_out,
+     tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev,
+     chat_summary:$chat}'
+else
+  jq -nc \
+    --argjson dispatch_entries "${DISPATCH_ENTRIES}" \
+    --argjson outcomes "${TICK_OUTCOMES}" \
+    --argjson evicted "${EVICTED_IIDS_JSON}" \
+    --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+    --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
+    --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
+    --arg ev "${EVIDENCE_PATH}" \
+    --arg chat "${SUMMARY}" '
+    {status:"ready", dispatch_entries:$dispatch_entries,
      max_launch_retries:3, backoff_seconds:2,
-     tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev, chat_summary:$chat}'
-  exit 0
+     evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+     cleanup_actions:$cleanup_actions,
+     label_filtered_in:$label_in, label_filtered_out:$label_out,
+     tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev,
+     chat_summary:$chat}'
 fi
-
-jq -nc \
-  --argjson dispatch_entries "${DISPATCH_ENTRIES}" \
-  --argjson outcomes "${TICK_OUTCOMES}" \
-  --argjson evicted "${EVICTED_IIDS_JSON}" \
-  --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
-  --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
-  --argjson label_in "${LABEL_FILTERED_IN_JSON}" \
-  --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
-  --arg ev "${EVIDENCE_PATH}" \
-  --arg chat "${SUMMARY}" '
-  {status:"ready", dispatch_entries:$dispatch_entries,
-   max_launch_retries:3, backoff_seconds:2,
-   evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
-   cleanup_actions:$cleanup_actions,
-   label_filtered_in:$label_in, label_filtered_out:$label_out,
-   tick_outcome_per_iid:$outcomes, last_reconcile_evidence:$ev,
-   chat_summary:$chat}'
