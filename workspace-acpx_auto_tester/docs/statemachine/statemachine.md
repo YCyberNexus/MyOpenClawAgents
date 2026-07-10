@@ -57,7 +57,7 @@ stateDiagram-v2
         PREPARING --> SPAWNING : prep_ok / -
         PREPARING --> [*]      : prep_failed / synth blocked, retry_count unchanged
 
-        SPAWNING : entry/ sessions_spawn (anonymous, timeoutSeconds=30)
+        SPAWNING : entry/ sessions_spawn (anonymous task, runtime=subagent, mode=run)
         SPAWNING : do/ wait launch ack (runId + childSessionKey)
         SPAWNING : exit/ record ack into pending_subagents[iid]
         note left of SPAWNING : run by dispatcher

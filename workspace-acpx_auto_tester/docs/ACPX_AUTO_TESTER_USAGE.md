@@ -101,7 +101,6 @@ issue_iids=301,304,310,318
 require_labels=acpx-auto,priority::high
 require_labels_match=or
 acpx_timeout_seconds=18000
-run_timeout_seconds=18120
 stuck_after_minutes=332
 kill_subagent_on_terminal=true
 result_basename=ifp-result
@@ -149,13 +148,14 @@ blocked_policy=skip_and_retry
 | `require_labels` | 空 | 只调度带有指定 live GitLab label 的 issue。多个 label 用逗号分隔。 |
 | `require_labels_match` | `or` | `or` 表示满足任意一个 label，`and` 表示必须全部满足。 |
 | `acpx_timeout_seconds` | `18000` | 子 agent 内部运行 `run_acpx_attempt.sh` 的 wall-clock cap。 |
-| `run_timeout_seconds` | `acpx_timeout_seconds + 120` | OpenClaw runtime 对整个 subagent 的运行上限，必须比 `acpx_timeout_seconds` 至少多 120 秒。 |
-| `stuck_after_minutes` | `ceil(run_timeout_seconds / 60) + 30` | pending subagent 超过该时间没有 callback 时，下次 scheduled tick 会做 stuck eviction。 |
+| `stuck_after_minutes` | `ceil((acpx_timeout_seconds + 120) / 60) + 30` | pending subagent 超过该时间没有 callback 时，下次 scheduled tick 会做 stuck eviction。 |
 | `kill_subagent_on_terminal` | `true` | terminal callback 后是否尽力清理 runtime child session。 |
 | `result_basename` | `ifp-result` | repo 内 agent runtime root 的目录名。 |
 | `data_basename` | `ifp-data` | repo 内测试知识库目录名。 |
 | `claude_settings_path` | 空 | 可选的 Claude Code settings JSON 绝对路径；会复制到 issue worktree 的 `.claude/settings.json`。 |
 | `gitlab_address` | 空 | 仅用于校验是否匹配部署固定 host；新配置通常不传。 |
+
+旧版 trigger 字段 `run_timeout_seconds` 已停止支持；传入它会让 tick 明确失败，避免被误认为 OpenClaw 2026.6.11 支持的单次 `sessions_spawn` 参数。若部署需要全局 subagent 运行上限，应使用 OpenClaw 配置 `agents.defaults.subagents.runTimeoutSeconds`，且正值必须满足 `>= acpx_timeout_seconds + 120`。例如 trigger 使用 `acpx_timeout_seconds=36000` 时，全局值至少应为 `36120`；配置成 `18120` 会在约 5 小时 2 分钟时提前终止外层 subagent，但不会导致启动瞬间的 `EXIT_CODE=141`。
 
 ### 字段覆盖规则
 
@@ -175,7 +175,6 @@ blocked_policy=skip_and_retry
 - `max_concurrent_subagents`
 - `max_accounts_per_issue`
 - `stuck_after_minutes`
-- `run_timeout_seconds`
 - `acpx_timeout_seconds`
 - `kill_subagent_on_terminal`
 - `issue_iids`
@@ -317,7 +316,7 @@ subagent 不读取 `SKILL.md`、`SOUL.md` 或 `AGENTS.md`，只读取 orchestrat
 
 | Prompt | 文件 | 发送给谁 | 用途 |
 | --- | --- | --- | --- |
-| outer executor prompt | `${LOG_DIR}/spawn_payload.txt` | `sessions_spawn(payload=...)` 的 per-issue subagent | 指挥 subagent 运行 acpx、提交、推送、上传 Wiki、创建 MR、返回 compact JSON |
+| outer executor prompt | `${LOG_DIR}/spawn_payload.txt` | `sessions_spawn(task=<文件内容>, runtime="subagent", mode="run", cleanup="keep", context="isolated")` 的 per-issue subagent | 指挥 subagent 运行 acpx、提交、推送、上传 Wiki、创建 MR、返回 compact JSON |
 | inner Claude Code prompt | `${LOG_DIR}/prompt.txt` | `acpx claude exec -f` | 指挥 Claude Code 根据 GitLab issue 生成测试/规格输出 |
 
 使用者和调度器只传 trigger prompt。不要把 `${LOG_DIR}/prompt.txt` 当作
