@@ -92,6 +92,7 @@ jq -e '
 ' <<<"${first_reserve}" >/dev/null
 
 a_job_id="$(jq -r '.grants[] | select(.batch_id == "A") | .job_id' <<<"${first_reserve}")"
+e_job_id="$(jq -r '.grants[] | select(.batch_id == "E") | .job_id' <<<"${first_reserve}")"
 jq -e --arg job_id "${a_job_id}" '
   .active_jobs[$job_id].physical_key == "group/repo#7"
   and (.active_jobs[$job_id].memberships | length) == 2
@@ -111,6 +112,43 @@ while IFS= read -r reserved_job_id; do
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${reserved_job_id}" STATUS=preparing \
     bash "${RECORD}" >/dev/null
 done < <(jq -r '.grants[].job_id' <<<"${first_reserve}")
+
+spawned_once="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${e_job_id}" STATUS=spawned \
+    bash "${RECORD}"
+)"
+spawned_again="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${e_job_id}" STATUS=spawned \
+    bash "${RECORD}"
+)"
+jq -e '.job_status == "running" and .should_spawn == false' \
+  <<<"${spawned_once}" >/dev/null
+jq -e '.job_status == "running" and .should_spawn == false' \
+  <<<"${spawned_again}" >/dev/null
+
+running_scheduler_before="$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")"
+running_batch_before="$(jq -cS . "${SCHEDULER_ROOT}/batches/E/state.json")"
+set +e
+running_launch_failed_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${e_job_id}" STATUS=launch_failed \
+    bash "${RECORD}" 2>&1
+)"
+running_launch_failed_status=$?
+set -e
+if [ "${running_launch_failed_status}" -ne 3 ]; then
+  echo "expected running launch_failed to exit 3, got ${running_launch_failed_status}: ${running_launch_failed_output}" >&2
+  exit 1
+fi
+running_scheduler_after="$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")"
+running_batch_after="$(jq -cS . "${SCHEDULER_ROOT}/batches/E/state.json")"
+if [ "${running_scheduler_after}" != "${running_scheduler_before}" ]; then
+  echo "expected rejected running launch_failed to leave scheduler state unchanged" >&2
+  exit 1
+fi
+if [ "${running_batch_after}" != "${running_batch_before}" ]; then
+  echo "expected rejected running launch_failed to leave batch state unchanged" >&2
+  exit 1
+fi
 
 # Re-reserving while the physical jobs are active must neither create another
 # grant nor duplicate the attached membership.
@@ -307,5 +345,88 @@ jq -e '
   ]
   and .active_count == 2
 ' <<<"${next_intent_reserve}" >/dev/null
+
+# A conflicting physical job at the head of one batch must not block a later
+# runnable snapshot item from using a free slot in the same round.
+SCHEDULER_ROOT="${TEST_ROOT}/head-of-line-scheduler"
+CONFIG_DIR="${TEST_ROOT}/head-of-line-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=2' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_single_fixture A group/repo 7 main false
+create_single_fixture C group/repo 7 release false
+jq '.selector = {type:"range",iid_min:7,iid_max:8}' \
+  "${SCHEDULER_ROOT}/batches/C/request.json" \
+  >"${SCHEDULER_ROOT}/batches/C/request.next.json"
+/bin/mv "${SCHEDULER_ROOT}/batches/C/request.next.json" \
+  "${SCHEDULER_ROOT}/batches/C/request.json"
+jq '.iids = [7,8]' \
+  "${SCHEDULER_ROOT}/batches/C/snapshot.json" \
+  >"${SCHEDULER_ROOT}/batches/C/snapshot.next.json"
+/bin/mv "${SCHEDULER_ROOT}/batches/C/snapshot.next.json" \
+  "${SCHEDULER_ROOT}/batches/C/snapshot.json"
+jq '.matched_count = 2' \
+  "${SCHEDULER_ROOT}/batches/C/state.json" \
+  >"${SCHEDULER_ROOT}/batches/C/state.next.json"
+/bin/mv "${SCHEDULER_ROOT}/batches/C/state.next.json" \
+  "${SCHEDULER_ROOT}/batches/C/state.json"
+jq '.batch_order = ["A","C"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+/bin/mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+head_of_line_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
+expected_head_of_line='[{"batch_id":"A","iid":7},{"batch_id":"C","iid":8}]'
+actual_head_of_line="$(jq -c '[.grants[] | {batch_id,iid}]' <<<"${head_of_line_reserve}")"
+if [ "${actual_head_of_line}" != "${expected_head_of_line}" ]; then
+  echo "expected blocked C#7 to yield to runnable C#8: ${expected_head_of_line}, got ${actual_head_of_line}" >&2
+  exit 1
+fi
+jq -e '
+  .memberships["0"].status == "pending"
+  and (.memberships["0"].blocked_by_job_id | type == "string")
+  and .memberships["1"].status == "reserved"
+' "${SCHEDULER_ROOT}/batches/C/state.json" >/dev/null
+
+# Missing entry_mode always normalizes to auto, including force reruns. It must
+# therefore remain a different intent from an explicit fresh request.
+SCHEDULER_ROOT="${TEST_ROOT}/entry-mode-scheduler"
+CONFIG_DIR="${TEST_ROOT}/entry-mode-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=2' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_single_fixture MISSING group/mode 9 main true
+create_single_fixture FRESH group/mode 9 main true
+jq '.entry_mode = "fresh"' \
+  "${SCHEDULER_ROOT}/batches/FRESH/request.json" \
+  >"${SCHEDULER_ROOT}/batches/FRESH/request.next.json"
+/bin/mv "${SCHEDULER_ROOT}/batches/FRESH/request.next.json" \
+  "${SCHEDULER_ROOT}/batches/FRESH/request.json"
+jq '.batch_order = ["MISSING","FRESH"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+/bin/mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+entry_mode_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
+expected_entry_mode='[{"batch_id":"MISSING","entry_mode":"auto"}]'
+actual_entry_mode="$(jq -c '[.grants[] | {batch_id,entry_mode}]' <<<"${entry_mode_reserve}")"
+if [ "${actual_entry_mode}" != "${expected_entry_mode}" ]; then
+  echo "expected missing entry_mode to stay auto: ${expected_entry_mode}, got ${actual_entry_mode}" >&2
+  exit 1
+fi
+jq -e '
+  .memberships["0"].status == "pending"
+  and (.memberships["0"].blocked_by_job_id | type == "string")
+' "${SCHEDULER_ROOT}/batches/FRESH/state.json" >/dev/null
 
 echo 'ok driven scheduler dedup'

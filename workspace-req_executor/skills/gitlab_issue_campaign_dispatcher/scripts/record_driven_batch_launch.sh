@@ -60,6 +60,13 @@ recover_pending_transaction() {
         and ((.scheduler_state.round_robin_cursor == null)
           or (.scheduler_state.round_robin_cursor | type == "string"))
         and (.scheduler_state.active_jobs | type == "object")
+        and (.scheduler_state.active_jobs | to_entries | all(
+          (.value.reservation_seq | type == "number"
+            and . == floor and . > 0)
+          and (.value.updated_at | type == "number"
+            and . == floor and . >= 0)))
+        and (([.scheduler_state.active_jobs[].reservation_seq] | length)
+          == ([.scheduler_state.active_jobs[].reservation_seq] | unique | length))
         and (.scheduler_state.batch_order | type == "array")
         and (.scheduler_state | has("pending_transaction") | not)
         and (.batch_states | type == "object")
@@ -139,6 +146,8 @@ JOB_JSON="$(jq -ce --arg job_id "${JOB_ID}" '
       and (.iid | type == "number" and . == floor and . > 0)
       and (.physical_key == (.project + "#" + (.iid | tostring)))
       and (.status == "reserved" or .status == "preparing" or .status == "running")
+      and (.reservation_seq | type == "number" and . == floor and . > 0)
+      and (.updated_at | type == "number" and . == floor and . >= 0)
       and (.owner | type == "object")
       and (.owner.batch_id | type == "string")
       and (.owner.snapshot_index | type == "number" and . == floor and . >= 0)
@@ -152,9 +161,10 @@ JOB_JSON="$(jq -ce --arg job_id "${JOB_ID}" '
     end
 ' <<<"${SCHEDULER_STATE}")" || record_die "active job state is invalid: ${JOB_ID}" 3
 CURRENT_STATUS="$(jq -r '.status' <<<"${JOB_JSON}")"
+SHOULD_SPAWN=false
 
 case "${STATUS}:${CURRENT_STATUS}" in
-  preparing:reserved|preparing:preparing|spawned:reserved|spawned:preparing|spawned:running|launch_failed:*|terminal:*) ;;
+  preparing:reserved|preparing:preparing|spawned:reserved|spawned:preparing|spawned:running|launch_failed:reserved|launch_failed:preparing|terminal:*) ;;
   *) record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3 ;;
 esac
 
@@ -164,6 +174,25 @@ case "${STATUS}" in
   launch_failed) NEXT_JOB_STATUS=launch_failed ;;
   terminal) NEXT_JOB_STATUS=terminal ;;
 esac
+
+if [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = reserved ]; then
+  SHOULD_SPAWN=true
+elif [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = preparing ]; then
+  # The lock makes the first reserved -> preparing transition the sole spawn
+  # claim. A duplicate caller observes the existing claim without refreshing
+  # its timestamp, so a crashed claimant can still be recovered by its lease.
+  ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
+  flock -u "${SCHEDULER_LOCK_FD}"
+  exec {SCHEDULER_LOCK_FD}>&-
+  jq -cn \
+    --arg job_id "${JOB_ID}" \
+    --arg job_status "${NEXT_JOB_STATUS}" \
+    --argjson active_count "${ACTIVE_COUNT}" \
+    --argjson should_spawn false \
+    '{status:"recorded",job_id:$job_id,job_status:$job_status,
+      active_count:$active_count,should_spawn:$should_spawn}'
+  exit 0
+fi
 
 declare -A BATCH_STATES=()
 declare -A CHANGED_BATCHES=()
@@ -290,4 +319,6 @@ jq -cn \
   --arg job_id "${JOB_ID}" \
   --arg job_status "${NEXT_JOB_STATUS}" \
   --argjson active_count "${ACTIVE_COUNT}" \
-  '{status:"recorded",job_id:$job_id,job_status:$job_status,active_count:$active_count}'
+  --argjson should_spawn "${SHOULD_SPAWN}" \
+  '{status:"recorded",job_id:$job_id,job_status:$job_status,
+    active_count:$active_count,should_spawn:$should_spawn}'

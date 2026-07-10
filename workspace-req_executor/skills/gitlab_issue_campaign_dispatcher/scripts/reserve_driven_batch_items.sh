@@ -6,6 +6,7 @@ set -euo pipefail
 
 RESERVE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESERVED_AT="${NOW_EPOCH:-$(date +%s)}"
+PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
 
 reserve_die() {
   echo "reserve_driven_batch_items.sh: $1" >&2
@@ -61,6 +62,13 @@ recover_pending_transaction() {
         and ((.scheduler_state.round_robin_cursor == null)
           or (.scheduler_state.round_robin_cursor | type == "string"))
         and (.scheduler_state.active_jobs | type == "object")
+        and (.scheduler_state.active_jobs | to_entries | all(
+          (.value.reservation_seq | type == "number"
+            and . == floor and . > 0)
+          and (.value.updated_at | type == "number"
+            and . == floor and . >= 0)))
+        and (([.scheduler_state.active_jobs[].reservation_seq] | length)
+          == ([.scheduler_state.active_jobs[].reservation_seq] | unique | length))
         and (.scheduler_state.batch_order | type == "array")
         and (.scheduler_state | has("pending_transaction") | not)
         and (.batch_states | type == "object")
@@ -99,6 +107,12 @@ recover_pending_transaction() {
 case "${RESERVED_AT}" in
   ''|*[!0-9]*) reserve_die "NOW_EPOCH must be a non-negative integer" ;;
 esac
+case "${PREPARING_LEASE_SECONDS}" in
+  ''|*[!0-9]*) reserve_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer" ;;
+esac
+if [[ "${PREPARING_LEASE_SECONDS}" =~ ^0+$ ]]; then
+  reserve_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer"
+fi
 
 # scheduler_env.sh validates deployment settings, initializes the scheduler
 # layout if needed, and exports all runtime paths. Its own short initialization
@@ -134,7 +148,9 @@ SCHEDULER_STATE="$(jq -ce '
       and (.value.entry_mode == "auto" or .value.entry_mode == "fresh" or .value.entry_mode == "continue")
       and (.value.force_rerun_pr | type == "boolean")
       and (.value.status == "reserved" or .value.status == "preparing" or .value.status == "running")
+      and (.value.reservation_seq | type == "number" and . == floor and . > 0)
       and (.value.reserved_at | type == "number" and . == floor and . >= 0)
+      and (.value.updated_at | type == "number" and . == floor and . >= 0)
       and (.value.owner | type == "object")
       and (.value.owner.batch_id | type == "string"
         and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
@@ -145,38 +161,13 @@ SCHEDULER_STATE="$(jq -ce '
           and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
         and (.snapshot_index | type == "number" and . == floor and . >= 0)))
     ))
+    and (([.active_jobs[].reservation_seq] | length)
+      == ([.active_jobs[].reservation_seq] | unique | length))
   then .
   else error("invalid scheduler state")
   end
 ' "${SCHEDULER_STATE_FILE}")" || reserve_die "scheduler state is invalid" 3
 BASE_SCHEDULER_STATE="${SCHEDULER_STATE}"
-
-ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
-if [ "${ACTIVE_COUNT}" -gt "${EXECUTOR_MAX_CONCURRENCY}" ]; then
-  reserve_die "active job count exceeds EXECUTOR_MAX_CONCURRENCY" 3
-fi
-AVAILABLE_SLOTS=$((EXECUTOR_MAX_CONCURRENCY - ACTIVE_COUNT))
-# A persisted `reserved` job has not yet been acknowledged as `preparing` by
-# the orchestrator. Re-emit its stable grant after a process/output failure;
-# once preparing is recorded, later reserve calls no longer return it.
-GRANTS_JSON="$(jq -c '
-  [.active_jobs | to_entries[]
-    | select(.value.status == "reserved")
-    | .value
-    | {
-        job_id,
-        batch_id:.owner.batch_id,
-        snapshot_index:.owner.snapshot_index,
-        project,
-        iid,
-        branch,
-        entry_mode,
-        force_rerun_pr,
-        reserved_at
-      }]
-  | sort_by(.reserved_at, .job_id)
-  | map(del(.reserved_at))
-' <<<"${SCHEDULER_STATE}")"
 SCHEDULER_CHANGED=false
 
 mapfile -t BATCH_ORDER < <(jq -r '.batch_order[]' <<<"${SCHEDULER_STATE}")
@@ -266,6 +257,82 @@ load_batch() {
   BATCH_STATES["${batch_id}"]="${state_json}"
 }
 
+mapfile -t EXPIRED_PREPARING_JOB_IDS < <(jq -r \
+  --argjson now "${RESERVED_AT}" \
+  --arg lease_seconds "${PREPARING_LEASE_SECONDS}" '
+  ($lease_seconds | tonumber) as $lease
+  | [.active_jobs | to_entries[]
+      | select(.value.status == "preparing"
+        and (($now - .value.updated_at) >= $lease))]
+  | sort_by(.value.reservation_seq)
+  | .[].key
+' <<<"${SCHEDULER_STATE}")
+for expired_job_id in "${EXPIRED_PREPARING_JOB_IDS[@]}"; do
+  expired_job="$(jq -c \
+    --arg job_id "${expired_job_id}" \
+    '.active_jobs[$job_id]' \
+    <<<"${SCHEDULER_STATE}")"
+  expired_batch_id="$(jq -r '.owner.batch_id' <<<"${expired_job}")"
+  expired_snapshot_index="$(jq -r '.owner.snapshot_index' <<<"${expired_job}")"
+  load_batch "${expired_batch_id}"
+  expired_batch_state="${BATCH_STATES[${expired_batch_id}]}"
+  if ! jq -e \
+    --arg index "${expired_snapshot_index}" \
+    --arg job_id "${expired_job_id}" '
+    .memberships[$index].job_id == $job_id
+    and .memberships[$index].status == "preparing"
+  ' <<<"${expired_batch_state}" >/dev/null; then
+    reserve_die \
+      "expired preparing owner membership is inconsistent: ${expired_batch_id}/${expired_snapshot_index}" \
+      3
+  fi
+
+  expired_batch_state="$(jq -c \
+    --arg index "${expired_snapshot_index}" '
+    .memberships[$index].status = "reserved"
+    | .status = "running"
+  ' <<<"${expired_batch_state}")"
+  SCHEDULER_STATE="$(jq -c \
+    --arg job_id "${expired_job_id}" \
+    --argjson recorded_at "${RESERVED_AT}" '
+    .active_jobs[$job_id].status = "reserved"
+    | .active_jobs[$job_id].updated_at = $recorded_at
+  ' <<<"${SCHEDULER_STATE}")"
+  BATCH_STATES["${expired_batch_id}"]="${expired_batch_state}"
+  CHANGED_BATCHES["${expired_batch_id}"]=1
+  SCHEDULER_CHANGED=true
+done
+
+ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
+if [ "${ACTIVE_COUNT}" -gt "${EXECUTOR_MAX_CONCURRENCY}" ]; then
+  reserve_die "active job count exceeds EXECUTOR_MAX_CONCURRENCY" 3
+fi
+AVAILABLE_SLOTS=$((EXECUTOR_MAX_CONCURRENCY - ACTIVE_COUNT))
+NEXT_RESERVATION_SEQ="$(jq -r \
+  '[.active_jobs[].reservation_seq] | (max // 0) + 1' \
+  <<<"${SCHEDULER_STATE}")"
+# A persisted `reserved` job has not yet been acknowledged as `preparing`, or
+# its previous preparing claim exceeded the recoverable lease. Re-emit the
+# stable public grant without exposing its internal reservation sequence.
+GRANTS_JSON="$(jq -c '
+  [.active_jobs | to_entries[]
+    | select(.value.status == "reserved")
+    | .value
+    | {
+        job_id,
+        batch_id:.owner.batch_id,
+        snapshot_index:.owner.snapshot_index,
+        project,
+        iid,
+        branch,
+        entry_mode,
+        force_rerun_pr,
+        reservation_seq
+      }]
+  | sort_by(.reservation_seq)
+  | map(del(.reservation_seq))
+' <<<"${SCHEDULER_STATE}")"
+
 batch_order_length="${#BATCH_ORDER[@]}"
 while [ "${batch_order_length}" -gt 0 ]; do
   PASS_PROGRESS=false
@@ -295,41 +362,44 @@ while [ "${batch_order_length}" -gt 0 ]; do
       completed|failed) continue ;;
     esac
 
-    pending_index="$(jq -r '
-      [.memberships | to_entries[]
-        | select(.value.status == "pending")
-        | (.key | tonumber)]
-      | if length == 0 then empty else min end
-    ' <<<"${batch_state}")"
-    candidate_is_new=false
-    if [ -z "${pending_index}" ]; then
-      next_index="$(jq -r '.next_snapshot_index' <<<"${batch_state}")"
-      matched_count="$(jq -r '.matched_count' <<<"${batch_state}")"
-      if [ "${next_index}" -ge "${matched_count}" ]; then
-        continue
-      fi
-      pending_index="${next_index}"
-      candidate_is_new=true
-    fi
-
     request_json="${BATCH_REQUESTS[${batch_id}]}"
     snapshot_json="${BATCH_SNAPSHOTS[${batch_id}]}"
     project="$(jq -r '.project' <<<"${request_json}")"
-    iid="$(jq -r --argjson index "${pending_index}" '.iids[$index]' <<<"${snapshot_json}")"
     branch_json="$(jq -c '.branch // null' <<<"${request_json}")"
-    entry_mode="$(jq -r '.entry_mode // (if .force_rerun_pr then "fresh" else "auto" end)' <<<"${request_json}")"
+    entry_mode="$(jq -r '.entry_mode // "auto"' <<<"${request_json}")"
     force_rerun_pr="$(jq -r '.force_rerun_pr' <<<"${request_json}")"
 
-    matching_jobs="$(jq -c \
-      --arg project "${project}" \
-      --argjson iid "${iid}" '
-      [.active_jobs | to_entries[]
-        | select(.value.project == $project and .value.iid == $iid)]
-    ' <<<"${SCHEDULER_STATE}")"
-    matching_job_count="$(jq -r 'length' <<<"${matching_jobs}")"
-    if [ "${matching_job_count}" -gt 1 ]; then
-      reserve_die "multiple active jobs hold the same physical Issue: ${project}#${iid}" 3
-    fi
+    # A blocked low-index membership must not hide a later runnable item. Scan
+    # pending and still-lazy snapshot indices in order, but stop after the first
+    # attach or grant so each batch still advances at most once per round.
+    mapfile -t CANDIDATE_INDICES < <(jq -r '
+      ([.memberships | to_entries[]
+          | select(.value.status == "pending")
+          | (.key | tonumber)]
+        + [range(.next_snapshot_index; .matched_count)])
+      | unique
+      | sort
+      | .[]
+    ' <<<"${batch_state}")
+    [ "${#CANDIDATE_INDICES[@]}" -gt 0 ] || continue
+
+    for pending_index in "${CANDIDATE_INDICES[@]}"; do
+      candidate_is_new="$(jq -r \
+        --arg index "${pending_index}" \
+        '.memberships | has($index) | not' \
+        <<<"${batch_state}")"
+      iid="$(jq -r --argjson index "${pending_index}" '.iids[$index]' <<<"${snapshot_json}")"
+
+      matching_jobs="$(jq -c \
+        --arg project "${project}" \
+        --argjson iid "${iid}" '
+        [.active_jobs | to_entries[]
+          | select(.value.project == $project and .value.iid == $iid)]
+      ' <<<"${SCHEDULER_STATE}")"
+      matching_job_count="$(jq -r 'length' <<<"${matching_jobs}")"
+      if [ "${matching_job_count}" -gt 1 ]; then
+        reserve_die "multiple active jobs hold the same physical Issue: ${project}#${iid}" 3
+      fi
 
     if [ "${matching_job_count}" -eq 1 ]; then
       active_job_id="$(jq -r '.[0].key' <<<"${matching_jobs}")"
@@ -372,6 +442,7 @@ while [ "${batch_order_length}" -gt 0 ]; do
         CHANGED_BATCHES["${batch_id}"]=1
         SCHEDULER_CHANGED=true
         PASS_PROGRESS=true
+        break
       else
         old_blocker="$(jq -r --arg index "${pending_index}" '.memberships[$index].blocked_by_job_id // empty' <<<"${batch_state}")"
         if [ "${candidate_is_new}" = true ] || [ "${old_blocker}" != "${active_job_id}" ]; then
@@ -392,16 +463,16 @@ while [ "${batch_order_length}" -gt 0 ]; do
           BATCH_STATES["${batch_id}"]="${batch_state}"
           CHANGED_BATCHES["${batch_id}"]=1
         fi
+        continue
       fi
-      continue
     fi
 
     # A new physical job consumes a global slot. If no slot is free, leave a
     # lazy snapshot item untouched so next_snapshot_index remains a true claim
     # cursor rather than merely a scan cursor.
-    if [ "${AVAILABLE_SLOTS}" -le 0 ]; then
-      continue
-    fi
+      if [ "${AVAILABLE_SLOTS}" -le 0 ]; then
+        break
+      fi
 
     job_id="${batch_id}:snapshot-${pending_index}"
     if jq -e --arg job_id "${job_id}" '.active_jobs[$job_id] != null' \
@@ -409,6 +480,8 @@ while [ "${batch_order_length}" -gt 0 ]; do
       reserve_die "generated job_id already exists: ${job_id}" 3
     fi
     physical_key="${project}#${iid}"
+    reservation_seq="${NEXT_RESERVATION_SEQ}"
+    NEXT_RESERVATION_SEQ=$((NEXT_RESERVATION_SEQ + 1))
     batch_state="$(jq -c \
       --arg index "${pending_index}" \
       --argjson snapshot_index "${pending_index}" \
@@ -432,6 +505,7 @@ while [ "${batch_order_length}" -gt 0 ]; do
       --argjson branch "${branch_json}" \
       --arg entry_mode "${entry_mode}" \
       --argjson force_rerun_pr "${force_rerun_pr}" \
+      --argjson reservation_seq "${reservation_seq}" \
       --argjson reserved_at "${RESERVED_AT}" \
       --arg batch_id "${batch_id}" \
       --argjson snapshot_index "${pending_index}" '
@@ -444,6 +518,7 @@ while [ "${batch_order_length}" -gt 0 ]; do
         entry_mode:$entry_mode,
         force_rerun_pr:$force_rerun_pr,
         status:"reserved",
+        reservation_seq:$reservation_seq,
         reserved_at:$reserved_at,
         updated_at:$reserved_at,
         owner:{batch_id:$batch_id,snapshot_index:$snapshot_index},
@@ -476,7 +551,9 @@ while [ "${batch_order_length}" -gt 0 ]; do
     SCHEDULER_CHANGED=true
     PASS_PROGRESS=true
     ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
-    AVAILABLE_SLOTS=$((AVAILABLE_SLOTS - 1))
+      AVAILABLE_SLOTS=$((AVAILABLE_SLOTS - 1))
+      break
+    done
   done
 
   [ "${PASS_PROGRESS}" = true ] || break

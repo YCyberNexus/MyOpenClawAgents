@@ -92,9 +92,33 @@ jq -e '
     and .force_rerun_pr == false)
 ' <<<"${first_reserve}" >/dev/null
 
-jq -e '
+# Before any grant is acknowledged as preparing, a fresh reserve process must
+# replay every persisted reservation in the exact physical creation order.
+first_grant_order="$(jq -c '[.grants[] | {job_id,batch_id,iid}]' <<<"${first_reserve}")"
+replayed_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
+replayed_grant_order="$(jq -c '[.grants[] | {job_id,batch_id,iid}]' <<<"${replayed_reserve}")"
+if [ "${replayed_grant_order}" != "${first_grant_order}" ]; then
+  echo "expected unacknowledged grant replay order ${first_grant_order}, got ${replayed_grant_order}" >&2
+  exit 1
+fi
+jq -e \
+  --argjson first_grants "$(jq -c '.grants' <<<"${first_reserve}")" '
+  .status == "ready"
+  and .grants == $first_grants
+  and .active_count == 3
+  and .available_slots == 0
+  and all(.grants[]; has("reservation_seq") | not)
+' <<<"${replayed_reserve}" >/dev/null
+
+jq -e --argjson expected_order "${first_grant_order}" '
   .round_robin_cursor == "A"
   and (.active_jobs | length) == 3
+  and ([.active_jobs[].reservation_seq] | length) ==
+    ([.active_jobs[].reservation_seq] | unique | length)
+  and ([.active_jobs[]
+    | {job_id,batch_id:.owner.batch_id,iid,reservation_seq}]
+    | sort_by(.reservation_seq)
+    | map(del(.reservation_seq))) == $expected_order
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 jq -e '
   .next_snapshot_index == 2
@@ -107,12 +131,43 @@ jq -e '
 ' "${SCHEDULER_ROOT}/batches/B/state.json" >/dev/null
 
 a1_job_id="$(jq -r '.grants[] | select(.batch_id == "A" and .iid == 1) | .job_id' <<<"${first_reserve}")"
+first_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=preparing \
+    bash "${RECORD}"
+)"
+if ! jq -e '.job_status == "preparing" and .should_spawn == true' \
+  <<<"${first_claim}" >/dev/null; then
+  echo "expected first preparing claim to set should_spawn=true, got ${first_claim}" >&2
+  exit 1
+fi
+duplicate_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=preparing \
+    bash "${RECORD}"
+)"
+if ! jq -e '.job_status == "preparing" and .should_spawn == false' \
+  <<<"${duplicate_claim}" >/dev/null; then
+  echo "expected duplicate preparing claim to set should_spawn=false, got ${duplicate_claim}" >&2
+  exit 1
+fi
 while IFS= read -r reserved_job_id; do
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${reserved_job_id}" STATUS=preparing \
     bash "${RECORD}" >/dev/null
-done < <(jq -r '.grants[].job_id' <<<"${first_reserve}")
+done < <(jq -r --arg a1_job_id "${a1_job_id}" \
+  '.grants[].job_id | select(. != $a1_job_id)' <<<"${first_reserve}")
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=spawned \
   bash "${RECORD}" >/dev/null
+
+set +e
+running_claim_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=preparing \
+    bash "${RECORD}" 2>&1
+)"
+running_claim_status=$?
+set -e
+if [ "${running_claim_status}" -ne 3 ]; then
+  echo "expected running preparing claim to exit 3, got ${running_claim_status}: ${running_claim_output}" >&2
+  exit 1
+fi
 
 full_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
 jq -e '
@@ -215,7 +270,11 @@ if [ "${crash_status}" -ne 97 ]; then
   echo "expected injected final scheduler publish failure, got ${crash_status}" >&2
   exit 1
 fi
-jq -e '.pending_transaction.version == 1' \
+jq -e '
+  .pending_transaction.version == 1
+  and .pending_transaction.scheduler_state
+    .active_jobs["X:snapshot-0"].reservation_seq == 1
+' \
   "${CRASH_ROOT}/scheduler_state.json" >/dev/null
 
 recovered_reserve="$(CONFIG_DIR="${CRASH_CONFIG_DIR}" bash "${RESERVE}")"
@@ -229,10 +288,106 @@ jq -e '
   (.pending_transaction | not)
   and .round_robin_cursor == "X"
   and (.active_jobs | length) == 1
+  and .active_jobs["X:snapshot-0"].reservation_seq == 1
 ' "${CRASH_ROOT}/scheduler_state.json" >/dev/null
 jq -e '
   .next_snapshot_index == 1
   and .memberships["0"].status == "reserved"
 ' "${CRASH_BATCH_DIR}/state.json" >/dev/null
+
+# A preparing claim is a recoverable lease. Before expiry it remains hidden;
+# after expiry reserve atomically restores the owner membership and replays the
+# exact original public grants in their stable reservation sequence.
+LEASE_ROOT="${TEST_ROOT}/lease-scheduler"
+CONFIG_DIR="${TEST_ROOT}/lease-config"
+SCHEDULER_ROOT="${LEASE_ROOT}"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${LEASE_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=2' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_batch_fixture L '[21,22]'
+jq '.batch_order = ["L"]' \
+  "${LEASE_ROOT}/scheduler_state.json" \
+  >"${LEASE_ROOT}/scheduler_state.next.json"
+/bin/mv "${LEASE_ROOT}/scheduler_state.next.json" \
+  "${LEASE_ROOT}/scheduler_state.json"
+
+lease_first_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+    DRIVEN_PREPARING_LEASE_SECONDS=10 NOW_EPOCH=100 \
+    bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,iid}] == [
+    {batch_id:"L",iid:21},
+    {batch_id:"L",iid:22}
+  ]
+' <<<"${lease_first_reserve}" >/dev/null
+lease_sequences_before="$(jq -c '
+  [.active_jobs[] | {job_id,reservation_seq}] | sort_by(.reservation_seq)
+' "${LEASE_ROOT}/scheduler_state.json")"
+while IFS= read -r lease_job_id; do
+  lease_claim="$(
+    CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=preparing \
+      NOW_EPOCH=101 bash "${RECORD}"
+  )"
+  jq -e '.should_spawn == true' <<<"${lease_claim}" >/dev/null
+done < <(jq -r '.grants[].job_id' <<<"${lease_first_reserve}")
+
+before_lease_expiry="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+    DRIVEN_PREPARING_LEASE_SECONDS=10 NOW_EPOCH=110 \
+    bash "${RESERVE}"
+)"
+if ! jq -e '
+  .status == "at_capacity"
+  and .grants == []
+  and .active_count == 2
+  and .available_slots == 0
+' <<<"${before_lease_expiry}" >/dev/null; then
+  echo "expected preparing grants to stay claimed before lease expiry, got ${before_lease_expiry}" >&2
+  exit 1
+fi
+
+after_lease_expiry="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+    DRIVEN_PREPARING_LEASE_SECONDS=10 NOW_EPOCH=112 \
+    bash "${RESERVE}"
+)"
+expected_lease_replay="$(jq -c '.grants' <<<"${lease_first_reserve}")"
+actual_lease_replay="$(jq -c '.grants' <<<"${after_lease_expiry}")"
+if [ "${actual_lease_replay}" != "${expected_lease_replay}" ]; then
+  echo "expected expired preparing grants to replay as ${expected_lease_replay}, got ${actual_lease_replay}" >&2
+  exit 1
+fi
+lease_sequences_after="$(jq -c '
+  [.active_jobs[] | {job_id,reservation_seq}] | sort_by(.reservation_seq)
+' "${LEASE_ROOT}/scheduler_state.json")"
+if [ "${lease_sequences_after}" != "${lease_sequences_before}" ]; then
+  echo "expected preparing lease recovery to preserve reservation sequence ${lease_sequences_before}, got ${lease_sequences_after}" >&2
+  exit 1
+fi
+jq -e '
+  [.active_jobs[].status] == ["reserved","reserved"]
+' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
+jq -e '
+  [.memberships[].status] == ["reserved","reserved"]
+' "${LEASE_ROOT}/batches/L/state.json" >/dev/null
+
+set +e
+invalid_lease_output="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+    DRIVEN_PREPARING_LEASE_SECONDS=0 NOW_EPOCH=112 \
+    bash "${RESERVE}" 2>&1
+)"
+invalid_lease_status=$?
+set -e
+if [ "${invalid_lease_status}" -ne 2 ]; then
+  echo "expected zero preparing lease to exit 2, got ${invalid_lease_status}: ${invalid_lease_output}" >&2
+  exit 1
+fi
 
 echo 'ok driven scheduler fairness'
