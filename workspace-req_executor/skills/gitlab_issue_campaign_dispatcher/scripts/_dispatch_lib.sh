@@ -128,6 +128,40 @@ derive_stuck_after_minutes() {
   printf '%s\n' "$(( (acpx_timeout_seconds + 120 + 59) / 60 + 30 ))"
 }
 
+# Decide whether a project campaign owner may enter while the caller holds the
+# campaign flock. This helper is deliberately pure: a rejected transition must
+# leave campaign_state.json byte-for-byte untouched, so persistence remains the
+# caller's responsibility only after `allowed == true`.
+dispatch_owner_transition() {
+  local state_json="$1" mode="$2" owner_id="$3" leased_at="$4"
+  printf '%s' "${state_json}" | jq -c \
+    --arg mode "${mode}" \
+    --arg owner_id "${owner_id}" \
+    --arg leased_at "${leased_at}" '
+    . as $state
+    | (($state.pending_subagents // {}) | length) as $pending_count
+    | ($state.dispatch_owner // null) as $current
+    | (($current | type) == "object"
+       and (($current.mode == "driven") or ($current.mode == "scheduled"))
+       and (($current.owner_id | type) == "string")
+       and (($current.owner_id | length) > 0)) as $has_current
+    | ($pending_count > 0
+       and $has_current
+       and (($current.mode != $mode) or ($current.owner_id != $owner_id))) as $busy
+    | {
+        allowed: ($busy | not),
+        status: (if $busy then ("busy_owned_by_" + $current.mode) else "acquired" end),
+        updated_state: (if $busy then $state else
+          ($state | .dispatch_owner = {
+            mode: $mode,
+            owner_id: $owner_id,
+            leased_at: $leased_at
+          })
+        end)
+      }
+  '
+}
+
 fresh_init_state() {
   jq -n \
     --arg project "${PROJECT}" \

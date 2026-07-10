@@ -245,6 +245,82 @@ if ! flock -n 9; then
   exit 0
 fi
 
+# Owner admission is the first campaign-state decision under the project lock.
+# In particular, a rejected owner must not reach trigger overrides, pending
+# eviction, reconcile, clone, or any campaign_state.json persistence.
+DISPATCH_MODE="${T[dispatch_mode]:-scheduled}"
+case "${DISPATCH_MODE}" in
+  scheduled|driven_topup) ;;
+  *) emit_chat_failure "invalid_dispatch_mode" ;;
+esac
+
+DRIVEN_REQUEST_JSON=""
+DRIVEN_GRANTS_JSON="[]"
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  DRIVEN_REQUEST_RAW="${T[driven_request_json]:-}"
+  if ! DRIVEN_REQUEST_JSON="$(printf '%s' "${DRIVEN_REQUEST_RAW}" | jq -ce \
+    --arg project "${PROJECT_FULL}" '
+    def clean_string:
+      type == "string" and length > 0
+      and (explode | all(. >= 32 and . != 127));
+    def exact_keys($wanted): (keys | sort) == ($wanted | sort);
+    if type != "object"
+       or (exact_keys(["owner_id","grants"]) | not)
+       or (.owner_id | clean_string | not)
+       or ((.grants | type) != "array")
+       or ((.grants | length) == 0)
+       or (all(.grants[];
+            type == "object"
+            and exact_keys(["job_id","batch_id","snapshot_index","project","iid","branch","entry_mode","force_rerun_pr"])
+            and (.job_id | clean_string)
+            and (.batch_id | clean_string)
+            and (.project == $project)
+            and (.branch | clean_string)
+            and (.snapshot_index | type == "number" and . == floor and . >= 0)
+            and (.iid | type == "number" and . == floor and . >= 1)
+            and (.entry_mode == "auto" or .entry_mode == "fresh" or .entry_mode == "continue")
+            and (.force_rerun_pr | type == "boolean")) | not)
+       or ([.grants[] | [.project,.iid]] | group_by(.) | any(length > 1))
+    then error("invalid") else . end
+  ' 2>/dev/null)"; then
+    emit_chat_failure "invalid_driven_request_json"
+  fi
+  DRIVEN_GRANTS_JSON="$(printf '%s' "${DRIVEN_REQUEST_JSON}" | jq -c '.grants')"
+  REQUESTED_OWNER_ID="$(printf '%s' "${DRIVEN_REQUEST_JSON}" | jq -r '.owner_id')"
+  REQUESTED_OWNER_MODE="driven"
+else
+  REQUESTED_OWNER_ID="${T[dispatch_owner_id]:-scheduled}"
+  case "${REQUESTED_OWNER_ID}" in
+    ''|*[[:cntrl:]]*) emit_chat_failure "invalid_dispatch_owner_id" ;;
+  esac
+  REQUESTED_OWNER_MODE="scheduled"
+fi
+
+STATE_JSON="$(load_state)"
+INITIAL_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+  | jq -c '(.pending_subagents // {}) | keys | map(tonumber) | sort')"
+OWNER_NOW="$(utc_now)"
+OWNER_DECISION="$(dispatch_owner_transition "${STATE_JSON}" \
+  "${REQUESTED_OWNER_MODE}" "${REQUESTED_OWNER_ID}" "${OWNER_NOW}")"
+if [ "$(printf '%s' "${OWNER_DECISION}" | jq -r '.allowed')" != "true" ]; then
+  OWNER_BUSY_STATUS="$(printf '%s' "${OWNER_DECISION}" | jq -r '.status')"
+  jq -nc --arg status "${OWNER_BUSY_STATUS}" \
+    '{status:$status, dispatch_entries:[], cleanup_actions:[], chat_summary:$status}'
+  exit 0
+fi
+STATE_JSON="$(printf '%s' "${OWNER_DECISION}" | jq -c '.updated_state')"
+DRIVEN_GRANT_IIDS_JSON="[]"
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  DRIVEN_GRANT_IIDS_JSON="$(printf '%s' "${DRIVEN_GRANTS_JSON}" | jq -c 'map(.iid)')"
+  DRIVEN_SCOPE_IIDS_JSON="$(jq -nc \
+    --argjson pending "${INITIAL_PENDING_IIDS_JSON}" \
+    --argjson grants "${DRIVEN_GRANT_IIDS_JSON}" \
+    '($pending + $grants) | unique | sort')"
+  T[issue_iids]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'join(",")')"
+  T[issue_min_iid]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'min')"
+  T[issue_max_iid]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'max')"
+fi
+
 wrapper_log prepare_tick "tick started project=${PROJECT}"
 TICK_START_TS="$(date -u +%s)"
 
@@ -262,8 +338,6 @@ fi
 ensure_safety_bin_executable
 
 # ─── 6. Load state + apply trigger override ──────────────────────
-STATE_JSON="$(load_state)"
-
 # Normalize integer / boolean trigger values.
 to_bool() {
   case "$1" in
@@ -477,6 +551,12 @@ EVICTED_IIDS_JSON="[]"
 SCOPE_EVICTED_IIDS_JSON="[]"
 PENDING_KEYS="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys[]?')"
 for piid in ${PENDING_KEYS}; do
+  # A driven topup treats the pending set at admission as occupied project
+  # capacity. Agent-level orchestration owns those grants; this bridge neither
+  # scope-evicts nor re-dispatches them while adding the current grants.
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    continue
+  fi
   ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --arg k "${piid}" '.pending_subagents[$k]')"
   SP_AT="$(printf '%s' "${ENTRY}" | jq -r '.spawned_at // ""')"
   PA_NUM="$(printf '%s' "${ENTRY}" | jq -r '.attempt_number')"
@@ -706,7 +786,7 @@ persist_state "${STATE_JSON}"
 # even while a batch is in flight. Still short-circuits the rest of the tick: no
 # new batch forms while pending is non-empty (single-batch-in-flight invariant).
 PENDING_COUNT="$(printf '%s' "${STATE_JSON}" | jq -r '.pending_subagents | keys | length')"
-if [ "${PENDING_COUNT}" -gt 0 ]; then
+if [ "${DISPATCH_MODE}" = "scheduled" ] && [ "${PENDING_COUNT}" -gt 0 ]; then
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
   persist_state "${STATE_JSON}"
   PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.pending_subagents | keys | map(tonumber)')"
@@ -721,6 +801,39 @@ if [ "${PENDING_COUNT}" -gt 0 ]; then
      evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
      cleanup_actions:$cleanup_actions, last_reconcile_evidence:$ev, chat_summary:$chat}'
   exit 0
+fi
+
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  CURRENT_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+    | jq -c '.pending_subagents | keys | map(tonumber) | sort')"
+  DRIVEN_NEW_GRANT_IIDS_JSON="$(jq -nc \
+    --argjson grants "${DRIVEN_GRANT_IIDS_JSON}" \
+    --argjson initial_pending "${INITIAL_PENDING_IIDS_JSON}" \
+    --argjson current_pending "${CURRENT_PENDING_IIDS_JSON}" '
+    $grants
+    | map(select(. as $iid
+        | ($initial_pending | index($iid) == null)
+        and ($current_pending | index($iid) == null)))')"
+  DRIVEN_AVAILABLE_SLOTS=$(( MAX_CONCURRENT - PENDING_COUNT ))
+  [ "${DRIVEN_AVAILABLE_SLOTS}" -lt 0 ] && DRIVEN_AVAILABLE_SLOTS=0
+  DRIVEN_NEW_GRANT_COUNT="$(printf '%s' "${DRIVEN_NEW_GRANT_IIDS_JSON}" | jq 'length')"
+  if [ "${DRIVEN_NEW_GRANT_COUNT}" -eq 0 ] \
+     || [ "${DRIVEN_NEW_GRANT_COUNT}" -gt "${DRIVEN_AVAILABLE_SLOTS}" ]; then
+    STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '.campaign_status = "waiting_for_callbacks"')"
+    persist_state "${STATE_JSON}"
+    PENDING_IIDS_JSON="${CURRENT_PENDING_IIDS_JSON}"
+    jq -nc \
+      --arg ev "${EVIDENCE_PATH}" \
+      --argjson pending "${PENDING_IIDS_JSON}" \
+      --argjson evicted "${EVICTED_IIDS_JSON}" \
+      --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
+      --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --arg chat "waiting_for_callbacks; driven topup has no unoccupied grant slots" '
+      {status:"waiting_for_callbacks", dispatch_entries:[], pending_iids:$pending,
+       evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
+       cleanup_actions:$cleanup_actions, last_reconcile_evidence:$ev, chat_summary:$chat}'
+    exit 0
+  fi
 fi
 
 # ─── 12. Early-return: all done? ─────────────────────────────────
@@ -803,8 +916,15 @@ QUOTA_LAUNCHED="$(printf '%s' "${STATE_JSON}" | jq -r '.quota_launched_this_tick
 QUOTA_LEFT=$(( HOURLY_QUOTA - QUOTA_LAUNCHED ))
 [ "${QUOTA_LEFT}" -lt 0 ] && QUOTA_LEFT=0
 
-BATCH_CAP="${MAX_CONCURRENT}"
-[ "${QUOTA_LEFT}" -lt "${BATCH_CAP}" ] && BATCH_CAP="${QUOTA_LEFT}"
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  # Agent scheduler grants already account for agent-wide capacity. At the
+  # project layer, only the slots not occupied by current pending entries are
+  # available to this topup; hourly scheduled quota does not re-filter grants.
+  BATCH_CAP="${DRIVEN_AVAILABLE_SLOTS}"
+else
+  BATCH_CAP="${MAX_CONCURRENT}"
+  [ "${QUOTA_LEFT}" -lt "${BATCH_CAP}" ] && BATCH_CAP="${QUOTA_LEFT}"
+fi
 
 NEXT_NEW="$(printf '%s' "${STATE_JSON}" | jq -r '.next_new_issue_iid // .issue_min_iid')"
 
@@ -881,6 +1001,19 @@ BATCH_JSON="$(jq -nc \
   --argjson cap "${BATCH_CAP}" '
   ($backlog + $fresh + $blocked) | unique_by(.) | .[0:$cap]')"
 
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  BATCH_JSON="$(jq -nc \
+    --argjson grants "${DRIVEN_GRANT_IIDS_JSON}" \
+    --argjson initial_pending "${INITIAL_PENDING_IIDS_JSON}" \
+    --argjson current_pending "${CURRENT_PENDING_IIDS_JSON}" \
+    --argjson cap "${BATCH_CAP}" '
+    $grants
+    | map(select(. as $iid
+        | ($initial_pending | index($iid) == null)
+        and ($current_pending | index($iid) == null)))
+    | .[0:$cap]')"
+fi
+
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
   jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
@@ -891,13 +1024,15 @@ fi
 
 # Move the fresh-issue cursor past any fresh IID selected for this batch. The
 # backlog/blocked paths do not affect it.
-STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
-  --argjson batch "${BATCH_JSON}" \
-  --argjson fresh "${FRESH_JSON}" '
-  ($batch - ($batch - $fresh)) as $fresh_batch
-  | if ($fresh_batch | length) > 0 then
-      .next_new_issue_iid = ([.next_new_issue_iid // .issue_min_iid, (($fresh_batch | max) + 1)] | max)
-    else . end')"
+if [ "${DISPATCH_MODE}" = "scheduled" ]; then
+  STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+    --argjson batch "${BATCH_JSON}" \
+    --argjson fresh "${FRESH_JSON}" '
+    ($batch - ($batch - $fresh)) as $fresh_batch
+    | if ($fresh_batch | length) > 0 then
+        .next_new_issue_iid = ([.next_new_issue_iid // .issue_min_iid, (($fresh_batch | max) + 1)] | max)
+      else . end')"
+fi
 
 # ─── 17. Allocate attempt numbers ─────────────────────────────────
 declare -A ATTEMPT
@@ -967,6 +1102,14 @@ done
 FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)'
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
 STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c "${PRE_PENDING_JQ_ARGS[@]}" "${FILTER}")"
+if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+    --argjson grants "${DRIVEN_GRANTS_JSON}" \
+    --argjson batch "${BATCH_JSON}" '
+    reduce ($grants[] | select(.iid as $iid | $batch | index($iid) != null)) as $grant (.;
+      .pending_subagents[($grant.iid | tostring)] +=
+        ($grant | {job_id,batch_id,snapshot_index,branch,entry_mode,force_rerun_pr}))')"
+fi
 persist_state "${STATE_JSON}"
 
 # ─── 19. Per-IID prep ─────────────────────────────────────────────
@@ -988,6 +1131,14 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_LABELS=""
   ISSUE_BODY=""
   ISSUE_TITLE_QUOTED="''"
+  IID_BRANCH="${T[branch]}"
+  GRANT_ENTRY_MODE="auto"
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    IID_GRANT_JSON="$(printf '%s' "${DRIVEN_GRANTS_JSON}" \
+      | jq -c --argjson iid "${iid}" '.[] | select(.iid == $iid)')"
+    IID_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.branch')"
+    GRANT_ENTRY_MODE="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.entry_mode')"
+  fi
 
   # Per-IID env for env_paths-derived paths.
   iid_env=(
@@ -1001,13 +1152,17 @@ for iid in "${BATCH_IIDS[@]}"; do
   # `blocked`, trigger require_labels) resets from the target branch
   # baseline, even if this IID has prior attempts on disk.
   ISSUE_MODE="fresh"
-  NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
-  RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
-    (.[] | select(.iid==$i) | .labels // []) as $labels
-    | (($labels | index("retry") != null) or ($labels | index("todo") != null))
-  ')"
-  if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
-    ISSUE_MODE="continue"
+  if [ "${DISPATCH_MODE}" = "driven_topup" ] && [ "${GRANT_ENTRY_MODE}" != "auto" ]; then
+    ISSUE_MODE="${GRANT_ENTRY_MODE}"
+  else
+    NEEDS_CONTINUE="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '.[] | select(.iid==$i) | .needs_continue // false')"
+    RESET_REQUESTED="$(printf '%s' "${EVIDENCE_JSON}" | jq -r --argjson i "${iid}" '
+      (.[] | select(.iid==$i) | .labels // []) as $labels
+      | (($labels | index("retry") != null) or ($labels | index("todo") != null))
+    ')"
+    if [ "${NEEDS_CONTINUE}" = "true" ] && [ "${RESET_REQUESTED}" != "true" ]; then
+      ISSUE_MODE="continue"
+    fi
   fi
 
   prep_blocked() {
@@ -1028,7 +1183,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   PA_ERR="$(mktemp)"
   CLEANUP_FILES+=("${PA_OUT}" "${PA_ERR}")
   set +e
-  env "${iid_env[@]}" BRANCH="${T[branch]}" \
+  env "${iid_env[@]}" BRANCH="${IID_BRANCH}" \
     ISSUE_MODE="${ISSUE_MODE}" \
     bash "${SCRIPT_DIR}/prepare_attempt.sh" >"${PA_OUT}" 2>"${PA_ERR}"
   PA_RC=$?
@@ -1214,7 +1369,7 @@ for iid in "${BATCH_IIDS[@]}"; do
 
   # build_prompt.sh
   set +e
-  env "${iid_env[@]}" BRANCH="${T[branch]}" \
+  env "${iid_env[@]}" BRANCH="${IID_BRANCH}" \
     ISSUE_MODE="${MODE_ACTUAL}" \
     bash "${SCRIPT_DIR}/build_prompt.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
   BP_RC=$?
@@ -1337,7 +1492,7 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_ISSUE_LABELS="${ISSUE_LABELS}" \
               TPL_ISSUE_BODY="${ISSUE_BODY}" \
               TPL_ISSUE_MODE="${MODE_ACTUAL}" \
-              TPL_BRANCH="${T[branch]}" \
+              TPL_BRANCH="${IID_BRANCH}" \
               TPL_WORK_BRANCH="${WORK_BRANCH_X}" \
               TPL_LOCAL_ATTEMPT_BRANCH="${LOCAL_ATTEMPT_BRANCH}" \
               TPL_REPO_PATH="${REPO_PATH}" \
@@ -1388,11 +1543,29 @@ PYEOF
   # `wrapper_log "rendered ..."`) cannot accidentally leak the token.
   rendered=""
 
-  DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
-    --argjson iid "${iid}" \
-    --argjson attempt "${attempt}" \
-    --arg clabel "${child_label}" \
-    --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$clabel, payload_path:$path}]')"
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
+      --argjson iid "${iid}" \
+      --argjson attempt "${attempt}" \
+      --arg clabel "${child_label}" \
+      --arg path "${payload_path}" \
+      --argjson grant "${IID_GRANT_JSON}" '
+      . + [{
+        iid:$iid,
+        attempt_number:$attempt,
+        child_label:$clabel,
+        payload_path:$path,
+        job_id:$grant.job_id,
+        batch_id:$grant.batch_id,
+        snapshot_index:$grant.snapshot_index
+      }]')"
+  else
+    DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
+      --argjson iid "${iid}" \
+      --argjson attempt "${attempt}" \
+      --arg clabel "${child_label}" \
+      --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$clabel, payload_path:$path}]')"
+  fi
 
   wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"
 done
