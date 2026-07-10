@@ -427,7 +427,15 @@ PARSED_ISSUE_URL=""
 PARSED_PROJECT=""
 PARSED_IID=""
 FORCE_RERUN_PR=false
-case "${NORMALIZED}" in
+RERUN_INTENT_SOURCE="$(
+  printf '%s\n' "${NORMALIZED}" | awk '
+    {
+      line = $0
+      gsub(/(不要|无需|无须|不用|不需要|不必|别|禁止|切勿|请勿)[[:space:]]*(再[[:space:]]*)?(重跑|重新处理|重新执行)/, "", line)
+      print line
+    }'
+)"
+case "${RERUN_INTENT_SOURCE}" in
   *重跑*|*重新处理*|*重新执行*) FORCE_RERUN_PR=true ;;
 esac
 
