@@ -53,7 +53,7 @@ openclaw config validate
 
 ## `routing.env`（多 project 路由表）
 
-当 action 是 `execute_issue` 或 `create_and_execute` 时，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`，再把 issue 交给 `executor_queue.json`，由 `drain_executor_queue.sh` 调用队首 `<executor> RUN_SINGLE_ISSUE`。只建单 action 不查本表、不入 executor queue。消费方 `scripts/route_project.sh`。
+当 action 是 `execute_issue` 或 `create_and_execute` 时，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`。新执行请求由 `submit_executor_batch.sh` 持久化无 token 的 I1，并向目标 executor 发送 `RUN_DRIVEN_ISSUE_BATCH`；旧 `executor_queue.json` 只用于排空升级前已经入队的 `RUN_SINGLE_ISSUE`，新请求不得再写入旧 FIFO。只建单 action 不查本表、不创建 executor batch。消费方 `scripts/route_project.sh`。
 
 行格式：每行一条 `PROJECT=AGENT`。
 
@@ -74,6 +74,16 @@ openclaw config validate
 
 因此：**114/WebUI 发送的 prompt 决定目标 project 和动作**。建单入口从 wiki URL 的 `<group>/<project>/-/wikis/<slug>` 或自由文本里的 `group/project`、GitLab 仓库/Wiki URL、`glab api projects/<encoded-group%2Fproject>/...` 片段确定 project，并生成带 `repo=<group/project>` 的 `git_issuer_payload`；既有 issue 执行入口从 GitLab issue URL 或显式 `group/project` + issue IID 提取 project/iid。若必需字段缺失则在调用下游前失败并通知用户。`req_dispatcher` 仍不写 GitLab，建单事实仍以 git_issuer 返回 JSON 为准。
 
+## 受驱动批次部署、迁移与回滚
+
+- `DISPATCHER_CALLBACK_TARGET` 是新 batch I1 和旧 single bridge 的必填部署 pin。蓝区默认继续使用 `agent:req_dispatcher:main`；不得把本机 session 或临时 callback 目标写回 tracked 配置。空值必须在生成 ID、持久化 intent 或调用 executor 前失败关闭。
+- req_dispatcher 发送的 I1 不含 `GITLAB_TOKEN`、`GLAB_TOKEN` 或其他 GitLab 凭据。GitLab host、protocol 和 token 仍由 req_executor 自身的进程环境或 tracked `config/gitlab.env` 加载，dispatcher 不复制、不转发。
+- executor 的公开受理响应必须来自固定 acceptance emitter，且只含精确五字段 `status,batch_id,matched_count,snapshot_digest,scheduler_status`。rich orchestration envelope、`chat_summary` 或手工拼接 JSON 都不是有效 acceptance。
+- executor 每个 Issue 终态都以 `RUN_DRIVEN_BATCH_RESULT` transport 单独回投 I3。dispatcher 对同一 `event_id` 返回 `accepted` 或 `duplicate` 都能确认该事件；重复事件不会重复计数或重复通知用户。
+- 升级时保留并先排空旧 `executor_queue.json` 的 active/queue。旧 FIFO 非空期间，新 batch 只持久化为 `waiting_for_legacy_drain`，不得向 executor 发送 I1；旧 active/queue 清空后，统一 tick 才会提交这些 durable intent。禁止删除旧 queue 或把它破坏性迁移进新 scheduler。
+- 部署周期触发统一使用 `RUN_EXECUTOR_BATCH_TICK`，建议每分钟唤醒一次 req_dispatcher 主 session；该路径恢复旧 bridge/FIFO、发送等待中的 batch I1 并重试通知。旧 `RUN_EXECUTOR_QUEUE_DRAIN` 仅保留为兼容触发，不再作为新部署的周期入口。req_executor 主 session 也必须按同一周期触发字面量补位和投递 outbox。
+- 回滚时先停止新的 batch 入口和周期 `RUN_EXECUTOR_BATCH_TICK`。根据恢复计划排空或原样保留 dispatcher intent/mirror/notification 与 executor scheduler/outbox；不得删除 durable state、outbox、snapshot、handoff 或运行时审计证据。恢复部署后用相同 tick 继续处理，不生成替代 batch ID。
+
 ## 部署校验清单
 
 1. `STATE_ROOT` 指向的目录在 runner 上存在且 agent 可写。
@@ -83,7 +93,8 @@ openclaw config validate
 5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token。只有执行动作会用到它；只建单动作不会入队。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。执行分支由用户 prompt 明确指定后作为 executor `branch=` 下发，未指定时由 executor 解析远端默认分支。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
 7. `DISPATCHER_CALLBACK_TARGET` 必须按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。不得留空，否则 batch intake 与旧 FIFO drain 都会在任何持久状态变更和网络调用前拒绝。
-8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 正在执行且未超时时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且无 active 时会继续推进。这个唤醒是执行队列恢复兜底；只建单请求不会进入该队列。
+8. req_dispatcher 部署侧必须每分钟周期性唤醒 `RUN_EXECUTOR_BATCH_TICK`。该统一路径先恢复旧 single bridge 并排空升级前 FIFO，再发送 durable batch I1、修复 receipt/mirror，最后重试逐 Issue 通知；只建单请求不会进入 executor batch。
+9. req_executor 部署侧也必须每分钟在其 main session 唤醒 `RUN_EXECUTOR_BATCH_TICK`，让默认 3 槽严格 round-robin 调度、handoff 导入和 callback outbox 在没有新聊天消息时持续恢复与补位。
 
 ## 与 acpx 工作区的差异
 

@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-10.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, handles GitLab tokens from req_dispatcher, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-11.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, handles GitLab tokens from req_dispatcher, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 

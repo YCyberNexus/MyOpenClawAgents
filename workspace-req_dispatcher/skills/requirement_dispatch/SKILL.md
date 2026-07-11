@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-10.5] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化无 token 的 I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-11.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化无 token 的 I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 

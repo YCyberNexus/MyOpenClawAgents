@@ -32,7 +32,7 @@ This workspace assumes a single GitLab deployment per runner. If you ever need t
 
 ## `campaign_defaults.env`
 
-Pins the clone parent used by the **driven** `RUN_SINGLE_ISSUE` entry point and the agent-wide driven-batch scheduler settings. On the single-issue driven path, `req_dispatcher` sends only the I1 trigger inputs: `project`, `iid`, `correlation_id`, `dispatcher_callback_target`, and optional `group`.
+Pins the clone parent used by the **driven** `RUN_SINGLE_ISSUE` entry point and the agent-wide driven-batch scheduler settings. On the single-issue driven path, `req_dispatcher` sends only the I1 trigger inputs: `project`, `iid`, `correlation_id`, `dispatcher_callback_target`, and optional `group` / `branch`.
 
 Like `gitlab.env`, this file is `source`d (and may be loaded under `set -a`), so it must stay pure `KEY=value` lines — no shell logic, no command substitution, no conditionals.
 
@@ -94,3 +94,13 @@ Driven-batch scheduling state is agent-wide rather than repository-local. By def
 ```
 
 There is no UI-account pool configuration in this workspace. The issue body is passed to Claude Code as the task prompt; credentials, account pools, or project-specific data directories must be described by the issue itself if they are relevant.
+
+## 受驱动批次部署与恢复
+
+- tracked 蓝区默认保持 `EXECUTOR_MAX_CONCURRENCY=3` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。不得为了工作站测试修改 tracked `campaign_defaults.env` 中的 `/data` 默认值、GitLab host/protocol 或 token 注入契约。
+- 工作站覆盖只能放在进程环境或 ignored `campaign_defaults.local.env`。对 scheduler 字段，显式进程环境优先于 local env，local env 优先于 tracked defaults；不要提交本机绝对路径、临时 session、测试 endpoint 或额外凭据。
+- `dispatcher_callback_target` 是 `RUN_DRIVEN_ISSUE_BATCH` 与 `RUN_SINGLE_ISSUE` 兼容 shim 的必填 I1 字段。executor 从自身进程环境或 `config/gitlab.env` 加载 GitLab 凭据；req_dispatcher 的 I1 不携带 token。
+- 默认 3 个物理槽位由所有 driven batch 共享。scheduler 持久保存 snapshot 游标与 round-robin 游标；即使单批包含 100+ Issue，也只按严格轮转逐步发放 grant，不把 IID 列表或全部 runtime action 展开到聊天上下文。
+- 部署周期触发固定为 `RUN_EXECUTOR_BATCH_TICK`，建议每分钟在 executor main session 唤醒一次。tick 先恢复 durable handoff/outbox 和未完成协调阶段，再按严格 round-robin 补满空槽；它不依赖此前聊天 turn 的内存。
+- 升级时先让 req_dispatcher 排空旧 FIFO。旧 active/queue 非空期间，新 batch 保持 `waiting_for_legacy_drain`，不得与旧 single active 重叠启动；旧队列清空后再由周期 tick 推进新 scheduler。
+- 回滚时先停止新的 batch 入口和周期 `RUN_EXECUTOR_BATCH_TICK`。可以在停用前排空，也可以原样保留 `${EXECUTOR_SCHEDULER_ROOT}` 下的 scheduler state、batch snapshot、handoff 与 callback outbox，等待恢复后继续；不得删除这些 durable runtime 记录。

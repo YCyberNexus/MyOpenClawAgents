@@ -17,8 +17,8 @@ grep -Fq 'openclaw agent --timeout' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the req_dispatcher CLI timeout"
 grep -Fq 'agents.defaults.subagents.runTimeoutSeconds' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must describe the optional downstream subagent timeout"
-grep -Fq 'SKILL_VERSION=2026-07-10.5' "${SKILL_DIR}/SKILL.md" \
-  || fail "req_dispatcher skill version must be bumped from the current same-day version"
+grep -Fq 'SKILL_VERSION=2026-07-11.1' "${SKILL_DIR}/SKILL.md" \
+  || fail "req_dispatcher skill version must match the current release version"
 
 for historical in \
   "${WORKSPACE_DIR}/docs/superpowers/specs/2026-06-25-req_dispatcher-design.md" \
