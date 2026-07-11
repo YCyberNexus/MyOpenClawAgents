@@ -138,11 +138,13 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
     set -e
     if [ "${delivery_rc}" -ne 0 ]; then
       delivery_error="openclaw_exit_${delivery_rc}"
-    elif ! jq -e --arg event_id "${event_id}" '
-      type == "object"
-      and (keys | sort) == ["event_id","status"]
-      and ((.status == "accepted") or (.status == "duplicate"))
-      and .event_id == $event_id
+    elif ! jq -se --arg event_id "${event_id}" '
+      length == 1
+      and (.[0]
+        | type == "object"
+        and (keys | sort) == ["event_id","status"]
+        and ((.status == "accepted") or (.status == "duplicate"))
+        and .event_id == $event_id)
     ' <<<"${ack_output}" >/dev/null 2>&1; then
       if ! jq -e . <<<"${ack_output}" >/dev/null 2>&1; then
         delivery_error="malformed_or_empty_ack"

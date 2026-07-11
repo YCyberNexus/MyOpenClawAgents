@@ -871,6 +871,13 @@ if [ "${call_count}" -eq 2 ]; then
 fi
 if [ "${call_count}" -eq 2 ] \
     && [ "${event_id}" = "batch-A:snapshot-0:terminal-1" ]; then
+  jq -nc '{status:"unexpected_extra_object"}'
+  jq -nc --arg event_id "${event_id}" \
+    '{status:"duplicate",event_id:$event_id}'
+  exit 0
+fi
+if [ "${call_count}" -eq 3 ] \
+    && [ "${event_id}" = "batch-A:snapshot-0:terminal-1" ]; then
   jq -nc --arg event_id "${event_id}" \
     '{status:"duplicate",event_id:$event_id}'
   exit 0
@@ -911,7 +918,13 @@ DRAIN_PID_B=$!
 wait "${DRAIN_PID_A}"
 wait "${DRAIN_PID_B}"
 
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
+jq -e '
+  .attempts == 2
+  and .delivered_at == null
+  and (.last_error | type == "string" and length > 0)
+' "${OUTBOX_A}" >/dev/null \
+  || fail "multi-object ack stream was accepted from its final valid object"
+for outbox_file in "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .attempts == 2
     and (.delivered_at | type == "number" and . >= 0)
@@ -919,6 +932,21 @@ for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   ' "${outbox_file}" >/dev/null \
     || fail "accepted or duplicate matching ack did not atomically mark delivery"
 done
+
+# Once the multi-object stream is rejected, a later single-object duplicate for
+# the same event remains a valid idempotent acknowledgement.
+CONFIG_DIR="${CONFIG_DIR}" \
+OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+OPENCLAW_LOG="${OPENCLAW_LOG}" \
+OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
+EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+bash "${DRAIN_OUTBOX}" >/dev/null
+jq -e '
+  .attempts == 3
+  and (.delivered_at | type == "number" and . >= 0)
+  and .last_error == null
+' "${OUTBOX_A}" >/dev/null \
+  || fail "single matching duplicate did not complete delivery after stream rejection"
 [ -f "${OUTBOX_A}" ] && [ -f "${OUTBOX_B}" ] && [ -f "${OUTBOX_R}" ] \
   || fail "drain deleted durable outbox evidence"
 jq -se \
@@ -926,7 +954,7 @@ jq -se \
   --arg event_b "${EVENT_B}" \
   --arg event_r "${EVENT_R}" '
   def bodies($event): [.[] | select(.event_id == $event) | (.body | @json)];
-  ((bodies($event_a) | length) == 2 and (bodies($event_a) | unique | length) == 1)
+  ((bodies($event_a) | length) == 3 and (bodies($event_a) | unique | length) == 1)
   and ((bodies($event_b) | length) == 2 and (bodies($event_b) | unique | length) == 1)
   and ((bodies($event_r) | length) == 2 and (bodies($event_r) | unique | length) == 1)
 ' "${OPENCLAW_LOG}" >/dev/null \
