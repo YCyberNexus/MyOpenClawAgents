@@ -4,10 +4,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-local-env.XXXXXX")"
+TMP_PARENT="${TMPDIR:-/tmp}"
+TMP_PARENT="${TMP_PARENT%/}"
+TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-local-env.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 REPO_PARENT="${TEST_ROOT}/repos"
-PREPARE_TICK="${TEST_ROOT}/prepare_tick.sh"
+DRIVEN_BATCH="${TEST_ROOT}/run_driven_issue_batch.sh"
+CAPTURE_FILE="${TEST_ROOT}/driven-trigger.txt"
 mkdir -p "${CONFIG_DIR}" "${REPO_PARENT}"
 
 cat >"${CONFIG_DIR}/gitlab.env" <<'EOF'
@@ -24,24 +27,16 @@ cat >"${CONFIG_DIR}/campaign_defaults.local.env" <<EOF
 REPO_PARENT_PATH=${REPO_PARENT}
 EOF
 
-cat >"${PREPARE_TICK}" <<'EOF'
+cat >"${DRIVEN_BATCH}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-trigger="$(cat)"
-project="$(printf '%s\n' "${trigger}" | sed -n 's/^project=//p')"
-repo_parent="$(printf '%s\n' "${trigger}" | sed -n 's/^repo_path=//p')"
-[ -n "${project}" ] && [ -n "${repo_parent}" ] || exit 98
-repo_target="${repo_parent}/${project}"
-if [ -e "${repo_target}" ] && [ ! -e "${repo_target}/.git" ]; then
-  exit 91
-fi
-mkdir -p "${repo_target}/.git"
-printf '%s\n' "${trigger}"
+cat >"${CAPTURE_FILE}"
+jq -cn '{status:"accepted",spawn_grants:[],reconcile_actions:[]}'
 EOF
-chmod +x "${PREPARE_TICK}"
+chmod +x "${DRIVEN_BATCH}"
 
 if ! CONFIG_DIR="${CONFIG_DIR}" \
-  PREPARE_TICK_CMD="${PREPARE_TICK}" \
+  DRIVEN_BATCH_CMD="${DRIVEN_BATCH}" CAPTURE_FILE="${CAPTURE_FILE}" \
   bash "${SKILL_DIR}/scripts/dispatch_single_issue.sh" >"${TEST_ROOT}/stdout" 2>"${TEST_ROOT}/stderr" <<'EOF'
 RUN_SINGLE_ISSUE
 project=claw_gitlab/req_executor_test
@@ -55,23 +50,23 @@ then
   exit 1
 fi
 
-if ! grep -q '^gitlab_token=gitlab-env-token$' "${TEST_ROOT}/stdout"; then
-  echo "expected gitlab.env token to be forwarded to synthesized trigger" >&2
-  cat "${TEST_ROOT}/stdout" >&2
+if grep -Eq 'gitlab_token|GITLAB_TOKEN|gitlab-env-token' "${CAPTURE_FILE}"; then
+  echo "single shim must not forward the configured token" >&2
+  cat "${CAPTURE_FILE}" >&2
   exit 1
 fi
 
-if grep -q '^branch=' "${TEST_ROOT}/stdout"; then
-  echo "synthesized trigger must not require or forward a configured branch" >&2
-  cat "${TEST_ROOT}/stdout" >&2
+if grep -q '^branch=' "${CAPTURE_FILE}"; then
+  echo "driven trigger must omit an unspecified branch" >&2
+  cat "${CAPTURE_FILE}" >&2
   exit 1
 fi
 
-# The local override still supplies the base clone parent; the driven resolver
-# appends the full group path before forwarding the clone-parent trigger.
-if ! grep -q "^repo_path=${REPO_PARENT}/claw_gitlab$" "${TEST_ROOT}/stdout"; then
-  echo "expected local env base parent to produce a full-project clone parent" >&2
-  cat "${TEST_ROOT}/stdout" >&2
+# Local deployment paths stay executor-private and are consumed only by the
+# delegated driven wrapper.
+if grep -q '^repo_path=' "${CAPTURE_FILE}"; then
+  echo "single shim must not copy a local repo path into I1" >&2
+  cat "${CAPTURE_FILE}" >&2
   exit 1
 fi
 
@@ -83,17 +78,20 @@ legacy_field_pattern+='|ui_'
 legacy_field_pattern+='accounts_'
 legacy_field_pattern+='relpath'
 legacy_field_pattern+=')='
-if grep -Eq "${legacy_field_pattern}" "${TEST_ROOT}/stdout"; then
-  echo "synthesized trigger must not expose old basename/UI-account fields" >&2
-  cat "${TEST_ROOT}/stdout" >&2
+if grep -Eq "${legacy_field_pattern}" "${CAPTURE_FILE}"; then
+  echo "driven trigger must not expose old basename/UI-account fields" >&2
+  cat "${CAPTURE_FILE}" >&2
   exit 1
 fi
 
-DISPATCH_ORIGIN="${REPO_PARENT}/claw_gitlab/req_executor_test/.req_executor/issues/issue-42/dispatch_origin.json"
-if [ "$(jq -r '.dispatcher_callback_target' "${DISPATCH_ORIGIN}")" != "agent:req_dispatcher:local-test" ]; then
-  echo "expected dispatch_origin.json to preserve dispatcher callback target" >&2
-  cat "${DISPATCH_ORIGIN}" >&2
+if ! grep -q '^dispatcher_callback_target=agent:req_dispatcher:local-test$' "${CAPTURE_FILE}"; then
+  echo "expected driven trigger to preserve dispatcher callback target" >&2
+  cat "${CAPTURE_FILE}" >&2
+  exit 1
+fi
+if find "${REPO_PARENT}" -name dispatch_origin.json -print -quit | grep -q .; then
+  echo "single shim must not create a legacy dispatch_origin.json" >&2
   exit 1
 fi
 
-echo "ok dispatch_single_issue loads local env override"
+echo "ok dispatch_single_issue keeps local deployment config private"

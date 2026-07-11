@@ -1,9 +1,11 @@
 # Trigger Commands
 
-`req_executor` accepts three trigger commands:
+`req_executor` accepts five trigger commands:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 - `RUN_CHILD_COMPLETION_CALLBACK`
+- `RUN_DRIVEN_ISSUE_BATCH`
+- `RUN_EXECUTOR_BATCH_TICK`
 - `RUN_SINGLE_ISSUE`
 
 The executor is task-agnostic. It reads the GitLab issue, renders the issue content into `${LOG_DIR}/prompt.txt`, and asks the outer subagent to run `scripts/run_acpx_attempt.sh` from the prepared worktree. That script owns the fixed `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` call.
@@ -79,16 +81,158 @@ be at least `acpx_timeout_seconds + 120`.
 
 `RUN_CHILD_COMPLETION_CALLBACK` is sent by the runtime when a subagent returns compact JSON. It carries the terminal worker result plus the same routing identity needed to locate state. Campaign scalars are loaded from the persisted `.req_executor/_dispatcher/campaign_state.json`; callback payloads do not override scheduled fields.
 
-## Driven Single Issue
+## Dispatcher-Driven Batch
 
-`RUN_SINGLE_ISSUE` is the `req_dispatcher` entry point. It accepts:
+`RUN_DRIVEN_ISSUE_BATCH` is the primary `req_dispatcher` intake. Its fixed
+multi-line form is:
 
-- `project`
-- `iid`
-- or `issue_url` as an alternative source for `project` and `iid`
-- `correlation_id`
-- `dispatcher_callback_target`
-- optional `branch`
-- optional `group`
+```text
+RUN_DRIVEN_ISSUE_BATCH
+batch_id=<stable dispatcher batch ID>
+correlation_id=<dispatcher correlation ID>
+project=<full group/project path>
+selector_type=single|range|open_unfinished|open_label
+iid=<positive integer; single only>
+iid_min=<positive integer; range only>
+iid_max=<positive integer; range only>
+label=<exact label; open_label only>
+force_rerun_pr=true|false
+dispatcher_callback_target=<non-empty req_dispatcher target>
+branch=<optional target branch>
+```
 
-`dispatch_single_issue.sh` parses `issue_url` values containing `/-/issues/<iid>` into `project` and `iid`; if explicit `project` or `iid` are also sent, they must match the URL. It then loads GitLab token from process env or `config/gitlab.env`, loads only the clone parent from `config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`, writes `dispatch_origin.json`, synthesizes a one-IID scheduled trigger, forwards optional `branch=`, and uses the same prepare/followup machinery as scheduled runs. The scheduled wrapper resolves the target branch from `origin/HEAD` unless the trigger explicitly supplies `branch=`.
+Exactly one selector shape is allowed. Every selector is restricted to OPEN
+issues. `open_unfinished` excludes `pr`, `timeout`, `blocked`, `blocked-*`,
+`failed`, and `failed-*` from the frozen snapshot. `open_label` matches the
+requested label exactly and does not apply those snapshot exclusions. Live
+preflight still skips an issue carrying `pr` unless `force_rerun_pr=true`; a
+closed issue is always skipped. The executor paginates GitLab and freezes the
+matching IID snapshot at intake, so later matching issues are not added.
+
+`batch_id` is idempotent: the same canonical request replays the existing
+batch, while the same ID with different bytes fails closed. The executor loads
+GitLab credentials and deployment roots only from its own process/config. A
+dispatcher trigger must never contain `gitlab_token` or `GITLAB_TOKEN`.
+
+The fixed `run_driven_issue_batch.sh` response includes `status`, `batch_id`,
+`matched_count`, `snapshot_digest`, `scheduler_status`, `spawn_grants`,
+`reconcile_actions`, `operation_results`, `max_launch_retries`,
+`backoff_seconds`, and `chat_summary`. It never returns the frozen IID array or
+private claim tokens. `matched_count=0` is a completed batch and creates no
+spawn grant.
+
+That rich response is runtime work input, not the req_dispatcher receipt. After
+all `reconcile_actions` and `spawn_grants` are processed, call:
+
+```bash
+cd "${SKILL_DIR}" && BATCH_ID="<verbatim envelope.batch_id>" \
+  bash scripts/emit_driven_batch_acceptance.sh
+```
+
+Use its sole compact stdout JSON as the final agent reply, with no code fence,
+`chat_summary`, rich envelope, or surrounding prose. The wrapper locks and
+validates durable scheduler state and emits exactly:
+
+```json
+{"status":"success","batch_id":"<batch>","matched_count":3,"snapshot_digest":"<digest>","scheduler_status":"queued"}
+```
+
+Never assemble this receipt in the LLM. req_dispatcher intentionally rejects
+the rich envelope and a human `chat_summary` because neither is the exact
+five-field public acceptance contract.
+
+## Executor Batch Tick
+
+`RUN_EXECUTOR_BATCH_TICK` has no user fields. Call
+`scripts/run_executor_batch_tick.sh` once for each trigger. The wrapper always
+performs these phases in order:
+
+1. Scan active/registered projects for durable Phase 6 handoff intents.
+2. Import handoffs and retry the callback outbox.
+3. Resume durable post-spawn coordinators in `ack_received`,
+   `project_recorded`, or `scheduler_recorded` without requiring the original
+   caller to resend an acknowledgement.
+4. Recover leases and reserve free executor-wide slots.
+5. Strictly round-robin runnable batches, top up project campaigns, and import
+   claim-0 skips.
+6. Persist preparing claims and bind them before emitting safe spawn grants.
+
+Post-spawn recovery covers the exact commit/coordinator ambiguity windows. The
+project campaign state stores a job/generation/token-hash/exact-outcome receipt
+in the same persistence as `spawned` or `launch_failed`; exact replay does not
+increase quota, refresh `spawned_at`, or require a deleted pending entry. For
+`ACTION=launch_failed`, scheduler active-job deletion and a strict token-hash
+tombstone share the same `pending_transaction`, so tick replay after deletion
+returns idempotent success. A current active claim always takes precedence over
+an older tombstone, including when the same job and numeric generation are
+reused with a new token. All conflicting outcome, runtime session, generation,
+token, or action evidence fails closed.
+
+The default executor-wide concurrency is 3 unless deployment config overrides
+`EXECUTOR_MAX_CONCURRENCY`. Multiple projects/batches share those slots. Grant
+order is persisted scheduler order and must be consumed one item at a time;
+project grouping must not reorder it. Explicit process values for
+`EXECUTOR_SCHEDULER_ROOT` and `EXECUTOR_MAX_CONCURRENCY` take precedence over
+config and are preserved consistently across intake, tick, top-up, and spawn
+recording, so one operation cannot split a batch across scheduler roots.
+
+The response has exactly `status`, `spawn_grants`, `reconcile_actions`,
+`operation_results`, `max_launch_retries`, `backoff_seconds`, and
+`chat_summary`. Each `spawn_grants[]` item contains only `job_id`,
+`claim_generation`, `project`, `iid`, `attempt_number`, `child_label`, and an
+absolute `payload_path`. Read that file and call `sessions_spawn` serially. Feed
+the runtime result to `record_executor_batch_spawn.sh`; never call claim/bind or
+scheduler record helpers directly.
+
+Driven `child_label` is generated only after the scheduler claim exists and has
+the fixed form `reqx-iid<IID>-gen<generation>-<40 lowercase hex>`. Its SHA-256
+prefix binds the full project, physical job ID, IID, attempt and generation, so
+`g1/repo#42` and `g2/repo#42` are distinguishable even at the same attempt and
+generation. A retry generation also receives a different label. The value is
+stable across replay, uses only `[A-Za-z0-9._-]`, is at most 96 bytes, and must
+be passed to `sessions_spawn` and matched during reconciliation verbatim.
+
+An expired `action_emitted` item appears as a token-free
+`reconcile_actions[]` item. Enumerate runtime subagents using its exact
+`child_label`, then call `resolve_executor_batch_reconcile.sh` with one of the
+strict objects below:
+
+```json
+{"job_id":"<job>","claim_generation":1,"resolution":"spawned","run_id":"<run>","child_session_key":"<session>"}
+```
+
+```json
+{"job_id":"<job>","claim_generation":1,"resolution":"not_found","evidence":"subagents_list_no_matching_label"}
+```
+
+Only explicit `not_found` evidence lets a later tick allocate the next claim
+generation. A found child restores the original generation project-first and
+must not be spawned again. Neither resolution accepts or returns a claim token.
+
+Driven terminal results use durable I3 outbox events with stable `event_id`,
+`batch_id`, `snapshot_index`, `project`, `iid`, `status`, `mr_url`, and
+`reason`. The executor marks an event delivered only after req_dispatcher
+returns an accepted/duplicate acknowledgement containing the same `event_id`.
+The outbox transport removes `GITLAB_TOKEN`, `GLAB_TOKEN`,
+`GITLAB_PRIVATE_TOKEN`, `PRIVATE_TOKEN`, and `WIKI_GITLAB_TOKEN` from the
+`openclaw` process environment; callback payloads and the transport never need
+executor-owned GitLab credentials.
+
+## Single-Issue Compatibility Shim
+
+`RUN_SINGLE_ISSUE` accepts:
+
+- `project` plus `iid`, or `issue_url` as their alternative source;
+- required non-empty `dispatcher_callback_target`;
+- optional `correlation_id`, `branch`, and `group`.
+
+Explicit project/IID values must match `issue_url` when both are present.
+`dispatch_single_issue.sh` generates stable content-addressed correlation and
+batch IDs when needed, converts the request into a single-selector
+`RUN_DRIVEN_ISSUE_BATCH`, and delegates to the same executor-wide scheduler.
+It does not synthesize `RUN_SCHEDULED_ISSUE_CAMPAIGN`, create a private
+`max_concurrent_subagents=1` campaign, write `dispatch_origin.json`, or forward
+a GitLab token. After processing its runtime actions, use the same
+`emit_driven_batch_acceptance.sh` call and exact five-field final reply described
+for dispatcher-driven batches; do not return its rich envelope or
+`chat_summary` as the public result.

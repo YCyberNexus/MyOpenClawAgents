@@ -565,6 +565,109 @@ if [ "$(wc -l <"${STRICT_OPENCLAW_LOG}" | tr -d ' ')" -ne 2 ]; then
   exit 1
 fi
 
+# A deterministic key helper forces two distinct events into the same primary
+# notification key. Durable outcome metadata must prevent event A's success
+# from being reused for event B; both events still need exactly one push.
+COLLISION_STATE_ROOT="${TEST_ROOT}/notification-key-collision-state"
+COLLISION_HELPER="${TEST_ROOT}/notification-key-helper.sh"
+COLLISION_HELPER_LOG="${TEST_ROOT}/notification-key-helper.log"
+COLLISION_OPENCLAW_BIN="${TEST_ROOT}/notification-key-openclaw-bin"
+COLLISION_OPENCLAW_LOG="${TEST_ROOT}/notification-key-openclaw.log"
+
+STATE_ROOT="${COLLISION_STATE_ROOT}" \
+BATCH_ID="batch-notification-key-collision" \
+EXECUTOR_AGENT="req_executor" \
+ORIGIN_JSON="${ORIGIN}" \
+MATCHED_COUNT="2" \
+REQUEST_DIGEST="request-digest-notification-key-collision" \
+  "${BASH}" "${SKILL_DIR}/scripts/record_executor_batch.sh" >/dev/null
+
+for collision_index in 0 1; do
+  collision_iid=$((201 + collision_index))
+  collision_event="$(jq -cnS \
+    --argjson snapshot_index "${collision_index}" \
+    --argjson iid "${collision_iid}" '{
+      event_id:("batch-notification-key-collision:snapshot-"
+        + ($snapshot_index | tostring) + ":terminal-1"),
+      batch_id:"batch-notification-key-collision",
+      snapshot_index:$snapshot_index,
+      project:"group/project",
+      iid:$iid,
+      status:"done",
+      mr_url:("https://gitlab.example/group/project/-/merge_requests/" + ($iid | tostring)),
+      reason:null
+    }')"
+  STATE_ROOT="${COLLISION_STATE_ROOT}" \
+  WORKER_RESULT_JSON="${collision_event}" \
+    "${BASH}" "${SKILL_DIR}/scripts/apply_executor_batch_event.sh" >/dev/null
+done
+
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' 'printf "%s\n" "$1" >>"${COLLISION_HELPER_LOG:?COLLISION_HELPER_LOG required}"'
+  printf '%s\n' 'printf "%s\n" "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'
+} >"${COLLISION_HELPER}"
+chmod +x "${COLLISION_HELPER}"
+
+mkdir -p "${COLLISION_OPENCLAW_BIN}"
+{
+  printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'set -euo pipefail'
+  printf '%s\n' 'printf "%s\n" "$*" >>"${COLLISION_OPENCLAW_LOG:?COLLISION_OPENCLAW_LOG required}"'
+  printf '%s\n' 'exit 0'
+} >"${COLLISION_OPENCLAW_BIN}/openclaw"
+chmod +x "${COLLISION_OPENCLAW_BIN}/openclaw"
+
+collision_drain="$(
+  PATH="${COLLISION_OPENCLAW_BIN}:${PATH}" \
+  STATE_ROOT="${COLLISION_STATE_ROOT}" \
+  EXECUTOR_BATCH_NOTIFICATION_KEY_HELPER="${COLLISION_HELPER}" \
+  COLLISION_HELPER_LOG="${COLLISION_HELPER_LOG}" \
+  COLLISION_OPENCLAW_LOG="${COLLISION_OPENCLAW_LOG}" \
+  REPLY_GATEWAY_URL="ws://example.invalid:8080" \
+  REPLY_GATEWAY_TOKEN="reply-token" \
+  DEFAULT_REPLY_AGENT="fallback-agent" \
+  REPLY_NOTIFY_TIMEOUT_SECONDS="5" \
+    "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh"
+)"
+if ! jq -e '
+  .attempted == 2 and .delivered == 2 and .failed == 0
+' <<<"${collision_drain}" >/dev/null \
+  || [ ! -f "${COLLISION_OPENCLAW_LOG}" ] \
+  || [ "$(wc -l <"${COLLISION_OPENCLAW_LOG}" | tr -d ' ')" -ne 2 ]; then
+  echo "colliding notification keys did not push both events exactly once" >&2
+  printf '%s\n' "${collision_drain}" >&2
+  exit 1
+fi
+if [ ! -f "${COLLISION_HELPER_LOG}" ] \
+  || [ "$(wc -l <"${COLLISION_HELPER_LOG}" | tr -d ' ')" -ne 2 ]; then
+  echo "notification drain did not use the injectable SHA-256 key helper" >&2
+  exit 1
+fi
+COLLISION_METADATA_LIST="${TEST_ROOT}/notification-key-metadata.list"
+find "${COLLISION_STATE_ROOT}/_dispatcher/executor_batch_notification_attempts" \
+  -type f -name event_metadata.json -print >"${COLLISION_METADATA_LIST}"
+if [ "$(wc -l <"${COLLISION_METADATA_LIST}" | tr -d ' ')" -ne 2 ] \
+  || ! while IFS= read -r metadata_file; do
+    jq -e '
+      (keys | sort) == ["event_id","version"]
+      and .version == 1
+      and (.event_id | startswith("batch-notification-key-collision:snapshot-"))
+    ' "${metadata_file}" >/dev/null
+  done <"${COLLISION_METADATA_LIST}"; then
+  echo "durable notification outcomes lack collision-safe event metadata" >&2
+  exit 1
+fi
+if ! jq -e '
+  (.notifications | length) == 2
+  and all(.notifications[];
+    .attempts == 1 and (.delivered_at | type == "string" and length > 0))
+' "${COLLISION_STATE_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null; then
+  echo "colliding notification outcomes were reused across event IDs" >&2
+  exit 1
+fi
+
 FAKE_NOTIFY="${TEST_ROOT}/fake_notify.sh"
 FAKE_NOTIFY_LOG="${TEST_ROOT}/fake_notify.jsonl"
 FAKE_NOTIFY_MARKER="${TEST_ROOT}/fake_notify.first-attempt"

@@ -65,6 +65,38 @@ for iid in 12 13; do
   bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh" >/dev/null
 done
 
+queue_file="${STATE_ROOT}/_dispatcher/executor_queue.json"
+pending_file="${STATE_ROOT}/_dispatcher/pending.json"
+cp "${queue_file}" "${TEST_ROOT}/executor_queue.before-empty-callback.json"
+cp "${pending_file}" "${TEST_ROOT}/pending.before-empty-callback.json"
+
+set +e
+empty_callback_output="$(
+  STATE_ROOT="${STATE_ROOT}" \
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
+  DISPATCHER_CALLBACK_TARGET="" \
+    bash "${SKILL_DIR}/scripts/drain_executor_queue.sh" 2>&1
+)"
+empty_callback_rc=$?
+set -e
+if [ "${empty_callback_rc}" -eq 0 ]; then
+  echo "empty callback target must fail before draining the legacy queue" >&2
+  printf '%s\n' "${empty_callback_output}" >&2
+  exit 1
+fi
+if ! cmp -s "${queue_file}" "${TEST_ROOT}/executor_queue.before-empty-callback.json" \
+  || ! cmp -s "${pending_file}" "${TEST_ROOT}/pending.before-empty-callback.json" \
+  || [ -e "${STATE_ROOT}/_dispatcher/seq" ]; then
+  echo "empty callback target changed legacy queue, pending, or seq state" >&2
+  exit 1
+fi
+if [ -s "${OPENCLAW_CALL_LOG}" ]; then
+  echo "empty callback target reached the legacy executor" >&2
+  exit 1
+fi
+
 drain="$(
   STATE_ROOT="${STATE_ROOT}" \
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \
@@ -73,9 +105,6 @@ drain="$(
   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
   bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
 )"
-
-queue_file="${STATE_ROOT}/_dispatcher/executor_queue.json"
-pending_file="${STATE_ROOT}/_dispatcher/pending.json"
 
 if [ "$(jq -r '.status' <<<"${drain}")" != "launched" ]; then
   echo "expected drain status launched" >&2

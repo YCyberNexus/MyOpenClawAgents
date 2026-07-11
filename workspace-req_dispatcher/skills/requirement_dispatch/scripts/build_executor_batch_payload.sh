@@ -11,6 +11,9 @@ FORCE_RERUN_PR="${FORCE_RERUN_PR:-false}"
 DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}"
 TARGET_BRANCH="${TARGET_BRANCH:-}"
 
+[ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
+  || { echo "DISPATCHER_CALLBACK_TARGET must not be empty" >&2; exit 2; }
+
 has_control_characters() {
   local value="$1"
 

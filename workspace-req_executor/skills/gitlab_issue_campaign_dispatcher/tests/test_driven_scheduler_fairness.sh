@@ -384,6 +384,7 @@ jq -e '
   .should_spawn == true
   and (.claim_token | type == "string" and length > 0)
 ' <<<"${lease_other_claim}" >/dev/null
+lease_other_claim_token="$(jq -r '.claim_token' <<<"${lease_other_claim}")"
 
 before_lease_expiry="$(
   CONFIG_DIR="${CONFIG_DIR}" \
@@ -453,6 +454,29 @@ jq -e '
 jq -e --arg job_id "${lease_job_id}" '
   .active_jobs[$job_id].claim_generation == 1
   and .active_jobs[$job_id].claim_token == null
+' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
+
+# A runtime child discovered during explicit reconciliation must be able to
+# restore exactly the fenced generation. This capability is ACTION-only;
+# ordinary STATUS=spawned remains forbidden for reserved jobs.
+recovered_spawned="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_other_job_id}" \
+    ACTION=recovered_spawned CLAIM_GENERATION=1 \
+    CLAIM_TOKEN="${lease_other_claim_token}" NOW_EPOCH=112 \
+    bash "${RECORD}"
+)"
+jq -e '
+  .status == "recorded"
+  and .job_status == "running"
+  and .should_spawn == false
+  and .claim_generation == null
+  and .claim_token == null
+' <<<"${recovered_spawned}" >/dev/null \
+  || { echo "expected recovered_spawned to restore the fenced claim" >&2; exit 1; }
+jq -e --arg job_id "${lease_other_job_id}" --arg token "${lease_other_claim_token}" '
+  .active_jobs[$job_id].status == "running"
+  and .active_jobs[$job_id].claim_generation == 1
+  and .active_jobs[$job_id].claim_token == $token
 ' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
 
 lease_claim2="$(

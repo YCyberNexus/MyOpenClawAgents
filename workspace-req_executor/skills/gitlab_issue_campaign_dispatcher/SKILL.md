@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-10.1] Run a GitLab issue campaign for req_executor as a thin LLM orchestrator over dispatcher-side shell wrappers. Supports RUN_SCHEDULED_ISSUE_CAMPAIGN, RUN_CHILD_COMPLETION_CALLBACK, and RUN_SINGLE_ISSUE. Driven single-issue runs read the GitLab token from process env or config/gitlab.env, read only the clone parent from campaign_defaults.env, accept project+iid or a GitLab issue_url from req_dispatcher, accept an optional branch field, infer the target branch from origin/HEAD when branch is omitted, write dispatch_origin.json, synthesize one IID scheduled work, and report terminal results back to req_dispatcher. Runtime state uses the fixed in-repo .req_executor directory; issue content is rendered into prompt.txt and Claude Code is invoked only through run_acpx_attempt.sh; attempt logs are not uploaded to project Wiki pages and are not committed into MR changes."
+description: "[SKILL_VERSION=2026-07-10.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, handles GitLab tokens from req_dispatcher, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -41,20 +41,21 @@ the subagent will then bypass `run_acpx_attempt.sh`, and the whole
 | Audience | the OUTER subagent (the runtime-spawned model) | the INNER Claude Code session that `acpx claude exec -f ${LOG_DIR}/prompt.txt` starts |
 | Tells it to | run Steps 0–9: `bash run_acpx_attempt.sh` → stage → push → verify → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue and write its deliverables (code / tests / specs / docs — whatever the issue asks for) |
 | Shape | starts with sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
-| Sent how | `sessions_spawn(task=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", runtime="subagent", mode="run", cleanup="keep", context="isolated")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
+| Sent how | `sessions_spawn(task=<contents of spawn_payload.txt>, label=<entry.child_label>, runtime="subagent", mode="run", cleanup="keep", context="isolated")` — scheduled entries use `#<iid>-att-<NNN>`; driven grants use the globally unique safe label described in Path D; both are anonymous, with no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
 | File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`; it stays on the runner and is not committed into the MR diff |
 
 **HARD RULE: `${LOG_DIR}/prompt.txt` is NEVER the spawn payload.** The
 wrapper's pre-spawn sentinel grep on the rendered string guards against
 this confusion; the LLM does not need to re-check, but MUST always feed
 `sessions_spawn` the contents of `payload_path` from the
-`dispatch_entries[]` returned by `dispatch_prepare_tick.sh` — never any
+`dispatch_entries[]` returned by `dispatch_prepare_tick.sh` or the
+`spawn_grants[]` returned by `run_executor_batch_tick.sh` — never any
 other file.
 
 ## The orchestrator loop (replaces Phases 1–6)
 
-There are **two trigger commands and two execution paths**, both
-reduced to a small fixed shape.
+There are **five trigger commands and five execution paths**, all
+reduced to fixed wrapper calls and strict JSON branches.
 
 > The legacy "Phase 1–6" numbering is **not** retired — the wrapper
 > scripts (`dispatch_prepare_tick.sh` / `dispatch_record_spawn.sh` /
@@ -161,124 +162,161 @@ script returns, state is durable and the next IID can be spawned.
 That's the entire callback path. No Phase 6 prose, no Bash chains, no
 state writes from the LLM side.
 
-### Path C — `RUN_SINGLE_ISSUE` (req_dispatcher-driven single-issue entry, I1)
+### Path C — `RUN_DRIVEN_ISSUE_BATCH`
 
-This is the **driven** entry point: `req_dispatcher` orchestrates one issue
-end-to-end and wants this executor to process exactly that one IID, then report
-the terminal result back so `req_dispatcher` can push it to the original
-requester. It is NOT the cron path — the scheduled `RUN_SCHEDULED_ISSUE_CAMPAIGN`
-+ cron continues to serve batch/backfill and non-driven sources unchanged
-(§3.6 of the active-orchestration design).
-
-**I1 trigger inputs** (multi-line key=value, same text format as the scheduled
-trigger). `req_dispatcher` normally sends `project` + `iid`; it may instead send
-`issue_url=<GitLab issue URL>`, which `dispatch_single_issue.sh` parses into the
-same project/iid facts. The driven wrapper reads GitLab token from
-process env or `config/gitlab.env`, reads only the clone parent from
-`config/campaign_defaults.env` / ignored `config/campaign_defaults.local.env`,
-and lets the scheduled wrapper infer branch from `origin/HEAD` when omitted:
-
-| Field | Required | Meaning |
-| ----- | -------- | ------- |
-| `project` | yes unless `issue_url` is present | GitLab project slug to process. Full `group/project` is preferred; bare slugs require `group`. |
-| `iid` | yes unless `issue_url` is present | The single issue IID to process (positive integer). |
-| `issue_url` | no | GitLab issue URL containing `/-/issues/<iid>`. When present, it can supply `project` and `iid`; explicit `project`/`iid` must match it if also sent. |
-| `correlation_id` | yes | req_dispatcher's关联 token. Echoed back verbatim in the I2 result envelope so req_dispatcher can match its pending entry. |
-| `dispatcher_callback_target` | yes (I2) | The callback target req_dispatcher reports to. Supports `agent:req_dispatcher:main` or a bare agent id; carried opaquely into `dispatch_origin.json`. |
-| `group` | no | Usually unnecessary when `project` is `<group>/<project>`. Falls back to `GROUP` env/local config only for bare project slugs. |
+Pass the complete I1 trigger verbatim to the fixed intake wrapper:
 
 ```
-1. cd "${SKILL_DIR}" && bash scripts/dispatch_single_issue.sh <<'TRIGGER_EOF'  → envelope
-   RUN_SINGLE_ISSUE
-   project=<project>
-   iid=<iid>
-   issue_url=<GitLab issue URL>  # optional alternative to project+iid
-   correlation_id=<correlation_id>
-   dispatcher_callback_target=<dispatcher_callback_target>
-   group=<group>            # optional; omit to use the pin
+1. cd "${SKILL_DIR}" && bash scripts/run_driven_issue_batch.sh <<'TRIGGER_EOF' → envelope
+   <verbatim RUN_DRIVEN_ISSUE_BATCH trigger>
    TRIGGER_EOF
-   # Same `cd`-chaining + heredoc rules as Path A.
-   #
-   # dispatch_single_issue.sh:
-   #   • validates project / iid (positive integer) / issue_url / correlation_id
-   #     (exit 2 on malformed CONFIG-shape input — surface it and stop per §No-Fallback);
-   #   • sources config/gitlab.env + config/campaign_defaults.env, then optional
-   #     ignored config/campaign_defaults.local.env; requires
-   #     GITLAB_TOKEN from process env or config/gitlab.env (never sent
-   #     by req_dispatcher) and a GROUP from full project, trigger, env, or local config;
-   #   • writes {correlation_id, dispatcher_callback_target, project, iid} to
-   #     ${ISSUE_ROOT}/dispatch_origin.json (= ${ISSUES_ROOT}/issue-<iid>/dispatch_origin.json)
-   #     so Phase 6 can find req_dispatcher to report back to;
-   #   • synthesizes an equivalent single-IID RUN_SCHEDULED_ISSUE_CAMPAIGN
-   #     (issue_iids=[iid], issue_min_iid=issue_max_iid=iid, hourly_issue_quota=1,
-   #     max_concurrent_subagents=1, fixed-value preflight fields) and pipes it
-   #     into dispatch_prepare_tick.sh, forwarding its envelope unchanged on stdout.
-2. From here the envelope is a normal Path A `dispatch_prepare_tick.sh` envelope:
-   enter the SAME spawn loop (step 4 of Path A), spawn the one IID, record it.
-   The driven setup is transparent to the per-IID subagent and to Phase 6 — the
-   ONLY driven-specific artifact is the issue's dispatch_origin.json, consumed at
-   §Phase 6 dispatcher result callback below.
+2. Process envelope.reconcile_actions and envelope.spawn_grants using Path D.
+3. If the envelope has no non-empty batch_id, or Path D cannot resolve an
+   action unambiguously, print envelope.chat_summary and EXIT without a public
+   acceptance.
+4. cd "${SKILL_DIR}" && BATCH_ID="<verbatim envelope.batch_id>" \
+     bash scripts/emit_driven_batch_acceptance.sh → acceptance
+5. Return exactly acceptance's sole compact JSON line as the final assistant
+   reply, then EXIT. Do not print envelope.chat_summary, the rich envelope, a
+   code fence, or surrounding prose after/beside it.
 ```
 
-The driven path reuses the entire existing campaign machine — subagent Steps
-0–9, per-issue worktree, anonymous spawn, the callback path — completely
-unchanged. The only two new pieces are this entry script (which just pins
-config + records the origin + delegates) and the Phase 6 callback below.
+The wrapper owns GitLab pagination, OPEN filtering, immutable snapshot creation,
+batch idempotency, strict round-robin reservation, live preflight, claim
+allocation and binding, claim-0 skips, project handoff import, and outbox drain.
+The trigger never contains a GitLab token, and the envelope never contains one.
+Do not query GitLab, expand the snapshot IID list, call `RUN_SINGLE_ISSUE` once
+per IID, or invoke scheduler/project helper scripts directly.
 
-### Phase 6 dispatcher result callback (I2 — driven path only)
+The public acceptance wrapper re-reads the named batch while holding the
+scheduler lock, verifies its unique registration, canonical request/snapshot
+digests, and batch-state invariants, and emits exactly `status`, `batch_id`,
+`matched_count`, `snapshot_digest`, and `scheduler_status`. Never construct
+those five fields in the LLM. The richer intake/tick envelope is runtime work
+input only and is rejected by req_dispatcher as a public receipt.
 
-`dispatch_followup.sh` (Path B) decides, at Phase 6 terminal time, between two
-**mutually exclusive, best-effort** result-report paths based on whether the
-issue carries a driven origin:
+### Path D — `RUN_EXECUTOR_BATCH_TICK`
 
-- **driven** — `${ISSUE_ROOT}/dispatch_origin.json` exists AND carries a
-  non-empty `correlation_id` + `dispatcher_callback_target`. The wrapper runs
-  `scripts/notify_dispatcher.sh` to报回 req_dispatcher and **SKIPS**
-  `post_result_note.sh` entirely (no `req_result` note — the user-facing回投 is
-  req_dispatcher's job on this path; a truncated origin missing the target falls
-  back to cron semantics).
-- **cron** — no `dispatch_origin.json`. The existing `result_note_enabled`-gated
-  `post_result_note.sh` path is unchanged (§trigger `result_note_enabled`).
-
-`notify_dispatcher.sh` only fires for terminal `done` / `failed` / `timeout`
-(never `blocked` — retryable, would re-post each attempt). It emits the **I2
-result envelope** (one compact JSON line):
-
-```json
-{"correlation_id":"<echo of I1>","iid":<int>,"project":"<group/project>","status":"done|failed|timeout","mr_url":<string|null>,"wiki_url":null,"reason":<string|null>}
+```
+1. cd "${SKILL_DIR}" && bash scripts/run_executor_batch_tick.sh → envelope
+2. for each action in envelope.reconcile_actions (STRICT ARRAY ORDER):
+     require action.action == "reconcile_emitted_spawn"
+     call `subagents list` once and match the exact action.child_label
+     if exactly one matching child has non-empty runId and childSessionKey:
+       cd "${SKILL_DIR}" && bash scripts/resolve_executor_batch_reconcile.sh <<'JSON_EOF'
+       {"job_id":"<action.job_id>","claim_generation":<action.claim_generation>,
+        "resolution":"spawned","run_id":"<runId>",
+        "child_session_key":"<childSessionKey>"}
+       JSON_EOF
+     else if no child matches:
+       call the same wrapper with
+       {"job_id":"<action.job_id>","claim_generation":<action.claim_generation>,
+        "resolution":"not_found","evidence":"subagents_list_no_matching_label"}
+     else:
+       print chat_summary, EXIT  # ambiguous runtime evidence; never guess
+3. for each grant in envelope.spawn_grants (STRICT ARRAY ORDER, never parallel):
+     payload = Read(grant.payload_path)
+     call sessions_spawn with the fixed parameters and retry contract below
+     immediately pass the ack or final launch error as one strict JSON object to
+       cd "${SKILL_DIR}" && bash scripts/record_executor_batch_spawn.sh
+4. Print envelope.chat_summary, EXIT.
 ```
 
-`status` is the Phase 6 `final_status`. Isolation matches `post_result_note.sh`:
-the wrapper calls it with `set +e`, stdout → `/dev/null`, and a non-zero exit is
-logged to `wrapper.log` but NEVER aborts Phase 6.
+For a successful spawn, the result JSON contains exactly
+`job_id`, `claim_generation`, `project`, `iid`, `attempt_number`,
+`status:"spawned"`, `run_id`, and `child_session_key`. For exhausted launch
+retries it contains the same identity plus `status:"launch_failed"`,
+`launch_attempts`, and `launch_error`. Never pass a claim token: the fixed
+recorder recovers it privately and records project state before scheduler state.
+The project recorder commits a token-hash-bound exact-outcome receipt in the
+same campaign-state write as `spawned`/`launch_failed`; the scheduler commits a
+token-hash-bound `launch_failed` tombstone in the same transaction that removes
+the active job. Exact tick replays therefore return idempotent success without
+incrementing quota, refreshing `spawned_at`, repeating Phase 6, or touching a
+new claim. Conflicting run/session/outcome/generation/token evidence fails
+closed. Project receipt replay and coordinator acknowledgement both validate
+the complete exact project result: integer remaining count, non-empty
+control-free summary, and, for driven launch failure, only
+`final_status:"blocked"` with one of the two exact Phase 6 cleanup shapes.
+Malformed or merely partial recorder output leaves recovery at
+`ack_received`; recorder exit status alone never advances the coordinator.
 
-`notify_dispatcher.sh` records the I2 JSON to
-`${WORK_ROOT}/log/dispatcher_callbacks.jsonl`, then calls `openclaw agent` with
-`RUN_EXECUTOR_RESULT_CALLBACK` and `worker_result_json=<I2>` for the configured
-target. Send failures remain best-effort (`exit 0`) after the envelope is
-recorded; only malformed input or callback timeout shape exits non-zero. When
-`dispatcher_callback_target` is empty it is a no-op (`exit 0`). See
-[`references/trigger_command.md`](references/trigger_command.md) §RUN_SINGLE_ISSUE
-and §Result callback for the full I1/I2 contract.
+Every driven `child_label` has the fixed form
+`reqx-iid<IID>-gen<generation>-<40 lowercase hex>`. The readable prefix keeps
+IID and claim generation visible; the 160-bit SHA-256 prefix binds full
+`project`, physical `job_id`, IID, attempt and generation. Labels use only
+`[A-Za-z0-9._-]`, are at most 96 bytes, are stable across replay, differ across
+projects sharing the same IID, and differ again when a later generation is
+explicitly authorized. Match this exact value during runtime reconciliation;
+never reconstruct it in the LLM.
+
+An `action_emitted` lease that expires is never automatically re-spawned.
+`not_found` requires the explicit runtime enumeration evidence above before a
+later tick may allocate the next claim generation. If the child is found, the
+wrapper restores that exact generation and the later tick must not spawn it
+again. `should_spawn=false` and claim-0 skips are handled entirely inside the
+tick wrapper and therefore never authorize a runtime call.
+
+`RUN_EXECUTOR_BATCH_TICK` is recovery-first: it scans durable project intents,
+imports terminal handoffs, drains the callback outbox, then resumes every
+durable post-spawn coordinator at `ack_received`, `project_recorded`, or
+`scheduler_recorded` before it reserves/refills slots. The original caller does
+not resend a spawn acknowledgement after a crash; the tick rebuilds the strict
+recorder input from the durable coordinator. This includes the two ambiguity
+windows where a downstream project/scheduler commit succeeded but its following
+coordinator stage write did not. Invoke only the fixed wrapper;
+never edit scheduler JSON, manually bind a claim, or reconstruct
+retry/round-robin logic in the LLM.
+
+### Path E — `RUN_SINGLE_ISSUE` compatibility shim
+
+```
+1. cd "${SKILL_DIR}" && bash scripts/dispatch_single_issue.sh <<'TRIGGER_EOF' → envelope
+   <verbatim RUN_SINGLE_ISSUE trigger>
+   TRIGGER_EOF
+2. Process envelope.reconcile_actions and envelope.spawn_grants using Path D.
+3. Apply Path C steps 3–5 using envelope.batch_id and the fixed
+   emit_driven_batch_acceptance.sh wrapper. The final reply is the same exact
+   five-field public acceptance, never envelope.chat_summary.
+```
+
+The shim accepts `project+iid` or `issue_url`, requires a non-empty
+`dispatcher_callback_target`, preserves an optional `branch`, and accepts an
+optional `correlation_id`. When the correlation ID is omitted it derives stable
+content-addressed correlation and batch IDs. It converts the request to a
+single-selector `RUN_DRIVEN_ISSUE_BATCH`; it does not create an independent
+one-concurrency scheduled campaign.
+
+Driven Phase 6 completion is durable: project-side completion writes a handoff;
+the next tick imports it, releases the physical slot, fans out every attached
+batch membership, and retries each I3 outbox item until the dispatcher returns
+the matching accepted acknowledgement. Callback delivery is never a best-effort
+direct send from the LLM.
 
 ### The envelope is the whole decision tree
 
-A wrapper call ALWAYS exits 0 and ALWAYS prints exactly one JSON envelope
-on stdout. On every wake-up your complete job is: issue the one chained
+A top-level wrapper call prints exactly one JSON envelope on stdout. On every
+wake-up your complete job is: issue the one chained
 `cd "${SKILL_DIR}" && bash scripts/<name>.sh` invocation, read the
-envelope, and act on `status` / `cleanup` / `dispatch_entries` exactly as
-the loop above prescribes. That switch IS the entire decision tree —
+envelope, and act on `status`, `cleanup`, `dispatch_entries`,
+`reconcile_actions`, and `spawn_grants` exactly as the matching path
+prescribes. That switch IS the entire decision tree —
 there is no "investigate", "debug", or "repair" branch anywhere in it.
 
-When an envelope reports `tick_failed` (or any non-`ready` status), you
-print its `chat_summary` and stop. A failure `chat_summary` is a
+When a Path A, B, or D envelope reports `tick_failed` (or any non-`ready`
+status), you print its `chat_summary` and stop. For Path C/E, an intake failure
+also stops without an acceptance; an accepted batch instead follows the fixed
+public-emitter rule above. A failure `chat_summary` is a
 terminal classification the wrapper already produced after it read,
 logged, and classified the underlying cause for you — it is finished
 work, not a task handed to you. Concretely, on the dispatcher side:
 
 - The ONLY file you ever `Read` is a `payload_path` taken from a `ready`
-  envelope's `dispatch_entries[]`. You do not `Read`, `grep`, `sed`, or
+  envelope's `dispatch_entries[]` or `spawn_grants[]`. You do not `Read`,
+  `grep`, `sed`, or
   `cat` any file under `scripts/` or `references/` for any reason.
+- You never query GitLab, enumerate batch IIDs, inspect private coordinator
+  files, or edit scheduler/project state. Fixed wrappers own those operations.
 - A tool name or surprising phrase inside a `chat_summary`
   (`reconcile_failed`, an exit code, a path, etc.) is never a bug for
   you to fix. You do not edit a script, do not substitute one command
@@ -296,8 +334,8 @@ signal to stop: print the envelope's `chat_summary` and end the turn.
 
 ### Standard env block
 
-The orchestrator forwards these on every dispatcher script invocation
-(they all source `env_paths.sh` which derives the rest):
+The scheduled/callback paths forward these to the legacy project wrappers
+(which source `env_paths.sh` and derive the rest):
 
 ```
 PROJECT={project}                          # always
@@ -312,6 +350,10 @@ REPO_PARENT_PATH={repo_path}               # when trigger supplied non-default r
 when unset; non-default deployments MUST keep passing it on every
 scheduled trigger and callback because the dispatcher needs it before
 locating `${CAMPAIGN_STATE_FILE}`.
+
+The driven intake/tick/single wrappers load the executor-owned credential and
+deployment roots themselves. `req_dispatcher` never supplies a token, and the
+LLM never copies a token into a trigger, result JSON, or chat response.
 
 ## What the wrappers handle (don't second-guess them)
 
@@ -331,6 +373,12 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |
 | Phase 6 validation + label sync + state writes + classification + drain | `dispatch_followup.sh` + `_dispatch_lib.sh::phase6_process` |
 | Best-effort terminal cleanup decision (preserves all terminal child sessions for diagnosis; no `subagents kill` request is emitted) | `_dispatch_lib.sh::phase6_decide_cleanup`; LLM acts on `envelope.cleanup.action` |
+| Driven batch intake, OPEN snapshot, and idempotency | `run_driven_issue_batch.sh` → `create_driven_batch.sh` |
+| Recovery-first handoff/outbox/coordinator replay and strict round-robin refill | `run_executor_batch_tick.sh` |
+| Preparing claim, bind, emitted-action fence, and claim-0 skip | `run_executor_batch_tick.sh` plus its fixed helpers |
+| Runtime-evidence reconciliation | `resolve_executor_batch_reconcile.sh` |
+| Project-first spawn/launch-failure record | `record_executor_batch_spawn.sh` |
+| Exact five-field public I1/single-shim receipt | `emit_driven_batch_acceptance.sh` |
 
 For the exhaustive contract of what each wrapper accepts and emits, see
 [`references/dispatcher_wrappers.md`](references/dispatcher_wrappers.md).
@@ -341,8 +389,9 @@ For the exhaustive contract of what each wrapper accepts and emits, see
 | ------- | ----------------- |
 | `sessions_spawn(...)` per IID | OpenClaw runtime tool — not callable from a shell process |
 | 3-attempt × 2-second-backoff retry around `sessions_spawn` | Each retry is itself a runtime-tool call. `dispatch_record_spawn.sh` documents and stores the outcome but cannot make the runtime call. |
+| One `subagents list` for each `reconcile_actions[]` item | Only the runtime can prove whether an emitted spawn already created a child session. |
 | `subagents kill --target <key>` | Runtime tool — same reason |
-| Printing `chat_summary` to chat | Only the LLM produces user-visible chat |
+| Printing `chat_summary`, or the fixed Path C/E acceptance, to chat | Only the LLM produces user-visible chat; it never hand-builds the acceptance |
 | Reading `payload_path` files via the `Read` tool | The wrapper writes them; the LLM passes the contents to `sessions_spawn` |
 
 Nothing else is the LLM's responsibility on the dispatcher side.
@@ -365,7 +414,8 @@ the wrappers cannot enforce:
    `childSessionKey` — that includes `status:"error"`, gateway
    timeouts, network/transport errors, runtime errors, and the spawn
    tool call itself raising. After 3 attempts fail, immediately call
-   `dispatch_record_spawn.sh STATUS=launch_failed`. **No fourth
+   `dispatch_record_spawn.sh STATUS=launch_failed` on Path A, or pass the strict
+   `launch_failed` JSON to `record_executor_batch_spawn.sh` on Path D. **No fourth
    attempt, no payload mutation, no "try once more without the label
    parameter".**
 2. **Strictly serial `sessions_spawn` calls.** Never batch multiple
@@ -492,10 +542,12 @@ placeholder so this rule only applies to the orchestrator session.
 
 ## Chat Output Policy
 
-Every wrapper envelope carries a `chat_summary` field — a one-line
-human-readable string. The LLM prints exactly that line (no surrounding
-prose, no rewording, no JSON dump) to chat and exits. **Never paste
-full logs, full diffs, long issue bodies, or the full envelope JSON
-into chat.** Operators reading the chat see the summary and dig into
-`${RESULT_ROOT}/_dispatcher/log/wrapper.log` for the structured trace
-when they need more detail.
+Every rich orchestration envelope carries a `chat_summary` field — a one-line
+human-readable string. Paths A, B, and D print exactly that line (no surrounding
+prose, no rewording, no JSON dump) and exit. Successful Path C/E intake is the
+only exception: after runtime actions, print exactly the sole compact JSON line
+from `emit_driven_batch_acceptance.sh`, with nothing after or around it. Never
+print the rich envelope itself and never hand-build the public receipt.
+**Never paste full logs, full diffs, long issue bodies, or frozen IID arrays
+into chat.** Operators reading ordinary tick chat see the summary and dig into
+`${RESULT_ROOT}/_dispatcher/log/wrapper.log` for structured trace when needed.

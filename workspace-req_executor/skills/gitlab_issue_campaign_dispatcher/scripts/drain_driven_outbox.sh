@@ -133,7 +133,15 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
     openclaw_args+=(--message "${callback_message}" --timeout "${DELIVERY_TIMEOUT_SECONDS}")
 
     set +e
-    ack_output="$("${OPENCLAW_BIN}" "${openclaw_args[@]}")"
+    ack_output="$(
+      env \
+        -u GITLAB_TOKEN \
+        -u GLAB_TOKEN \
+        -u GITLAB_PRIVATE_TOKEN \
+        -u PRIVATE_TOKEN \
+        -u WIKI_GITLAB_TOKEN \
+        "${OPENCLAW_BIN}" "${openclaw_args[@]}"
+    )"
     delivery_rc=$?
     set -e
     if [ "${delivery_rc}" -ne 0 ]; then

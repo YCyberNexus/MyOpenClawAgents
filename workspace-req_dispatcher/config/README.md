@@ -30,7 +30,7 @@
 | `REPLY_GATEWAY_TOKEN` | 否 | 114 OpenClaw 网关 token。仅由 `notify_user.sh` 用于 `openclaw agent run` 投递结果信封；为空时兼容回落到旧 `ZHIBAN_GATEWAY_TOKEN`；不要写入日志。 |
 | `DEFAULT_REPLY_AGENT` | 否 | 114 上接收结果信封的默认 agent 名。`notify_user.sh` 只有在 `ORIGIN_JSON` 是合法 object 时才允许出站推送；目标 agent 优先使用 `origin.reply_agent`，该字段只在合法 origin 未提供 `reply_agent` 时兜底。`ORIGIN_JSON` 为空/null/非 object 时视为手动入口，不使用该兜底值；为空时兼容回落到旧 `ZHIBAN_AGENT`。接收 agent 负责根据信封里的 `origin` 完成企微最后一跳。 |
 | `REPLY_NOTIFY_TIMEOUT_SECONDS` | 否 | 104 反向调用 114 接收 agent 的超时秒数，默认 `30`；为空时兼容回落到旧 `ZHIBAN_NOTIFY_TIMEOUT_SECONDS`；必须为正整数，配置形态错误时 `notify_user.sh` 以 `2` 退出。实际投递超时只写 `user_notify_failed` 留痕并 `exit 0`，不阻断终态回调路径。 |
-| `DISPATCHER_CALLBACK_TARGET` | 否 | 结果回调目标：调用 `req_executor` 的 `RUN_SINGLE_ISSUE` 时作为 `dispatcher_callback_target`（I1）传下去，执行器 Phase 6 据此把结果回调（I2）投回 req_dispatcher。支持 `agent:req_dispatcher:main` 这类 session key selector 或裸 agent 名；留空＝该字段为空，执行器侧回调 no-op。 |
+| `DISPATCHER_CALLBACK_TARGET` | 是 | executor 结果回调目标：batch I1 与旧 `RUN_SINGLE_ISSUE` bridge 都把它作为 `dispatcher_callback_target` 传给 req_executor，执行器 Phase 6 据此把 I3 结果投回 req_dispatcher。支持 `agent:req_dispatcher:main` 这类 session key selector 或裸 agent 名。必须非空；缺失时 intake/legacy drain 会在分配序号、修改 active/pending、落 batch intent 或网络调用前失败关闭，payload builder 还会二次校验。 |
 | 跨 agent 调用契约 | 已定 | `scripts/run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>`；普通调用默认 `agent:<target>:main`，`RUN_SINGLE_ISSUE` 默认 `agent:<target>:issue-<sanitized-project>-<iid>`；旧 `TARGET_SESSION_ID` 输入仅作兼容且同样转为 `--session-key`，但 `RUN_SINGLE_ISSUE` 显式传 `agent:<target>:main` 时会改投 issue 级 session；CLI 使用 runner 已配置的 OpenClaw Gateway，不在本文件重复 pin 网关地址/token。 |
 
 ## 两类 timeout 的边界
@@ -82,7 +82,7 @@ openclaw config validate
 4. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
 5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token。只有执行动作会用到它；只建单动作不会入队。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。执行分支由用户 prompt 明确指定后作为 executor `branch=` 下发，未指定时由 executor 解析远端默认分支。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
-7. `DISPATCHER_CALLBACK_TARGET` 按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。未填时执行器结果回调字段为空。
+7. `DISPATCHER_CALLBACK_TARGET` 必须按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。不得留空，否则 batch intake 与旧 FIFO drain 都会在任何持久状态变更和网络调用前拒绝。
 8. 部署侧必须周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`（建议 1 到 5 分钟一次）：该路径先跑 `evict_stuck.sh`，再跑 `drain_executor_queue.sh`。active 正在执行且未超时时它会返回 `busy`；active 卡在 `launching`、`launch_failed` 到期、executor pending 已超时被清理，或 queue 非空且无 active 时会继续推进。这个唤醒是执行队列恢复兜底；只建单请求不会进入该队列。
 
 ## 与 acpx 工作区的差异

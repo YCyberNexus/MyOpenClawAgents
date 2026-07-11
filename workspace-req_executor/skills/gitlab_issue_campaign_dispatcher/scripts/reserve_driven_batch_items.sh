@@ -45,6 +45,25 @@ migrate_legacy_scheduler_state() {
   local -a legacy_preparing_job_ids=()
 
   persisted_state="$(jq -ce '
+    def valid_launch_failed_receipts:
+      (has("launch_failed_receipts") | not)
+      or (.launch_failed_receipts | type == "object"
+        and (to_entries | all(. as $entry |
+          ($entry.value | type == "object")
+          and ($entry.value | keys | sort) == [
+            "action","claim_generation","claim_token_sha256",
+            "job_id","recorded_at","version"
+          ]
+          and $entry.value.version == 1
+          and $entry.value.job_id == $entry.key
+          and ($entry.value.job_id | type == "string" and length > 0)
+          and ($entry.value.claim_generation | type == "number"
+            and . == floor and . > 0)
+          and ($entry.value.claim_token_sha256 | type == "string"
+            and test("^[0-9a-f]{64}$"))
+          and $entry.value.action == "launch_failed"
+          and ($entry.value.recorded_at | type == "number"
+            and . == floor and . >= 0))));
     if type == "object"
       and .version == 1
       and ((.round_robin_cursor == null) or (.round_robin_cursor | type == "string"))
@@ -54,6 +73,7 @@ migrate_legacy_scheduler_state() {
         type == "string"
         and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")))
       and ((.batch_order | length) == (.batch_order | unique | length))
+      and valid_launch_failed_receipts
     then .
     else error("invalid version=1 scheduler state")
     end
@@ -62,6 +82,25 @@ migrate_legacy_scheduler_state() {
   if jq -e 'has("pending_transaction")' <<<"${persisted_state}" >/dev/null; then
     pending_mode=true
     migration_target="$(jq -ce '
+      def valid_launch_failed_receipts:
+        (has("launch_failed_receipts") | not)
+        or (.launch_failed_receipts | type == "object"
+          and (to_entries | all(. as $entry |
+            ($entry.value | type == "object")
+            and ($entry.value | keys | sort) == [
+              "action","claim_generation","claim_token_sha256",
+              "job_id","recorded_at","version"
+            ]
+            and $entry.value.version == 1
+            and $entry.value.job_id == $entry.key
+            and ($entry.value.job_id | type == "string" and length > 0)
+            and ($entry.value.claim_generation | type == "number"
+              and . == floor and . > 0)
+            and ($entry.value.claim_token_sha256 | type == "string"
+              and test("^[0-9a-f]{64}$"))
+            and $entry.value.action == "launch_failed"
+            and ($entry.value.recorded_at | type == "number"
+              and . == floor and . >= 0))));
       .pending_transaction
       | if type == "object"
           and .version == 1
@@ -71,6 +110,7 @@ migrate_legacy_scheduler_state() {
             or (.scheduler_state.round_robin_cursor | type == "string"))
           and (.scheduler_state.active_jobs | type == "object")
           and (.scheduler_state.batch_order | type == "array")
+          and (.scheduler_state | valid_launch_failed_receipts)
           and (.scheduler_state | has("pending_transaction") | not)
           and (.batch_states | type == "object")
         then .scheduler_state
@@ -233,6 +273,25 @@ recover_pending_transaction() {
   local -a transaction_batch_ids=()
 
   persisted_state="$(jq -ce '
+    def valid_launch_failed_receipts:
+      (has("launch_failed_receipts") | not)
+      or (.launch_failed_receipts | type == "object"
+        and (to_entries | all(. as $entry |
+          ($entry.value | type == "object")
+          and ($entry.value | keys | sort) == [
+            "action","claim_generation","claim_token_sha256",
+            "job_id","recorded_at","version"
+          ]
+          and $entry.value.version == 1
+          and $entry.value.job_id == $entry.key
+          and ($entry.value.job_id | type == "string" and length > 0)
+          and ($entry.value.claim_generation | type == "number"
+            and . == floor and . > 0)
+          and ($entry.value.claim_token_sha256 | type == "string"
+            and test("^[0-9a-f]{64}$"))
+          and $entry.value.action == "launch_failed"
+          and ($entry.value.recorded_at | type == "number"
+            and . == floor and . >= 0))));
     if type == "object"
       and .version == 1
       and (.batch_order | type == "array")
@@ -240,6 +299,7 @@ recover_pending_transaction() {
         type == "string"
         and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")))
       and ((.batch_order | length) == (.batch_order | unique | length))
+      and valid_launch_failed_receipts
     then .
     else error("scheduler state must be a valid object")
     end
@@ -250,6 +310,25 @@ recover_pending_transaction() {
   fi
 
   transaction_json="$(jq -ce '
+    def valid_launch_failed_receipts:
+      (has("launch_failed_receipts") | not)
+      or (.launch_failed_receipts | type == "object"
+        and (to_entries | all(. as $entry |
+          ($entry.value | type == "object")
+          and ($entry.value | keys | sort) == [
+            "action","claim_generation","claim_token_sha256",
+            "job_id","recorded_at","version"
+          ]
+          and $entry.value.version == 1
+          and $entry.value.job_id == $entry.key
+          and ($entry.value.job_id | type == "string" and length > 0)
+          and ($entry.value.claim_generation | type == "number"
+            and . == floor and . > 0)
+          and ($entry.value.claim_token_sha256 | type == "string"
+            and test("^[0-9a-f]{64}$"))
+          and $entry.value.action == "launch_failed"
+          and ($entry.value.recorded_at | type == "number"
+            and . == floor and . >= 0))));
     .pending_transaction
     | if type == "object"
         and .version == 1
@@ -280,6 +359,7 @@ recover_pending_transaction() {
         and (([.scheduler_state.active_jobs[].reservation_seq] | length)
           == ([.scheduler_state.active_jobs[].reservation_seq] | unique | length))
         and (.scheduler_state.batch_order | type == "array")
+        and (.scheduler_state | valid_launch_failed_receipts)
         and (.scheduler_state | has("pending_transaction") | not)
         and (.batch_states | type == "object")
         and (.batch_states | to_entries | all(
@@ -337,6 +417,25 @@ migrate_legacy_scheduler_state
 recover_pending_transaction
 
 SCHEDULER_STATE="$(jq -ce '
+  def valid_launch_failed_receipts:
+    (has("launch_failed_receipts") | not)
+    or (.launch_failed_receipts | type == "object"
+      and (to_entries | all(. as $entry |
+        ($entry.value | type == "object")
+        and ($entry.value | keys | sort) == [
+          "action","claim_generation","claim_token_sha256",
+          "job_id","recorded_at","version"
+        ]
+        and $entry.value.version == 1
+        and $entry.value.job_id == $entry.key
+        and ($entry.value.job_id | type == "string" and length > 0)
+        and ($entry.value.claim_generation | type == "number"
+          and . == floor and . > 0)
+        and ($entry.value.claim_token_sha256 | type == "string"
+          and test("^[0-9a-f]{64}$"))
+        and $entry.value.action == "launch_failed"
+        and ($entry.value.recorded_at | type == "number"
+          and . == floor and . >= 0))));
   if type == "object"
     and .version == 1
     and ((.round_robin_cursor == null) or (.round_robin_cursor | type == "string"))
@@ -346,6 +445,7 @@ SCHEDULER_STATE="$(jq -ce '
       type == "string"
       and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")))
     and ((.batch_order | length) == (.batch_order | unique | length))
+    and valid_launch_failed_receipts
     and (.active_jobs | to_entries | all(
       (.key | type == "string" and length > 0)
       and (.value | type == "object")

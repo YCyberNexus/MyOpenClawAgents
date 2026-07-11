@@ -1,65 +1,75 @@
 # req_dispatcher User Contract
 
-把本工作区用作 WebUI/智伴 prompt 在 104 侧的统一接入点。114 把用户在企微上发的需求转发到这里，WebUI 也可以直接输入自然语言。`req_dispatcher` 会先判断用户意图：只要分析/拆分/创建/变更 issue，就调用蓝区 `git_issuer`；明确要求处理既有 issue，就调用 `req_executor`；明确要求"建 issue 并处理"，才会先建单再执行。它不再因为消息里有 wiki URL 或需求正文就自动进入执行链。本 agent 不写 GitLab（不建 issue、不打标签、不写 note、不跑 issue）。
+## 114 / WebUI 如何调用
 
-## 114 如何调用
+直接发送自然语言需求。req_dispatcher 先判断动作：
 
-经网关 `agent run` 指定本 agent（架构图"114 侧调用特定 agent"方式 A）：
+- 分析、拆分、创建或变更 Issue：只调用 git_issuer；
+- 执行既有 Issue：进入受驱动 batch；
+- 明确“建单并执行”：建单成功后进入受驱动 batch；
+- project/selector 不完整：要求补充，不调用 executor。
 
-```bash
-openclaw --gateway-url ws://<104-host>:<port> \
-         --gateway-token "<token>" \
-         agent run "<用户需求原文>" \
-         --agent req_dispatcher \
-         --deliver
-```
+执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
 
-或等价 HTTP 桥接（方式 B）。要点：
+- 单 Issue：`处理 group/project 的 #42`；
+- IID 闭区间：`处理 group/project 的 #100 到 #250`；
+- OPEN 未完成：`处理 group/project 中未完成的 Issue`；
+- OPEN 指定标签：`处理 group/project 中 label 为 smoke 的 Issue`。
 
-- 发的就是**一段文本消息**，不是结构化字段。消息可以要求创建 issue，也可以要求处理既有 issue。
-- 建单入口支持 GitLab wiki URL，例如 `http://<gitlab>/<group>/<project>/-/wikis/<slug>`；也支持能确定 project 的自由文本，目标 project 必须能从 `group/project`、GitLab 仓库/Wiki URL，或 `glab api projects/<encoded-group%2Fproject>/...` 片段中确定性提取。无法确定 project 时，会在调用 git_issuer 前直接返回失败说明。
-- 执行入口必须包含 GitLab issue URL，或同时包含 `group/project` 与 issue IID（例如 `issue #312`）。缺 project 或缺 IID 时不会调用 executor，会要求补充。
-- 需要指定本次执行分支时，可在同一条自然语言消息里明确写 `branch=release/xxx`、`target_branch=release/xxx`、`目标分支：release/xxx`、`合到 release/xxx`，或“基于 release/xxx 分支开发”；只有执行动作会把它作为 executor 的 `branch=` 透传。执行器会基于该分支 checkout，处理完成后 MR/PR 也指向同一分支。建单动作会从给 git_issuer 的需求正文中剥离该路由指令。
-- 若需把处理结果推回**发起需求的具体企微用户**，`req_dispatcher` 会先从 OpenClaw 网关/运行时来源元数据捕获 origin（如 source agent/session、deliver origin），再 fallback 到需求文本里的 `[origin] channel=... user=... conversation=... reply_agent=...` 行。其中 `reply_agent` 是 114 上接收终态结果的 agent 名；只有捕获到合法 origin object 时才允许出站推 114，`reply_agent` 缺省时才退回部署期默认 `DEFAULT_REPLY_AGENT`。手动 WebUI 入口通常没有 origin，结果只落 ledger/log 留痕，不给 114 或企微发消息。
-- `--deliver` 把本 agent 的回复投回企微侧。本 agent 同步只回一条**最小受理 ack**；处理结论稍后由本 agent 经反向网关推 114 接收 agent，再由该 agent 投回企微（不在 ack 里）。
+四类 selector 都只纳入创建 batch 时为 OPEN 的 Issue，CLOSED 始终不处理。未完成模式排除
+`pr,timeout,blocked,blocked-*,failed,failed-*`；指定标签模式不额外排除这些标签。
 
-## 你会收到什么
+只有明确“重跑/重新处理/重新执行”才覆盖 `pr` 完成态；CLOSED Issue 不会重新打开。可在同一
+消息中指定 `branch=release/x`、`target_branch=release/x`、`目标分支：release/x`、
+`合到 release/x` 或“基于 release/x 分支开发”。
 
-- **同步：来自 req_dispatcher 的最小 ack**，例如：
-  > 需求已受理，正在创建 issue。
+origin 优先来自 OpenClaw 运行时元数据；正文 `[origin] ...` 只是兼容 fallback。只有合法
+origin object 才向 114/企微推送，手动 WebUI 入口通常只留审计。
 
-  或：
+## 同步回复
 
-  > issue 已加入执行队列，处理结果稍后通知。
+只返回最小结论，例如：
 
-  （只建单请求同步返回 issue 创建结果；执行请求的处理结论稍后异步返回。）
-- **异步：来自 req_dispatcher 的终态结论**（只有执行动作才有；受理 ack 之外的实质通知，仅终态推一次）：
-  - 处理完成 → "#<iid> 已处理完成，MR：<mr_url>"
-  - 处理未通过 → "#<iid> 处理未通过：<reason>"
-  - 处理超时 → "#<iid> 处理超时未完成，已停放待人工处理"
-  - 流程性失败（建 issue 失败 / 默认执行器未配置 / 启动执行失败）→ 对应失败说明。
+> 需求已受理，正在创建 Issue。
 
-> ack 文案已固定；终态结论的推送机制已对齐为反向网关推 114 接收 agent。部署期需填 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`；仅当 `origin` 是合法 object 时才出站推送，目标 agent 优先取 `origin.reply_agent`，没有时才用默认 `DEFAULT_REPLY_AGENT`。`origin` 为空/null、网关 pin 缺失或目标 agent 缺失时结论只落 ledger/log 留痕。`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制该 best-effort 推送的超时。
+> 批次已受理，处理结果将逐条通知。
 
-## 预期行为
+> 批次已持久化，正在等待旧执行队列排空。
 
-- 同一个编排器 session 承接接入消息、executor 回调、executor queue drain 三类唤醒。
-- 只建单请求 → `run_agent_turn.sh` 调蓝区 git_issuer 建 issue → drain git_issuer 审计 stage → 返回 issue 创建结果，不进入 executor queue。
-- 执行既有 issue 请求 → `prepare_executor_issue_payload.sh` 提取 project/iid → 按路由入 executor durable FIFO queue → 队首由 `drain_executor_queue.sh` 起 req_executor 单次 issue 执行 → 记录 executor pending → executor 回调 drain → 清 active → 继续 drain 下一条 → 终态推用户一次。
-- 显式建单并执行请求 → 先按建单流程创建 issue；成功后才入 executor queue。
-- 多条需求可并发接入并建 issue；executor 执行按队列 FIFO 推进，active 未完成时后续 issue 保持排队。
-- 失败（下游调用耗尽重试 / git_issuer 报失败 / 默认执行器未配置 / 执行 failed/timeout / 超时无回调）**不静默丢**：记 `ledger.jsonl` + 推用户对应说明 + 可选 ops 通知。**不自动重试业务**——重试请重发需求。
-- wiki URL 无法解析、wiki 读取失败、wiki 内容为空，或自由文本无法确定 GitLab project 时，不会调用 git_issuer 或 executor；会直接提示补充 `group/project` 或具体 GitLab/Wiki URL。
-- req_dispatcher 现在**会**在智伴/114 入口带合法 origin 时把处理结论推回企微发起人（终态一次）；手动 WebUI 入口没有 origin 时不推 114/企微，只留本地审计。它仍**不**做处理进度播报、**不**碰 GitLab。
+> 执行请求信息不足，请补充完整 project 与 selector。
 
-## 配置
+`waiting_for_legacy_drain` 与临时网络失败不会丢请求；dispatcher 周期 tick 会复用同一 batch
+重试，不要求用户重发。
 
-部署期配置见 [`config/dispatcher.env`](config/dispatcher.env) 与 [`config/README.md`](config/README.md)。关键：`GIT_ISSUER_AGENT`、`DEFAULT_EXECUTOR_AGENT`、`DOWNSTREAM_AGENT_TIMEOUT_SECONDS`（git_issuer 等通用下游默认）、`EXECUTOR_AGENT_TIMEOUT_SECONDS`（executor 专用，默认 10800 秒）、`STATE_ROOT`、`STUCK_AFTER_MINUTES`、`ROUTING_FILE`（project 覆盖路由表）、wiki 只读 pin `WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` / `WIKI_GLAB_BIN`、`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / `DEFAULT_REPLY_AGENT` / `REPLY_NOTIFY_TIMEOUT_SECONDS`（用户结果推送 pin，其中 `DEFAULT_REPLY_AGENT` 只是合法 origin object 缺少 `origin.reply_agent` 时的默认目标）、`DISPATCHER_CALLBACK_TARGET`（结果回调目标）、`EXECUTOR_QUEUE_*`（队列恢复与启动重试窗口）。覆盖路由表本体 [`config/routing.env`](config/routing.env)。部署侧还需要周期性唤醒 `RUN_EXECUTOR_QUEUE_DRAIN`，用于清理超时 active、恢复中断或补推进队列。**group/project 不写死在配置里**（wiki 入口从 URL 解析，自由文本入口从 `group/project`、GitLab 仓库/Wiki URL 或 `glab api projects/<encoded-group%2Fproject>/...` 片段提取）；**执行分支不写死在配置里**（只从入口消息里的明确分支语义提取）；**执行器 GitLab token 不在配置里**（归执行器侧）。
+## 异步结果
 
-## 依赖与对齐项
+每个匹配 Issue 只生成一个 durable terminal notification intent：
 
-- `run_agent_turn.sh` 调用契约 + executor RUN_SINGLE_ISSUE(I1)/结果回调(I2) 信封：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)。
-- origin 捕获、`correlation_id` 生成：同上 + [`config/README.md`](config/README.md)（origin 优先来自 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 行是 fallback；最终需能携带或推导 `reply_agent`）。
-- 用户结果推送 pin：`REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` / 默认 `DEFAULT_REPLY_AGENT`，机制已对齐为反向网关推 114 接收 agent；仅合法 origin object 允许出站，目标 agent 优先来自 `origin.reply_agent`。
-- git_issuer 对接文档（跨团队，待与同事对齐）：创建契约 [`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)、变更请求契约 [`docs/integration/gitissuer_change_request.md`](docs/integration/gitissuer_change_request.md)。
-- req_executor 衔接前提（默认执行器部署可处理蓝区目标 GitLab project，专属覆盖按需配置）：[`AGENTS.md`](AGENTS.md) §req_executor 衔接依赖；主动编排设计稿 [`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)。
+- done：`#<iid> 已处理完成，MR：<mr_url>`；
+- failed：`#<iid> 处理未通过：<reason>`；
+- timeout：`#<iid> 处理超时未完成，已停放待人工处理`；
+- skipped：该 Issue 在实时预检时已 CLOSED、普通处理遇到 `pr` 或无需再执行；
+- zero-match：`无匹配 OPEN Issue`，整个 batch 只通知一次。
+
+不会发送额外批次进度或聚合汇总。通知通道失败时 intent 保留；duplicate I3 或周期 tick 会
+继续投递，但不会重复计数。若成功日志已经写入而 `delivered_at` 尚未提交就中断，下次从
+durable 日志修复，不再调用通知通道。
+
+## 恢复与兼容
+
+- I1 在调用 executor 前先持久化；ack 丢失后同 batch/correlation/payload 重投。
+- dispatcher mirror 不保存 IID snapshot，数百/数千 Issue 不会展开进旧 FIFO。
+- 升级前旧 FIFO 继续排空；它非空时新 batch 不发送。
+- 旧 `RUN_SINGLE_ISSUE` 在 executor 内转为 single batch，后续结果也走 I3；dispatcher bridge
+  会在 terminal 或 zero-match 后清旧 active 并推进下一条。
+- I3 accepted/duplicate 都带原 event_id；重复事件不会重复通知。
+
+## 安全边界
+
+dispatcher 不读取或传递 executor GitLab token，不查询 GitLab Issue，不展开 IID，不自行跑
+Issue。GitLab snapshot、并发槽位、worktree、MR 和 retry 均由 req_executor 管理。
+
+配置见 [`config/dispatcher.env`](config/dispatcher.env) 与
+[`config/README.md`](config/README.md)。关键部署项包括
+`DEFAULT_EXECUTOR_AGENT,ROUTING_FILE,DISPATCHER_CALLBACK_TARGET,STATE_ROOT` 与用户通知 gateway
+pin。`DISPATCHER_CALLBACK_TARGET` 为空时执行请求会在落 intent 前拒绝。

@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
 GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
+MAX_CONCURRENCY_ENV_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
+MAX_CONCURRENCY_ENV_VALUE="${EXECUTOR_MAX_CONCURRENCY:-}"
 
 die() {
   echo "dispatch_driven_topup.sh: $*" >&2
@@ -79,6 +81,9 @@ source "${CONFIG_DIR}/campaign_defaults.env"
 if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   # shellcheck disable=SC1091
   source "${CONFIG_DIR}/campaign_defaults.local.env"
+fi
+if [ "${MAX_CONCURRENCY_ENV_SET}" = x ]; then
+  EXECUTOR_MAX_CONCURRENCY="${MAX_CONCURRENCY_ENV_VALUE}"
 fi
 
 GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"

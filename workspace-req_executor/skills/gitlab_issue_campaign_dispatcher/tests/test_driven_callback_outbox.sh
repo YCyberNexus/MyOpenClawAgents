@@ -800,7 +800,8 @@ fi
 # unsupported same-event status, and accepts a same-event duplicate after the
 # dispatcher committed the first attempt but its acknowledgement was lost.
 # Retries keep byte-identical public event bodies. The fake also proves that no
-# scheduler lock is held during the network call.
+# scheduler lock is held during the network call and that executor-owned GitLab
+# credentials are removed from the callback transport environment.
 OPENCLAW_LOG="${TEST_ROOT}/openclaw.jsonl"
 OPENCLAW_BARRIER_DIR="${TEST_ROOT}/openclaw-barrier"
 FAKE_OPENCLAW="${TEST_ROOT}/fake-openclaw.sh"
@@ -808,6 +809,18 @@ mkdir -p "${OPENCLAW_BARRIER_DIR}"
 cat >"${FAKE_OPENCLAW}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+
+secrets_clear=true
+for secret_name in \
+  GITLAB_TOKEN \
+  GLAB_TOKEN \
+  GITLAB_PRIVATE_TOKEN \
+  PRIVATE_TOKEN \
+  WIKI_GITLAB_TOKEN
+do
+  secret_value="${!secret_name-}"
+  [ -z "${secret_value}" ] || secrets_clear=false
+done
 
 target=""
 message=""
@@ -838,8 +851,9 @@ event_id="$(jq -er '.event_id' <<<"${body}")"
 jq -nc \
   --arg event_id "${event_id}" \
   --arg target "${target}" \
+  --argjson secrets_clear "${secrets_clear}" \
   --argjson body "${body}" \
-  '{event_id:$event_id,target:$target,body:$body}' \
+  '{event_id:$event_id,target:$target,secrets_clear:$secrets_clear,body:$body}' \
   >>"${OPENCLAW_LOG:?}"
 call_count="$(jq -sr --arg event_id "${event_id}" \
   '[.[] | select(.event_id == $event_id)] | length' "${OPENCLAW_LOG}")"
@@ -886,12 +900,21 @@ jq -nc --arg event_id "${event_id}" '{status:"accepted",event_id:$event_id}'
 EOF
 chmod +x "${FAKE_OPENCLAW}"
 
+export GITLAB_TOKEN='must-not-reach-callback-transport'
+export GLAB_TOKEN='must-not-reach-callback-transport'
+export GITLAB_PRIVATE_TOKEN='must-not-reach-callback-transport'
+export PRIVATE_TOKEN='must-not-reach-callback-transport'
+export WIKI_GITLAB_TOKEN='must-not-reach-callback-transport'
+
 CONFIG_DIR="${CONFIG_DIR}" \
 OPENCLAW_BIN="${FAKE_OPENCLAW}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
 OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
 bash "${DRAIN_OUTBOX}" >/dev/null
+jq -se 'length == 3 and all(.[]; .secrets_clear == true)' \
+  "${OPENCLAW_LOG}" >/dev/null \
+  || fail "callback transport inherited executor-owned GitLab credentials"
 for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .attempts == 1
@@ -978,6 +1001,8 @@ cmp -s "${INVALID_OUTBOX}" "${TEST_ROOT}/invalid-outbox-before-drain.json" \
   || fail "invalid filename/event identity was mutated by drain"
 [ "$(wc -l <"${OPENCLAW_LOG}" | tr -d ' ')" = "${OPENCLAW_CALLS_BEFORE_INVALID}" ] \
   || fail "invalid filename/event identity reached OpenClaw"
+
+unset GITLAB_TOKEN GLAB_TOKEN GITLAB_PRIVATE_TOKEN PRIVATE_TOKEN WIKI_GITLAB_TOKEN
 
 # Run the real followup wrapper in a small project fixture. Its importer exits
 # non-zero deliberately after proving the campaign lock is available and both

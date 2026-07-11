@@ -13,12 +13,14 @@ SEQ_FILE="${DISPATCHER_DIR}/seq"
 LOCK_FILE="${DISPATCHER_DIR}/pending.lock"
 LOG_DIR="${DISPATCHER_DIR}/log"
 EXECUTOR_BATCH_MIRROR_FILE="${DISPATCHER_DIR}/executor_batches.json"
+EXECUTOR_BATCH_OUTBOX_FILE="${DISPATCHER_DIR}/executor_batch_outbox.json"
 EXECUTOR_BATCH_EVENT_LEDGER_FILE="${DISPATCHER_DIR}/executor_batch_events.jsonl"
 EXECUTOR_BATCH_NOTIFICATIONS_FILE="${DISPATCHER_DIR}/executor_batch_notifications.json"
 EXECUTOR_BATCH_NOTIFICATION_ATTEMPTS_DIR="${DISPATCHER_DIR}/executor_batch_notification_attempts"
 
 export DISPATCHER_DIR PENDING_FILE EXECUTOR_QUEUE_FILE LEDGER_FILE SEQ_FILE LOCK_FILE LOG_DIR
 export EXECUTOR_BATCH_MIRROR_FILE EXECUTOR_BATCH_EVENT_LEDGER_FILE
+export EXECUTOR_BATCH_OUTBOX_FILE
 export EXECUTOR_BATCH_NOTIFICATIONS_FILE EXECUTOR_BATCH_NOTIFICATION_ATTEMPTS_DIR
 
 # 幂等地确保 state 目录与初始文件存在。
@@ -33,6 +35,7 @@ ensure_state_dirs() {
   [ -f "${EXECUTOR_QUEUE_FILE}" ] || printf '%s\n' '{"next_id":1,"active":null,"queue":[]}' > "${EXECUTOR_QUEUE_FILE}"
   [ -f "${LEDGER_FILE}" ] || : > "${LEDGER_FILE}"
   [ -f "${EXECUTOR_BATCH_MIRROR_FILE}" ] || printf '%s\n' '{"batches":{}}' > "${EXECUTOR_BATCH_MIRROR_FILE}"
+  [ -f "${EXECUTOR_BATCH_OUTBOX_FILE}" ] || printf '%s\n' '{"version":1,"requests":[]}' > "${EXECUTOR_BATCH_OUTBOX_FILE}"
   [ -f "${EXECUTOR_BATCH_EVENT_LEDGER_FILE}" ] || : > "${EXECUTOR_BATCH_EVENT_LEDGER_FILE}"
   [ -f "${EXECUTOR_BATCH_NOTIFICATIONS_FILE}" ] || printf '%s\n' '{"notifications":[]}' > "${EXECUTOR_BATCH_NOTIFICATIONS_FILE}"
   flock -u "${state_init_lock_fd}"

@@ -112,6 +112,8 @@ if ! [[ "${BATCH_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   batch_die "batch_id must be a safe path component"
 fi
 [ -n "${CORRELATION_ID}" ] || batch_die "correlation_id must not be empty"
+[ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
+  || batch_die "dispatcher_callback_target must not be empty"
 if ! [[ "${PROJECT_FULL}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; then
   batch_die "project must be <group>/<project>"
 fi

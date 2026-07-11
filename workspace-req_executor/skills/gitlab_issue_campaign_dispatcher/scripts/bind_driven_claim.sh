@@ -75,6 +75,40 @@ if [ "${HAS_BINDING}" = true ]; then
         iid:$iid,
         job_id:$job_id,
         claim_generation:$claim_generation
+    }'
+    exit 0
+  fi
+  # A claim whose actionable grant was emitted but never acked may be fenced
+  # back to reserved by the preparing lease. The project placeholder is safe
+  # to rebind only while no runtime run/session/spawn timestamp was recorded,
+  # and only to a strictly newer generation for the same physical job.
+  if jq -e \
+    --argjson generation "${CLAIM_GENERATION}" '
+    .placeholder == true
+    and (.run_id == null)
+    and (.child_session_key == null)
+    and (.spawned_at == null)
+    and (.claim_generation | type == "number" and . >= 1 and . < $generation)
+    and (.claim_token | type == "string" and length > 0)
+  ' <<<"${PENDING_JSON}" >/dev/null; then
+    NEXT_STATE="$(jq -c \
+      --argjson iid "${IID}" \
+      --argjson claim_generation "${CLAIM_GENERATION}" \
+      --arg claim_token "${CLAIM_TOKEN}" \
+      --arg bound_at "${BOUND_AT}" '
+      .pending_subagents[($iid | tostring)].claim_generation = $claim_generation
+      | .pending_subagents[($iid | tostring)].claim_token = $claim_token
+      | .pending_subagents[($iid | tostring)].bound_at = $bound_at
+    ' <<<"${STATE_JSON}")"
+    persist_state "${NEXT_STATE}"
+    jq -cn \
+      --argjson iid "${IID}" \
+      --arg job_id "${JOB_ID}" \
+      --argjson claim_generation "${CLAIM_GENERATION}" '{
+        status:"rebound",
+        iid:$iid,
+        job_id:$job_id,
+        claim_generation:$claim_generation
       }'
     exit 0
   fi

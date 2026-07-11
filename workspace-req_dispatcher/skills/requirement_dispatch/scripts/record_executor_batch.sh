@@ -44,7 +44,7 @@ if ! jq -en --arg value "${REQUEST_DIGEST}" '
   record_die "REQUEST_DIGEST must be a non-empty printable string"
 fi
 
-if ! ORIGIN_JSON="$(jq -ce '
+if ! ORIGIN_JSON="$(jq -c '
   def printable:
     type == "string"
     and length > 0
@@ -118,6 +118,15 @@ if [ "${existing_json}" != null ]; then
   existing_digest="$(jq -r '.request_digest // empty' <<<"${existing_json}")"
   if [ "${existing_digest}" != "${REQUEST_DIGEST}" ]; then
     record_die "batch ID conflicts with a different request digest: ${BATCH_ID}" 3
+  fi
+  if [ "$(jq -r '.executor_agent' <<<"${existing_json}")" != "${EXECUTOR_AGENT}" ]; then
+    record_die "batch receipt conflicts with executor_agent: ${BATCH_ID}" 3
+  fi
+  if [ "$(jq -r '.matched_count' <<<"${existing_json}")" != "${MATCHED_COUNT}" ]; then
+    record_die "batch receipt conflicts with matched_count: ${BATCH_ID}" 3
+  fi
+  if [ "$(jq -cS '.origin' <<<"${existing_json}")" != "$(jq -cS . <<<"${ORIGIN_JSON}")" ]; then
+    record_die "batch receipt conflicts with origin: ${BATCH_ID}" 3
   fi
   flock -u 9
   jq -cn --arg batch_id "${BATCH_ID}" '{status:"duplicate",batch_id:$batch_id}'

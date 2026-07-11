@@ -154,11 +154,17 @@ if ! notifications_json="$(jq -ce '
       and (.event_id | printable)
       and (.origin | valid_origin)
       and (.project | printable)
-      and (.iid | type == "number" and . == floor and . > 0)
-      and (.status == "done" or .status == "failed"
-        or .status == "timeout" or .status == "skipped")
-      and ((.mr_url == null) or (.mr_url | type == "string"))
-      and ((.reason == null) or (.reason | type == "string"))
+      and (
+        ((.status == "done" or .status == "failed"
+            or .status == "timeout" or .status == "skipped")
+          and (.iid | type == "number" and . == floor and . > 0)
+          and ((.mr_url == null) or (.mr_url | type == "string"))
+          and ((.reason == null) or (.reason | type == "string")))
+        or (.status == "no_matches"
+          and .iid == null
+          and .mr_url == null
+          and .reason == "无匹配 OPEN Issue")
+      )
       and (.attempts | type == "number" and . == floor and . >= 0)
       and ((.delivered_at == null) or (.delivered_at | printable))
     )

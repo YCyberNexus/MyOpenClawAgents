@@ -9,6 +9,20 @@ set -euo pipefail
 DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}"
 TARGET_BRANCH="${TARGET_BRANCH:-}"
 
+[ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
+  || { echo "DISPATCHER_CALLBACK_TARGET must not be empty" >&2; exit 2; }
+
+case "${DISPATCHER_CALLBACK_TARGET}" in
+  *$'\n'*|*$'\r'*|*$'\t'*)
+    echo "DISPATCHER_CALLBACK_TARGET must not contain control characters" >&2
+    exit 2
+    ;;
+esac
+if LC_ALL=C printf '%s' "${DISPATCHER_CALLBACK_TARGET}" | grep -q '[[:cntrl:]]'; then
+  echo "DISPATCHER_CALLBACK_TARGET must not contain control characters" >&2
+  exit 2
+fi
+
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in

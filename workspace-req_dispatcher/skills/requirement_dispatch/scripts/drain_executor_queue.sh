@@ -5,6 +5,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
+
+# The legacy single-Issue bridge cannot complete without a durable callback
+# route. Reject a broken deployment pin before initializing state, consuming a
+# correlation sequence, claiming queue work, writing pending, or calling out.
+[ -n "${DISPATCHER_CALLBACK_TARGET:-}" ] \
+  || { echo "drain_executor_queue.sh: DISPATCHER_CALLBACK_TARGET must not be empty" >&2; exit 2; }
+
 ensure_state_dirs
 
 LAUNCH_RECLAIM_SECONDS="${EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS:-11100}"
@@ -161,16 +168,33 @@ payload="$(
   TARGET_BRANCH="${target_branch}" \
   bash "${SCRIPT_DIR}/build_executor_payload.sh"
 )"
+sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "drain_executor_queue.sh: no SHA-256 command is available" >&2
+    return 2
+  fi
+}
 
 attempt=1
 run_rc=1
 envelope=""
 envelope_status="failed"
 accepted_executor="false"
+driven_acceptance_json=null
 last_error_text=""
 while [ "${attempt}" -le "${SPAWN_MAX_ATTEMPTS}" ]; do
   set +e
   envelope="$(
+    env \
+    -u GITLAB_TOKEN \
+    -u GLAB_TOKEN \
+    -u GITLAB_PRIVATE_TOKEN \
+    -u PRIVATE_TOKEN \
+    -u WIKI_GITLAB_TOKEN \
     OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}" \
     TARGET_AGENT="${executor_agent}" \
     RUN_ID="${run_id}" \
@@ -186,16 +210,35 @@ while [ "${attempt}" -le "${SPAWN_MAX_ATTEMPTS}" ]; do
   envelope_status="failed"
   worker_status=""
   accepted_executor="false"
+  driven_acceptance_json=null
   if [ "${run_rc}" -eq 0 ]; then
     envelope_status="$(jq -r '.status // "failed"' <<<"${envelope}" 2>/dev/null || printf 'failed')"
     if [ "${envelope_status}" = "success" ]; then
       worker_status="$(jq -r '.worker_result_json.status // ""' <<<"${envelope}" 2>/dev/null || true)"
       if [ "${worker_status}" = "waiting_for_callbacks" ]; then
         accepted_executor="true"
+      elif driven_acceptance_json="$(jq -ce '
+        if type == "object"
+          and (keys | sort) == [
+            "batch_id","matched_count","scheduler_status","snapshot_digest","status"
+          ]
+          and .status == "success"
+          and (.batch_id | type == "string"
+            and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"))
+          and (.matched_count == 0 or .matched_count == 1)
+          and (.snapshot_digest | type == "string" and length > 0)
+          and (.scheduler_status == "queued" or .scheduler_status == "running"
+            or .scheduler_status == "completed")
+          and (if .matched_count == 0 then .scheduler_status == "completed" else true end)
+        then . else error("invalid single shim acceptance") end
+      ' <<<"$(jq -c '.worker_result_json // null' <<<"${envelope}" 2>/dev/null)" 2>/dev/null)"; then
+        accepted_executor="true"
       elif [ -z "${worker_status}" ] &&
            jq -r '.raw_output // ""' <<<"${envelope}" 2>/dev/null | grep -q 'waiting_for_callbacks'; then
+        driven_acceptance_json=null
         accepted_executor="true"
       else
+        driven_acceptance_json=null
         worker_status_label="${worker_status:-null}"
         last_error_text="executor did not accept RUN_SINGLE_ISSUE for callback wait: worker_result_json.status=${worker_status_label}; envelope=${envelope}"
       fi
@@ -213,6 +256,51 @@ while [ "${attempt}" -le "${SPAWN_MAX_ATTEMPTS}" ]; do
 done
 
 if [ "${accepted_executor}" = "true" ]; then
+  if [ "${driven_acceptance_json}" != null ]; then
+    driven_batch_id="$(jq -r '.batch_id' <<<"${driven_acceptance_json}")"
+    driven_matched_count="$(jq -r '.matched_count' <<<"${driven_acceptance_json}")"
+    driven_snapshot_digest="$(jq -r '.snapshot_digest' <<<"${driven_acceptance_json}")"
+    driven_scheduler_status="$(jq -r '.scheduler_status' <<<"${driven_acceptance_json}")"
+    driven_request_digest="$(printf '%s' "${payload}" | sha256_text)"
+    STATE_ROOT="${STATE_ROOT}" \
+    QUEUE_ID="${queue_id}" \
+    CORRELATION_ID="${correlation_id}" \
+    BATCH_ID="${driven_batch_id}" \
+    EXECUTOR_AGENT="${executor_agent}" \
+    MATCHED_COUNT="${driven_matched_count}" \
+    SNAPSHOT_DIGEST="${driven_snapshot_digest}" \
+    SCHEDULER_STATUS="${driven_scheduler_status}" \
+    REQUEST_DIGEST="${driven_request_digest}" \
+      "${BASH}" "${SCRIPT_DIR}/record_legacy_executor_batch_receipt.sh" >/dev/null
+
+    bridge_recovery="$(
+      STATE_ROOT="${STATE_ROOT}" \
+        "${BASH}" "${SCRIPT_DIR}/recover_legacy_executor_batch_bridge.sh"
+    )"
+    if [ "${driven_matched_count}" -eq 0 ]; then
+      if [ "$(jq -r '.status' <<<"${bridge_recovery}")" != cleared ]; then
+        echo "drain_executor_queue.sh: zero-match legacy bridge did not clear" >&2
+        exit 3
+      fi
+      "${BASH}" "${SCRIPT_DIR}/drain_executor_batch_notifications.sh" >/dev/null || true
+      queued_count="$(jq -r '.queue | length' "${EXECUTOR_QUEUE_FILE}")"
+      jq -nc \
+        --arg status "completed_zero_match" \
+        --arg queue_id "${queue_id}" \
+        --arg project "${project}" \
+        --argjson iid "${iid}" \
+        --arg run_id "${run_id}" \
+        --arg correlation_id "${correlation_id}" \
+        --arg batch_id "${driven_batch_id}" \
+        --argjson queued_count "${queued_count}" '{
+          status:$status,queue_id:$queue_id,project:$project,iid:$iid,
+          run_id:$run_id,correlation_id:$correlation_id,batch_id:$batch_id,
+          queued_count:$queued_count
+        }'
+      exit 0
+    fi
+  fi
+
   child_session_key="$(jq -r '.child_session_key // ""' <<<"${envelope}")"
   launched_at="$(date -u +%s)"
   exec 9>"${LOCK_FILE}"

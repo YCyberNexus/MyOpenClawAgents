@@ -7,6 +7,7 @@ RECORD_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECORDED_AT="${NOW_EPOCH:-$(date +%s)}"
 PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
 CLAIM_TOKEN_INPUT="${CLAIM_TOKEN:-}"
+CLAIM_GENERATION_INPUT="${CLAIM_GENERATION:-}"
 FINALIZATION_EVENT_ID_INPUT="${FINALIZATION_EVENT_ID:-}"
 
 record_die() {
@@ -22,6 +23,16 @@ generate_claim_token() {
     "${job_id}" "${generation}" "${RECORDED_AT}" "$$" \
     "${RANDOM}" "${RANDOM}" "${RANDOM}" "${RANDOM}" \
     "${RANDOM}" "${RANDOM}" "${RANDOM}" "${RANDOM}"
+}
+
+sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    record_die "no SHA-256 command is available"
+  fi
 }
 
 atomic_write_json() {
@@ -65,6 +76,25 @@ recover_pending_transaction() {
   fi
 
   transaction_json="$(jq -ce '
+    def valid_launch_failed_receipts:
+      (has("launch_failed_receipts") | not)
+      or (.launch_failed_receipts | type == "object"
+        and (to_entries | all(. as $entry |
+          ($entry.value | type == "object")
+          and ($entry.value | keys | sort) == [
+            "action","claim_generation","claim_token_sha256",
+            "job_id","recorded_at","version"
+          ]
+          and $entry.value.version == 1
+          and $entry.value.job_id == $entry.key
+          and ($entry.value.job_id | type == "string" and length > 0)
+          and ($entry.value.claim_generation | type == "number"
+            and . == floor and . > 0)
+          and ($entry.value.claim_token_sha256 | type == "string"
+            and test("^[0-9a-f]{64}$"))
+          and $entry.value.action == "launch_failed"
+          and ($entry.value.recorded_at | type == "number"
+            and . == floor and . >= 0))));
     .pending_transaction
     | if type == "object"
         and .version == 1
@@ -95,6 +125,7 @@ recover_pending_transaction() {
         and (([.scheduler_state.active_jobs[].reservation_seq] | length)
           == ([.scheduler_state.active_jobs[].reservation_seq] | unique | length))
         and (.scheduler_state.batch_order | type == "array")
+        and (.scheduler_state | valid_launch_failed_receipts)
         and (.scheduler_state | has("pending_transaction") | not)
         and (.batch_states | type == "object")
         and (.batch_states | to_entries | all(
@@ -127,14 +158,31 @@ recover_pending_transaction() {
 }
 
 JOB_ID="${JOB_ID:-}"
-STATUS="${STATUS:-}"
+STATUS_INPUT="${STATUS:-}"
+ACTION_INPUT="${ACTION:-}"
 [ -n "${JOB_ID}" ] || record_die "JOB_ID is required"
 case "${JOB_ID}" in
   *$'\n'*|*$'\r'*|*$'\t'*) record_die "JOB_ID contains control characters" ;;
 esac
+if [ -n "${STATUS_INPUT}" ] && [ -n "${ACTION_INPUT}" ]; then
+  record_die "set exactly one of STATUS or ACTION"
+fi
+ACTION_MODE=false
+RECOVERED_SPAWNED=false
+if [ -n "${ACTION_INPUT}" ]; then
+  ACTION_MODE=true
+  if [ "${ACTION_INPUT}" = recovered_spawned ]; then
+    STATUS=spawned
+    RECOVERED_SPAWNED=true
+  else
+    STATUS="${ACTION_INPUT}"
+  fi
+else
+  STATUS="${STATUS_INPUT}"
+fi
 case "${STATUS}" in
   preparing|spawned|launch_failed|terminal) ;;
-  *) record_die "STATUS must be preparing, spawned, launch_failed, or terminal" ;;
+  *) record_die "STATUS/ACTION must be preparing, spawned, recovered_spawned, launch_failed, or terminal" ;;
 esac
 case "${RECORDED_AT}" in
   ''|*[!0-9]*) record_die "NOW_EPOCH must be a non-negative integer" ;;
@@ -148,6 +196,23 @@ fi
 case "${CLAIM_TOKEN_INPUT}" in
   *$'\n'*|*$'\r'*|*$'\t'*) record_die "CLAIM_TOKEN contains control characters" ;;
 esac
+if [ -n "${CLAIM_GENERATION_INPUT}" ]; then
+  case "${CLAIM_GENERATION_INPUT}" in
+    *[!0-9]*) record_die "CLAIM_GENERATION must be a positive integer" ;;
+  esac
+fi
+if [ "${RECOVERED_SPAWNED}" = true ] \
+    && { [ -z "${CLAIM_GENERATION_INPUT}" ] \
+      || [[ "${CLAIM_GENERATION_INPUT}" =~ ^0+$ ]]; }; then
+  record_die "ACTION=recovered_spawned requires a positive CLAIM_GENERATION"
+fi
+if [ "${ACTION_MODE}" = true ] && [ "${STATUS}" = launch_failed ]; then
+  if ! [[ "${CLAIM_GENERATION_INPUT}" =~ ^[1-9][0-9]*$ ]]; then
+    record_die "ACTION=launch_failed requires a positive CLAIM_GENERATION"
+  fi
+  [ -n "${CLAIM_TOKEN_INPUT}" ] \
+    || record_die "ACTION=launch_failed requires CLAIM_TOKEN"
+fi
 case "${FINALIZATION_EVENT_ID_INPUT}" in
   *$'\n'*|*$'\r'*|*$'\t'*) record_die "FINALIZATION_EVENT_ID contains control characters" ;;
 esac
@@ -170,10 +235,30 @@ flock -x "${SCHEDULER_LOCK_FD}"
 recover_pending_transaction
 
 SCHEDULER_STATE="$(jq -ce '
+  def valid_launch_failed_receipts:
+    (has("launch_failed_receipts") | not)
+    or (.launch_failed_receipts | type == "object"
+      and (to_entries | all(. as $entry |
+        ($entry.value | type == "object")
+        and ($entry.value | keys | sort) == [
+          "action","claim_generation","claim_token_sha256",
+          "job_id","recorded_at","version"
+        ]
+        and $entry.value.version == 1
+        and $entry.value.job_id == $entry.key
+        and ($entry.value.job_id | type == "string" and length > 0)
+        and ($entry.value.claim_generation | type == "number"
+          and . == floor and . > 0)
+        and ($entry.value.claim_token_sha256 | type == "string"
+          and test("^[0-9a-f]{64}$"))
+        and $entry.value.action == "launch_failed"
+        and ($entry.value.recorded_at | type == "number"
+          and . == floor and . >= 0))));
   if type == "object"
     and .version == 1
     and (.active_jobs | type == "object")
     and (.batch_order | type == "array")
+    and valid_launch_failed_receipts
     and (.active_jobs | to_entries | all(
       (.value.reservation_seq | type == "number" and . == floor and . > 0)
       and (.value.claim_generation | type == "number" and . == floor and . >= 0)
@@ -199,6 +284,35 @@ BASE_SCHEDULER_STATE="${SCHEDULER_STATE}"
 
 if ! jq -e --arg job_id "${JOB_ID}" '.active_jobs[$job_id] != null' \
   <<<"${SCHEDULER_STATE}" >/dev/null; then
+  if [ "${ACTION_MODE}" = true ] && [ "${STATUS}" = launch_failed ]; then
+    LAUNCH_FAILED_RECEIPT="$(jq -c --arg job_id "${JOB_ID}" \
+      '.launch_failed_receipts[$job_id] // null' <<<"${SCHEDULER_STATE}")"
+    if [ "${LAUNCH_FAILED_RECEIPT}" != null ]; then
+      CLAIM_TOKEN_SHA256="$(printf '%s' "${CLAIM_TOKEN_INPUT}" | sha256_text)"
+      if ! jq -e \
+          --arg job_id "${JOB_ID}" \
+          --argjson generation "${CLAIM_GENERATION_INPUT}" \
+          --arg token_sha256 "${CLAIM_TOKEN_SHA256}" '
+          .job_id == $job_id
+          and .claim_generation == $generation
+          and .claim_token_sha256 == $token_sha256
+          and .action == "launch_failed"
+        ' <<<"${LAUNCH_FAILED_RECEIPT}" >/dev/null; then
+        record_die "launch_failed ACTION conflicts with durable receipt: ${JOB_ID}" 3
+      fi
+      ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
+      flock -u "${SCHEDULER_LOCK_FD}"
+      exec {SCHEDULER_LOCK_FD}>&-
+      jq -cn \
+        --arg job_id "${JOB_ID}" \
+        --argjson active_count "${ACTIVE_COUNT}" '{
+        status:"recorded",job_id:$job_id,job_status:"launch_failed",
+        active_count:$active_count,should_spawn:false,
+        claim_generation:null,claim_token:null
+      }'
+      exit 0
+    fi
+  fi
   record_die "unknown active JOB_ID: ${JOB_ID}" 3
 fi
 
@@ -311,6 +425,14 @@ if [ "${IS_LEGACY_RUNNING}" = true ]; then
 else
   case "${STATUS}:${CURRENT_STATUS}" in
     preparing:reserved|preparing:preparing) ;;
+    preparing:running)
+      [ "${ACTION_MODE}" = true ] \
+        || record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3
+      ;;
+    spawned:reserved)
+      [ "${RECOVERED_SPAWNED}" = true ] \
+        || record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3
+      ;;
     spawned:preparing|spawned:running) ;;
     launch_failed:reserved|launch_failed:preparing) ;;
     terminal:reserved|terminal:preparing|terminal:running) ;;
@@ -319,15 +441,27 @@ else
 
   case "${STATUS}" in
     spawned)
-      [ -n "${CURRENT_CLAIM_TOKEN}" ] \
-        && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] || \
-        record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
+      if [ "${RECOVERED_SPAWNED}" = true ]; then
+        [ "${CURRENT_STATUS}" = reserved ] \
+          && [ "${CURRENT_CLAIM_GENERATION}" -eq "${CLAIM_GENERATION_INPUT}" ] \
+          && [ -z "${CURRENT_CLAIM_TOKEN}" ] \
+          && [ -n "${CLAIM_TOKEN_INPUT}" ] || \
+          record_die "recovered_spawned does not match the fenced generation: ${JOB_ID}" 3
+      else
+        [ -n "${CURRENT_CLAIM_TOKEN}" ] \
+          && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] || \
+          record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
+      fi
       ;;
     launch_failed|terminal)
       if [ "${CURRENT_STATUS}" = preparing ] || [ "${CURRENT_STATUS}" = running ]; then
         [ -n "${CURRENT_CLAIM_TOKEN}" ] \
           && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] || \
           record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
+        if [ "${STATUS}" = launch_failed ] && [ "${ACTION_MODE}" = true ]; then
+          [ "${CLAIM_GENERATION_INPUT}" -eq "${CURRENT_CLAIM_GENERATION}" ] \
+            || record_die "CLAIM_GENERATION does not match current claim: ${JOB_ID}" 3
+        fi
       elif [ "${CURRENT_CLAIM_GENERATION}" -ne 0 ] || [ -n "${CLAIM_TOKEN_INPUT}" ]; then
         record_die "reserved job has no current claim: ${JOB_ID}" 3
       fi
@@ -342,7 +476,13 @@ case "${STATUS}" in
   terminal) NEXT_JOB_STATUS=terminal ;;
 esac
 
-if [ "${STATUS}" = preparing ] && [ "${CURRENT_STATUS}" = reserved ]; then
+if [ "${RECOVERED_SPAWNED}" = true ]; then
+  NEXT_CLAIM_TOKEN="${CLAIM_TOKEN_INPUT}"
+fi
+
+if [ "${STATUS}" = preparing ] \
+    && { [ "${CURRENT_STATUS}" = reserved ] \
+      || { [ "${ACTION_MODE}" = true ] && [ "${CURRENT_STATUS}" = running ]; }; }; then
   SHOULD_SPAWN=true
   NEXT_CLAIM_GENERATION=$((CURRENT_CLAIM_GENERATION + 1))
   NEXT_CLAIM_TOKEN="$(generate_claim_token "${JOB_ID}" "${NEXT_CLAIM_GENERATION}")"
@@ -459,13 +599,48 @@ if [ "${STATUS}" = preparing ]; then
     | .active_jobs[$job_id].claim_token = $claim_token
   ' <<<"${SCHEDULER_STATE}")"
 elif [ "${STATUS}" = spawned ]; then
-  SCHEDULER_STATE="$(jq -c \
-    --arg job_id "${JOB_ID}" \
-    --arg status "${NEXT_JOB_STATUS}" \
-    --argjson recorded_at "${RECORDED_AT}" '
-    .active_jobs[$job_id].status = $status
-    | .active_jobs[$job_id].updated_at = $recorded_at
-  ' <<<"${SCHEDULER_STATE}")"
+  if [ "${RECOVERED_SPAWNED}" = true ]; then
+    SCHEDULER_STATE="$(jq -c \
+      --arg job_id "${JOB_ID}" \
+      --arg status "${NEXT_JOB_STATUS}" \
+      --argjson recorded_at "${RECORDED_AT}" \
+      --arg claim_token "${NEXT_CLAIM_TOKEN}" '
+      .active_jobs[$job_id].status = $status
+      | .active_jobs[$job_id].updated_at = $recorded_at
+      | .active_jobs[$job_id].claim_token = $claim_token
+    ' <<<"${SCHEDULER_STATE}")"
+  else
+    SCHEDULER_STATE="$(jq -c \
+      --arg job_id "${JOB_ID}" \
+      --arg status "${NEXT_JOB_STATUS}" \
+      --argjson recorded_at "${RECORDED_AT}" '
+      .active_jobs[$job_id].status = $status
+      | .active_jobs[$job_id].updated_at = $recorded_at
+    ' <<<"${SCHEDULER_STATE}")"
+  fi
+elif [ "${STATUS}" = launch_failed ]; then
+  SCHEDULER_STATE="$(jq -c --arg job_id "${JOB_ID}" 'del(.active_jobs[$job_id])' <<<"${SCHEDULER_STATE}")"
+  if [ "${ACTION_MODE}" = true ]; then
+    CLAIM_TOKEN_SHA256="$(printf '%s' "${CLAIM_TOKEN_INPUT}" | sha256_text)"
+    LAUNCH_FAILED_RECEIPT="$(jq -cnS \
+      --arg job_id "${JOB_ID}" \
+      --argjson claim_generation "${CLAIM_GENERATION_INPUT}" \
+      --arg claim_token_sha256 "${CLAIM_TOKEN_SHA256}" \
+      --argjson recorded_at "${RECORDED_AT}" '{
+      version:1,
+      job_id:$job_id,
+      claim_generation:$claim_generation,
+      claim_token_sha256:$claim_token_sha256,
+      action:"launch_failed",
+      recorded_at:$recorded_at
+    }')"
+    SCHEDULER_STATE="$(jq -c \
+      --arg job_id "${JOB_ID}" \
+      --argjson receipt "${LAUNCH_FAILED_RECEIPT}" '
+      .launch_failed_receipts = (.launch_failed_receipts // {})
+      | .launch_failed_receipts[$job_id] = $receipt
+    ' <<<"${SCHEDULER_STATE}")"
+  fi
 else
   SCHEDULER_STATE="$(jq -c --arg job_id "${JOB_ID}" 'del(.active_jobs[$job_id])' <<<"${SCHEDULER_STATE}")"
 fi

@@ -95,6 +95,23 @@ fi
 if PROJECT="ai-infra/veqp_server_v3" \
    IID="312" \
    CORRELATION_ID="reqd-7" \
+   DISPATCHER_CALLBACK_TARGET="" \
+   bash "${SKILL_DIR}/scripts/build_executor_payload.sh" >/dev/null 2>"${TEST_ROOT}/build-executor-callback.err"; then
+  echo "expected empty dispatcher callback target to fail" >&2
+  exit 1
+fi
+
+if ! grep -q "DISPATCHER_CALLBACK_TARGET must not be empty" \
+  "${TEST_ROOT}/build-executor-callback.err"; then
+  echo "expected clear empty callback target error" >&2
+  cat "${TEST_ROOT}/build-executor-callback.err" >&2
+  exit 1
+fi
+
+if PROJECT="ai-infra/veqp_server_v3" \
+   IID="312" \
+   CORRELATION_ID="reqd-7" \
+   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
    TARGET_BRANCH="../bad" \
    bash "${SKILL_DIR}/scripts/build_executor_payload.sh" >/dev/null 2>"${TEST_ROOT}/build-executor-branch.err"; then
   echo "expected invalid target branch to fail" >&2
@@ -110,6 +127,7 @@ fi
 if PROJECT="ai-infra/veqp_server_v3" \
    IID="312" \
    CORRELATION_ID="reqd-7" \
+   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
    TARGET_BRANCH="-c" \
    bash "${SKILL_DIR}/scripts/build_executor_payload.sh" >/dev/null 2>"${TEST_ROOT}/build-executor-dash-branch.err"; then
   echo "expected leading-dash target branch to fail" >&2

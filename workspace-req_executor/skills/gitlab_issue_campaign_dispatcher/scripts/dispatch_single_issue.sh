@@ -1,53 +1,10 @@
 #!/usr/bin/env bash
-# dispatch_single_issue.sh — driven single-issue entry (RUN_SINGLE_ISSUE).
+# dispatch_single_issue.sh — stable compatibility shim for RUN_SINGLE_ISSUE.
 #
-# This is the req_dispatcher-driven entry point (see
-# docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md
-# §3.1–§3.3). Instead of req_dispatcher feeding a full RUN_SCHEDULED_ISSUE_CAMPAIGN
-# trigger, it sends a minimal trigger carrying only what it knows about ONE issue;
-# everything else is either inferred by the executor or held in runner-side config;
-# req_dispatcher never holds GitLab config.
-#
-# What it does:
-#   1. Reads the I1 trigger from stdin (multi-line key=value, same text format as
-#      dispatch_prepare_tick.sh). Required keys: correlation_id plus either
-#      project+iid or issue_url. Optional: dispatcher_callback_target, group,
-#      branch.
-#   2. Validates project / iid (positive integer) / issue_url / correlation_id.
-#   3. Sources config/gitlab.env (host pin), config/campaign_defaults.env
-#      (clone parent pin), then optional config/campaign_defaults.local.env
-#      (ignored local override) to obtain the clone parent. GitLab token comes
-#      only from process env or config/gitlab.env.
-#   4. Synthesizes the equivalent RUN_SCHEDULED_ISSUE_CAMPAIGN trigger for a single
-#      IID (issue_iids=[iid], issue_min_iid=issue_max_iid=iid, hourly_issue_quota=1,
-#      max_concurrent_subagents=1, …) and exports the dispatcher bootstrap env.
-#   5. Pipes the synthesized trigger into dispatch_prepare_tick.sh, captures its
-#      stdout envelope, and requires the prepare/clone phase to leave the resolved
-#      final repo target with a `.git` entry.
-#   6. Only after the clone exists, writes {correlation_id,
-#      dispatcher_callback_target} to ${ISSUES_ROOT}/issue-${iid}/dispatch_origin.json
-#      for the Phase 6 callback, then forwards the captured prepare envelope.
-#
-# Exit codes:
-#   0  — handed off to dispatch_prepare_tick.sh (its envelope is on stdout); the
-#        prepare tick itself reports tick-level problems via its JSON envelope.
-#   2  — malformed/missing input (bad trigger header, missing/invalid required
-#        field, missing pinned token/group). This is a CONFIG-shape error, surfaced
-#        to the caller so it can stop and classify (No-Fallback) rather than spawn a
-#        half-set-up issue.
-#   12 — prepare reported success without leaving the resolved clone target.
-#   Other non-zero prepare statuses are propagated unchanged.
-#
-# Required input env (forwarded to env_paths.sh / dispatch_prepare_tick.sh):
-#   (none mandatory on the command line — project/iid/correlation_id arrive on
-#    stdin; token comes from env/gitlab.env; group comes from full project,
-#    trigger group=, or env override)
-# Optional input env (override for smoke tests / non-default deployments):
-#   GITLAB_TOKEN          overrides config/gitlab.env GITLAB_TOKEN
-#   GROUP                 smoke-test override when trigger project is bare
-#   PREPARE_TICK_CMD      path to the prepare-tick script to invoke (default:
-#                         the sibling dispatch_prepare_tick.sh). Smoke tests may
-#                         stub this with a fake that simulates the clone result.
+# The legacy entry no longer creates an independent one-concurrency project
+# campaign. It canonicalizes one single-IID selector, derives stable IDs, and
+# delegates to the same agent-wide RUN_DRIVEN_ISSUE_BATCH wrapper used by every
+# batch. GitLab credentials are neither loaded nor emitted here.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -214,14 +171,13 @@ fi
 
 PROJECT_IN="${T[project]:-${PARSED_URL_PROJECT}}"
 IID_IN="${T[iid]:-${PARSED_URL_IID}}"
-CORRELATION_ID="${T[correlation_id]:-}"
+CORRELATION_ID_INPUT="${T[correlation_id]:-}"
 DISPATCHER_CALLBACK_TARGET="${T[dispatcher_callback_target]:-}"
 GROUP_IN="${T[group]:-}"
 BRANCH_IN="${T[branch]:-${T[target_branch]:-}}"
 
 [ -n "${PROJECT_IN}" ]    || { echo "dispatch_single_issue.sh: missing required trigger field: project" >&2; exit 2; }
 [ -n "${IID_IN}" ]        || { echo "dispatch_single_issue.sh: missing required trigger field: iid" >&2; exit 2; }
-[ -n "${CORRELATION_ID}" ] || { echo "dispatch_single_issue.sh: missing required trigger field: correlation_id" >&2; exit 2; }
 
 if [ -n "${PARSED_URL_PROJECT}" ] && [ -n "${T[project]:-}" ] && [ "${PROJECT_IN}" != "${PARSED_URL_PROJECT}" ]; then
   echo "dispatch_single_issue.sh: project does not match issue_url project (${PROJECT_IN} != ${PARSED_URL_PROJECT})" >&2
@@ -255,27 +211,9 @@ if [ -n "${BRANCH_IN}" ] && ! validate_branch_name "${BRANCH_IN}"; then
   exit 2
 fi
 
-# ─── 3. Load deployment pins (host + clone parent) ────────────────
-[ -f "${CONFIG_DIR}/gitlab.env" ] || { echo "dispatch_single_issue.sh: missing config/gitlab.env at ${CONFIG_DIR}/gitlab.env" >&2; exit 2; }
-[ -f "${CONFIG_DIR}/campaign_defaults.env" ] || { echo "dispatch_single_issue.sh: missing config/campaign_defaults.env at ${CONFIG_DIR}/campaign_defaults.env" >&2; exit 2; }
-# shellcheck disable=SC1091
-source "${CONFIG_DIR}/gitlab.env"
-GITLAB_TOKEN_GITLAB_ENV_PIN="${GITLAB_TOKEN:-}"
-# shellcheck disable=SC1091
-source "${CONFIG_DIR}/campaign_defaults.env"
-if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
-  # shellcheck disable=SC1091
-  source "${CONFIG_DIR}/campaign_defaults.local.env"
-fi
-
-# I1 `project` carries the FULL name <group>/<project> (git_issuer's callback form,
-# which req_dispatcher transparently forwards and uses as its routing key). The
-# executor's internal campaign machinery (env_paths.sh) expects a BARE project slug
-# plus a separate GROUP — env_paths.sh builds REPO_PATH=${REPO_PARENT_PATH}/${PROJECT}
-# and PROJECT_FULL=${GROUP}/${PROJECT}, so feeding it a slashed name would double the
-# group and mis-locate the clone. Split here: if `project` has a slash, the part before
-# is the group and the part after is the bare slug; if not, it is already a bare slug
-# and GROUP must come from I1/env/local config.
+# Convert the compatibility bare-slug form into the full project identity
+# required by create_driven_batch.sh. New callers should always send the full
+# group/project path.
 case "${PROJECT_IN}" in
   */*)
     GROUP_FROM_PROJECT="${PROJECT_IN%/*}"
@@ -293,9 +231,6 @@ if [ -n "${GROUP_FROM_PROJECT}" ] && [ -n "${GROUP_IN}" ] && [ "${GROUP_IN}" != 
   exit 2
 fi
 
-# GROUP: explicit I1 group wins, then the group split out of a full-name project,
-# then the process env override used by smoke tests. dispatch_prepare_tick.sh
-# requires `group`.
 GROUP_EFF="${GROUP_IN:-${GROUP_FROM_PROJECT:-${GROUP_ENV_OVERRIDE:-}}}"
 [ -n "${GROUP_EFF}" ] || { echo "dispatch_single_issue.sh: group is required (provide a full-name project group/project, trigger group=, or env GROUP=)" >&2; exit 2; }
 
@@ -305,116 +240,73 @@ case "${PROJECT_IN}" in
   */*) PROJECT_FULL="${PROJECT_IN}" ;;
   *)   PROJECT_FULL="${GROUP_EFF}/${PROJECT_SLUG}" ;;
 esac
+validate_project_path "${PROJECT_FULL}" \
+  || { echo "dispatch_single_issue.sh: project must be a safe full group/project path" >&2; exit 2; }
 
-# GITLAB_TOKEN: env override wins, then gitlab.env. The clone defaults layer is
-# intentionally ignored for secrets.
-GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN_GITLAB_ENV_PIN:-}}"
-[ -n "${GITLAB_TOKEN_EFF}" ] || { echo "dispatch_single_issue.sh: GITLAB_TOKEN is required (set env GITLAB_TOKEN or pin it in config/gitlab.env)" >&2; exit 2; }
+case "${CORRELATION_ID_INPUT}${DISPATCHER_CALLBACK_TARGET}" in
+  *$'\n'*|*$'\r'*|*$'\t'*)
+    echo "dispatch_single_issue.sh: correlation_id and dispatcher_callback_target must not contain control characters" >&2
+    exit 2
+    ;;
+esac
+[ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
+  || { echo "dispatch_single_issue.sh: missing required trigger field: dispatcher_callback_target" >&2; exit 2; }
 
-ACPX_TIMEOUT_EFF=18000
-MAX_RUNTIME_MINUTES_EFF=300
-BLOCKED_RETRY_LIMIT_EFF=3
-BLOCKED_COOLDOWN_TICKS_EFF=1
-# REPO_PARENT_PATH is the only campaign default required in tracked config.
-# env_paths.sh additionally validates it.
-REPO_PARENT_EFF="${REPO_PARENT_PATH:-/data}"
+sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "dispatch_single_issue.sh: no SHA-256 command is available" >&2
+    return 2
+  fi
+}
 
-# Resolve the collision-free final clone target before env_paths.sh derives its
-# runtime tree. The existing repo_path trigger contract carries a clone parent,
-# so pass the resolved target's parent downstream; env_paths.sh then appends the
-# bare PROJECT slug and lands on exactly the resolver's final path.
-if ! RESOLVED_REPO_PATH="$(
-  PROJECT_FULL="${PROJECT_FULL}" \
-    REPO_PARENT_PATH="${REPO_PARENT_EFF}" \
-    GITLAB_API_PROTOCOL="${GITLAB_API_PROTOCOL:-}" \
-    GITLAB_HOST="${GITLAB_HOST:-}" \
-    bash "${SCRIPT_DIR}/resolve_driven_repo_path.sh"
-)"; then
-  echo "dispatch_single_issue.sh: unable to resolve a safe clone path for ${PROJECT_FULL}" >&2
-  exit 2
+IDENTITY_JSON="$(jq -cnS \
+  --arg project "${PROJECT_FULL}" \
+  --argjson iid "${IID_IN}" \
+  --arg callback_target "${DISPATCHER_CALLBACK_TARGET}" \
+  --arg branch "${BRANCH_IN}" '{
+    project:$project,
+    iid:$iid,
+    dispatcher_callback_target:$callback_target,
+    branch:(if $branch == "" then null else $branch end)
+  }')"
+IDENTITY_DIGEST="$(printf '%s' "${IDENTITY_JSON}" | sha256_text)"
+if [ -n "${CORRELATION_ID_INPUT}" ]; then
+  CORRELATION_ID="${CORRELATION_ID_INPUT}"
+else
+  CORRELATION_ID="single-correlation-${IDENTITY_DIGEST}"
 fi
-REPO_PARENT_EFF="${RESOLVED_REPO_PATH%/*}"
 
-# driven single-issue run is always quota=1, concurrency=1, IID-scoped to one issue.
-HOURLY_ISSUE_QUOTA_EFF=1
-MAX_CONCURRENT_SUBAGENTS_EFF=1
+REQUEST_ID_JSON="$(jq -cnS \
+  --argjson identity "${IDENTITY_JSON}" \
+  --arg correlation_id "${CORRELATION_ID}" '
+  $identity + {correlation_id:$correlation_id}')"
+BATCH_ID="single-$(printf '%s' "${REQUEST_ID_JSON}" | sha256_text)"
 
-# ─── 4. Export the dispatcher bootstrap env for env_paths.sh ───────
-export PROJECT="${PROJECT_SLUG}"
-export GROUP="${GROUP_EFF}"
-export GITLAB_TOKEN="${GITLAB_TOKEN_EFF}"
-export REPO_PARENT_PATH="${REPO_PARENT_EFF}"
-
-# ─── 5. Synthesize the equivalent single-IID scheduled trigger ─────
-# dispatch_prepare_tick.sh reads its trigger from stdin as multi-line key=value.
-# The fixed-value preflight fields and the per-issue scope (issue_iids=[iid],
-# issue_min_iid=issue_max_iid=iid) are pinned here; quota / concurrency are forced
-# to 1 for a single-issue run.
-SYNTH_TRIGGER="$(cat <<EOF
-RUN_SCHEDULED_ISSUE_CAMPAIGN
-non_interactive=true
-session_mode=per_issue
-scheduling_mode=quota_carryover
-blocked_policy=skip_and_retry
-project=${PROJECT_SLUG}
-group=${GROUP_EFF}
-gitlab_token=${GITLAB_TOKEN_EFF}
-issue_iids=${IID_IN}
-issue_min_iid=${IID_IN}
-issue_max_iid=${IID_IN}
-hourly_issue_quota=${HOURLY_ISSUE_QUOTA_EFF}
-max_concurrent_subagents=${MAX_CONCURRENT_SUBAGENTS_EFF}
-max_runtime_minutes=${MAX_RUNTIME_MINUTES_EFF}
-blocked_retry_limit=${BLOCKED_RETRY_LIMIT_EFF}
-blocked_cooldown_ticks=${BLOCKED_COOLDOWN_TICKS_EFF}
-acpx_timeout_seconds=${ACPX_TIMEOUT_EFF}
-repo_path=${REPO_PARENT_EFF}
+DRIVEN_TRIGGER="$(cat <<EOF
+RUN_DRIVEN_ISSUE_BATCH
+batch_id=${BATCH_ID}
+correlation_id=${CORRELATION_ID}
+project=${PROJECT_FULL}
+selector_type=single
+iid=${IID_IN}
+force_rerun_pr=false
+dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}
 EOF
 )"
-# Append the optional fields only when a non-empty value exists, so we never feed
-# dispatch_prepare_tick.sh an empty key it would reject.
-[ -n "${BRANCH_IN}" ] && SYNTH_TRIGGER="${SYNTH_TRIGGER}"$'\n'"branch=${BRANCH_IN}"
+[ -n "${BRANCH_IN}" ] \
+  && DRIVEN_TRIGGER="${DRIVEN_TRIGGER}"$'\n'"branch=${BRANCH_IN}"
 
-# ─── 6. Prepare/clone before creating any in-repo runtime path ─────
-PREPARE_TICK_CMD="${PREPARE_TICK_CMD:-${SCRIPT_DIR}/dispatch_prepare_tick.sh}"
-PREPARE_OUTPUT=""
-if PREPARE_OUTPUT="$(printf '%s\n' "${SYNTH_TRIGGER}" | bash "${PREPARE_TICK_CMD}")"; then
-  :
-else
-  PREPARE_STATUS=$?
-  [ -z "${PREPARE_OUTPUT}" ] || printf '%s\n' "${PREPARE_OUTPUT}"
-  exit "${PREPARE_STATUS}"
-fi
+DRIVEN_BATCH_CMD="${DRIVEN_BATCH_CMD:-${SCRIPT_DIR}/run_driven_issue_batch.sh}"
+case "${DRIVEN_BATCH_CMD}" in
+  /*) ;;
+  *) echo "dispatch_single_issue.sh: DRIVEN_BATCH_CMD must be absolute" >&2; exit 2 ;;
+esac
+[ -f "${DRIVEN_BATCH_CMD}" ] && [ -x "${DRIVEN_BATCH_CMD}" ] \
+  || { echo "dispatch_single_issue.sh: DRIVEN_BATCH_CMD must be executable" >&2; exit 2; }
 
-if [ ! -e "${RESOLVED_REPO_PATH}/.git" ]; then
-  [ -z "${PREPARE_OUTPUT}" ] || printf '%s\n' "${PREPARE_OUTPUT}"
-  echo "dispatch_single_issue.sh: prepare tick succeeded without cloning ${RESOLVED_REPO_PATH}" >&2
-  exit 12
-fi
-
-# ─── 7. Persist the driven origin after the clone exists ───────────
-# env_paths.sh may create its runtime tree only now that clone_or_pull has
-# populated the final target. ISSUE_ROOT proper is ${ISSUES_ROOT}/issue-${iid}.
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/env_paths.sh"
-
-: "${ISSUES_ROOT:?dispatch_single_issue.sh: env_paths.sh did not export ISSUES_ROOT}"
-ISSUE_ROOT_FOR_IID="${ISSUES_ROOT}/issue-${IID_IN}"
-DISPATCH_ORIGIN_FILE="${ISSUE_ROOT_FOR_IID}/dispatch_origin.json"
-
-mkdir -p "${ISSUE_ROOT_FOR_IID}"
-ORIGIN_TMP="$(mktemp "${DISPATCH_ORIGIN_FILE}.tmp.XXXXXX")"
-jq -nc \
-  --arg correlation_id "${CORRELATION_ID}" \
-  --arg dispatcher_callback_target "${DISPATCHER_CALLBACK_TARGET}" \
-  --arg project "${PROJECT_FULL}" \
-  --argjson iid "${IID_IN}" '
-  {correlation_id: $correlation_id,
-   dispatcher_callback_target: ($dispatcher_callback_target | select(. != "") // null),
-   project: $project,
-   iid: $iid}' >"${ORIGIN_TMP}"
-mv -f "${ORIGIN_TMP}" "${DISPATCH_ORIGIN_FILE}"
-echo "dispatch_single_issue.sh: wrote dispatch_origin.json for #${IID_IN} (correlation_id=${CORRELATION_ID})" >&2
-
-# Preserve the prepare envelope on stdout after the origin is durable.
-[ -z "${PREPARE_OUTPUT}" ] || printf '%s\n' "${PREPARE_OUTPUT}"
+printf '%s\n' "${DRIVEN_TRIGGER}" | \
+  CONFIG_DIR="${CONFIG_DIR}" bash "${DRIVEN_BATCH_CMD}"

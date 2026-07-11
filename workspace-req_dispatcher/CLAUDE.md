@@ -1,79 +1,127 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+## 工作区性质
 
-## What this workspace is
+这是 `req_dispatcher` OpenClaw agent 部署工件，不是应用仓库。它包含 prompt 契约、一个
+`requirement_dispatch` SKILL、Bash wrapper/tests 与部署配置。不要在本机启动 agent；本机只做
+shell 静态检查与临时 `STATE_ROOT` 功能测试。
 
-这**不是**应用仓库——它是名为 `req_dispatcher` 的 **OpenClaw agent 部署工件**。它包含 agent 的提示契约（`SOUL.md`、`AGENTS.md`、`USER.md`）、一个 SKILL（`requirement_dispatch`）、该 SKILL 调用的 bash 脚本，以及部署期配置（`config/`）。没有 build、没有 test runner、没有包清单。改动通过把本工作区同步到 runner 来部署。
+一律使用 `/opt/homebrew/bin/bash`。本机 `/bin/bash` 版本过旧，缺少项目脚本使用的能力。
 
-agent 本身在 OpenClaw runner 上运行。**不要尝试在本机启动这个 agent**——它只在 server 上跑。本机开发只做两件事：脚本静态检查（`/opt/homebrew/bin/bash -n scripts/foo.sh`），以及脚本功能冒烟（这些脚本是纯本地 state 操作，不碰网络/glab/acpx，可用临时 `STATE_ROOT` 跑通 record→drain→evict 验证）。本机 `/bin/bash` 是 3.2.57，会误判语法且缺 `mapfile`，所以**一律用 `/opt/homebrew/bin/bash`**。
+## Agent 边界
 
-## 它做什么 / 不做什么
+dispatcher 是 prompt 路由器和 batch 控制面：
 
-`req_dispatcher` 是 WebUI/智伴 prompt 在 104 侧的**统一接入点 + 动作路由编排器**：接收 114 转发或 WebUI 输入的自然语言消息，先判断用户要做什么。只分析/拆分/创建/变更 issue 时，通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer`；明确要求处理既有 issue 时，使用 `prepare_executor_issue_payload.sh` 提取 `project`/`iid` 后按 project 选择目标 `req_executor` 部署并进入 durable executor FIFO queue；明确要求"建 issue 并处理"时，才允许先 `git_issuer` 后入 executor queue。它不再把每条需求都自动推进完整执行链。
+- 建单使用 git_issuer；
+- 执行只使用 `submit_executor_batch.sh`；
+- 周期恢复只使用 `run_executor_batch_tick.sh`；
+- I3 只使用 `handle_executor_batch_event.sh`；
+- 旧 I2/FIFO 只为部署升级排空保留。
 
-**仍明确不做**：不建 issue、不打标签、不写 GitLab note、不自己跑 issue、不去重、git_issuer/executor 业务失败不自动重试。**新增会做**：根据 prompt 选择建单、执行既有 issue、显式建单并执行或要求补充信息；用 `WIKI_GITLAB_*` 只读拉取 wiki 内容；用受控脚本准备下游消息；只在明确执行动作中按 project 路由、维护 durable executor FIFO queue，并把执行结论推回企微用户（仅一次）。project 不能靠语义猜测，issue 事实仍以 git_issuer 返回 JSON 或 GitLab issue URL/显式 issue IID 为准。
+它不建 Issue、不改 GitLab、不跑 Issue、不查询 GitLab Issue、不展开 IID snapshot、不管理
+worktree/campaign/物理并发。wiki 是唯一只读 GitLab 入口。
 
-> 注意：本 agent **没有** acpx/执行器的那套 worktree / UI 账号 / campaign_state / 模型档位 / 标签机（执行器 token 归执行器侧）。它只有 wiki 只读 token pin。若你在改动里引入执行器状态概念，几乎一定是搞错了 agent。
+single/range/open_unfinished/open_label 都只处理 intake 时为 OPEN 的 Issue；snapshot 查询、过滤
+和冻结由 executor 完成，dispatcher 不补查 CLOSED Issue。
 
-## Single-skill execution model
+## 薄控制器规则
 
-唯一 SKILL：`skills/requirement_dispatch/`，编排器固定 session `agent:req_dispatcher:main`。每条接入消息先判 action：`create_issue` 只走 git_issuer 段并同轮 record/drain 作审计；`execute_issue` 只走 executor queue；`create_and_execute` 先走 git_issuer，成功后再进入 executor queue；`clarify_or_reject` 不调用下游。
+LLM 不得拆开执行下面的内部链：
 
-- **接入路径（A）**（114/WebUI 投来 prompt）：`capture_origin.sh` 捕获 origin（优先 OpenClaw 网关/运行时来源元数据，其次正文 `[origin]` 行；含回推目标 `reply_agent`）→ AI 判定 action。`create_issue` / `create_and_execute` 走 `prepare_wiki_downstream_payloads.sh` 或 `prepare_downstream_payloads.sh` 生成 git_issuer payload，顺序调用蓝区 `git_issuer`，同轮 record/drain 审计 stage；`create_issue` 成功后停止，`create_and_execute` 才继续 route/enqueue/drain executor。`execute_issue` 走 `prepare_executor_issue_payload.sh` 提取既有 issue 的 `project`/`iid`，再 route/enqueue/drain executor。`clarify_or_reject` 推用户补充说明或紧凑回复，不调用下游。
-- **executor 回调路径（B）**：解析结果信封(I2) → 按 executor `run_id` 匹配 pending，回调缺 `run_id` 时按 `correlation_id` 反查（`correlation_id` 二次校验）→ `notify_user.sh` 把结论推回 origin → drain executor 段 → `finish_executor_queue_active.sh` 清当前 active → `drain_executor_queue.sh` 继续启动下一条。
-- **executor 队列恢复路径（C）**：周期性 `RUN_EXECUTOR_QUEUE_DRAIN` 先调用 `evict_stuck.sh`，再调用 `drain_executor_queue.sh`，用于清理超时 pending 对应的 active、恢复启动中断、重试 launch_failed active、或在队列非空且没有回调唤醒时继续推进。
+```text
+prepare_executor_issue_payload.sh
+  -> route_project.sh
+  -> build_executor_batch_payload.sh
+  -> enqueue_executor_batch_request.sh
+  -> drain_executor_batch_outbox.sh
+```
 
-完整算法见 [`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。
+不得直接调用 receipt/mirror/event/notification/legacy bridge 内部脚本，也不得手写 JSON state。
+只读取顶层 wrapper 的严格 JSON。
 
-## State 布局
+`DISPATCHER_CALLBACK_TARGET` 为空必须在 ID/intent/network 前拒绝。I1 intent 必须先落盘；旧
+FIFO 非空时不发送。ack 丢失只重投同 batch。receipt immutable 字段冲突 fail closed。
 
-由 `scripts/env_paths.sh` 从 `STATE_ROOT` 派生：`${STATE_ROOT}/_dispatcher/` 下 `pending.json`（run_id 主键，flock 保护）/ `executor_queue.json`（executor durable FIFO，复用同一锁）/ `ledger.jsonl`（append-only 审计）/ `pending.lock` / `seq` / `log/`。schema：[`skills/requirement_dispatch/references/state_schema.md`](skills/requirement_dispatch/references/state_schema.md)。
+I3 handler stdout 只能有一个 accepted/duplicate ack；notification drain 输出隔离，失败不
+撤销 ack。zero-match 使用稳定 no-match notification intent。
 
-## Strict no-fallback policy
+## State
 
-- 脚本非零退出 → 读 stdout/stderr、分类、记录、**stop**。不内联重写脚本逻辑、不"手动来一遍"、不换"更简单的命令"。
-- 不写 GitLab（不建 issue / 打标签 / 写 note / 跑 issue）；只允许 `prepare_wiki_downstream_payloads.sh` 用 `glab api` 只读拉取 wiki；只做受控入口分析，不语义猜 project；不自己跑 issue；不去重；git_issuer/executor 业务失败不自动重试。
-- git_issuer 下游调用失败（`run_agent_turn.sh` envelope `status=failed`）只允许"同 payload 3 次 2s 退避"；耗尽即 `launch_failed`（写 ledger + 推用户 + 可选 ops 通知，不写 pending）。
-- executor 启动失败只由 `drain_executor_queue.sh` 对同一 `RUN_SINGLE_ISSUE` payload 做 3 次 2s 退避；耗尽后保留 queue active 为 `launch_failed`，等待后续 `RUN_EXECUTOR_QUEUE_DRAIN` 继续重试，不清 active、不丢 issue。
-- `route_project.sh` 未命中覆盖表时必须返回 `DEFAULT_EXECUTOR_AGENT`；只有默认执行器未配置时才输出 `__NO_ROUTE__`。project 形态错、`ROUTING_FILE` 缺失/格式错才按 no-fallback 停。
-- 跨 agent 调用固定为 `run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>`；默认 session key 由脚本自动生成：普通调用用 `agent:<target>:main`，executor 的 `RUN_SINGLE_ISSUE` 用 payload 的 `project`/`iid` 生成 `agent:<target>:issue-<sanitized-project>-<iid>`，避免多个 issue 堆在 executor main session；普通调用不要手写 `TARGET_SESSION_KEY`，旧 `TARGET_SESSION_ID` 输入仅作兼容且同样转为 `--session-key`，但 `RUN_SINGLE_ISSUE` 若显式传了 `agent:<target>:main` 会改投 issue 级 session。执行路径不得直接调用 `build_executor_payload.sh` / `run_agent_turn.sh` 启动 executor；必须先 `enqueue_executor_issue.sh`，再让 `drain_executor_queue.sh` 启动队首。下游 agent turn 可能超过本地 shell tool 的短轮询窗口，进程仍在运行时必须继续 poll 到最终 stdout，不得因暂时无输出而 kill。origin 捕获固定为 `capture_origin.sh`，优先 OpenClaw 网关/运行时来源元数据，正文 `[origin]` 只是 fallback。建单消息准备固定为 `prepare_wiki_downstream_payloads.sh`（wiki URL）或 `prepare_downstream_payloads.sh`（自由文本）；既有 issue 执行准备固定为 `prepare_executor_issue_payload.sh`；executor 触发文本固定由 queue drain 内部调用 `build_executor_payload.sh` 生成。用户出站推送已对齐：`notify_user.sh` 仅在 origin 为合法 object 时反向网关推 114 接收 agent，连接 pin 为 `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN`，目标 agent 优先取 `origin.reply_agent`、否则取默认 `DEFAULT_REPLY_AGENT`；空/null/非 object origin 视为手动入口不推 114；缺少网关 pin 或目标 agent 则留痕；`REPLY_NOTIFY_TIMEOUT_SECONDS` 控制 best-effort 调用超时。
+`${STATE_ROOT}/_dispatcher/`：
 
-若你要用 SKILL / `scripts/` / `references/` 没列出的工具、命令、flag 或流程，那就是**停下并失败**的信号。详见 [`SOUL.md`](SOUL.md) §No-Fallback。
+- `executor_batch_outbox.json`：token-free I1 intent 与 received/accepted receipt；
+- `executor_batches.json`：compact mirror；
+- `executor_batch_events.jsonl`：canonical I3 ledger；
+- `executor_batch_notifications.json`：notification intent；
+- `executor_batch_notification_attempts/`：event 专属 durable notify outcome；
+- `executor_queue.json`/`pending.json`：旧 FIFO、git_issuer、旧 I2 兼容；
+- `ledger.jsonl`：append-only 审计。
 
-## Per-exec environment contract
+schema 见
+[`skills/requirement_dispatch/references/state_schema.md`](skills/requirement_dispatch/references/state_schema.md)。
 
-OpenClaw 每个 Bash tool call 是全新 shell，`export`/`cd` 不跨 exec 存活。每次调脚本都在**同一个** Bash exec 里：`cd "<SKILL_DIR 绝对路径>" && source scripts/source_dispatcher_env.sh && <最小 env> bash scripts/<name>.sh`。该 helper 先加载 tracked `config/dispatcher.env`，再加载 ignored `config/dispatcher.local.env`（若存在）；`DOWNSTREAM_AGENT_TIMEOUT_SECONDS` 是通用下游默认，`EXECUTOR_AGENT_TIMEOUT_SECONDS` 是 executor 专用下限。脚本顶部 `source env_paths.sh` 从 `STATE_ROOT` 派生路径。脚本入参契约见 SKILL §Working Directory 的表。
+## Token 与配置安全
 
-## Sanity-checking shell changes
+- batch payload/state 不得出现 GitLab token。
+- 只在 req_executor I1、旧 single I1 与 batch notification 外部进程边界 scrub GitLab token；
+  不得破坏 git_issuer/wiki 既有本地环境。
+- tracked 蓝区默认保持 `/data`、GitLab/wik pin、callback 与 gateway 契约。
+- 本机路径/session/测试 endpoint 只放 ignored `config/dispatcher.local.env` 或进程环境。
+- 不在仓库中运行 `rm`。
 
-改任何脚本后跑 `/opt/homebrew/bin/bash -n scripts/foo.sh`。能跑通的本地功能冒烟（临时 `STATE_ROOT`，record→drain→evict）也鼓励做——它比纯 `bash -n` 强得多。
+## Per-exec
 
-## Bumping SKILL_VERSION on workspace edits
+OpenClaw 每个 Bash tool call 是新 shell。一次调用必须在同一个 exec：
 
-改动 `workspace-req_dispatcher/` 下任何文件（`SOUL.md`/`AGENTS.md`/`USER.md`/`config/`/`skills/requirement_dispatch/` 下的 SKILL、`scripts/`、`references/`）后，bump [`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md) `description:` 字段里的 `[SKILL_VERSION=...]` token。
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+source scripts/source_dispatcher_env.sh && \
+<最小 env> bash scripts/<顶层 wrapper>.sh
+```
 
-格式 `YYYY-MM-DD.N`：日期是改动当天；`N` 是当天序号。若现有版本日期不是今天 → 整体替换成 `<今天>.1`；若已是今天 → `N` 加 1。**同一次编辑/提交里 bump**，不留到后续。改动**本** `CLAUDE.md`、repo 根文件、`.claude/` 不触发 bump。
+不依赖上一个 exec 的 `cd/export`。
 
-## Code review workflow
+## No-Fallback
 
-每个非平凡改动在视为完成前必须走 review 循环。reviewer 是 Claude Code `code-reviewer` 子代理（`Agent(subagent_type="code-reviewer")`）。
+- 脚本非零：读取错误、分类、停止；不手工重写逻辑或 state。
+- `waiting_for_legacy_drain`/`retryable_failure` 是 durable 分支，不生成新 batch。
+- 不从 raw output 猜 acceptance；只认精确五字段 executor public receipt。
+- transport 只重投同 intent；dispatcher 不自动重试业务 Issue。
 
-1. **Edit** → 2. **Review**（调用 `code-reviewer`，prompt 里点明 diff 范围，如"review `workspace-req_dispatcher/` 下未提交的 diff"）→ 3. **Address**（无可执行发现即结束）→ 4. **Repeat**（最多 3 轮；满 3 轮仍有问题则把报告交用户裁决，不擅自继续改）。
+完整运行契约见
+[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md) 与
+[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)。
 
-适用于 `workspace-req_dispatcher/` 下所有改动。trivial 改动（typo、版本 bump、单行修）可由主 agent 酌情跳过。
+## 验证
 
-项目级 Stop hook（[`.claude/hooks/require-workspace-review.sh`](.claude/hooks/require-workspace-review.sh)，注册于 [`.claude/settings.json`](.claude/settings.json)）强制此约定：turn 结束时若 `workspace-req_dispatcher/` 有未提交改动，返回 `decision:"block"` 并喂回 review 指令。循环完成（或改动确属 trivial）后，把当前 diff 指纹写入 sentinel `workspace-req_dispatcher/.claude/.review-done-sha` 解除阻断——hook 的 reason 文本里给出了要执行的精确 `printf %s '<hash>' > <sentinel>` 行。
+脚本修改至少运行：
 
-## Where to look for full details
+```bash
+/opt/homebrew/bin/bash -n skills/requirement_dispatch/scripts/<file>.sh
+/opt/homebrew/bin/bash skills/requirement_dispatch/tests/test_driven_batch_simulated_flow.sh
+/opt/homebrew/bin/bash skills/requirement_dispatch/tests/test_executor_batch_recovery_contract.sh
+```
 
-- agent 契约：[`SOUL.md`](SOUL.md)（三路径、Global Rules、No-Fallback、两段匹配策略、Session Policy、Tooling）。
-- 工作区说明 + req_executor 衔接依赖（主动编排）：[`AGENTS.md`](AGENTS.md)。
-- 使用方式 + ack 文案 + 终态结论文案：[`USER.md`](USER.md)。
-- 三路径算法 + 脚本入参（含 route_project/notify_user/queue drain）+ 精确 env 行：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)。
-- state/ledger schema（两段 pending、I3）：[`skills/requirement_dispatch/references/state_schema.md`](skills/requirement_dispatch/references/state_schema.md)。
-- `run_agent_turn.sh` 调用契约 + executor RUN_SINGLE_ISSUE(I1)/结果回调(I2) 信封：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)。
-- 主动编排设计稿与实施计划：[`docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](docs/superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)、[`docs/superpowers/plans/2026-06-29-req_dispatcher-active-orchestration.md`](docs/superpowers/plans/2026-06-29-req_dispatcher-active-orchestration.md)。
-- git_issuer 对接文档（跨团队交接，orchestrator 运行时不读）：[`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)（创建契约 + 回传模板）、[`docs/integration/gitissuer_change_request.md`](docs/integration/gitissuer_change_request.md)（变更请求契约）。
+并回归 Task 8 event/notification、旧 queue、`run_agent_turn` 与全部 dispatcher shell tests。
 
-存疑时 READ 对应文件，不要凭记忆重构契约。
+## SKILL_VERSION
+
+通常修改本 workspace 后按项目根规则 bump
+`skills/requirement_dispatch/SKILL.md` 的 `SKILL_VERSION=YYYY-MM-DD.N`。
+
+当前受驱动 batch 总计划明确把 Task 1–9 的版本变更统一留给 Task 10；执行 Task 9 时不得提前
+bump。Task 10 完成后恢复常规规则。
+
+## Code review
+
+非平凡改动在完成前必须走只读 review：review 未提交的 `workspace-req_dispatcher/` diff，修复
+Critical/Important 后再复审，最多三轮。reviewer 不得修改工作树、index、HEAD 或分支。
+
+## 入口索引
+
+- 运行契约：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)
+- public trigger：[`skills/requirement_dispatch/references/trigger_command.md`](skills/requirement_dispatch/references/trigger_command.md)
+- state：[`skills/requirement_dispatch/references/state_schema.md`](skills/requirement_dispatch/references/state_schema.md)
+- 用户语义：[`USER.md`](USER.md)
+- agent 硬边界：[`SOUL.md`](SOUL.md)
+- git_issuer：[`docs/integration/gitissuer_contract.md`](docs/integration/gitissuer_contract.md)

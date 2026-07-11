@@ -31,6 +31,7 @@ drain="$(
   OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
   EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
   EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS="0" \
+  DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
   bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
 )"
 

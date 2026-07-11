@@ -23,6 +23,36 @@ It does not read runtime basename, data directory, or account-pool trigger field
 
 Records a `sessions_spawn` result for one IID. On launch failure it synthesizes a blocked Phase 6 reply and drains the pending entry.
 
+When the fixed driven wrapper supplies `DRIVEN_JOB_ID`,
+`DRIVEN_CLAIM_GENERATION`, and `DRIVEN_CLAIM_TOKEN`, all three are mandatory.
+The recorder stores only the token SHA-256 plus the exact runtime outcome and
+result under `campaign_state.json.driven_launch_receipts[job_id]` in the same
+atomic persistence as the state mutation. Exact replay is read-only; conflict
+replay fails closed. Receipt replay validates the complete exact typed result,
+including the only reachable driven launch-failure status (`blocked`) and the
+two exact Phase 6 cleanup shapes; malformed fields cannot authorize replay.
+Scheduled calls without those fields retain the legacy behavior.
+
+## `record_executor_batch_spawn.sh`
+
+Consumes one strict driven `spawned` or `launch_failed` result, recovers the
+private claim, and advances `ack_received -> project_recorded ->
+scheduler_recorded -> completed`. It always records project state first. A
+later tick may call it with the durable exact outcome when the process died
+after either downstream commit; project receipts and scheduler
+`launch_failed_receipts` make those calls idempotent. The project boundary
+accepts only the complete exact result shape for the durable action's
+`spawned` or `launch_failed` outcome. A partial or forged zero-exit response
+leaves the action at `ack_received` for safe recovery.
+
+## `record_driven_batch_launch.sh`
+
+`ACTION=launch_failed` requires a positive claim generation and matching private
+token. Its scheduler transaction both removes the active job and writes a
+token-hash-bound tombstone. If no active job remains, only the exact same
+job/generation/token/action may replay successfully; a current active claim is
+always authoritative over an older tombstone.
+
 ## `dispatch_followup.sh`
 
 Consumes `RUN_CHILD_COMPLETION_CALLBACK` compact JSON, validates it, reconciles the IID, writes terminal state, updates labels, optionally reports results back to `req_dispatcher`, and emits cleanup instructions.

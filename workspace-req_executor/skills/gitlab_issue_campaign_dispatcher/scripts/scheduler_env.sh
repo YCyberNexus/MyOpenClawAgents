@@ -112,11 +112,31 @@ if [ ! -e "${SCHEDULER_STATE_FILE}" ]; then
   printf '%s' "${INITIAL_STATE}" >"${STATE_TMP}"
   mv "${STATE_TMP}" "${SCHEDULER_STATE_FILE}"
 elif ! jq -e '
+  def valid_launch_failed_receipts:
+    (has("launch_failed_receipts") | not)
+    or (.launch_failed_receipts | type == "object"
+      and (to_entries | all(. as $entry |
+        ($entry.value | type == "object")
+        and ($entry.value | keys | sort) == [
+          "action","claim_generation","claim_token_sha256",
+          "job_id","recorded_at","version"
+        ]
+        and $entry.value.version == 1
+        and $entry.value.job_id == $entry.key
+        and ($entry.value.job_id | type == "string" and length > 0)
+        and ($entry.value.claim_generation | type == "number"
+          and . == floor and . > 0)
+        and ($entry.value.claim_token_sha256 | type == "string"
+          and test("^[0-9a-f]{64}$"))
+        and $entry.value.action == "launch_failed"
+        and ($entry.value.recorded_at | type == "number"
+          and . == floor and . >= 0))));
   type == "object"
   and .version == 1
   and ((.round_robin_cursor == null) or (.round_robin_cursor | type == "string"))
   and (.active_jobs | type == "object")
   and (.batch_order | type == "array")
+  and valid_launch_failed_receipts
 ' "${SCHEDULER_STATE_FILE}" >/dev/null; then
   die "existing scheduler state is invalid: ${SCHEDULER_STATE_FILE}"
 fi
