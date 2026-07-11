@@ -14,10 +14,21 @@
 #   atomic_write_json <path>     ← reads JSON from stdin, atomic mv
 #   load_state                   → cat CAMPAIGN_STATE_FILE (or fresh init)
 #   wrapper_log <phase> <msg...> → append to dispatcher log
+#   phase6_build_driven_handoff_intent <pending_json> <iid> <attempt> <status>
+#                                          <mr_url> <reason>
+#                                → emits a canonical claim-bound durable intent
+#   phase6_canonicalize_driven_handoff_intent <intent_json>
+#                                → validates and canonicalizes an existing intent
+#   phase6_put_driven_handoff_intent <state_json> <intent_json>
+#                                → idempotently adds the intent to campaign state
+#   phase6_find_driven_handoff_intent <state_json> <iid> <attempt>
+#                                → emits the one matching intent or null
+#   phase6_write_driven_handoff_intent <intent_json>
+#                                → atomically materializes its project-local
+#                                  scheduler handoff and prints the path
 #   phase6_write_driven_handoff <pending_json> <iid> <status> <mr_url> <reason>
-#                                → atomically persists a project-local scheduler
-#                                  handoff and prints its path; never reads the
-#                                  executor-wide scheduler
+#                                → compatibility wrapper that builds and writes
+#                                  a handoff without storing an intent
 #   iso_to_epoch <iso8601>       → epoch seconds (0 when unparseable)
 #   phase6_synthesize_reply <iid> <attempt_number> <status> <block_reason>
 #                                → emit a synthetic compact reply JSON (status=blocked|timeout)
@@ -88,14 +99,14 @@ wrapper_log() {
   printf '[%s] [%s] %s\n' "${ts}" "${phase}" "$*" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
 }
 
-# Persist the project-local half of a scheduler-driven terminal callback while
-# the caller still holds the campaign lock. The pending entry intentionally
-# contributes only job identity and the dynamic-membership marker: membership
-# fanout is resolved later by import_driven_handoff.sh under the scheduler lock.
-phase6_write_driven_handoff() {
+# Build the project-local half of a scheduler-driven terminal callback without
+# writing it. The pending entry intentionally contributes only job/claim
+# identity and the dynamic-membership marker: membership fanout is resolved
+# later by import_driven_handoff.sh under the scheduler lock.
+phase6_build_driven_handoff_json() {
   local pending_json="$1" iid="$2" final_status="$3" mr_url="$4" reason="$5"
   local job_id claim_generation claim_token_json event_id
-  local handoff_dir handoff_file handoff_json existing_json
+  local handoff_json
 
   case "${final_status}" in
     done|failed|timeout|skipped) ;;
@@ -143,9 +154,6 @@ phase6_write_driven_handoff() {
     if has("claim_token") then .claim_token else null end
   ' <<<"${pending_json}")"
   event_id="${job_id}:claim-${claim_generation}:terminal-1"
-  handoff_dir="${ISSUES_ROOT}/issue-${iid}/driven_handoffs"
-  handoff_file="${handoff_dir}/${event_id}.json"
-  mkdir -p "${handoff_dir}"
   handoff_json="$(jq -cnS \
     --arg event_id "${event_id}" \
     --arg job_id "${job_id}" \
@@ -170,19 +178,215 @@ phase6_write_driven_handoff() {
       reason:(if $reason == "" then null else $reason end)
     }')"
 
+  printf '%s\n' "${handoff_json}"
+}
+
+# Strictly canonicalize a handoff before it is persisted or recovered from a
+# durable intent. Requiring memberships=[] keeps scheduler membership snapshots
+# out of the project lock/domain; the importer alone freezes that snapshot.
+phase6_canonicalize_driven_handoff_json() {
+  local handoff_json="$1"
+  printf '%s' "${handoff_json}" | jq -ceS --arg project "${PROJECT_FULL}" '
+    if type == "object"
+      and (keys | sort) == [
+        "claim_generation",
+        "claim_token",
+        "event_id",
+        "iid",
+        "job_id",
+        "memberships",
+        "memberships_source",
+        "mr_url",
+        "project",
+        "reason",
+        "status",
+        "version"
+      ]
+      and .version == 1
+      and (.job_id | type == "string"
+        and test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"))
+      and (.claim_generation | type == "number"
+        and . == floor and . >= 0)
+      and (if .claim_generation == 0
+        then .claim_token == null
+        else (.claim_token | type == "string" and length > 0)
+        end)
+      and .event_id == (.job_id + ":claim-"
+        + (.claim_generation | tostring) + ":terminal-1")
+      and .memberships == []
+      and .memberships_source == "scheduler_active_job"
+      and .project == $project
+      and (.iid | type == "number" and . == floor and . > 0)
+      and ((.status == "done") or (.status == "failed")
+        or (.status == "timeout") or (.status == "skipped"))
+      and (.mr_url == null
+        or (.mr_url | type == "string" and length > 0))
+      and (.reason == null
+        or (.reason | type == "string" and length > 0))
+    then .
+    else error("invalid canonical scheduler-driven handoff")
+    end
+  '
+}
+
+# Materialization is idempotent and safe outside the campaign lock because the
+# canonical intent has already been committed with project state. Concurrent
+# drainers can only publish byte-equivalent JSON for the same stable event.
+phase6_write_driven_handoff_json() {
+  local handoff_json="$1"
+  local canonical_handoff iid event_id
+  local handoff_dir handoff_file existing_json
+
+  canonical_handoff="$(phase6_canonicalize_driven_handoff_json "${handoff_json}")" || {
+    echo "phase6_write_driven_handoff_json: invalid handoff" >&2
+    return 3
+  }
+  iid="$(jq -r '.iid' <<<"${canonical_handoff}")"
+  event_id="$(jq -r '.event_id' <<<"${canonical_handoff}")"
+  handoff_dir="${ISSUES_ROOT}/issue-${iid}/driven_handoffs"
+  handoff_file="${handoff_dir}/${event_id}.json"
+  mkdir -p "${handoff_dir}"
+
   if [ -f "${handoff_file}" ]; then
-    existing_json="$(jq -cS . "${handoff_file}" 2>/dev/null)" || {
-      echo "phase6_write_driven_handoff: existing handoff is invalid: ${handoff_file}" >&2
+    existing_json="$(phase6_canonicalize_driven_handoff_json \
+      "$(cat "${handoff_file}")" 2>/dev/null)" || {
+      echo "phase6_write_driven_handoff_json: existing handoff is invalid: ${handoff_file}" >&2
       return 3
     }
-    if [ "${existing_json}" != "$(jq -cS . <<<"${handoff_json}")" ]; then
-      echo "phase6_write_driven_handoff: stable event conflicts with existing handoff: ${event_id}" >&2
+    if [ "${existing_json}" != "${canonical_handoff}" ]; then
+      echo "phase6_write_driven_handoff_json: stable event conflicts with existing handoff: ${event_id}" >&2
       return 3
     fi
   else
-    printf '%s' "${handoff_json}" | atomic_write_json "${handoff_file}"
+    printf '%s' "${canonical_handoff}" | atomic_write_json "${handoff_file}"
   fi
   printf '%s\n' "${handoff_file}"
+}
+
+phase6_build_driven_handoff_intent() {
+  local pending_json="$1" iid="$2" attempt_number="$3"
+  local final_status="$4" mr_url="$5" reason="$6"
+  local handoff_json
+
+  case "${attempt_number}" in
+    ''|*[!0-9]*|0)
+      echo "phase6_build_driven_handoff_intent: invalid attempt_number: ${attempt_number}" >&2
+      return 2
+      ;;
+  esac
+  handoff_json="$(phase6_build_driven_handoff_json \
+    "${pending_json}" "${iid}" "${final_status}" "${mr_url}" "${reason}")" \
+    || return $?
+  handoff_json="$(phase6_canonicalize_driven_handoff_json "${handoff_json}")" \
+    || return $?
+  jq -cnS \
+    --argjson attempt_number "${attempt_number}" \
+    --argjson handoff "${handoff_json}" '{
+      version:1,
+      attempt_number:$attempt_number,
+      handoff:$handoff
+    }'
+}
+
+phase6_canonicalize_driven_handoff_intent() {
+  local intent_json="$1"
+  local normalized_intent canonical_handoff attempt_number
+
+  normalized_intent="$(printf '%s' "${intent_json}" | jq -ceS '
+    if type == "object"
+      and (keys | sort) == ["attempt_number","handoff","version"]
+      and .version == 1
+      and (.attempt_number | type == "number"
+        and . == floor and . > 0)
+      and (.handoff | type == "object")
+    then .
+    else error("invalid scheduler-driven handoff intent")
+    end
+  ')" || return 3
+  attempt_number="$(jq -r '.attempt_number' <<<"${normalized_intent}")"
+  canonical_handoff="$(phase6_canonicalize_driven_handoff_json \
+    "$(jq -c '.handoff' <<<"${normalized_intent}")")" || return 3
+  jq -cnS \
+    --argjson attempt_number "${attempt_number}" \
+    --argjson handoff "${canonical_handoff}" '{
+      version:1,
+      attempt_number:$attempt_number,
+      handoff:$handoff
+    }'
+}
+
+phase6_put_driven_handoff_intent() {
+  local state_json="$1" intent_json="$2"
+  local canonical_intent event_id
+
+  canonical_intent="$(phase6_canonicalize_driven_handoff_intent \
+    "${intent_json}")" || return 3
+  event_id="$(jq -r '.handoff.event_id' <<<"${canonical_intent}")"
+  printf '%s' "${state_json}" | jq -ce \
+    --arg event_id "${event_id}" \
+    --argjson intent "${canonical_intent}" '
+    if has("driven_handoff_intents")
+        and (.driven_handoff_intents | type != "object")
+    then error("driven_handoff_intents must be an object")
+    elif ((.driven_handoff_intents // {})[$event_id] // null) as $existing
+      | $existing != null and $existing != $intent
+    then error("stable event conflicts with existing durable intent")
+    else .driven_handoff_intents =
+      ((.driven_handoff_intents // {}) + {($event_id):$intent})
+    end
+  '
+}
+
+phase6_find_driven_handoff_intent() {
+  local state_json="$1" iid="$2" attempt_number="$3"
+  local matches match_count entry_key canonical_intent
+
+  matches="$(printf '%s' "${state_json}" | jq -ce \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" '
+    if has("driven_handoff_intents")
+        and (.driven_handoff_intents | type != "object")
+    then error("driven_handoff_intents must be an object")
+    else [(.driven_handoff_intents // {}) | to_entries[]
+      | select(
+          (.value | type == "object")
+          and .value.attempt_number == $attempt_number
+          and (.value.handoff | type == "object")
+          and .value.handoff.iid == $iid
+        )]
+    end
+  ')" || return 3
+  match_count="$(jq -r 'length' <<<"${matches}")"
+  if [ "${match_count}" -eq 0 ]; then
+    printf '%s\n' null
+    return 0
+  fi
+  if [ "${match_count}" -ne 1 ]; then
+    echo "phase6_find_driven_handoff_intent: multiple intents match iid=${iid} attempt=${attempt_number}" >&2
+    return 3
+  fi
+  entry_key="$(jq -r '.[0].key' <<<"${matches}")"
+  canonical_intent="$(phase6_canonicalize_driven_handoff_intent \
+    "$(jq -c '.[0].value' <<<"${matches}")")" || return 3
+  if [ "$(jq -r '.handoff.event_id' <<<"${canonical_intent}")" != "${entry_key}" ]; then
+    echo "phase6_find_driven_handoff_intent: intent key does not match stable event" >&2
+    return 3
+  fi
+  printf '%s\n' "${canonical_intent}"
+}
+
+phase6_write_driven_handoff_intent() {
+  local canonical_intent
+  canonical_intent="$(phase6_canonicalize_driven_handoff_intent "$1")" \
+    || return 3
+  phase6_write_driven_handoff_json \
+    "$(jq -c '.handoff' <<<"${canonical_intent}")"
+}
+
+phase6_write_driven_handoff() {
+  local handoff_json
+  handoff_json="$(phase6_build_driven_handoff_json "$@")" || return $?
+  phase6_write_driven_handoff_json "${handoff_json}"
 }
 
 # Self-heal the executable bit on every file under scripts/safety_bin/.

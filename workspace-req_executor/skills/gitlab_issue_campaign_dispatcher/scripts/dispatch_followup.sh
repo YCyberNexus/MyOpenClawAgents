@@ -42,6 +42,16 @@ source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_dispatch_lib.sh"
 
+# Run the reusable recovery entry for one stable physical event. The caller
+# must release fd 9 first; the drainer itself only snapshots/updates campaign
+# state under that lock and performs materialization/import lock-free.
+drain_driven_handoff_event() {
+  local event_id="$1"
+  DRIVEN_HANDOFF_EVENT_ID="${event_id}" \
+  DRIVEN_HANDOFF_IMPORTER="${DRIVEN_HANDOFF_IMPORTER:-${SCRIPT_DIR}/import_driven_handoff.sh}" \
+    bash "${SCRIPT_DIR}/drain_driven_handoff_intents.sh"
+}
+
 # Acquire flock (non-blocking). The callback can safely retry later.
 exec 9>"${LOCK_FILE}"
 if ! flock -n 9; then
@@ -78,6 +88,62 @@ STATE_JSON="$(load_state)"
 # Lookup the pending entry.
 PENDING_ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" '.pending_subagents[($iid|tostring)] // null')"
 if [ "${PENDING_ENTRY}" = "null" ]; then
+  # Phase 6 may already have atomically drained pending while retaining a
+  # claim-bound durable intent. Match only this callback's IID+attempt, then
+  # require the intent key to equal its canonical stable event before replay.
+  RECOVERY_ATTEMPT="${ATTEMPT_NUMBER:-0}"
+  if ! RECOVERY_INTENT="$(phase6_find_driven_handoff_intent \
+      "${STATE_JSON}" "${IID}" "${RECOVERY_ATTEMPT}")"; then
+    echo "dispatch_followup.sh: invalid durable handoff intent for iid=${IID} attempt=${RECOVERY_ATTEMPT}" >&2
+    exit 3
+  fi
+  if [ "${RECOVERY_INTENT}" != "null" ]; then
+    RECOVERY_EVENT_ID="$(jq -r '.handoff.event_id' <<<"${RECOVERY_INTENT}")"
+    flock -u 9
+    exec 9>&-
+
+    set +e
+    RECOVERY_DRAIN_OUT="$(drain_driven_handoff_event "${RECOVERY_EVENT_ID}" \
+      2>>"${DISPATCHER_LOG_DIR}/wrapper.log")"
+    RECOVERY_DRAIN_RC=$?
+    set -e
+    RECOVERY_RESULT=""
+    if [ "${RECOVERY_DRAIN_RC}" -eq 0 ]; then
+      RECOVERY_RESULT="$(jq -c --arg event_id "${RECOVERY_EVENT_ID}" \
+        '.results[]? | select(.event_id == $event_id)' \
+        <<<"${RECOVERY_DRAIN_OUT}" 2>/dev/null || true)"
+    fi
+    RECOVERY_HANDOFF_PATH=""
+    RECOVERY_IMPORT_STATUS="pending"
+    if [ -n "${RECOVERY_RESULT}" ]; then
+      RECOVERY_HANDOFF_PATH="$(jq -r '.handoff_path // ""' <<<"${RECOVERY_RESULT}")"
+      RECOVERY_RESULT_STATUS="$(jq -r '.status' <<<"${RECOVERY_RESULT}")"
+      case "${RECOVERY_RESULT_STATUS}" in
+        imported|imported_cleanup_pending)
+          RECOVERY_IMPORT_STATUS="imported"
+          ;;
+      esac
+    fi
+    wrapper_log followup \
+      "durable handoff replay iid=${IID} attempt=${RECOVERY_ATTEMPT} event_id=${RECOVERY_EVENT_ID} import_status=${RECOVERY_IMPORT_STATUS} drain_rc=${RECOVERY_DRAIN_RC}"
+    jq -nc \
+      --argjson iid "${IID}" \
+      --argjson attempt_number "${RECOVERY_ATTEMPT}" \
+      --arg handoff_event_id "${RECOVERY_EVENT_ID}" \
+      --arg handoff_path "${RECOVERY_HANDOFF_PATH}" \
+      --arg handoff_import_status "${RECOVERY_IMPORT_STATUS}" '{
+      callback_status:"handoff_recovered",
+      iid:$iid,
+      attempt_number:$attempt_number,
+      handoff_event_id:$handoff_event_id,
+      handoff_path:$handoff_path,
+      handoff_import_status:$handoff_import_status,
+      chat_summary:("recovered durable handoff for #" + ($iid|tostring)
+        + " event=" + $handoff_event_id
+        + " handoff_import=" + $handoff_import_status)
+    }'
+    exit 0
+  fi
   jq -nc --argjson iid "${IID}" --argjson att "${ATTEMPT_NUMBER:-0}" \
     '{callback_status:"stale_or_already_drained", iid:$iid, attempt_number:$att,
       chat_summary:("stale callback: no pending entry for #" + ($iid|tostring))}'
@@ -188,11 +254,8 @@ fi
 # Run Phase 6 inline.
 PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "false")"
 
-# Persist updated campaign state.
+# Build the final envelope inputs before the one campaign-state transaction.
 NEW_STATE="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
-persist_state "${NEW_STATE}"
-
-# Build the chat-visible envelope.
 FINAL_STATUS="$(printf '%s' "${PHASE6_OUT}" | jq -r '.final_status')"
 CLEANUP="$(printf '%s' "${PHASE6_OUT}" | jq -c '.cleanup')"
 REMAINING_COUNT="$(printf '%s' "${PHASE6_OUT}" | jq -r '.remaining_pending_count')"
@@ -202,50 +265,71 @@ CAMPAIGN_STATUS="$(printf '%s' "${NEW_STATE}" | jq -r '.campaign_status // "runn
 if [ "${REMAINING_COUNT}" = "0" ] && [ "${CAMPAIGN_STATUS}" = "waiting_for_callbacks" ]; then
   CAMPAIGN_STATUS="running"
   NEW_STATE="$(printf '%s' "${NEW_STATE}" | jq -c '.campaign_status = "running"')"
-  persist_state "${NEW_STATE}"
 fi
 REMAINING_PENDING="$(printf '%s' "${NEW_STATE}" | jq -c '.pending_subagents | keys | map(tonumber)')"
 BLOCK_REASON="$(printf '%s' "${REPLY_JSON}" | jq -r '.block_reason // ""')"
 
-# Scheduler-driven terminal outcomes use a durable two-lock handoff. Finish all
-# project-local Phase 6 mutations first, atomically write only the physical-job
-# handoff under the campaign lock, then explicitly release that lock before the
-# importer reads scheduler state. Retryable `blocked` never creates a handoff or
-# releases the scheduler job.
+# Scheduler-driven terminal outcomes add the complete canonical physical-job
+# handoff intent to the same atomic state write that drains pending. Thus every
+# post-persist crash point retains job/claim identity even before the handoff
+# file exists. Retryable `blocked` never creates an intent or releases the job.
 HANDOFF_PATH=""
 HANDOFF_IMPORT_STATUS=""
+HANDOFF_INTENT=""
+HANDOFF_EVENT_ID=""
 if [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
   case "${FINAL_STATUS}" in
     done|failed|timeout)
-      HANDOFF_PATH="$(phase6_write_driven_handoff \
-        "${PENDING_ENTRY}" "${IID}" "${FINAL_STATUS}" "${MR_URL}" "${BLOCK_REASON}")"
-      wrapper_log followup \
-        "driven handoff persisted iid=${IID} job_id=$(jq -r '.job_id' <<<"${PENDING_ENTRY}") path=${HANDOFF_PATH}"
-
-      # The importer and its terminal recorder must never inherit ownership of
-      # the project lock. Closing fd 9 also lets a fake importer prove the
-      # boundary with `flock -n`.
-      flock -u 9
-      exec 9>&-
-
-      HANDOFF_IMPORTER="${DRIVEN_HANDOFF_IMPORTER:-${SCRIPT_DIR}/import_driven_handoff.sh}"
-      set +e
-      HANDOFF_FILE="${HANDOFF_PATH}" \
-        bash "${HANDOFF_IMPORTER}" >/dev/null \
-        2>>"${DISPATCHER_LOG_DIR}/wrapper.log"
-      HANDOFF_IMPORT_RC=$?
-      set -e
-      if [ "${HANDOFF_IMPORT_RC}" -eq 0 ]; then
-        HANDOFF_IMPORT_STATUS="imported"
-        wrapper_log followup \
-          "handoff import completed iid=${IID} path=${HANDOFF_PATH}"
-      else
-        HANDOFF_IMPORT_STATUS="pending"
-        wrapper_log followup \
-          "handoff import pending iid=${IID} rc=${HANDOFF_IMPORT_RC} path=${HANDOFF_PATH}; durable handoff retained for retry"
-      fi
+      HANDOFF_INTENT="$(phase6_build_driven_handoff_intent \
+        "${PENDING_ENTRY}" "${IID}" "${REPLY_ATTEMPT}" \
+        "${FINAL_STATUS}" "${MR_URL}" "${BLOCK_REASON}")"
+      HANDOFF_EVENT_ID="$(jq -r '.handoff.event_id' <<<"${HANDOFF_INTENT}")"
+      NEW_STATE="$(phase6_put_driven_handoff_intent \
+        "${NEW_STATE}" "${HANDOFF_INTENT}")"
       ;;
   esac
+fi
+
+# This is the transaction commit: pending removal, terminal classification,
+# campaign status, and the durable intent become visible together.
+persist_state "${NEW_STATE}"
+
+if [ -n "${HANDOFF_INTENT}" ]; then
+  if [ "${DRIVEN_HANDOFF_TEST_FAULT:-}" = crash_after_intent_persist ]; then
+    wrapper_log followup \
+      "driven handoff crash fault injected after intent persist iid=${IID} event_id=${HANDOFF_EVENT_ID}"
+    exit 86
+  fi
+
+  # Materialization and scheduler import are delegated to the reusable recovery
+  # entry after releasing the project lock. Import failure is non-fatal because
+  # both intent and any materialized handoff remain durable for callback replay
+  # or an independent periodic drain.
+  flock -u 9
+  exec 9>&-
+  set +e
+  HANDOFF_DRAIN_OUT="$(drain_driven_handoff_event "${HANDOFF_EVENT_ID}" \
+    2>>"${DISPATCHER_LOG_DIR}/wrapper.log")"
+  HANDOFF_DRAIN_RC=$?
+  set -e
+  HANDOFF_DRAIN_RESULT=""
+  if [ "${HANDOFF_DRAIN_RC}" -eq 0 ]; then
+    HANDOFF_DRAIN_RESULT="$(jq -c --arg event_id "${HANDOFF_EVENT_ID}" \
+      '.results[]? | select(.event_id == $event_id)' \
+      <<<"${HANDOFF_DRAIN_OUT}" 2>/dev/null || true)"
+  fi
+  HANDOFF_IMPORT_STATUS="pending"
+  if [ -n "${HANDOFF_DRAIN_RESULT}" ]; then
+    HANDOFF_PATH="$(jq -r '.handoff_path // ""' <<<"${HANDOFF_DRAIN_RESULT}")"
+    HANDOFF_DRAIN_STATUS="$(jq -r '.status' <<<"${HANDOFF_DRAIN_RESULT}")"
+    case "${HANDOFF_DRAIN_STATUS}" in
+      imported|imported_cleanup_pending)
+        HANDOFF_IMPORT_STATUS="imported"
+        ;;
+    esac
+  fi
+  wrapper_log followup \
+    "driven handoff drain iid=${IID} event_id=${HANDOFF_EVENT_ID} import_status=${HANDOFF_IMPORT_STATUS} drain_rc=${HANDOFF_DRAIN_RC} path=${HANDOFF_PATH:-pending}"
 fi
 
 CHAT_SUMMARY="#${IID} ${FINAL_STATUS}"

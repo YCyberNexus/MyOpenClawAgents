@@ -796,9 +796,11 @@ if CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${ORPHAN_HANDOFF}" \
   fail "missing scheduler job without a receipt was forged as success"
 fi
 
-# Delivery keeps failed entries durable, rejects a wrong accepted event, and
-# retries with byte-identical public event bodies. The fake also proves that
-# no scheduler lock is held during the network call.
+# Delivery keeps failed entries durable, rejects a wrong accepted event and an
+# unsupported same-event status, and accepts a same-event duplicate after the
+# dispatcher committed the first attempt but its acknowledgement was lost.
+# Retries keep byte-identical public event bodies. The fake also proves that no
+# scheduler lock is held during the network call.
 OPENCLAW_LOG="${TEST_ROOT}/openclaw.jsonl"
 OPENCLAW_BARRIER_DIR="${TEST_ROOT}/openclaw-barrier"
 FAKE_OPENCLAW="${TEST_ROOT}/fake-openclaw.sh"
@@ -849,6 +851,11 @@ if [ "${call_count}" -eq 1 ] && [ "${event_id}" = "batch-B:snapshot-0:terminal-1
   jq -nc '{status:"accepted",event_id:"wrong-event"}'
   exit 0
 fi
+if [ "${call_count}" -eq 1 ] && [ "${event_id}" = "batch-R:snapshot-0:terminal-1" ]; then
+  jq -nc --arg event_id "${event_id}" \
+    '{status:"retry_later",event_id:$event_id}'
+  exit 0
+fi
 if [ "${call_count}" -eq 2 ]; then
   printf '%s\n' ready >"${OPENCLAW_BARRIER_DIR:?}/${event_id}"
   barrier_ready=false
@@ -862,6 +869,12 @@ if [ "${call_count}" -eq 2 ]; then
   done
   [ "${barrier_ready}" = true ] || exit 96
 fi
+if [ "${call_count}" -eq 2 ] \
+    && [ "${event_id}" = "batch-A:snapshot-0:terminal-1" ]; then
+  jq -nc --arg event_id "${event_id}" \
+    '{status:"duplicate",event_id:$event_id}'
+  exit 0
+fi
 jq -nc --arg event_id "${event_id}" '{status:"accepted",event_id:$event_id}'
 EOF
 chmod +x "${FAKE_OPENCLAW}"
@@ -872,7 +885,7 @@ OPENCLAW_LOG="${OPENCLAW_LOG}" \
 OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
 bash "${DRAIN_OUTBOX}" >/dev/null
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .attempts == 1
     and .delivered_at == null
@@ -898,22 +911,24 @@ DRAIN_PID_B=$!
 wait "${DRAIN_PID_A}"
 wait "${DRAIN_PID_B}"
 
-for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .attempts == 2
     and (.delivered_at | type == "number" and . >= 0)
     and .last_error == null
   ' "${outbox_file}" >/dev/null \
-    || fail "accepted matching ack did not atomically mark delivery"
+    || fail "accepted or duplicate matching ack did not atomically mark delivery"
 done
-[ -f "${OUTBOX_A}" ] && [ -f "${OUTBOX_B}" ] \
+[ -f "${OUTBOX_A}" ] && [ -f "${OUTBOX_B}" ] && [ -f "${OUTBOX_R}" ] \
   || fail "drain deleted durable outbox evidence"
 jq -se \
   --arg event_a "${EVENT_A}" \
-  --arg event_b "${EVENT_B}" '
+  --arg event_b "${EVENT_B}" \
+  --arg event_r "${EVENT_R}" '
   def bodies($event): [.[] | select(.event_id == $event) | (.body | @json)];
   ((bodies($event_a) | length) == 2 and (bodies($event_a) | unique | length) == 1)
   and ((bodies($event_b) | length) == 2 and (bodies($event_b) | unique | length) == 1)
+  and ((bodies($event_r) | length) == 2 and (bodies($event_r) | unique | length) == 1)
 ' "${OPENCLAW_LOG}" >/dev/null \
   || fail "drain changed the public event body across retries or duplicated a concurrent send"
 
@@ -954,6 +969,7 @@ cp \
   "${SKILL_DIR}/scripts/dispatch_followup.sh" \
   "${SKILL_DIR}/scripts/_dispatch_lib.sh" \
   "${SKILL_DIR}/scripts/env_paths.sh" \
+  "${SKILL_DIR}/scripts/drain_driven_handoff_intents.sh" \
   "${FOLLOWUP_SCRIPTS}/"
 
 cat >"${FOLLOWUP_SCRIPTS}/reconcile.sh" <<'EOF'

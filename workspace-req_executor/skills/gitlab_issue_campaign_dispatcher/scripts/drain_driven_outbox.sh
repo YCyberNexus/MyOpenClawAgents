@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Deliver durable driven-batch callback entries. Entries are never deleted;
-# only a strict matching accepted acknowledgement marks delivered_at.
+# only a strict same-event accepted/duplicate acknowledgement marks delivered_at.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -141,13 +141,15 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
     elif ! jq -e --arg event_id "${event_id}" '
       type == "object"
       and (keys | sort) == ["event_id","status"]
-      and .status == "accepted"
+      and ((.status == "accepted") or (.status == "duplicate"))
       and .event_id == $event_id
     ' <<<"${ack_output}" >/dev/null 2>&1; then
       if ! jq -e . <<<"${ack_output}" >/dev/null 2>&1; then
         delivery_error="malformed_or_empty_ack"
-      elif [ "$(jq -r '.status // empty' <<<"${ack_output}")" != accepted ]; then
-        delivery_error="ack_not_accepted"
+      elif ! jq -e '
+          (.status == "accepted") or (.status == "duplicate")
+        ' <<<"${ack_output}" >/dev/null 2>&1; then
+        delivery_error="ack_not_accepted_or_duplicate"
       elif [ "$(jq -r '.event_id // empty' <<<"${ack_output}")" != "${event_id}" ]; then
         delivery_error="ack_event_id_mismatch"
       else
