@@ -5,6 +5,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-batch-recovery.XXXXXX")"
 ORIGIN='{"channel":"wecom","user":"recovery-user","conversation":"recovery-conversation","reply_agent":"reply-agent"}'
+AUTH_NONCE='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+AUTH_SNAPSHOT_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+ZERO_SNAPSHOT_DIGEST='bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
+CONFLICT_SNAPSHOT_DIGEST='cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
 
 sha256_text() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -12,6 +16,18 @@ sha256_text() {
   else
     shasum -a 256 | awk '{print $1}'
   fi
+}
+
+make_callback_envelope() {
+  local nonce="$1"
+  local event_json="$2"
+  local executor_agent="${3:-req_executor}"
+  jq -cn --arg nonce "${nonce}" --arg executor_agent "${executor_agent}" \
+    --argjson event "${event_json}" '{
+      callback_nonce:$nonce,
+      executor_agent:$executor_agent,
+      worker_result_json:$event
+    }'
 }
 
 # A durable receipt is a recovery boundary between an executor ack and the
@@ -26,6 +42,8 @@ RECEIPT_PAYLOAD="$(
   PROJECT="group/project" \
   SELECTOR_JSON='{"type":"single","iid":42}' \
   FORCE_RERUN_PR=false \
+  EXECUTOR_AGENT=req_executor \
+  CALLBACK_NONCE="${AUTH_NONCE}" \
   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
     "${BASH}" "${SKILL_DIR}/scripts/build_executor_batch_payload.sh"
 )"
@@ -38,6 +56,7 @@ PROJECT="group/project" \
 SELECTOR_JSON='{"type":"single","iid":42}' \
 FORCE_RERUN_PR=false \
 EXECUTOR_AGENT="req_executor" \
+CALLBACK_NONCE="${AUTH_NONCE}" \
 ORIGIN_JSON="${ORIGIN}" \
 PAYLOAD="${RECEIPT_PAYLOAD}" \
 REQUEST_DIGEST="${RECEIPT_DIGEST}" \
@@ -48,7 +67,7 @@ record_receipt() {
   BATCH_ID="${RECEIPT_BATCH_ID}" \
   EXECUTOR_AGENT="${1:-req_executor}" \
   MATCHED_COUNT="${2:-1}" \
-  SNAPSHOT_DIGEST="${3:-snapshot-receipt-fixed}" \
+  SNAPSHOT_DIGEST="${3:-${AUTH_SNAPSHOT_DIGEST}}" \
   SCHEDULER_STATUS="${4:-queued}" \
     "${BASH}" "${SKILL_DIR}/scripts/record_executor_batch_receipt.sh"
 }
@@ -64,7 +83,7 @@ if ! jq -e '
   exit 1
 fi
 
-evolved_receipt="$(record_receipt req_executor 1 snapshot-receipt-fixed running)"
+evolved_receipt="$(record_receipt req_executor 1 "${AUTH_SNAPSHOT_DIGEST}" running)"
 if ! jq -e '.status == "duplicate" and .scheduler_status == "running"' \
   <<<"${evolved_receipt}" >/dev/null; then
   echo "expected scheduler_status to evolve on an otherwise identical receipt" >&2
@@ -76,9 +95,9 @@ receipt_before_conflicts="$(jq -cS . "${RECEIPT_ROOT}/_dispatcher/executor_batch
 for conflict in executor matched snapshot; do
   set +e
   case "${conflict}" in
-    executor) record_receipt other_executor 1 snapshot-receipt-fixed running >/dev/null 2>"${TEST_ROOT}/${conflict}.err" ;;
-    matched) record_receipt req_executor 2 snapshot-receipt-fixed running >/dev/null 2>"${TEST_ROOT}/${conflict}.err" ;;
-    snapshot) record_receipt req_executor 1 snapshot-conflict running >/dev/null 2>"${TEST_ROOT}/${conflict}.err" ;;
+    executor) record_receipt other_executor 1 "${AUTH_SNAPSHOT_DIGEST}" running >/dev/null 2>"${TEST_ROOT}/${conflict}.err" ;;
+    matched) record_receipt req_executor 2 "${AUTH_SNAPSHOT_DIGEST}" running >/dev/null 2>"${TEST_ROOT}/${conflict}.err" ;;
+    snapshot) record_receipt req_executor 1 "${CONFLICT_SNAPSHOT_DIGEST}" running >/dev/null 2>"${TEST_ROOT}/${conflict}.err" ;;
   esac
   conflict_rc=$?
   set -e
@@ -108,11 +127,11 @@ repaired="$(
   NOTIFY_USER_SCRIPT="${TEST_ROOT}/not-used-notifier" \
     "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_outbox.sh"
 )"
-if ! jq -e '
+if ! jq -e --arg snapshot_digest "${AUTH_SNAPSHOT_DIGEST}" '
   .status == "accepted"
   and .batch_id == "batch-receipt-recovery"
   and .matched_count == 1
-  and .snapshot_digest == "snapshot-receipt-fixed"
+  and .snapshot_digest == $snapshot_digest
   and .scheduler_status == "running"
 ' <<<"${repaired}" >/dev/null; then
   echo "expected a received I1 to repair its mirror without another network call" >&2
@@ -142,6 +161,8 @@ ZERO_PAYLOAD="$(
   PROJECT="group/project" \
   SELECTOR_JSON='{"type":"single","iid":99}' \
   FORCE_RERUN_PR=false \
+  EXECUTOR_AGENT=req_executor \
+  CALLBACK_NONCE="${AUTH_NONCE}" \
   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
     "${BASH}" "${SKILL_DIR}/scripts/build_executor_batch_payload.sh"
 )"
@@ -153,6 +174,7 @@ PROJECT="group/project" \
 SELECTOR_JSON='{"type":"single","iid":99}' \
 FORCE_RERUN_PR=false \
 EXECUTOR_AGENT="req_executor" \
+CALLBACK_NONCE="${AUTH_NONCE}" \
 ORIGIN_JSON=null \
 PAYLOAD="${ZERO_PAYLOAD}" \
 REQUEST_DIGEST="${ZERO_DIGEST}" \
@@ -161,7 +183,7 @@ STATE_ROOT="${ZERO_ROOT}" \
 BATCH_ID="${ZERO_BATCH_ID}" \
 EXECUTOR_AGENT="req_executor" \
 MATCHED_COUNT=0 \
-SNAPSHOT_DIGEST="snapshot-zero-fixed" \
+SNAPSHOT_DIGEST="${ZERO_SNAPSHOT_DIGEST}" \
 SCHEDULER_STATUS=completed \
   "${BASH}" "${SKILL_DIR}/scripts/record_executor_batch_receipt.sh" >/dev/null
 STATE_ROOT="${ZERO_ROOT}" \
@@ -192,9 +214,12 @@ ZERO_NOTIFY_LOG="${ZERO_NOTIFY_LOG}" \
   "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh" >/dev/null
 if ! jq -e '.status == "accepted" and .matched_count == 0' \
   <<<"${zero_repaired}" >/dev/null \
-  || ! jq -e '
-    [.notifications[] | select(.event_id == "batch-zero-receipt:no-matches")] | length == 1
-  ' "${ZERO_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null \
+  || ! jq -e '.notifications | length == 0' \
+    "${ZERO_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null \
+  || [ "$(find "${ZERO_ROOT}/_dispatcher/delivered_notifications" -type f -name '*.json' | wc -l | tr -d ' ')" -ne 1 ] \
+  || ! find "${ZERO_ROOT}/_dispatcher/delivered_notifications" \
+    -type f -name '*.json' -exec jq -e \
+      '.event_id == "batch-zero-receipt:no-matches"' {} + >/dev/null \
   || [ "$(wc -l <"${ZERO_NOTIFY_LOG}" | tr -d ' ')" -ne 1 ]; then
   echo "zero-match receipt recovery duplicated its stable notification intent" >&2
   exit 1
@@ -229,7 +254,8 @@ RECEIPT_EVENT="$(jq -cn --arg batch_id "${RECEIPT_BATCH_ID}" '{
   mr_url:"https://gitlab.example/group/project/-/merge_requests/42",
   reason:null
 }')"
-RECEIPT_TRIGGER="$(printf 'RUN_DRIVEN_BATCH_RESULT\nworker_result_json=%s\n' "${RECEIPT_EVENT}")"
+RECEIPT_ENVELOPE="$(make_callback_envelope "${AUTH_NONCE}" "${RECEIPT_EVENT}")"
+RECEIPT_TRIGGER="$(printf 'RUN_DRIVEN_BATCH_RESULT\ncallback_envelope=%s\n' "${RECEIPT_ENVELOPE}")"
 accepted_ack="$(
   printf '%s\n' "${RECEIPT_TRIGGER}" | \
     env \
@@ -248,6 +274,10 @@ if [ "$(wc -l <<<"${accepted_ack}" | tr -d ' ')" -ne 1 ] \
   printf '%s\n' "${accepted_ack}" >&2
   exit 1
 fi
+STATE_ROOT="${RECEIPT_ROOT}" \
+NOTIFY_USER_SCRIPT="${FAIL_NOTIFY}" \
+FAIL_NOTIFY_LOG="${FAIL_NOTIFY_LOG}" \
+  "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh" >/dev/null 2>&1
 if ! jq -e '
   .notifications[0].attempts == 1
   and .notifications[0].delivered_at == null
@@ -256,13 +286,23 @@ if ! jq -e '
   exit 1
 fi
 
+retry_candidate="$(mktemp "${RECEIPT_ROOT}/_dispatcher/.notifications.retry.XXXXXX")"
+jq '
+  .notifications |= map(.next_attempt_at = "1970-01-01T00:00:00Z")
+' "${RECEIPT_ROOT}/_dispatcher/executor_batch_notifications.json" >"${retry_candidate}"
+mv "${retry_candidate}" "${RECEIPT_ROOT}/_dispatcher/executor_batch_notifications.json"
+
 duplicate_ack="$(
   STATE_ROOT="${RECEIPT_ROOT}" \
-  WORKER_RESULT_JSON="${RECEIPT_EVENT}" \
+  CALLBACK_ENVELOPE_JSON="${RECEIPT_ENVELOPE}" \
   NOTIFY_USER_SCRIPT="${SUCCESS_NOTIFY}" \
   SUCCESS_NOTIFY_LOG="${SUCCESS_NOTIFY_LOG}" \
     "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
 )"
+STATE_ROOT="${RECEIPT_ROOT}" \
+NOTIFY_USER_SCRIPT="${SUCCESS_NOTIFY}" \
+SUCCESS_NOTIFY_LOG="${SUCCESS_NOTIFY_LOG}" \
+  "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh" >/dev/null
 if [ "$(wc -l <<<"${duplicate_ack}" | tr -d ' ')" -ne 1 ] \
   || ! jq -e '.status == "duplicate"' <<<"${duplicate_ack}" >/dev/null \
   || [ "$(wc -l <"${FAIL_NOTIFY_LOG}" | tr -d ' ')" -ne 1 ] \
@@ -316,14 +356,16 @@ assert_callback_trigger_rejected() {
 
 assert_callback_trigger_rejected extra_callback_line \
   "${RECEIPT_TRIGGER}"$'\n''unexpected=true'
-assert_callback_trigger_rejected duplicate_worker_result \
-  "RUN_DRIVEN_BATCH_RESULT"$'\n'"worker_result_json=${RECEIPT_EVENT}"$'\n'"worker_result_json=${RECEIPT_EVENT}"
-assert_callback_trigger_rejected non_object_worker_result \
-  "RUN_DRIVEN_BATCH_RESULT"$'\n''worker_result_json=[]'
+assert_callback_trigger_rejected duplicate_callback_envelope \
+  "RUN_DRIVEN_BATCH_RESULT"$'\n'"callback_envelope=${RECEIPT_ENVELOPE}"$'\n'"callback_envelope=${RECEIPT_ENVELOPE}"
+assert_callback_trigger_rejected non_object_callback_envelope \
+  "RUN_DRIVEN_BATCH_RESULT"$'\n''callback_envelope=[]'
 assert_callback_trigger_rejected missing_i3_field \
-  "RUN_DRIVEN_BATCH_RESULT"$'\n'"worker_result_json=$(jq -c 'del(.reason)' <<<"${RECEIPT_EVENT}")"
+  "RUN_DRIVEN_BATCH_RESULT"$'\n'"callback_envelope=$(jq -c '.worker_result_json |= del(.reason)' <<<"${RECEIPT_ENVELOPE}")"
 assert_callback_trigger_rejected extra_i3_field \
-  "RUN_DRIVEN_BATCH_RESULT"$'\n'"worker_result_json=$(jq -c '.extra = true' <<<"${RECEIPT_EVENT}")"
+  "RUN_DRIVEN_BATCH_RESULT"$'\n'"callback_envelope=$(jq -c '.worker_result_json.extra = true' <<<"${RECEIPT_ENVELOPE}")"
+assert_callback_trigger_rejected unauthenticated_new_batch \
+  "RUN_DRIVEN_BATCH_RESULT"$'\n'"worker_result_json=${RECEIPT_EVENT}"
 
 # The old FIFO RUN_SINGLE_ISSUE now receives driven I3, not old I2. Its compact
 # acceptance must attach a bridge before the mirror becomes callback-visible.
@@ -342,27 +384,32 @@ cat >"${LEGACY_OPENCLAW}" <<'FAKE'
 set -euo pipefail
 shift
 message=""
+message_file=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent|--session-key|--timeout) shift 2 ;;
     --message) message="$2"; shift 2 ;;
+    --message-file) message_file="$2"; shift 2 ;;
     *) exit 91 ;;
   esac
 done
+[ -z "${message_file}" ] || [ "${message_file}" = /dev/stdin ] || exit 92
+[ -z "${message_file}" ] || message="$(cat)"
 iid="$(awk -F= '$1 == "iid" {print $2; exit}' <<<"${message}")"
-jq -nc --arg iid "${iid}" --arg message "${message}" \
+redacted_message="$(sed -E 's/^callback_nonce=.*/callback_nonce=<redacted>/' <<<"${message}")"
+jq -nc --arg iid "${iid}" --arg message "${redacted_message}" \
   '{iid:$iid,message:$message}' >>"${LEGACY_OPENCLAW_LOG:?LEGACY_OPENCLAW_LOG required}"
 case "${iid}" in
   700)
     jq -nc --arg batch_id "${SINGLE_BATCH_A:?}" '{
       status:"success",batch_id:$batch_id,matched_count:1,
-      snapshot_digest:"legacy-snapshot-a",scheduler_status:"queued"
+      snapshot_digest:("e" * 64),scheduler_status:"queued"
     }'
     ;;
   701)
     jq -nc --arg batch_id "${SINGLE_BATCH_B:?}" '{
       status:"success",batch_id:$batch_id,matched_count:0,
-      snapshot_digest:"legacy-snapshot-b",scheduler_status:"completed"
+      snapshot_digest:("f" * 64),scheduler_status:"completed"
     }'
     ;;
   *) exit 92 ;;
@@ -398,16 +445,36 @@ legacy_first="$(
   EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS=0 \
     "${BASH}" "${SKILL_DIR}/scripts/drain_executor_queue.sh"
 )"
+LEGACY_CALLBACK_NONCE="$(jq -r '.active.callback_nonce' \
+  "${LEGACY_ROOT}/_dispatcher/executor_queue.json")"
+LEGACY_CALLBACK_NONCE_SHA256="$(printf '%s' "${LEGACY_CALLBACK_NONCE}" | sha256_text)"
 if ! jq -e '.status == "launched" and .iid == 700' <<<"${legacy_first}" >/dev/null \
-  || ! jq -e --arg batch_id "${SINGLE_BATCH_A}" '
+  || ! jq -e --arg batch_id "${SINGLE_BATCH_A}" --arg digest "${LEGACY_CALLBACK_NONCE_SHA256}" '
     .active.driven_batch_id == $batch_id
     and .active.launch_state == "launched"
+    and .active.driven_project == "group/project"
+    and .active.driven_callback_auth_mode == "nonce_v1"
+    and .active.driven_callback_nonce_sha256 == $digest
   ' "${LEGACY_ROOT}/_dispatcher/executor_queue.json" >/dev/null \
-  || ! jq -e --arg batch_id "${SINGLE_BATCH_A}" '
+  || ! jq -e --arg batch_id "${SINGLE_BATCH_A}" --arg digest "${LEGACY_CALLBACK_NONCE_SHA256}" '
     .batches[$batch_id].matched_count == 1
+    and .batches[$batch_id].project == "group/project"
+    and .batches[$batch_id].executor_agent == "req_executor"
+    and .batches[$batch_id].callback_auth_mode == "nonce_v1"
+    and .batches[$batch_id].callback_nonce_sha256 == $digest
   ' "${LEGACY_ROOT}/_dispatcher/executor_batches.json" >/dev/null; then
   echo "legacy single acceptance did not attach a durable I3 bridge and mirror" >&2
   printf '%s\n' "${legacy_first}" >&2
+  exit 1
+fi
+if ! jq -e --arg digest "${LEGACY_CALLBACK_NONCE_SHA256}" '
+  (.pending | length) == 1
+  and (.pending[]
+    | .callback_auth_mode == "nonce_v1"
+    and .callback_nonce_sha256 == $digest
+    and (has("callback_nonce") | not))
+' "${LEGACY_ROOT}/_dispatcher/pending.json" >/dev/null; then
+  echo "legacy-single pending state did not retain only the callback nonce digest" >&2
   exit 1
 fi
 
@@ -421,9 +488,10 @@ LEGACY_EVENT="$(jq -cn --arg batch_id "${SINGLE_BATCH_A}" '{
   mr_url:null,
   reason:"already terminal"
 }')"
+LEGACY_ENVELOPE="$(make_callback_envelope "${LEGACY_CALLBACK_NONCE}" "${LEGACY_EVENT}")"
 legacy_ack="$(
   STATE_ROOT="${LEGACY_ROOT}" \
-  WORKER_RESULT_JSON="${LEGACY_EVENT}" \
+  CALLBACK_ENVELOPE_JSON="${LEGACY_ENVELOPE}" \
   NOTIFY_USER_SCRIPT="${LEGACY_NOTIFY}" \
   LEGACY_NOTIFY_LOG="${LEGACY_NOTIFY_LOG}" \
   OPENCLAW_BIN="${LEGACY_OPENCLAW}" \
@@ -440,6 +508,21 @@ if [ "$(wc -l <<<"${legacy_ack}" | tr -d ' ')" -ne 1 ] \
   printf '%s\n' "${legacy_ack}" >&2
   exit 1
 fi
+mkdir -p "${TEST_ROOT}/legacy-tick"
+ln -s "${SCRIPT_DIR}/fixtures/executor_tick_stage.sh" \
+  "${TEST_ROOT}/legacy-tick/evict.sh"
+STATE_ROOT="${LEGACY_ROOT}" \
+EVICT_STUCK_SCRIPT="${TEST_ROOT}/legacy-tick/evict.sh" \
+TICK_ORDER_LOG="${TEST_ROOT}/legacy-tick/order.log" \
+NOTIFY_USER_SCRIPT="${LEGACY_NOTIFY}" \
+LEGACY_NOTIFY_LOG="${LEGACY_NOTIFY_LOG}" \
+OPENCLAW_BIN="${LEGACY_OPENCLAW}" \
+LEGACY_OPENCLAW_LOG="${LEGACY_OPENCLAW_LOG}" \
+SINGLE_BATCH_A="${SINGLE_BATCH_A}" \
+SINGLE_BATCH_B="${SINGLE_BATCH_B}" \
+DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
+EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS=0 \
+  "${BASH}" "${SKILL_DIR}/scripts/run_executor_batch_tick.sh" >/dev/null
 if ! jq -e '.active == null and (.queue | length) == 0' \
   "${LEGACY_ROOT}/_dispatcher/executor_queue.json" >/dev/null \
   || ! jq -e '.pending | length == 0' \
@@ -471,7 +554,7 @@ fi
 
 legacy_duplicate="$(
   STATE_ROOT="${LEGACY_ROOT}" \
-  WORKER_RESULT_JSON="${LEGACY_EVENT}" \
+  CALLBACK_ENVELOPE_JSON="${LEGACY_ENVELOPE}" \
   NOTIFY_USER_SCRIPT="${LEGACY_NOTIFY}" \
   LEGACY_NOTIFY_LOG="${LEGACY_NOTIFY_LOG}" \
     "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
@@ -489,7 +572,10 @@ CRASH_ROOT="${TEST_ROOT}/notify-crash-state"
 CRASH_BATCH_ID="batch-notify-crash"
 STATE_ROOT="${CRASH_ROOT}" \
 BATCH_ID="${CRASH_BATCH_ID}" \
+PROJECT="group/project" \
 EXECUTOR_AGENT="req_executor" \
+CALLBACK_AUTH_MODE=legacy_pre_upgrade \
+ALLOW_LEGACY_PRE_UPGRADE=true \
 ORIGIN_JSON="${ORIGIN}" \
 MATCHED_COUNT=1 \
 REQUEST_DIGEST="notify-crash-request" \

@@ -44,6 +44,42 @@ DRAINED_AT="$(date -u +%s)"
 
 exec 9>"${LOCK_FILE}"
 flock 9
+pending_entry="$(jq -c --arg rid "${RUN_ID}" '.pending[$rid] // null' "${PENDING_FILE}")" \
+  || { echo "jq read failed on ${PENDING_FILE} (corrupt?)" >&2; exit 1; }
+persisted_stage="$(jq -r '.stage // ""' <<<"${pending_entry}")"
+if [ "${STAGE}" = executor ] || [ "${persisted_stage}" = executor ]; then
+  active="$(jq -c '.active // null' "${EXECUTOR_QUEUE_FILE}")" \
+    || { echo "jq read failed on ${EXECUTOR_QUEUE_FILE} (corrupt?)" >&2; exit 1; }
+  if ! jq -en \
+    --argjson pending "${pending_entry}" \
+    --argjson active "${active}" \
+    --arg stage "${STAGE}" \
+    --arg project "${PROJECT}" \
+    --arg iid "${IID}" '
+      $pending != null
+      and $active != null
+      and $stage == "executor"
+      and $pending.stage == "executor"
+      and $pending.callback_auth_mode == "legacy_pre_upgrade"
+      and (($pending | has("callback_nonce")) | not)
+      and ($pending.callback_nonce_sha256 // null) == null
+      and $active.driven_callback_auth_mode == "legacy_pre_upgrade"
+      and (($active | has("callback_nonce")) | not)
+      and ($active.driven_callback_nonce_sha256 // null) == null
+      and ($active.launch_state // "launched") == "launched"
+      and $pending.run_id == $active.run_id
+      and $pending.correlation_id == $active.correlation_id
+      and $pending.project == $active.project
+      and $pending.iid == $active.iid
+      and $project != ""
+      and $project == $pending.project
+      and ($iid | test("^[1-9][0-9]*$"))
+      and ($iid | tonumber) == $pending.iid
+    ' >/dev/null; then
+    echo "drain_pending: executor callback is not an authorized legacy I2" >&2
+    exit 3
+  fi
+fi
 present="$(jq -r --arg rid "${RUN_ID}" 'if .pending[$rid] then "yes" else "no" end' "${PENDING_FILE}")" \
   || { echo "jq read failed on ${PENDING_FILE} (corrupt?)" >&2; exit 1; }
 # 追加 ledger（即便 pending 已不在也记，便于审计重复/迟到回调）。
@@ -64,7 +100,6 @@ jq -nc --arg rid "${RUN_ID}" --arg oc "${OUTCOME}" \
      drained_at:$ts, was_pending:($present=="yes")}' \
    >> "${LEDGER_FILE}"
 tmp="$(mktemp "${DISPATCHER_DIR}/pending.XXXXXX")"
-trap 'rm -f "${tmp}"' EXIT
 jq --arg rid "${RUN_ID}" 'del(.pending[$rid])' "${PENDING_FILE}" > "${tmp}"
 mv "${tmp}" "${PENDING_FILE}"
 flock -u 9

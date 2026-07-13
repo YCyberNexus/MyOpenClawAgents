@@ -29,9 +29,9 @@ All three:
 
 The LLM contract reduces to four genuinely LLM-only operations:
 
-1. (per spawn) `sessions_spawn(task=<file contents>, label=child_label,
-   runtime="subagent", mode="run", cleanup="keep", context="isolated")`
-   — anonymous, NO `name=`/`session_name=`/`mode="session"`.
+1. (per spawn) `sessions_spawn(payload=<file contents>, label=child_label,
+   timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>,
+   cleanup="keep")` — anonymous, NO `name=`/`session_name=`/`mode="session"`.
 2. (per spawn outcome) `bash scripts/dispatch_record_spawn.sh ...` to
    write back the result.
 3. (per terminal IID) `bash scripts/dispatch_followup.sh ...` on each
@@ -82,7 +82,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 4. Acquire flock; load `${CAMPAIGN_STATE_FILE}` (or fresh-init).
 5. Apply trigger overrides into the in-memory state JSON; validate
    `max_concurrent_subagents` (1..pool_size), `max_accounts_per_issue`,
-   `acpx_timeout_seconds`, `require_labels_match`.
+   `run_timeout_seconds`, `acpx_timeout_seconds`, `require_labels_match`.
 6. Migrate legacy on-disk shapes (`active_issue_iid` → array,
    stale account-count fields dropped).
 7. Compute `effective_iid_universe` (`[issue_min_iid,issue_max_iid]`
@@ -100,7 +100,7 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
    (`now - spawned_at >= acpx_timeout_seconds - 60s`) is timeout-shaped:
    it synthesizes a Phase 6 **timeout** reply, so the IID parks in
    `timeout_iids` with no auto-retry (只要超时就不重试). With the default
-   `stuck_after_minutes` (`ceil((acpx_timeout_seconds+120)/60)+30`) every stuck
+   `stuck_after_minutes` (`ceil(run_timeout_seconds/60)+30`) every stuck
    eviction passes that budget check; only an operator-shortened
    `stuck_after_minutes` can evict early enough to stay **blocked**
    (retryable). Placeholder evictions (spawn never landed) always stay
@@ -184,7 +184,8 @@ Trigger: `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 | Field | Meaning |
 | ----- | ------- |
 | `status` | `"ready"` (LLM should spawn), `"waiting_for_callbacks"` (no new batch this tick), `"no_eligible_iids"` (nothing eligible OR all batch IIDs blocked during prep), `"completed"` (every IID in range terminal), `"lock_held"` (another dispatcher tick is holding the flock — safe to retry on the next scheduled trigger), `"tick_failed"` (hard failure — auth, reconcile_failed, ensure_labels_failed, clone_or_pull_failed; chat_summary has the verbatim reason). `lock_held` is distinct from `tick_failed` on purpose: the runtime can re-deliver the trigger soon, while `tick_failed` usually needs operator attention. |
-| `dispatch_entries` | Array of `{iid, attempt_number, child_label, payload_path}` objects; empty unless `status == "ready"`. The LLM `Read`s each `payload_path` and feeds the file contents to `sessions_spawn(task=<contents>, runtime="subagent", mode="run", cleanup="keep", context="isolated")`. **Token-sensitive:** the file holds the GitLab token in cleartext (substituted from `{GITLAB_TOKEN}`); the wrapper writes it with mode 0600 and `dispatch_record_spawn.sh STATUS=spawned` truncates it once the runtime has it. The wrapper.log MUST NEVER include the rendered prompt contents. |
+| `dispatch_entries` | Array of `{iid, attempt_number, child_label, payload_path}` objects; empty unless `status == "ready"`. The LLM `Read`s each `payload_path` and feeds the file contents to `sessions_spawn(payload=...)`. **Token-sensitive:** the file holds the GitLab token in cleartext (substituted from `{GITLAB_TOKEN}`); the wrapper writes it with mode 0600 and `dispatch_record_spawn.sh STATUS=spawned` truncates it once the runtime has it. The wrapper.log MUST NEVER include the rendered prompt contents. |
+| `run_timeout_seconds` | Pass as `runTimeoutSeconds=` to every `sessions_spawn` in this tick. |
 | `max_launch_retries` | Always `3` today. LLM retries the IDENTICAL spawn payload this many times. |
 | `backoff_seconds` | Always `2` today. Sleep between retries. |
 | `evicted_iids` | IIDs that were evicted from `pending_subagents` at the top of this tick, either because they were outside the current trigger scope or because they were stuck past `stuck_after_minutes`. Stuck evictions whose run outlived `acpx_timeout_seconds - 60s` are classified `timeout` (parked, no auto-retry); scope/placeholder evictions and early stuck evictions are classified `blocked`. |

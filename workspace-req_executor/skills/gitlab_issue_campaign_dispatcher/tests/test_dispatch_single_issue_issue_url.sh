@@ -33,6 +33,8 @@ RUN_SINGLE_ISSUE
 issue_url=http://gitlab-b.pxsemic.tech:30000/claw_gitlab/req_executor_test/-/issues/42
 correlation_id=reqd-url
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=6666666666666666666666666666666666666666666666666666666666666666
 branch=release/2026.07
 EOF
 then

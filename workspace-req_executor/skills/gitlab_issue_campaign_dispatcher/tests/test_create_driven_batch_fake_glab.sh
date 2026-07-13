@@ -24,6 +24,8 @@ cat >"${CONFIG_DIR}/campaign_defaults.env" <<EOF
 REPO_PARENT_PATH=/data
 EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}
 EXECUTOR_MAX_CONCURRENCY=3
+EXECUTOR_AGENT=req_executor
+DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
 EOF
 
 cat >"${FAKE_GLAB}" <<'EOF'
@@ -50,41 +52,187 @@ case "${1:-}" in
     exit 0
     ;;
   api)
-    endpoint="${2:-}"
-    printf '%s\n' "${endpoint}" >>"${FAKE_GLAB_API_LOG:?}"
-    if [[ ! "${endpoint}" =~ ^projects/group%2Frepo/issues\?state=opened\&per_page=100\&page=([0-9]+)$ ]]; then
-      echo "unexpected GitLab API endpoint: ${endpoint}" >&2
+    [ "${2:-}" = graphql ] || {
+      echo "offset REST pagination is forbidden: ${2:-}" >&2
       exit 90
+    }
+    shift 2
+    query=""
+    full_path=""
+    after=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        -f|-F|--field|--raw-field)
+          shift
+          field="${1:-}"
+          case "${field}" in
+            query=*) query="${field#query=}" ;;
+            fullPath=*) full_path="${field#fullPath=}" ;;
+            after=*) after="${field#after=}" ;;
+          esac
+          ;;
+      esac
+      [ "$#" -gt 0 ] && shift
+    done
+    [ "${full_path}" = group/repo ] || {
+      echo "missing GraphQL fullPath variable" >&2
+      exit 91
+    }
+    [[ "${query}" == *'issues(first: 100, after: $after, state: opened, sort: created_asc)'* ]] \
+      && [[ "${query}" == *'labels(first: 100)'* ]] \
+      && [[ "${query}" == *pageInfo* ]] \
+      && [[ "${query}" == *endCursor* ]] \
+      && [[ "${query}" == *hasNextPage* ]] || {
+      echo "GraphQL query lacks cursor pagination contract" >&2
+      exit 92
+    }
+    printf 'graphql after=%s\n' "${after:-<null>}" >>"${FAKE_GLAB_API_LOG:?}"
+
+    scan=0
+    if [ -z "${after}" ]; then
+      [ ! -f "${FAKE_GLAB_SCAN_STATE:?}" ] || scan="$(cat "${FAKE_GLAB_SCAN_STATE}")"
+      scan=$((scan + 1))
+      printf '%s' "${scan}" >"${FAKE_GLAB_SCAN_STATE}"
+    else
+      scan="$(cat "${FAKE_GLAB_SCAN_STATE:?}")"
     fi
-    page="${BASH_REMATCH[1]}"
-    case "${FAKE_GLAB_MODE:-success}:${page}" in
-      fail_page_2:2)
+
+    response() {
+      local nodes="$1" has_next="$2" end_cursor_json="$3"
+      nodes="$(jq -c '
+        map(.labels.pageInfo = (.labels.pageInfo // {hasNextPage:false}))
+      ' <<<"${nodes}")"
+      jq -cn \
+        --argjson nodes "${nodes}" \
+        --argjson has_next "${has_next}" \
+        --argjson end_cursor "${end_cursor_json}" \
+        '{data:{project:{issues:{nodes:$nodes,pageInfo:{
+          hasNextPage:$has_next,endCursor:$end_cursor
+        }}}}}'
+    }
+
+    case "${FAKE_GLAB_MODE:-success}:${after:-first}" in
+      fail_page_2:cursor-default-1)
         echo "simulated page 2 failure" >&2
-        exit 91
+        exit 93
         ;;
-      malformed_page_2:2)
+      malformed_page_2:cursor-default-1)
         printf '%s\n' '{"not":"an array"}'
         ;;
-      *:1)
-        printf '%s\n' '[
-          {"iid":4,"state":"opened","labels":["smoke","timeout"]},
-          {"iid":2,"state":"opened","labels":["pr"]},
-          {"iid":1,"state":"opened","labels":[]}
-        ]'
+      repeating_front_churn:first)
+        if [ "${scan}" -eq 1 ]; then
+          range_start=1
+          range_end=101
+          boundary_cursor='"cursor-boundary-old"'
+        else
+          range_start=2
+          range_end=102
+          boundary_cursor='"cursor-boundary-stable"'
+        fi
+        nodes="$(jq -cn \
+          --argjson range_start "${range_start}" \
+          --argjson range_end "${range_end}" '[range($range_start;$range_end) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" true "${boundary_cursor}"
         ;;
-      *:2)
-        printf '%s\n' '[
-          {"iid":4,"state":"opened","labels":["smoke","timeout"]},
-          {"iid":3,"state":"opened","labels":["blocked-cc"]},
-          {"iid":5,"state":"closed","labels":["smoke"]}
-        ]'
+      repeating_front_churn:cursor-boundary-old)
+        nodes="$(jq -cn '[range(101;106) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" false null
         ;;
-      *:3)
-        printf '%s\n' '[]'
+      repeating_front_churn:cursor-boundary-stable)
+        nodes="$(jq -cn '[range(102;106) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" false null
+        ;;
+      duplicate_iid:first)
+        nodes="$(jq -cn '[range(1;101) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" true '"cursor-duplicate-100"'
+        ;;
+      duplicate_iid:cursor-duplicate-100)
+        nodes="$(jq -cn '[range(100;106) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" false null
+        ;;
+      stalled_cursor:first)
+        response '[{"iid":"1","state":"opened","labels":{"nodes":[]}}]' \
+          true '"cursor-stalled"'
+        ;;
+      stalled_cursor:cursor-stalled)
+        stalled_state="${FAKE_GLAB_SCAN_STATE}.stalled"
+        stalled_calls=0
+        [ ! -f "${stalled_state}" ] || stalled_calls="$(cat "${stalled_state}")"
+        stalled_calls=$((stalled_calls + 1))
+        printf '%s' "${stalled_calls}" >"${stalled_state}"
+        [ "${stalled_calls}" -le 1 ] || exit 95
+        response '[{"iid":"2","state":"opened","labels":{"nodes":[]}}]' \
+          true '"cursor-stalled"'
+        ;;
+      unsafe_cursor:first)
+        response '[{"iid":"1","state":"opened","labels":{"nodes":[]}}]' \
+          true '"cursor with spaces"'
+        ;;
+      runaway_cursor:*)
+        if [ -z "${after}" ]; then
+          runaway_page=1
+        else
+          runaway_page="${after##*-}"
+          runaway_page=$((runaway_page + 1))
+        fi
+        [ "${runaway_page}" -le 5 ] || exit 96
+        nodes="$(jq -cn --argjson iid "${runaway_page}" \
+          '[{iid:($iid|tostring),state:"opened",labels:{nodes:[]}}]')"
+        response "${nodes}" true "\"cursor-runaway-${runaway_page}\""
+        ;;
+      node_limit:first)
+        nodes="$(jq -cn '[range(1;5) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" false null
+        ;;
+      never_stable:first)
+        nodes="$(jq -cn '[range(1;101) | {
+          iid:(.|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" true '"cursor-never-stable"'
+        ;;
+      never_stable:cursor-never-stable)
+        nodes="$(jq -cn --argjson scan "${scan}" '[{
+          iid:((100 + $scan)|tostring),state:"opened",labels:{nodes:[]}
+        }]')"
+        response "${nodes}" false null
+        ;;
+      truncated_labels:first)
+        response '[{
+          "iid":"7",
+          "state":"opened",
+          "labels":{
+            "nodes":[{"title":"smoke"}],
+            "pageInfo":{"hasNextPage":true}
+          }
+        }]' false null
+        ;;
+      *:first)
+        response '[
+          {"iid":"4","state":"opened","labels":{"nodes":[{"title":"smoke"},{"title":"timeout"}]}},
+          {"iid":"2","state":"opened","labels":{"nodes":[{"title":"pr"}]}},
+          {"iid":"1","state":"opened","labels":{"nodes":[]}}
+        ]' true '"cursor-default-1"'
+        ;;
+      *:cursor-default-1)
+        response '[
+          {"iid":"3","state":"opened","labels":{"nodes":[{"title":"blocked-cc"}]}}
+        ]' false null
         ;;
       *)
-        echo "unexpected pagination past the empty page: ${page}" >&2
-        exit 92
+        echo "unexpected GraphQL cursor: ${after}" >&2
+        exit 94
         ;;
     esac
     ;;
@@ -101,9 +249,14 @@ run_batch() {
   local selector_lines="$2"
   local mode="${3:-success}"
   local config_dir="${4:-${CONFIG_DIR}}"
+  local max_cursor_pages="${5:-}"
+  local max_snapshot_nodes="${6:-}"
 
   FAKE_GLAB_API_LOG="${API_LOG}" \
+    FAKE_GLAB_SCAN_STATE="${TEST_ROOT}/scan-${batch_id}" \
     FAKE_GLAB_MODE="${mode}" \
+    CREATE_BATCH_MAX_CURSOR_PAGES="${max_cursor_pages}" \
+    CREATE_BATCH_MAX_SNAPSHOT_NODES="${max_snapshot_nodes}" \
     GLAB_BIN="${FAKE_GLAB}" \
     GITLAB_TOKEN="executor-owned-token" \
     CONFIG_DIR="${config_dir}" \
@@ -115,19 +268,44 @@ project=group/repo
 ${selector_lines}
 force_rerun_pr=false
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
 }
+
+# Keep the full-scan accumulator out of argv. Passing every previously seen
+# Issue through `jq --argjson current ...` on each cursor page grows one process
+# argument until it hits ARG_MAX, well before the advertised node ceiling.
+argv_accumulator_regressions=0
+if grep -Eq -- '--argjson[[:space:]]+current' "${CREATE_BATCH}"; then
+  echo "GraphQL cursor intake still carries the accumulated scan through argv" >&2
+  argv_accumulator_regressions=1
+fi
+if grep -Eq -- '--argjson[[:space:]]+iids' "${CREATE_BATCH}"; then
+  echo "GraphQL snapshot creation still carries every matched IID through argv" >&2
+  argv_accumulator_regressions=1
+fi
+[ "${argv_accumulator_regressions}" -eq 0 ] || exit 1
 
 unfinished_out="$(run_batch unfinished 'selector_type=open_unfinished')"
 label_out="$(run_batch label $'selector_type=open_label\nlabel=smoke')"
 range_out="$(run_batch range $'selector_type=range\niid_min=2\niid_max=4')"
 single_out="$(run_batch single $'selector_type=single\niid=2')"
+zero_out="$(run_batch zero $'selector_type=single\niid=999')"
 
 BATCH_ROOT="${SCHEDULER_ROOT}/batches"
+if find "${BATCH_ROOT}" -name normalized-issue-pages.jsonl -print -quit \
+    | grep -q .; then
+  echo "published batch retained the private GraphQL scan accumulator" >&2
+  exit 1
+fi
 jq -e '.iids == [1]' "${BATCH_ROOT}/unfinished/snapshot.json" >/dev/null
 jq -e '.iids == [4]' "${BATCH_ROOT}/label/snapshot.json" >/dev/null
 jq -e '.iids == [2,3,4]' "${BATCH_ROOT}/range/snapshot.json" >/dev/null
 jq -e '.iids == [2]' "${BATCH_ROOT}/single/snapshot.json" >/dev/null
+jq -e '.iids == []' "${BATCH_ROOT}/zero/snapshot.json" >/dev/null
+jq -e '.status == "completed" and .matched_count == 0' \
+  "${BATCH_ROOT}/zero/state.json" >/dev/null
 
 for batch_id in unfinished label range single; do
   for filename in request.json snapshot.json state.json; do
@@ -145,6 +323,19 @@ for batch_id in unfinished label range single; do
       and .status == "queued"' \
     "${BATCH_ROOT}/${batch_id}/state.json" >/dev/null
 done
+for filename in request.json snapshot.json state.json; do
+  [ -f "${BATCH_ROOT}/zero/${filename}" ] || {
+    echo "expected persisted ${filename} for zero" >&2
+    exit 1
+  }
+done
+jq -e '
+  .batch_id == "zero"
+  and .matched_count == 0
+  and (.request_digest | type == "string" and length == 64)
+  and (.snapshot_digest | type == "string" and length == 64)
+  and .status == "completed"
+' "${BATCH_ROOT}/zero/state.json" >/dev/null
 
 jq -e \
   '.status == "success"
@@ -179,6 +370,14 @@ jq -e '
   and (.snapshot_digest | type == "string" and test("^[0-9a-f]{64}$"))
   and .scheduler_status == "queued"
 ' <<<"${single_acceptance}" >/dev/null
+zero_acceptance="$(emit_acceptance zero)"
+jq -e '
+  .status == "success"
+  and .batch_id == "zero"
+  and .matched_count == 0
+  and .scheduler_status == "completed"
+' <<<"${zero_acceptance}" >/dev/null \
+  || { echo "zero-match cold batch could not emit acceptance" >&2; exit 1; }
 
 # Exercise the real req_dispatcher run_agent_turn extraction and strict
 # acceptance check. A rich executor envelope and a human chat summary are not
@@ -212,7 +411,9 @@ enqueue_dispatcher_fixture() {
     'selector_type=single' \
     'iid=2' \
     'force_rerun_pr=false' \
-    'dispatcher_callback_target=agent:req_dispatcher:main')"
+    'dispatcher_callback_target=agent:req_dispatcher:main' \
+    'executor_agent=req_executor' \
+    'callback_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')"
   request_digest="$(printf '%s' "${payload}" | sha256_text)"
   STATE_ROOT="${state_root}" \
   BATCH_ID="${batch_id}" \
@@ -222,6 +423,7 @@ enqueue_dispatcher_fixture() {
   FORCE_RERUN_PR=false \
   TARGET_BRANCH='' \
   EXECUTOR_AGENT=req_executor \
+  CALLBACK_NONCE=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
   ORIGIN_JSON=null \
   PAYLOAD="${payload}" \
   REQUEST_DIGEST="${request_digest}" \
@@ -473,8 +675,157 @@ if run_batch malformed-page-2 'selector_type=open_unfinished' malformed_page_2 \
   echo "expected a non-array GitLab page to fail batch intake" >&2
   exit 1
 fi
+
+if run_batch truncated-labels $'selector_type=open_label\nlabel=smoke' truncated_labels \
+    >"${TEST_ROOT}/truncated-labels.out" \
+    2>"${TEST_ROOT}/truncated-labels.err"; then
+  echo "expected an incomplete nested labels connection to fail batch intake" >&2
+  exit 1
+fi
+[ ! -e "${BATCH_ROOT}/truncated-labels/snapshot.json" ] || {
+  echo "incomplete nested labels left a runnable partial snapshot" >&2
+  exit 1
+}
 [ ! -e "${BATCH_ROOT}/malformed-page-2/snapshot.json" ] || {
   echo "malformed pagination left a runnable partial snapshot" >&2
+  exit 1
+}
+
+boundary_out="$(run_batch boundary-stable 'selector_type=open_unfinished' repeating_front_churn)"
+jq -e '
+  .status == "success"
+  and .matched_count == 104
+  and .scheduler_status == "queued"
+' <<<"${boundary_out}" >/dev/null || {
+  echo "stable re-scan did not recover all IIDs across a moving page boundary" >&2
+  exit 1
+}
+jq -e '
+  (.iids | length) == 104
+  and .iids[0] == 2
+  and .iids[99] == 101
+  and .iids[100] == 102
+  and .iids[103] == 105
+' "${BATCH_ROOT}/boundary-stable/snapshot.json" >/dev/null || {
+  echo "moving page boundary froze a partial snapshot" >&2
+  exit 1
+}
+[ "$(cat "${TEST_ROOT}/scan-boundary-stable")" -eq 3 ] || {
+  echo "snapshot must wait for two consecutive identical full scans" >&2
+  exit 1
+}
+if grep -Eq 'page=|per_page=|/issues\?' "${API_LOG}"; then
+  echo "batch intake fell back to moving offset pagination" >&2
+  exit 1
+fi
+
+if run_batch never-stable 'selector_type=open_unfinished' never_stable \
+  >"${TEST_ROOT}/never-stable.out" 2>"${TEST_ROOT}/never-stable.err"; then
+  echo "expected continuously changing pagination to fail closed" >&2
+  exit 1
+fi
+[ ! -e "${BATCH_ROOT}/never-stable/snapshot.json" ] || {
+  echo "unstable pagination left a runnable partial snapshot" >&2
+  exit 1
+}
+unstable_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+  -path '*batch-intake-never-stable.*/failure.json' -print -quit)"
+[ -n "${unstable_failure}" ] || {
+  echo "unstable pagination did not retain failure evidence" >&2
+  exit 1
+}
+jq -e '.reason == "gitlab_snapshot_unstable"' "${unstable_failure}" >/dev/null || {
+  echo "unstable pagination failure was not classified" >&2
+  exit 1
+}
+
+for cursor_failure in duplicate_iid stalled_cursor unsafe_cursor; do
+  if run_batch "${cursor_failure}" 'selector_type=open_unfinished' "${cursor_failure}" \
+      >"${TEST_ROOT}/${cursor_failure}.out" \
+      2>"${TEST_ROOT}/${cursor_failure}.err"; then
+    echo "expected ${cursor_failure} cursor intake to fail closed" >&2
+    exit 1
+  fi
+  [ ! -e "${BATCH_ROOT}/${cursor_failure}/snapshot.json" ] || {
+    echo "${cursor_failure} cursor intake left a runnable snapshot" >&2
+    exit 1
+  }
+done
+
+if run_batch cursor-page-limit 'selector_type=open_unfinished' runaway_cursor \
+    "${CONFIG_DIR}" 3 100 \
+    >"${TEST_ROOT}/cursor-page-limit.out" \
+    2>"${TEST_ROOT}/cursor-page-limit.err"; then
+  echo "expected an endlessly advancing cursor scan to hit the page limit" >&2
+  exit 1
+fi
+page_limit_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+  -path '*batch-intake-cursor-page-limit.*/failure.json' -print -quit)"
+jq -e '.reason == "gitlab_cursor_page_limit"' "${page_limit_failure}" >/dev/null || {
+  echo "cursor page limit failure was not classified" >&2
+  exit 1
+}
+[ ! -e "${BATCH_ROOT}/cursor-page-limit/snapshot.json" ] || {
+  echo "cursor page limit left a runnable snapshot" >&2
+  exit 1
+}
+
+if run_batch cursor-node-limit 'selector_type=open_unfinished' node_limit \
+    "${CONFIG_DIR}" 10 3 \
+    >"${TEST_ROOT}/cursor-node-limit.out" \
+    2>"${TEST_ROOT}/cursor-node-limit.err"; then
+  echo "expected an oversized full scan to hit the node limit" >&2
+  exit 1
+fi
+node_limit_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+  -path '*batch-intake-cursor-node-limit.*/failure.json' -print -quit)"
+jq -e '.reason == "gitlab_snapshot_node_limit"' "${node_limit_failure}" >/dev/null || {
+  echo "snapshot node limit failure was not classified" >&2
+  exit 1
+}
+[ ! -e "${BATCH_ROOT}/cursor-node-limit/snapshot.json" ] || {
+  echo "snapshot node limit left a runnable snapshot" >&2
+  exit 1
+}
+
+for overflow_case in \
+  'cursor-limit-overflow|9999999999999999999999999999999999999999|100|gitlab_cursor_limit_invalid' \
+  'node-limit-overflow|10|9999999999999999999999999999999999999999|gitlab_snapshot_limit_invalid'
+do
+  IFS='|' read -r overflow_batch overflow_pages overflow_nodes overflow_reason \
+    <<<"${overflow_case}"
+  if run_batch "${overflow_batch}" 'selector_type=open_unfinished' success \
+      "${CONFIG_DIR}" "${overflow_pages}" "${overflow_nodes}" \
+      >"${TEST_ROOT}/${overflow_batch}.out" \
+      2>"${TEST_ROOT}/${overflow_batch}.err"; then
+    echo "expected an overlong decimal limit to fail closed: ${overflow_batch}" >&2
+    exit 1
+  fi
+  overflow_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+    -path "*batch-intake-${overflow_batch}.*/failure.json" -print -quit)"
+  jq -e --arg reason "${overflow_reason}" '.reason == $reason' \
+    "${overflow_failure}" >/dev/null || {
+    echo "overlong decimal limit failure was not classified: ${overflow_batch}" >&2
+    exit 1
+  }
+done
+
+duplicate_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+  -path '*batch-intake-duplicate_iid.*/failure.json' -print -quit)"
+stalled_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+  -path '*batch-intake-stalled_cursor.*/failure.json' -print -quit)"
+unsafe_failure="$(find "${SCHEDULER_ROOT}/failed-intake" -type f \
+  -path '*batch-intake-unsafe_cursor.*/failure.json' -print -quit)"
+jq -e '.reason == "gitlab_cursor_duplicate_iid"' "${duplicate_failure}" >/dev/null || {
+  echo "duplicate cursor IID failure was not classified" >&2
+  exit 1
+}
+jq -e '.reason == "gitlab_cursor_not_advanced"' "${stalled_failure}" >/dev/null || {
+  echo "stalled cursor failure was not classified" >&2
+  exit 1
+}
+jq -e '.reason == "gitlab_cursor_invalid"' "${unsafe_failure}" >/dev/null || {
+  echo "unsafe cursor failure was not classified" >&2
   exit 1
 }
 
@@ -484,7 +835,7 @@ FAILED_INTAKE="${SCHEDULER_ROOT}/failed-intake"
   exit 1
 }
 failed_evidence_count="$(find "${FAILED_INTAKE}" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
-[ "${failed_evidence_count}" -ge 2 ] || {
+[ "${failed_evidence_count}" -ge 3 ] || {
   echo "expected pagination failures to retain intake evidence" >&2
   exit 1
 }
@@ -497,19 +848,21 @@ if FAKE_GLAB_API_LOG="${API_LOG}" \
   GLAB_BIN="${FAKE_GLAB}" \
   GITLAB_TOKEN="executor-owned-token" \
   CONFIG_DIR="${CONFIG_DIR}" \
-  bash "${CREATE_BATCH}" >"${TEST_ROOT}/token-field.out" 2>"${TEST_ROOT}/token-field.err" <<'EOF'
+  bash "${CREATE_BATCH}" >"${TEST_ROOT}/unknown-field.out" 2>"${TEST_ROOT}/unknown-field.err" <<'EOF'
 RUN_DRIVEN_ISSUE_BATCH
-batch_id=token-field
-correlation_id=correlation-token-field
+batch_id=unknown-field
+correlation_id=correlation-unknown-field
 project=group/repo
 selector_type=single
 iid=1
 force_rerun_pr=false
 dispatcher_callback_target=agent:req_dispatcher:main
-gitlab_token=must-not-be-accepted
+executor_agent=req_executor
+callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+unexpected_field=unsupported
 EOF
 then
-  echo "expected token material in the trigger to be rejected" >&2
+  echo "expected an unsupported trigger field to be rejected" >&2
   exit 1
 fi
 
@@ -526,6 +879,8 @@ selector_type=single
 iid=1
 force_rerun_pr=false
 dispatcher_callback_target=
+executor_agent=req_executor
+callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
 then
   echo "expected empty dispatcher_callback_target to fail closed before snapshot creation" >&2
@@ -536,9 +891,116 @@ fi
   exit 1
 }
 
+for bad_case in wrong-target wrong-executor bad-nonce; do
+  callback_target=agent:req_dispatcher:main
+  executor_agent=req_executor
+  callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  case "${bad_case}" in
+    wrong-target) callback_target=agent:other_agent:main ;;
+    wrong-executor) executor_agent=other_executor ;;
+    bad-nonce) callback_nonce=short ;;
+  esac
+  if FAKE_GLAB_API_LOG="${API_LOG}" GLAB_BIN="${FAKE_GLAB}" \
+      GITLAB_TOKEN="executor-owned-token" CONFIG_DIR="${CONFIG_DIR}" \
+      bash "${CREATE_BATCH}" >"${TEST_ROOT}/${bad_case}.out" \
+        2>"${TEST_ROOT}/${bad_case}.err" <<EOF
+RUN_DRIVEN_ISSUE_BATCH
+batch_id=${bad_case}
+correlation_id=correlation-${bad_case}
+project=group/repo
+selector_type=single
+iid=1
+force_rerun_pr=false
+dispatcher_callback_target=${callback_target}
+executor_agent=${executor_agent}
+callback_nonce=${callback_nonce}
+EOF
+  then
+    echo "expected ${bad_case} to fail before snapshot creation" >&2
+    exit 1
+  fi
+  [ ! -e "${BATCH_ROOT}/${bad_case}" ] || {
+    echo "invalid authenticated routing left batch ${bad_case}" >&2
+    exit 1
+  }
+done
+
+# The compatibility marker is derived only while reading trusted scheduler
+# files created before auth existed. New intake cannot omit auth or request a
+# legacy downgrade explicitly.
+if FAKE_GLAB_API_LOG="${API_LOG}" GLAB_BIN="${FAKE_GLAB}" \
+    GITLAB_TOKEN="executor-owned-token" CONFIG_DIR="${CONFIG_DIR}" \
+    bash "${CREATE_BATCH}" >"${TEST_ROOT}/missing-auth.out" \
+      2>"${TEST_ROOT}/missing-auth.err" <<'EOF'
+RUN_DRIVEN_ISSUE_BATCH
+batch_id=missing-auth
+correlation_id=correlation-missing-auth
+project=group/repo
+selector_type=single
+iid=1
+force_rerun_pr=false
+dispatcher_callback_target=agent:req_dispatcher:main
+EOF
+then
+  echo "expected new intake without callback auth to fail closed" >&2
+  exit 1
+fi
+[ ! -e "${BATCH_ROOT}/missing-auth" ] || {
+  echo "missing-auth intake created a legacy-compatible batch" >&2
+  exit 1
+}
+
+if FAKE_GLAB_API_LOG="${API_LOG}" GLAB_BIN="${FAKE_GLAB}" \
+    GITLAB_TOKEN="executor-owned-token" CONFIG_DIR="${CONFIG_DIR}" \
+    bash "${CREATE_BATCH}" >"${TEST_ROOT}/legacy-downgrade.out" \
+      2>"${TEST_ROOT}/legacy-downgrade.err" <<'EOF'
+RUN_DRIVEN_ISSUE_BATCH
+batch_id=legacy-downgrade
+correlation_id=correlation-legacy-downgrade
+project=group/repo
+selector_type=single
+iid=1
+force_rerun_pr=false
+dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+callback_auth_mode=legacy_pre_upgrade
+EOF
+then
+  echo "expected new intake to reject a requested legacy_pre_upgrade downgrade" >&2
+  exit 1
+fi
+[ ! -e "${BATCH_ROOT}/legacy-downgrade" ] || {
+  echo "legacy downgrade intake created a batch" >&2
+  exit 1
+}
+
 jq -e '
-  .batch_order == ["unfinished","label","range","single"]
+  .executor_agent == "req_executor"
+  and .callback_nonce == ("a" * 64)
+' "${BATCH_ROOT}/single/request.json" >/dev/null || {
+  echo "authenticated callback fields were not privately persisted" >&2
+  exit 1
+}
+if printf '%s\n' "${single_out}" | grep -q 'callback_nonce\|executor_agent'; then
+  echo "private callback authentication leaked into public acceptance" >&2
+  exit 1
+fi
+
+jq -e '
+  .batch_order == ["unfinished","label","range","single","boundary-stable"]
   and (.batch_order | length) == (.batch_order | unique | length)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+
+zero_replay="$(run_batch zero $'selector_type=single\niid=999')"
+[ "${zero_out}" = "${zero_replay}" ] || {
+  echo "zero-match replay returned a different acceptance" >&2
+  exit 1
+}
+jq -e '.batch_order | index("zero") == null' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null || {
+  echo "zero-match replay re-entered the hot runnable index" >&2
+  exit 1
+}
 
 echo 'ok create driven batch snapshot'

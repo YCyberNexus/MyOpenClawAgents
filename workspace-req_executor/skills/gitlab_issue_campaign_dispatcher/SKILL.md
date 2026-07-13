@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-11.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, handles GitLab tokens from req_dispatcher, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-13.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -40,7 +40,7 @@ the subagent will then bypass `run_acpx_attempt.sh`, and the whole
 | Built from | rendering [`references/executor_prompt.md`](references/executor_prompt.md), written by `dispatch_prepare_tick.sh` to `${LOG_DIR}/spawn_payload.txt` | running `scripts/build_prompt.sh`, which writes `${LOG_DIR}/prompt.txt` |
 | Audience | the OUTER subagent (the runtime-spawned model) | the INNER Claude Code session that `acpx claude exec -f ${LOG_DIR}/prompt.txt` starts |
 | Tells it to | run Steps 0–9: `bash run_acpx_attempt.sh` → stage → push → verify → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue and write its deliverables (code / tests / specs / docs — whatever the issue asks for) |
-| Shape | starts with sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
+| Shape | starts with sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks, and carries the resolved `GITLAB_TOKEN` as ordinary prompt text | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
 | Sent how | `sessions_spawn(task=<contents of spawn_payload.txt>, label=<entry.child_label>, runtime="subagent", mode="run", cleanup="keep", context="isolated")` — scheduled entries use `#<iid>-att-<NNN>`; driven grants use the globally unique safe label described in Path D; both are anonymous, with no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
 | File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`; it stays on the runner and is not committed into the MR diff |
 
@@ -181,10 +181,22 @@ Pass the complete I1 trigger verbatim to the fixed intake wrapper:
    code fence, or surrounding prose after/beside it.
 ```
 
-The wrapper owns GitLab pagination, OPEN filtering, immutable snapshot creation,
+The wrapper owns GitLab GraphQL cursor pagination, rejects repeated IIDs,
+non-advancing/unsafe cursors and bounded-scan overflow, requires two consecutive
+normalized full scans to agree before freezing, OPEN filtering, immutable snapshot creation,
 batch idempotency, strict round-robin reservation, live preflight, claim
 allocation and binding, claim-0 skips, project handoff import, and outbox drain.
-The trigger never contains a GitLab token, and the envelope never contains one.
+The external I1 shape is the selector and callback-routing schema documented in
+`references/trigger_command.md`. The wrapper resolves `GITLAB_TOKEN` using the
+standard source precedence; executor-internal `RUN_SCHEDULED_ISSUE_CAMPAIGN`
+triggers carry it as `gitlab_token`, and spawned executor prompts contain the
+resolved value as ordinary text.
+New I1 requires the deployment-pinned `executor_agent` and
+`dispatcher_callback_target` plus a 64-hex private `callback_nonce`; none of
+these authentication bytes may be added to the public five-field acceptance.
+Only trusted request/outbox files already persisted before callback auth existed
+may be upgraded to explicit `legacy_pre_upgrade` and delivered with the former
+raw eight-field I3 transport. New intake cannot select that mode or omit auth.
 Do not query GitLab, expand the snapshot IID list, call `RUN_SINGLE_ISSUE` once
 per IID, or invoke scheduler/project helper scripts directly.
 
@@ -267,6 +279,12 @@ windows where a downstream project/scheduler commit succeeded but its following
 coordinator stage write did not. Invoke only the fixed wrapper;
 never edit scheduler JSON, manually bind a claim, or reconstruct
 retry/round-robin logic in the LLM.
+Before those phases it also checks expired running jobs using the exact current
+job/generation/token digest and the project-persisted ACPX deadline. Only a due,
+matching claim can synthesize `timeout` through the normal durable handoff; a
+stale generation cannot release a newer job. Terminal batches, delivered
+callbacks, and completed launch coordinators leave hot scans but remain
+addressable in cold per-ID storage for idempotent replay.
 
 ### Path E — `RUN_SINGLE_ISSUE` compatibility shim
 
@@ -281,7 +299,8 @@ retry/round-robin logic in the LLM.
 ```
 
 The shim accepts `project+iid` or `issue_url`, requires a non-empty
-`dispatcher_callback_target`, preserves an optional `branch`, and accepts an
+deployment-pinned `dispatcher_callback_target` and `executor_agent`, plus a
+64-hex private `callback_nonce`; it preserves an optional `branch` and accepts an
 optional `correlation_id`. When the correlation ID is omitted it derives stable
 content-addressed correlation and batch IDs. It converts the request to a
 single-selector `RUN_DRIVEN_ISSUE_BATCH`; it does not create an independent
@@ -291,7 +310,8 @@ Driven Phase 6 completion is durable: project-side completion writes a handoff;
 the next tick imports it, releases the physical slot, fans out every attached
 batch membership, and retries each I3 outbox item until the dispatcher returns
 the matching accepted acknowledgement. Callback delivery is never a best-effort
-direct send from the LLM.
+direct send from the LLM. Each drain has a bounded send budget and persists
+retry backoff, so callback failure backlog does not prevent reservation.
 
 ### The envelope is the whole decision tree
 
@@ -351,9 +371,14 @@ when unset; non-default deployments MUST keep passing it on every
 scheduled trigger and callback because the dispatcher needs it before
 locating `${CAMPAIGN_STATE_FILE}`.
 
-The driven intake/tick/single wrappers load the executor-owned credential and
-deployment roots themselves. `req_dispatcher` never supplies a token, and the
-LLM never copies a token into a trigger, result JSON, or chat response.
+The driven intake/tick/single wrappers resolve `GITLAB_TOKEN` with process-env
+precedence over `config/gitlab.env`, then pass it directly through the
+executor-internal scheduled trigger and rendered executor prompt. Repository
+clone, fetch, ls-remote, and push operations use ordinary `git` with `origin`
+set to
+`${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git`.
+Git commands and callback `openclaw` subprocesses inherit the executor process
+environment, including the effective `GITLAB_TOKEN`.
 
 ## What the wrappers handle (don't second-guess them)
 

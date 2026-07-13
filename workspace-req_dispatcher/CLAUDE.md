@@ -42,14 +42,17 @@ prepare_executor_issue_payload.sh
 `DISPATCHER_CALLBACK_TARGET` 为空必须在 ID/intent/network 前拒绝。I1 intent 必须先落盘；旧
 FIFO 非空时不发送。ack 丢失只重投同 batch。receipt immutable 字段冲突 fail closed。
 
-I3 handler stdout 只能有一个 accepted/duplicate ack；notification drain 输出隔离，失败不
-撤销 ack。zero-match 使用稳定 no-match notification intent。
+每个新 batch/single intent 自动生成独立 callback nonce；明文只留在私有 outbox/active I1，
+mirror/pending 只保存摘要。I3 handler 在落账前核对 nonce 摘要、完整 project 和 executor，纯
+八字段 I3 只兼容明确 `legacy_pre_upgrade` 的部署前 mirror。stdout 只能有一个
+accepted/duplicate ack；notification drain 输出隔离，失败不撤销 ack。zero-match 使用稳定
+no-match notification intent。
 
 ## State
 
 `${STATE_ROOT}/_dispatcher/`：
 
-- `executor_batch_outbox.json`：token-free I1 intent 与 received/accepted receipt；
+- `executor_batch_outbox.json`：durable I1 intent 与 received/accepted receipt；
 - `executor_batches.json`：compact mirror；
 - `executor_batch_events.jsonl`：canonical I3 ledger；
 - `executor_batch_notifications.json`：notification intent；
@@ -60,11 +63,8 @@ I3 handler stdout 只能有一个 accepted/duplicate ack；notification drain �
 schema 见
 [`skills/requirement_dispatch/references/state_schema.md`](skills/requirement_dispatch/references/state_schema.md)。
 
-## Token 与配置安全
+## 配置约束
 
-- batch payload/state 不得出现 GitLab token。
-- 只在 req_executor I1、旧 single I1 与 batch notification 外部进程边界 scrub GitLab token；
-  不得破坏 git_issuer/wiki 既有本地环境。
 - tracked 蓝区默认保持 `/data`、GitLab/wik pin、callback 与 gateway 契约。
 - 本机路径/session/测试 endpoint 只放 ignored `config/dispatcher.local.env` 或进程环境。
 - 不在仓库中运行 `rm`。

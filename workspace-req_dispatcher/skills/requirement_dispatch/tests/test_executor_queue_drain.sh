@@ -21,6 +21,7 @@ shift
 target_agent=""
 session_id=""
 message=""
+message_file=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent)
@@ -35,6 +36,10 @@ while [ "$#" -gt 0 ]; do
       message="$2"
       shift 2
       ;;
+    --message-file)
+      message_file="$2"
+      shift 2
+      ;;
     --timeout)
       shift 2
       ;;
@@ -44,6 +49,8 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+[ -z "${message_file}" ] || [ "${message_file}" = /dev/stdin ] || exit 7
+[ -z "${message_file}" ] || message="$(cat)"
 
 jq -nc --arg agent "${target_agent}" --arg session_id "${session_id}" --arg message "${message}" \
   '{agent:$agent, session_id:$session_id, message:$message}' >>"${OPENCLAW_CALL_LOG:?OPENCLAW_CALL_LOG required}"

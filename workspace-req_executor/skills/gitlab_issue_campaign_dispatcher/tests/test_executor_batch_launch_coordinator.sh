@@ -88,6 +88,7 @@ fi
 printf 'scheduler:%s:%s\n' "${ACTION}" "${JOB_ID}" >>"${CALL_LOG}"
 job_status=running
 [ "${ACTION}" = launch_failed ] && job_status=launch_failed
+[ "${ACTION}" = recovered_launch_failed ] && job_status=launch_failed
 jq -cn --arg job_id "${JOB_ID}" --arg job_status "${job_status}" '{
   status:"recorded",job_id:$job_id,job_status:$job_status,active_count:1,
   should_spawn:false,claim_generation:null,claim_token:null
@@ -153,8 +154,17 @@ REAL_SCHEDULER_RECORD_CMD="${FAKE_BIN}/real-scheduler-record.sh"
 REAL_SCHEDULER_ERR_LOG="${TEST_ROOT}/real-scheduler.err"
 : >"${REAL_SCHEDULER_ERR_LOG}"
 
+write_minimal_batch_request() {
+  mkdir -p "${SCHEDULER_ROOT}/batches/A"
+  jq -cnS '{
+    version:1,batch_id:"A",project:"group/repo",
+    dispatcher_callback_target:"agent:req_dispatcher:main"
+  }' >"${SCHEDULER_ROOT}/batches/A/request.json"
+}
+
 write_scheduler_job() {
   local job_id="$1" generation="$2" token="$3"
+  write_minimal_batch_request
   jq -cn \
     --arg job_id "${job_id}" \
     --argjson generation "${generation}" \
@@ -171,6 +181,7 @@ write_scheduler_job() {
 
 write_fenced_scheduler_job() {
   local job_id="$1" generation="$2"
+  write_minimal_batch_request
   jq -cn \
     --arg job_id "${job_id}" \
     --argjson generation "${generation}" '{
@@ -202,6 +213,12 @@ write_emitted_action() {
     created_at:1,updated_at:1
   }' >"${action_file}"
   chmod 600 "${action_file}"
+}
+
+cold_launch_failed_receipt() {
+  local root="$1" job_id="$2" digest
+  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  printf '%s/launch_failed_receipts/%s.json\n' "${root}" "${digest}"
 }
 
 spawn_input() {
@@ -675,17 +692,22 @@ set -e
 [ "$(grep -c '^project:' "${CALL_LOG}")" -eq 1 ] \
   || fail "scheduler fault did not record project exactly once"
 assert_one_action_file project_recorded
+SCHEDULER_RECEIPT_3="$(cold_launch_failed_receipt "${SCHEDULER_ROOT}" 'A:snapshot-3')"
 jq -e '
   (.active_jobs | has("A:snapshot-3") | not)
-  and (.launch_failed_receipts["A:snapshot-3"]
-    | .version == 1
-      and .job_id == "A:snapshot-3"
-      and .claim_generation == 1
-      and (.claim_token_sha256 | test("^[0-9a-f]{64}$"))
-      and .action == "launch_failed")
+  and (has("launch_failed_receipts") | not)
   and (tostring | contains("private-claim-4") | not)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
-  || fail "scheduler launch_failed delete and tombstone were not atomic"
+  || fail "scheduler launch_failed delete polluted hot scheduler state"
+jq -e '
+  .version == 1
+  and .job_id == "A:snapshot-3"
+  and .claim_generation == 1
+  and (.claim_token_sha256 | test("^[0-9a-f]{64}$"))
+  and .action == "launch_failed"
+  and (tostring | contains("private-claim-4") | not)
+' "${SCHEDULER_RECEIPT_3}" >/dev/null \
+  || fail "scheduler launch_failed cold tombstone was not durable"
 cp "${SCHEDULER_ROOT}/scheduler_state.json" \
   "${TEST_ROOT}/scheduler-launch-failed-after-crash.json"
 scheduler_replay="$(run_recovery_tick 0 0 \
@@ -717,16 +739,8 @@ done
 # Reusing the same physical job and numeric generation with a new private token
 # must prioritize the current active claim over the old tombstone. The new
 # failure overwrites the tombstone; the old token remains rejected afterward.
-old_scheduler_receipt="$(jq -c \
-  '.launch_failed_receipts["A:snapshot-3"]' \
-  "${SCHEDULER_ROOT}/scheduler_state.json")"
+old_scheduler_receipt="$(jq -c . "${SCHEDULER_RECEIPT_3}")"
 write_real_scheduler_job 'A:snapshot-3' 1 'new-private-claim-4'
-jq --argjson receipt "${old_scheduler_receipt}" '
-  .launch_failed_receipts = {"A:snapshot-3":$receipt}
-' "${SCHEDULER_ROOT}/scheduler_state.json" \
-  >"${SCHEDULER_ROOT}/scheduler_state.with-old-receipt.json"
-mv "${SCHEDULER_ROOT}/scheduler_state.with-old-receipt.json" \
-  "${SCHEDULER_ROOT}/scheduler_state.json"
 cp "${SCHEDULER_ROOT}/scheduler_state.json" \
   "${TEST_ROOT}/scheduler-new-claim-before-old-replay.json"
 if run_scheduler_launch_failed_direct 'A:snapshot-3' 1 'private-claim-4' \
@@ -744,11 +758,10 @@ jq -e '.status == "recorded" and .job_status == "launch_failed"' \
   <<<"${new_claim_result}" >/dev/null \
   || fail "current claim returned an invalid scheduler result"
 jq -e --argjson old "${old_scheduler_receipt}" '
-  .launch_failed_receipts["A:snapshot-3"] as $new
-  | $new.claim_generation == 1
-    and $new.claim_token_sha256 != $old.claim_token_sha256
-    and (tostring | contains("new-private-claim-4") | not)
-' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  .claim_generation == 1
+  and .claim_token_sha256 != $old.claim_token_sha256
+  and (tostring | contains("new-private-claim-4") | not)
+' "${SCHEDULER_RECEIPT_3}" >/dev/null \
   || fail "new claim did not replace the old token-bound tombstone"
 cp "${SCHEDULER_ROOT}/scheduler_state.json" \
   "${TEST_ROOT}/scheduler-new-claim-after-record.json"
@@ -769,25 +782,21 @@ cmp -s "${SCHEDULER_ROOT}/scheduler_state.json" \
   "${TEST_ROOT}/scheduler-new-claim-after-record.json" \
   || fail "conflicting old receipt or action changed scheduler bytes"
 
-cp "${SCHEDULER_ROOT}/scheduler_state.json" \
-  "${TEST_ROOT}/scheduler-before-malformed-receipt.json"
-jq '.launch_failed_receipts["A:snapshot-3"].claim_token_sha256 = "bad"' \
-  "${SCHEDULER_ROOT}/scheduler_state.json" \
-  >"${SCHEDULER_ROOT}/scheduler_state.malformed-receipt.json"
-mv "${SCHEDULER_ROOT}/scheduler_state.malformed-receipt.json" \
-  "${SCHEDULER_ROOT}/scheduler_state.json"
-cp "${SCHEDULER_ROOT}/scheduler_state.json" \
-  "${TEST_ROOT}/scheduler-malformed-receipt.json"
+cp "${SCHEDULER_RECEIPT_3}" "${TEST_ROOT}/scheduler-before-malformed-receipt.json"
+jq '.claim_token_sha256 = "bad"' "${SCHEDULER_RECEIPT_3}" \
+  >"${SCHEDULER_RECEIPT_3}.malformed"
+mv "${SCHEDULER_RECEIPT_3}.malformed" "${SCHEDULER_RECEIPT_3}"
+cp "${SCHEDULER_RECEIPT_3}" "${TEST_ROOT}/scheduler-malformed-receipt.json"
 if run_scheduler_launch_failed_direct 'A:snapshot-3' 1 'new-private-claim-4' \
     >"${TEST_ROOT}/malformed-receipt.out" \
     2>"${TEST_ROOT}/malformed-receipt.err"; then
   fail "malformed scheduler tombstone did not fail closed"
 fi
-cmp -s "${SCHEDULER_ROOT}/scheduler_state.json" \
+cmp -s "${SCHEDULER_RECEIPT_3}" \
   "${TEST_ROOT}/scheduler-malformed-receipt.json" \
   || fail "malformed scheduler tombstone was mutated during rejection"
 cp "${TEST_ROOT}/scheduler-before-malformed-receipt.json" \
-  "${SCHEDULER_ROOT}/scheduler_state.json"
+  "${SCHEDULER_RECEIPT_3}"
 
 # The transaction marker itself contains the tombstone. If final scheduler
 # publication fails, the next exact ACTION must recover the marker and return
@@ -824,10 +833,13 @@ set -e
 jq -e '
   .pending_transaction.scheduler_state
   | (.active_jobs | has("A:snapshot-4") | not)
-    and (.launch_failed_receipts["A:snapshot-4"]
-      | .claim_generation == 1 and .action == "launch_failed")
+    and (has("launch_failed_receipts") | not)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
-  || fail "pending transaction lost the scheduler launch_failed tombstone"
+  || fail "pending transaction retained launch_failed history in hot state"
+SCHEDULER_RECEIPT_4="$(cold_launch_failed_receipt "${SCHEDULER_ROOT}" 'A:snapshot-4')"
+jq -e '.claim_generation == 1 and .action == "launch_failed"' \
+  "${SCHEDULER_RECEIPT_4}" >/dev/null \
+  || fail "pending transaction crash lost the cold launch_failed tombstone"
 transaction_replay="$(run_scheduler_launch_failed_direct \
   'A:snapshot-4' 1 'private-claim-5')" \
   || fail "exact ACTION did not recover the pending transaction tombstone"
@@ -840,9 +852,12 @@ jq -e '
 jq -e '
   (has("pending_transaction") | not)
   and (.active_jobs | has("A:snapshot-4") | not)
-  and .launch_failed_receipts["A:snapshot-4"].claim_generation == 1
+  and (has("launch_failed_receipts") | not)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
-  || fail "pending transaction recovery did not preserve the tombstone"
+  || fail "pending transaction recovery repopulated hot tombstone history"
+jq -e '.claim_generation == 1 and .action == "launch_failed"' \
+  "${SCHEDULER_RECEIPT_4}" >/dev/null \
+  || fail "pending transaction recovery did not preserve the cold tombstone"
 
 # If reserve already fenced an unacknowledged emitted action back to reserved,
 # recovered runtime evidence must restore the same generation after recording
@@ -861,5 +876,188 @@ jq -e '
   and .claim_generation == 1
   and (tostring | contains("private-claim") | not)
 ' <<<"${fenced_found}" >/dev/null || fail "fenced runtime match returned an unsafe envelope"
+
+# A launch failure acknowledgement can be durable longer than the preparing
+# lease. Once reserve fences that exact generation back to reserved/token-null,
+# recovery must use an explicit action instead of the ordinary current-claim
+# transition; otherwise the project receipt and scheduler slot are stranded.
+SCHEDULER_ROOT="${TEST_ROOT}/scheduler-fenced-launch-failed"
+mkdir -p "${SCHEDULER_ROOT}"
+write_fenced_scheduler_job 'A:snapshot-5' 1
+write_emitted_action 'A:snapshot-5' 1 'private-claim-6' 6
+: >"${CALL_LOG}"
+fenced_launch_failed="$(record_result "$(launch_failed_input 'A:snapshot-5' 1 6)")" \
+  || fail "fenced launch_failed acknowledgement was rejected"
+[ "$(cat "${CALL_LOG}")" = $'project:launch_failed:A:snapshot-5\nscheduler:recovered_launch_failed:A:snapshot-5' ] \
+  || fail "fenced launch_failed did not use its explicit recovery action"
+jq -e '
+  .status == "launch_failed_recorded"
+  and .claim_generation == 1
+  and (tostring | contains("private-claim") | not)
+' <<<"${fenced_launch_failed}" >/dev/null \
+  || fail "fenced launch_failed returned an unsafe envelope"
+
+# The real scheduler recorder independently verifies the fixed durable action,
+# its project-receipt digest, old private token, and same fenced generation.
+SCHEDULER_ROOT="${TEST_ROOT}/scheduler-real-fenced-launch-failed"
+mkdir -p "${SCHEDULER_ROOT}"
+write_real_scheduler_job 'A:snapshot-6' 1 'private-claim-7'
+jq '
+  .active_jobs["A:snapshot-6"].status = "reserved"
+  | .active_jobs["A:snapshot-6"].claim_token = null
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.fenced.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.fenced.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+jq '.memberships["0"].status = "reserved"' \
+  "${SCHEDULER_ROOT}/batches/A/state.json" \
+  >"${SCHEDULER_ROOT}/batches/A/state.fenced.json"
+mv "${SCHEDULER_ROOT}/batches/A/state.fenced.json" \
+  "${SCHEDULER_ROOT}/batches/A/state.json"
+write_emitted_action 'A:snapshot-6' 1 'private-claim-7' 7
+real_recovery_action="$(find "${SCHEDULER_ROOT}/launch_actions" \
+  -maxdepth 1 -type f -name '*.json' -print -quit)"
+jq '
+  .stage = "project_recorded"
+  | .outcome = "launch_failed"
+  | .ack = {launch_attempts:3,launch_error:"transport-failed-7"}
+  | .project_receipt_sha256 = ("a" * 64)
+' "${real_recovery_action}" >"${real_recovery_action}.updated"
+mv "${real_recovery_action}.updated" "${real_recovery_action}"
+real_recovered_out="$(
+  CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT}" \
+  JOB_ID='A:snapshot-6' ACTION=recovered_launch_failed \
+  CLAIM_GENERATION=1 CLAIM_TOKEN='private-claim-7' \
+    bash "${SCHEDULER_RECORD_SCRIPT}"
+)" || fail "real scheduler rejected a valid recovered_launch_failed action"
+jq -e '.status == "recorded" and .job_status == "launch_failed"' \
+  <<<"${real_recovered_out}" >/dev/null \
+  || fail "real recovered_launch_failed returned an invalid acknowledgement"
+jq -e '
+  (.active_jobs | has("A:snapshot-6") | not)
+  and (has("launch_failed_receipts") | not)
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "real recovered_launch_failed did not release without hot tombstone history"
+SCHEDULER_RECEIPT_6="$(cold_launch_failed_receipt "${SCHEDULER_ROOT}" 'A:snapshot-6')"
+jq -e '
+  .claim_generation == 1
+  and .action == "launch_failed"
+  and (.claim_token_sha256 | test("^[0-9a-f]{64}$"))
+  and (tostring | contains("private-claim-7") | not)
+' "${SCHEDULER_RECEIPT_6}" >/dev/null \
+  || fail "real recovered_launch_failed did not persist its cold tombstone"
+
+# A pre-upgrade coordinator may create the old hot lock after the new library's
+# migration scan. During the compatibility window, dlc_open must also wait for
+# that late old-path lock before entering the action critical section.
+ROLLING_LAUNCH_ROOT="${TEST_ROOT}/scheduler-launch-lock-rolling"
+ROLLING_LAUNCH_JOB='rolling-lock:snapshot-0'
+ROLLING_LAUNCH_DIGEST="$(printf '%s' "${ROLLING_LAUNCH_JOB}" | shasum -a 256 | awk '{print $1}')"
+ROLLING_LAUNCH_SCAN="${TEST_ROOT}/rolling-launch-scan"
+ROLLING_LAUNCH_OLD_READY="${TEST_ROOT}/rolling-launch-old-ready"
+ROLLING_LAUNCH_RELEASE="${TEST_ROOT}/rolling-launch-release"
+ROLLING_LAUNCH_ACQUIRED="${TEST_ROOT}/rolling-launch-acquired"
+mkdir -p "${ROLLING_LAUNCH_ROOT}/launch_actions"
+(
+  for _wait in $(seq 1 200); do
+    [ -e "${ROLLING_LAUNCH_SCAN}" ] && break
+    sleep 0.01
+  done
+  [ -e "${ROLLING_LAUNCH_SCAN}" ]
+  exec 8>"${ROLLING_LAUNCH_ROOT}/launch_actions/.${ROLLING_LAUNCH_DIGEST}.lock"
+  flock -x 8
+  : >"${ROLLING_LAUNCH_OLD_READY}"
+  for _wait in $(seq 1 300); do
+    [ -e "${ROLLING_LAUNCH_RELEASE}" ] && break
+    sleep 0.01
+  done
+  [ -e "${ROLLING_LAUNCH_RELEASE}" ]
+  flock -u 8
+) &
+ROLLING_LAUNCH_OLD_PID=$!
+EXECUTOR_SCHEDULER_ROOT="${ROLLING_LAUNCH_ROOT}" \
+LEGACY_LOCK_COMPAT_ACTIVE=true \
+ROLLING_LAUNCH_JOB="${ROLLING_LAUNCH_JOB}" \
+ROLLING_LAUNCH_SCAN="${ROLLING_LAUNCH_SCAN}" \
+ROLLING_LAUNCH_OLD_READY="${ROLLING_LAUNCH_OLD_READY}" \
+ROLLING_LAUNCH_ACQUIRED="${ROLLING_LAUNCH_ACQUIRED}" \
+bash -c '
+  source "$1"
+  : >"${ROLLING_LAUNCH_SCAN}"
+  for _wait in $(seq 1 200); do
+    [ -e "${ROLLING_LAUNCH_OLD_READY}" ] && break
+    sleep 0.01
+  done
+  dlc_open "${ROLLING_LAUNCH_JOB}"
+  : >"${ROLLING_LAUNCH_ACQUIRED}"
+  dlc_close
+' _ "${SKILL_DIR}/scripts/_driven_launch_coordinator.sh" &
+ROLLING_LAUNCH_NEW_PID=$!
+for _wait in $(seq 1 300); do
+  [ -e "${ROLLING_LAUNCH_OLD_READY}" ] && break
+  sleep 0.01
+done
+[ -e "${ROLLING_LAUNCH_OLD_READY}" ] \
+  || fail "rolling launch old lock was not established"
+sleep 0.2
+if [ -e "${ROLLING_LAUNCH_ACQUIRED}" ]; then
+  : >"${ROLLING_LAUNCH_RELEASE}"
+  wait "${ROLLING_LAUNCH_OLD_PID}" || true
+  wait "${ROLLING_LAUNCH_NEW_PID}" || true
+  fail "new launch coordinator bypassed a late old-path rolling-upgrade lock"
+fi
+: >"${ROLLING_LAUNCH_RELEASE}"
+wait "${ROLLING_LAUNCH_OLD_PID}"
+wait "${ROLLING_LAUNCH_NEW_PID}"
+[ -e "${ROLLING_LAUNCH_ACQUIRED}" ] \
+  || fail "rolling launch coordinator did not resume after old lock release"
+
+# Window-close migration itself can be sourced concurrently by multiple new
+# processes. Both may snapshot the same old lock before either moves it; a
+# dedicated layout lock must serialize the entire glob/open/move pass.
+MIGRATOR_ROOT="${TEST_ROOT}/scheduler-launch-lock-concurrent-migration"
+MIGRATOR_DIGEST='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+mkdir -p "${MIGRATOR_ROOT}/launch_actions"
+exec 9>"${MIGRATOR_ROOT}/launch_actions/.${MIGRATOR_DIGEST}.lock"
+flock -x 9
+EXECUTOR_SCHEDULER_ROOT="${MIGRATOR_ROOT}" LEGACY_LOCK_COMPAT_ACTIVE=false \
+  bash -c 'source "$1"' _ "${SKILL_DIR}/scripts/_driven_launch_coordinator.sh" &
+MIGRATOR_PID_A=$!
+EXECUTOR_SCHEDULER_ROOT="${MIGRATOR_ROOT}" LEGACY_LOCK_COMPAT_ACTIVE=false \
+  bash -c 'source "$1"' _ "${SKILL_DIR}/scripts/_driven_launch_coordinator.sh" &
+MIGRATOR_PID_B=$!
+sleep 0.2
+flock -u 9
+exec 9>&-
+set +e
+wait "${MIGRATOR_PID_A}"
+MIGRATOR_RC_A=$?
+wait "${MIGRATOR_PID_B}"
+MIGRATOR_RC_B=$?
+set -e
+[ "${MIGRATOR_RC_A}" -eq 0 ] && [ "${MIGRATOR_RC_B}" -eq 0 ] \
+  || fail "concurrent launch lock-layout migrators raced the same old inode"
+if find "${MIGRATOR_ROOT}/launch_actions" -maxdepth 1 -type f -name '*.lock' \
+    -print -quit | grep -q .; then
+  fail "concurrent launch migration left the old lock in hot storage"
+fi
+
+# Stable launch-action locks belong in their own directly addressable 0700
+# directory; years of completed job locks must not enlarge the hot action scan.
+LAUNCH_LOCK_ROOT="${TEST_ROOT}/scheduler-launch-lock-history"
+mkdir -p "${LAUNCH_LOCK_ROOT}/launch_actions"
+for launch_lock_index in $(seq 0 104); do
+  : >"${LAUNCH_LOCK_ROOT}/launch_actions/.history-${launch_lock_index}.lock"
+done
+EXECUTOR_SCHEDULER_ROOT="${LAUNCH_LOCK_ROOT}" \
+  bash -c 'source "$1"' _ "${SKILL_DIR}/scripts/_driven_launch_coordinator.sh"
+if find "${LAUNCH_LOCK_ROOT}/launch_actions" -maxdepth 1 -type f -name '*.lock' \
+    -print -quit | grep -q .; then
+  fail "historical launch locks remained in the hot action directory"
+fi
+[ "$(find "${LAUNCH_LOCK_ROOT}/launch_action_locks" -maxdepth 1 -type f -name '*.lock' | wc -l | tr -d ' ')" -ge 105 ] \
+  || fail "historical launch locks were not migrated to the independent lock directory"
+[ "$(find "${LAUNCH_LOCK_ROOT}/launch_actions" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')" = 0 ] \
+  || fail "launch lock migration polluted the hot JSON scan"
 
 echo "ok launch coordinator recovers ack, project, and scheduler crash windows"

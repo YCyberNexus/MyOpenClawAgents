@@ -313,17 +313,6 @@ install_driven_receipt() {
   ' <<<"${state_json}"
 }
 
-scrub_spawn_payload() {
-  local attempt_padded payload_file
-  attempt_padded="$(printf '%03d' "${ATTEMPT_NUMBER}")"
-  payload_file="${WORKTREES_ROOT}/issue-${IID}/${REQ_EXECUTOR_DIR}/issue-${IID}/log/attempt-${attempt_padded}/spawn_payload.txt"
-  if [ -f "${payload_file}" ]; then
-    : >"${payload_file}" 2>/dev/null \
-      && wrapper_log record_spawn "scrubbed spawn payload iid=${IID}" \
-      || wrapper_log record_spawn "warn: could not scrub spawn payload at ${payload_file}"
-  fi
-}
-
 case "${STATUS}" in
   spawned)
     NOW="$(utc_now)"
@@ -351,18 +340,12 @@ case "${STATUS}" in
     NEW_STATE="$(install_driven_receipt "${NEW_STATE}" "${RESULT_JSON}" "${NOW}")"
     persist_state "${NEW_STATE}"
 
-    # The file holds the GitLab token in cleartext until the launch outcome is
-    # recorded. Best-effort: failure is logged but does not fail writeback.
-    scrub_spawn_payload
-
     wrapper_log record_spawn "spawned iid=${IID} attempt=${ATTEMPT_NUMBER} run_id=${RUN_ID}"
     printf '%s\n' "${RESULT_JSON}"
     ;;
   launch_failed)
     BLOCK_REASON="sessions_spawn failed after ${LAUNCH_ATTEMPTS} attempts (2s backoff): ${LAUNCH_ERROR}"
     REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${ATTEMPT_NUMBER}" "${BLOCK_REASON}")"
-    scrub_spawn_payload
-
     # Run Phase 6 with is_launch_synth=true so retry_count is NOT incremented.
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     NEW_STATE="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"

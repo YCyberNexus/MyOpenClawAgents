@@ -32,6 +32,42 @@ atomic_write_json() {
   mv "${candidate}" "${destination}"
 }
 
+locate_outbox_file() {
+  local event_id="$1"
+  local hot_file="${CALLBACK_OUTBOX}/${event_id}.json"
+  local archive_file="${CALLBACK_ARCHIVE}/${event_id}.json"
+  if [ -e "${hot_file}" ] && [ -e "${archive_file}" ]; then
+    import_die "outbox event exists in both hot and archive storage: ${event_id}" 3
+  elif [ -e "${archive_file}" ]; then
+    printf '%s\n' "${archive_file}"
+  else
+    printf '%s\n' "${hot_file}"
+  fi
+}
+
+acquire_callback_event_locks() {
+  local event_id="$1" lock_digest
+  unset CALLBACK_EVENT_LEGACY_LOCK_FD CALLBACK_EVENT_LOCK_FD
+  if [ "${LEGACY_LOCK_COMPAT_ACTIVE:-false}" = true ]; then
+    exec {CALLBACK_EVENT_LEGACY_LOCK_FD}>"${CALLBACK_OUTBOX}/.${event_id}.lock"
+    flock -x "${CALLBACK_EVENT_LEGACY_LOCK_FD}"
+  fi
+  lock_digest="$(printf '%s' "${event_id}" | scheduler_sha256_text)"
+  exec {CALLBACK_EVENT_LOCK_FD}>"${CALLBACK_LOCKS}/${lock_digest}.lock"
+  flock -x "${CALLBACK_EVENT_LOCK_FD}"
+}
+
+release_callback_event_locks() {
+  flock -u "${CALLBACK_EVENT_LOCK_FD}" 2>/dev/null || true
+  exec {CALLBACK_EVENT_LOCK_FD}>&-
+  unset CALLBACK_EVENT_LOCK_FD
+  if [ -n "${CALLBACK_EVENT_LEGACY_LOCK_FD:-}" ]; then
+    flock -u "${CALLBACK_EVENT_LEGACY_LOCK_FD}" 2>/dev/null || true
+    exec {CALLBACK_EVENT_LEGACY_LOCK_FD}>&-
+    unset CALLBACK_EVENT_LEGACY_LOCK_FD
+  fi
+}
+
 run_scheduler_migration() {
   CONFIG_DIR="${CONFIG_DIR}" \
   NOW_EPOCH="${IMPORTED_AT}" \
@@ -42,7 +78,7 @@ run_scheduler_migration() {
 }
 
 release_delivery_gate() {
-  local ready_at membership event_id target body outbox_file lock_file
+  local ready_at membership event_id target callback_auth_mode executor_agent callback_nonce body outbox_file
   local current_entry next_entry
 
   ready_at="$(date +%s)"
@@ -52,35 +88,55 @@ release_delivery_gate() {
   while IFS= read -r membership; do
     event_id="$(jq -r '.event_id' <<<"${membership}")"
     target="$(jq -r '.target' <<<"${membership}")"
+    callback_auth_mode="$(jq -r '.callback_auth_mode' <<<"${membership}")"
+    executor_agent="$(jq -r '.executor_agent // empty' <<<"${membership}")"
+    callback_nonce="$(jq -r '.callback_nonce // empty' <<<"${membership}")"
     body="$(jq -c '.body' <<<"${membership}")"
-    outbox_file="${CALLBACK_OUTBOX}/${event_id}.json"
-    lock_file="${CALLBACK_OUTBOX}/.${event_id}.lock"
-    exec {READY_LOCK_FD}>"${lock_file}"
-    flock -x "${READY_LOCK_FD}"
+    acquire_callback_event_locks "${event_id}"
+    # The drainer can move hot -> archive at any time before this event lock is
+    # held. Locate only after locking so validation and update use one stable
+    # path for the whole critical section.
+    outbox_file="$(locate_outbox_file "${event_id}")"
     current_entry="$(jq -ce \
       --arg event_id "${event_id}" \
       --arg target "${target}" \
+      --arg callback_auth_mode "${callback_auth_mode}" \
+      --arg executor_agent "${executor_agent}" \
+      --arg callback_nonce "${callback_nonce}" \
       --argjson body "${body}" '
       if type == "object"
         and .version == 1
         and .event_id == $event_id
         and .target == $target
+        and ((.callback_auth_mode //
+          (if has("executor_agent") or has("callback_nonce")
+           then "nonce_v1" else "legacy_pre_upgrade" end)) == $callback_auth_mode)
+        and (if $callback_auth_mode == "nonce_v1"
+          then .executor_agent == $executor_agent
+            and .callback_nonce == $callback_nonce
+          else (has("executor_agent") | not) and (has("callback_nonce") | not)
+          end)
         and .body == $body
         and ((.ready_at == null)
           or (.ready_at | type == "number" and . == floor and . >= 0))
-      then .
+      then . + {callback_auth_mode:$callback_auth_mode}
       else error("outbox changed before delivery release")
       end
     ' "${outbox_file}")" \
       || import_die "outbox entry changed before delivery release: ${event_id}" 3
+    if [ "${outbox_file%/*}" = "${CALLBACK_ARCHIVE}" ]; then
+      jq -e '.delivered_at != null' <<<"${current_entry}" >/dev/null \
+        || import_die "archived outbox entry is not delivered: ${event_id}" 3
+      release_callback_event_locks
+      continue
+    fi
     next_entry="$(jq -c \
       --argjson ready_at "${ready_at}" '
       .ready_at = (.ready_at // $ready_at)
       | .updated_at = $ready_at
     ' <<<"${current_entry}")"
     atomic_write_json "${outbox_file}" "${next_entry}"
-    flock -u "${READY_LOCK_FD}"
-    exec {READY_LOCK_FD}>&-
+    release_callback_event_locks
   done < <(jq -c '.memberships[]' <<<"${RECEIPT_JSON}")
 }
 
@@ -225,11 +281,28 @@ if [ -f "${RECEIPT_FILE}" ]; then
       and (.memberships | all(
         (.batch_id | type == "string")
         and (.snapshot_index | type == "number" and . == floor and . >= 0)
-        and (.target | type == "string" and length > 0)
+        and (.target | type == "string"
+          and test("^agent:req_dispatcher:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"))
+        and (
+          (((.callback_auth_mode //
+              (if has("executor_agent") or has("callback_nonce")
+               then "nonce_v1" else "legacy_pre_upgrade" end)) == "nonce_v1")
+            and (.executor_agent | type == "string"
+              and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"))
+            and (.callback_nonce | type == "string" and test("^[0-9a-f]{64}$")))
+          or
+          (((.callback_auth_mode // "legacy_pre_upgrade") == "legacy_pre_upgrade")
+            and (has("executor_agent") | not)
+            and (has("callback_nonce") | not)))
         and (.event_id | type == "string" and length > 0)
         and (.body | type == "object")))
       and (.created_at | type == "number" and . == floor and . >= 0)
-    then .
+    then .memberships |= map(
+      if has("callback_auth_mode") then .
+      elif has("executor_agent") or has("callback_nonce")
+      then . + {callback_auth_mode:"nonce_v1"}
+      else . + {callback_auth_mode:"legacy_pre_upgrade"}
+      end)
     else error("invalid import receipt")
     end
   ' "${RECEIPT_FILE}")" \
@@ -313,18 +386,33 @@ if [ "${ACTIVE_JOB}" != null ]; then
     request_file="${BATCHES_ROOT}/${batch_id}/request.json"
     [ -f "${request_file}" ] \
       || import_die "membership batch request is missing: ${batch_id}" 3
-    request_json="$(jq -ce --arg batch_id "${batch_id}" '
+    request_json="$(jq -ce \
+      --arg batch_id "${batch_id}" \
+      --arg pinned_target "${DISPATCHER_CALLBACK_TARGET}" \
+      --arg pinned_executor "${EXECUTOR_AGENT}" '
       if type == "object"
         and .version == 1
         and .batch_id == $batch_id
-        and (.dispatcher_callback_target | type == "string" and length > 0)
-        and (.dispatcher_callback_target | explode | all(. >= 32 and . != 127))
-      then .
+        and (has("callback_auth_mode") | not)
+        and (
+          (.dispatcher_callback_target == $pinned_target
+            and .executor_agent == $pinned_executor
+            and (.callback_nonce | type == "string" and test("^[0-9a-f]{64}$")))
+          or
+          ((has("executor_agent") | not)
+            and (has("callback_nonce") | not)
+            and (.dispatcher_callback_target | type == "string"
+              and test("^agent:req_dispatcher:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"))))
+      then . + {callback_auth_mode:
+        (if has("executor_agent") then "nonce_v1" else "legacy_pre_upgrade" end)}
       else error("invalid callback target")
       end
     ' "${request_file}")" \
       || import_die "membership batch request is invalid: ${batch_id}" 3
     callback_target="$(jq -r '.dispatcher_callback_target' <<<"${request_json}")"
+    callback_auth_mode="$(jq -r '.callback_auth_mode' <<<"${request_json}")"
+    executor_agent="$(jq -r '.executor_agent // empty' <<<"${request_json}")"
+    callback_nonce="$(jq -r '.callback_nonce // empty' <<<"${request_json}")"
     membership_event_id="${batch_id}:snapshot-${snapshot_index}:terminal-1"
     public_body="$(jq -cnS \
       --arg event_id "${membership_event_id}" \
@@ -348,15 +436,21 @@ if [ "${ACTIVE_JOB}" != null ]; then
       --arg batch_id "${batch_id}" \
       --argjson snapshot_index "${snapshot_index}" \
       --arg target "${callback_target}" \
+      --arg callback_auth_mode "${callback_auth_mode}" \
+      --arg executor_agent "${executor_agent}" \
+      --arg callback_nonce "${callback_nonce}" \
       --arg event_id "${membership_event_id}" \
       --argjson body "${public_body}" '
       . + [{
         batch_id:$batch_id,
         snapshot_index:$snapshot_index,
         target:$target,
+        callback_auth_mode:$callback_auth_mode,
         event_id:$event_id,
         body:$body
-      }]
+      } + (if $callback_auth_mode == "nonce_v1"
+        then {executor_agent:$executor_agent,callback_nonce:$callback_nonce}
+        else {} end)]
     ' <<<"${MEMBERSHIPS_JSON}")"
   done < <(jq -r '.memberships[] | [.batch_id, (.snapshot_index | tostring)] | @tsv' \
     <<<"${ACTIVE_JOB}")
@@ -425,22 +519,44 @@ else
   RECEIPT_JSON="${EXISTING_RECEIPT}"
 fi
 
+# The scheduler-locked finalization fence above freezes the exact memberships
+# and claim identity. Event locks are independent durability locks and can be
+# occupied by a rolling old drainer across its network timeout, so never wait
+# for one while holding the global scheduler lock. A crash from this point is
+# replayable from the active job plus finalization fence (or existing receipt).
+flock -u "${IMPORT_SCHEDULER_LOCK_FD}"
+exec {IMPORT_SCHEDULER_LOCK_FD}>&-
+
 # Fail closed before changing the receipt if an existing event carries a
 # different public body or a different fixed delivery target.
 while IFS= read -r membership; do
   event_id="$(jq -r '.event_id' <<<"${membership}")"
   target="$(jq -r '.target' <<<"${membership}")"
+  callback_auth_mode="$(jq -r '.callback_auth_mode' <<<"${membership}")"
+  executor_agent="$(jq -r '.executor_agent // empty' <<<"${membership}")"
+  callback_nonce="$(jq -r '.callback_nonce // empty' <<<"${membership}")"
   body="$(jq -c '.body' <<<"${membership}")"
-  outbox_file="${CALLBACK_OUTBOX}/${event_id}.json"
+  acquire_callback_event_locks "${event_id}"
+  outbox_file="$(locate_outbox_file "${event_id}")"
   if [ -f "${outbox_file}" ]; then
-    jq -e \
+    existing_outbox="$(jq -ce \
       --arg event_id "${event_id}" \
       --arg target "${target}" \
+      --arg callback_auth_mode "${callback_auth_mode}" \
+      --arg executor_agent "${executor_agent}" \
+      --arg callback_nonce "${callback_nonce}" \
       --argjson body "${body}" '
-      type == "object"
+      if type == "object"
       and .version == 1
       and .event_id == $event_id
       and .target == $target
+      and ((.callback_auth_mode //
+        (if has("executor_agent") or has("callback_nonce")
+         then "nonce_v1" else "legacy_pre_upgrade" end)) == $callback_auth_mode)
+      and (if $callback_auth_mode == "nonce_v1"
+        then .executor_agent == $executor_agent and .callback_nonce == $callback_nonce
+        else (has("executor_agent") | not) and (has("callback_nonce") | not)
+        end)
       and .body == $body
       and (.attempts | type == "number" and . == floor and . >= 0)
       and ((.last_error == null) or (.last_error | type == "string"))
@@ -448,9 +564,13 @@ while IFS= read -r membership; do
         or (.delivered_at | type == "number" and . == floor and . >= 0))
       and ((.ready_at == null)
         or (.ready_at | type == "number" and . == floor and . >= 0))
-    ' "${outbox_file}" >/dev/null \
+      then . + {callback_auth_mode:$callback_auth_mode}
+      else error("conflicting outbox") end
+    ' "${outbox_file}")" \
       || import_die "outbox event conflicts with persisted body: ${event_id}" 3
+    atomic_write_json "${outbox_file}" "${existing_outbox}"
   fi
+  release_callback_event_locks
 done < <(jq -c '.memberships[]' <<<"${RECEIPT_JSON}")
 
 # Receipt is intentionally durable before any outbox creation. It contains all
@@ -461,36 +581,47 @@ atomic_write_json "${RECEIPT_FILE}" "${RECEIPT_JSON}"
 while IFS= read -r membership; do
   event_id="$(jq -r '.event_id' <<<"${membership}")"
   target="$(jq -r '.target' <<<"${membership}")"
+  callback_auth_mode="$(jq -r '.callback_auth_mode' <<<"${membership}")"
+  executor_agent="$(jq -r '.executor_agent // empty' <<<"${membership}")"
+  callback_nonce="$(jq -r '.callback_nonce // empty' <<<"${membership}")"
   body="$(jq -c '.body' <<<"${membership}")"
-  outbox_file="${CALLBACK_OUTBOX}/${event_id}.json"
+  acquire_callback_event_locks "${event_id}"
+  outbox_file="$(locate_outbox_file "${event_id}")"
   if [ -f "${outbox_file}" ]; then
+    release_callback_event_locks
     continue
   fi
   outbox_json="$(jq -cnS \
     --arg event_id "${event_id}" \
     --arg target "${target}" \
+    --arg callback_auth_mode "${callback_auth_mode}" \
+    --arg executor_agent "${executor_agent}" \
+    --arg callback_nonce "${callback_nonce}" \
     --argjson body "${body}" \
     --argjson created_at "${IMPORTED_AT}" '{
       version:1,
       event_id:$event_id,
       target:$target,
+      callback_auth_mode:$callback_auth_mode,
       body:$body,
       attempts:0,
       last_error:null,
       delivered_at:null,
       ready_at:null,
+      next_attempt_at:null,
       created_at:$created_at,
       updated_at:$created_at
-    }')"
+    }
+    + (if $callback_auth_mode == "nonce_v1"
+      then {executor_agent:$executor_agent,callback_nonce:$callback_nonce}
+      else {} end)')"
   atomic_write_json "${outbox_file}" "${outbox_json}"
+  release_callback_event_locks
 done < <(jq -c '.memberships[]' <<<"${RECEIPT_JSON}")
 
 OUTBOX_COUNT="$(jq -r '.memberships | length' <<<"${RECEIPT_JSON}")"
 CLAIM_TOKEN="$(jq -r '.claim_token // empty' <<<"${RECEIPT_JSON}")"
 LEGACY_RUNNING="$(jq -r '.legacy_running' <<<"${RECEIPT_JSON}")"
-
-flock -u "${IMPORT_SCHEDULER_LOCK_FD}"
-exec {IMPORT_SCHEDULER_LOCK_FD}>&-
 
 if [ "${TERMINAL_RECORD_NEEDED}" = true ]; then
   set +e

@@ -22,6 +22,7 @@ shift
 target_agent=""
 session_id=""
 message=""
+message_file=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent)
@@ -36,6 +37,10 @@ while [ "$#" -gt 0 ]; do
       message="$2"
       shift 2
       ;;
+    --message-file)
+      message_file="$2"
+      shift 2
+      ;;
     --timeout)
       shift 2
       ;;
@@ -45,6 +50,8 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+[ -z "${message_file}" ] || [ "${message_file}" = /dev/stdin ] || exit 7
+[ -z "${message_file}" ] || message="$(cat)"
 
 jq -nc --arg agent "${target_agent}" --arg session_id "${session_id}" --arg message "${message}" \
   '{agent: $agent, session_id: $session_id, message: $message}' >>"${OPENCLAW_CALL_LOG:?OPENCLAW_CALL_LOG required}"
@@ -64,7 +71,14 @@ case "${target_agent}" in
       '{status:"success",issue_iid:$iid,issue_url:$issue_url,project:"claw_gitlab/px_ifp_hulat_test",entry_label:"todo",reason:null,correlation_id:null}'
     ;;
   req_executor)
-    jq -nc '{status:"waiting_for_callbacks",chat_summary:"accepted executor turn"}'
+    iid="$(awk -F= '$1 == "iid" {print $2; exit}' <<<"${message}")"
+    jq -nc --arg iid "${iid}" '{
+      status:"success",
+      batch_id:("single-wiki-" + $iid),
+      matched_count:1,
+      snapshot_digest:("e" * 64),
+      scheduler_status:"queued"
+    }'
     ;;
   *)
     echo "unexpected target agent: ${target_agent}" >&2
@@ -164,20 +178,39 @@ for idx in $(seq 0 $((payload_count - 1))); do
   fi
 done
 
-STATE_ROOT="${STATE_ROOT}" \
-RUN_ID="${first_run_id}" \
-OUTCOME="success" \
-STAGE="executor" \
-PROJECT="claw_gitlab/px_ifp_hulat_test" \
-IID="101" \
-MR_URL="http://localhost:8081/claw_gitlab/px_ifp_hulat_test/-/merge_requests/1" \
-bash "${SKILL_DIR}/scripts/drain_pending.sh" >/dev/null
-
-STATE_ROOT="${STATE_ROOT}" \
-CORRELATION_ID="${first_correlation_id}" \
-PROJECT="claw_gitlab/px_ifp_hulat_test" \
-IID="101" \
-bash "${SKILL_DIR}/scripts/finish_executor_queue_active.sh" >/dev/null
+first_callback_nonce="$(jq -r '.active.callback_nonce' \
+  "${STATE_ROOT}/_dispatcher/executor_queue.json")"
+first_batch_id="$(jq -r '.active.driven_batch_id' \
+  "${STATE_ROOT}/_dispatcher/executor_queue.json")"
+first_event="$(jq -cn \
+  --arg batch_id "${first_batch_id}" '{
+    event_id:($batch_id + ":snapshot-0:terminal-1"),
+    batch_id:$batch_id,
+    snapshot_index:0,
+    project:"claw_gitlab/px_ifp_hulat_test",
+    iid:101,
+    status:"done",
+    mr_url:"http://localhost:8081/claw_gitlab/px_ifp_hulat_test/-/merge_requests/1",
+    reason:null
+  }')"
+first_callback_envelope="$(jq -cn \
+  --arg callback_nonce "${first_callback_nonce}" \
+  --argjson event "${first_event}" '{
+    callback_nonce:$callback_nonce,
+    executor_agent:"req_executor",
+    worker_result_json:$event
+  }')"
+STATE_ROOT="${STATE_ROOT}" CALLBACK_ENVELOPE_JSON="${first_callback_envelope}" \
+  bash "${SKILL_DIR}/scripts/handle_executor_batch_event.sh" >/dev/null
+first_recovery="$(
+  STATE_ROOT="${STATE_ROOT}" \
+    bash "${SKILL_DIR}/scripts/recover_legacy_executor_batch_bridge.sh"
+)"
+if ! jq -e '.status == "cleared"' <<<"${first_recovery}" >/dev/null; then
+  echo "expected authenticated first Issue callback to clear the single bridge" >&2
+  printf '%s\n' "${first_recovery}" >&2
+  exit 1
+fi
 
 second_drain="$(
   STATE_ROOT="${STATE_ROOT}" \

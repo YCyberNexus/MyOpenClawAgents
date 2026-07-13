@@ -7,10 +7,13 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-run-agent.XXXXXX")"
 FAKE_OPENCLAW="${TEST_ROOT}/openclaw"
 OPENCLAW_LOG="${TEST_ROOT}/openclaw.args"
+OPENCLAW_STDIN_LOG="${TEST_ROOT}/openclaw.stdin"
+SECRET_NONCE='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 
 cat >"${FAKE_OPENCLAW}" <<'EOF'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "${OPENCLAW_LOG}"
+cat >"${OPENCLAW_STDIN_LOG}"
 printf '%s\n' 'accepted'
 printf '%s\n' '{"status":"success","project":"ai-infra/veqp_server_v3","issue_iid":7,"issue_url":"https://gitlab.example/issues/7"}'
 EOF
@@ -19,12 +22,14 @@ chmod +x "${FAKE_OPENCLAW}"
 result="$(
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \
   OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  OPENCLAW_STDIN_LOG="${OPENCLAW_STDIN_LOG}" \
   RUN_ID="run-git-1" \
   TARGET_AGENT="git_issuer" \
   TARGET_SESSION_KEY="agent:git_issuer:main" \
   AGENT_TIMEOUT_SECONDS="120" \
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh" <<'EOF'
 create issue for ai-infra/veqp_server_v3
+callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
 )"
 
@@ -34,9 +39,16 @@ if ! grep -q -- 'agent --agent git_issuer --session-key agent:git_issuer:main' "
   exit 1
 fi
 
-if ! grep -q -- '--message create issue for ai-infra/veqp_server_v3' "${OPENCLAW_LOG}"; then
-  echo "expected wrapper to pass stdin as --message" >&2
+if ! grep -q -- '--message-file /dev/stdin' "${OPENCLAW_LOG}" \
+  || grep -q -- "${SECRET_NONCE}" "${OPENCLAW_LOG}"; then
+  echo "expected wrapper to keep the nonce out of argv and select /dev/stdin" >&2
   cat "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+
+expected_stdin="$(printf 'create issue for ai-infra/veqp_server_v3\ncallback_nonce=%s\n' "${SECRET_NONCE}")"
+if [ "$(<"${OPENCLAW_STDIN_LOG}")" != "${expected_stdin}" ]; then
+  echo "expected fake openclaw to receive the complete message only on stdin" >&2
   exit 1
 fi
 

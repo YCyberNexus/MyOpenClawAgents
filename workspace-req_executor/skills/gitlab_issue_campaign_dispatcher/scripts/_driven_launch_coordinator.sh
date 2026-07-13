@@ -7,7 +7,41 @@ set -euo pipefail
 : "${EXECUTOR_SCHEDULER_ROOT:?_driven_launch_coordinator.sh: scheduler_env.sh must be sourced first}"
 
 DLC_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_actions"
-mkdir -p "${DLC_ROOT}"
+DLC_ARCHIVE_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_action_archive"
+DLC_LOCK_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_action_locks"
+DLC_LAYOUT_MIGRATION_LOCK="${DLC_LOCK_ROOT}/.layout-migration.lock"
+mkdir -p "${DLC_ROOT}" "${DLC_ARCHIVE_ROOT}" "${DLC_LOCK_ROOT}"
+chmod 700 "${DLC_ROOT}" "${DLC_ARCHIVE_ROOT}" "${DLC_LOCK_ROOT}" \
+  || { echo "_driven_launch_coordinator.sh: launch state directories must be private" >&2; return 2 2>/dev/null || exit 2; }
+
+# After the rolling compatibility window, quiesce both lock domains and retire
+# only the old inode to a non-canonical history name. Never replace the new
+# canonical path because another current process may already hold that inode.
+if [ "${LEGACY_LOCK_COMPAT_ACTIVE:-false}" != true ]; then
+  exec {DLC_LAYOUT_MIGRATION_LOCK_FD}>"${DLC_LAYOUT_MIGRATION_LOCK}"
+  flock -x "${DLC_LAYOUT_MIGRATION_LOCK_FD}"
+  shopt -s nullglob
+  DLC_LEGACY_LOCKS=("${DLC_ROOT}"/.*.lock)
+  for dlc_legacy_lock in "${DLC_LEGACY_LOCKS[@]}"; do
+    dlc_legacy_name="$(basename "${dlc_legacy_lock}")"
+    dlc_legacy_digest="${dlc_legacy_name#.}"
+    dlc_legacy_digest="${dlc_legacy_digest%.lock}"
+    dlc_canonical_lock="${DLC_LOCK_ROOT}/${dlc_legacy_digest}.lock"
+    dlc_archived_lock="${DLC_LOCK_ROOT}/legacy-${dlc_legacy_digest}.lock"
+    exec {DLC_LEGACY_MIGRATE_FD}>"${dlc_legacy_lock}"
+    flock -x "${DLC_LEGACY_MIGRATE_FD}"
+    exec {DLC_CANONICAL_MIGRATE_FD}>"${dlc_canonical_lock}"
+    flock -x "${DLC_CANONICAL_MIGRATE_FD}"
+    mv "${dlc_legacy_lock}" "${dlc_archived_lock}"
+    flock -u "${DLC_CANONICAL_MIGRATE_FD}"
+    exec {DLC_CANONICAL_MIGRATE_FD}>&-
+    flock -u "${DLC_LEGACY_MIGRATE_FD}"
+    exec {DLC_LEGACY_MIGRATE_FD}>&-
+  done
+  shopt -u nullglob
+  flock -u "${DLC_LAYOUT_MIGRATION_LOCK_FD}"
+  exec {DLC_LAYOUT_MIGRATION_LOCK_FD}>&-
+fi
 
 dlc_sha256() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -64,10 +98,30 @@ dlc_open() {
   local digest
   digest="$(printf '%s' "${job_id}" | dlc_sha256)" || return $?
   DLC_ACTION_FILE="${DLC_ROOT}/${digest}.json"
-  DLC_ACTION_LOCK="${DLC_ROOT}/.${digest}.lock"
+  DLC_ARCHIVE_FILE="${DLC_ARCHIVE_ROOT}/${digest}.json"
+  DLC_ACTION_LOCK="${DLC_LOCK_ROOT}/${digest}.lock"
+  unset DLC_LEGACY_ACTION_LOCK_FD
+  if [ "${LEGACY_LOCK_COMPAT_ACTIVE:-false}" = true ]; then
+    DLC_LEGACY_ACTION_LOCK="${DLC_ROOT}/.${digest}.lock"
+    exec {DLC_LEGACY_ACTION_LOCK_FD}>"${DLC_LEGACY_ACTION_LOCK}"
+    flock -x "${DLC_LEGACY_ACTION_LOCK_FD}"
+  fi
   exec {DLC_ACTION_LOCK_FD}>"${DLC_ACTION_LOCK}"
   flock -x "${DLC_ACTION_LOCK_FD}"
-  export DLC_ACTION_FILE DLC_ACTION_LOCK DLC_ACTION_LOCK_FD
+  if [ ! -f "${DLC_ACTION_FILE}" ] && [ -f "${DLC_ARCHIVE_FILE}" ]; then
+    mv "${DLC_ARCHIVE_FILE}" "${DLC_ACTION_FILE}"
+  fi
+  export DLC_ACTION_FILE DLC_ARCHIVE_FILE DLC_ACTION_LOCK DLC_ACTION_LOCK_FD
+}
+
+dlc_archive_completed() {
+  [ -f "${DLC_ACTION_FILE}" ] || return 0
+  jq -e '.stage == "completed"' "${DLC_ACTION_FILE}" >/dev/null \
+    || return 2
+  if [ -e "${DLC_ARCHIVE_FILE}" ]; then
+    cmp -s "${DLC_ACTION_FILE}" "${DLC_ARCHIVE_FILE}" || return 3
+  fi
+  mv "${DLC_ACTION_FILE}" "${DLC_ARCHIVE_FILE}"
 }
 
 dlc_close() {
@@ -75,6 +129,11 @@ dlc_close() {
     flock -u "${DLC_ACTION_LOCK_FD}" 2>/dev/null || true
     exec {DLC_ACTION_LOCK_FD}>&-
     unset DLC_ACTION_LOCK_FD
+  fi
+  if [ -n "${DLC_LEGACY_ACTION_LOCK_FD:-}" ]; then
+    flock -u "${DLC_LEGACY_ACTION_LOCK_FD}" 2>/dev/null || true
+    exec {DLC_LEGACY_ACTION_LOCK_FD}>&-
+    unset DLC_LEGACY_ACTION_LOCK_FD
   fi
 }
 

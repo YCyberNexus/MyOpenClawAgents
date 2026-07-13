@@ -415,6 +415,10 @@ flock -x "${SCHEDULER_LOCK_FD}"
 
 migrate_legacy_scheduler_state
 recover_pending_transaction
+# An upgraded pending transaction may have republished the former hot
+# launch_failed tombstone map. Compact it to direct cold receipts before this
+# scheduling pass loads or rewrites scheduler_state.json.
+scheduler_migrate_hot_launch_failed_receipts
 
 SCHEDULER_STATE="$(jq -ce '
   def valid_launch_failed_receipts:
@@ -498,6 +502,42 @@ if [ "${DRIVEN_SCHEDULER_MIGRATION_ONLY:-0}" = 1 ]; then
   exit 0
 fi
 SCHEDULER_CHANGED=false
+
+# `batch_order` is the hot runnable index, not an audit log. Compact terminal
+# batches under the scheduler lock before the fairness loop; their immutable
+# directories remain addressable by batch_id for acceptance/idempotency but are
+# never opened by later ticks. This one-file transition is independently atomic
+# and therefore does not need the cross-file pending_transaction marker.
+ACTIVE_BATCH_ORDER='[]'
+while IFS= read -r registered_batch_id; do
+  [ -n "${registered_batch_id}" ] || continue
+  registered_state_file="${BATCHES_ROOT}/${registered_batch_id}/state.json"
+  [ -f "${registered_state_file}" ] \
+    || reserve_die "registered batch state is missing: ${registered_batch_id}" 3
+  registered_status="$(jq -er '
+    .status | select(. == "queued" or . == "running"
+      or . == "completed" or . == "failed")
+  ' "${registered_state_file}")" \
+    || reserve_die "registered batch state is invalid: ${registered_batch_id}" 3
+  case "${registered_status}" in
+    completed|failed) ;;
+    *)
+      ACTIVE_BATCH_ORDER="$(jq -c --arg batch_id "${registered_batch_id}" \
+        '. + [$batch_id]' <<<"${ACTIVE_BATCH_ORDER}")"
+      ;;
+  esac
+done < <(jq -r '.batch_order[]' <<<"${SCHEDULER_STATE}")
+if [ "$(jq -c '.batch_order' <<<"${SCHEDULER_STATE}")" != "${ACTIVE_BATCH_ORDER}" ]; then
+  SCHEDULER_STATE="$(jq -c --argjson active_order "${ACTIVE_BATCH_ORDER}" '
+    .round_robin_cursor as $cursor
+    | .batch_order = $active_order
+    | if $cursor != null
+        and ($active_order | index($cursor)) == null
+      then .round_robin_cursor = null else . end
+  ' <<<"${SCHEDULER_STATE}")"
+  atomic_write_json "${SCHEDULER_STATE_FILE}" "${SCHEDULER_STATE}"
+  BASE_SCHEDULER_STATE="${SCHEDULER_STATE}"
+fi
 
 mapfile -t BATCH_ORDER < <(jq -r '.batch_order[]' <<<"${SCHEDULER_STATE}")
 declare -A BATCH_STATES=()

@@ -35,7 +35,8 @@ git -C "${PROJECT_REPO}" symbolic-ref \
 mkdir -p "${STATE_DIR}"
 
 for name in dispatch_driven_topup.sh dispatch_prepare_tick.sh _dispatch_lib.sh \
-  branch_utils.sh env_paths.sh resolve_driven_repo_path.sh; do
+  branch_utils.sh env_paths.sh \
+  resolve_driven_repo_path.sh; do
   cp "${SKILL_DIR}/scripts/${name}" "${FIXTURE_SCRIPTS}/${name}"
 done
 cp "${SKILL_DIR}/references/executor_prompt.md" "${FIXTURE_REFS}/executor_prompt.md"
@@ -43,7 +44,7 @@ cp "${SKILL_DIR}/references/executor_prompt.md" "${FIXTURE_REFS}/executor_prompt
 cat >"${CONFIG_DIR}/gitlab.env" <<'EOF'
 GITLAB_HOST=gitlab.test.invalid
 GITLAB_API_PROTOCOL=https
-GITLAB_TOKEN=fake-token-must-not-enter-state
+GITLAB_TOKEN=fake-token-direct
 EOF
 cat >"${CONFIG_DIR}/campaign_defaults.env" <<EOF
 REPO_PARENT_PATH=${REPO_PARENT}
@@ -231,7 +232,7 @@ dispatch_mode=driven_topup
 driven_request_json=${request}
 project=project
 group=group
-gitlab_token=fake-token-must-not-enter-state
+gitlab_token=fake-token-must-enter-trigger
 issue_iids=2,3
 issue_min_iid=2
 issue_max_iid=3
@@ -253,6 +254,7 @@ assert_prepare_rejected() {
   : >"${LABEL_LOG}"
   : >"${GLAB_LOG}"
   output="$(prepare_trigger "${request}" | \
+    GITLAB_TOKEN=fake-token-direct \
     GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
     PATH="${BIN_DIR}:${PATH}" bash "${FIXTURE_SCRIPTS}/dispatch_prepare_tick.sh")"
   printf '%s' "${output}" | jq -e \
@@ -275,6 +277,7 @@ assert_prepare_rejected duplicate_membership_internal "${DUP_MEMBERSHIP_REQUEST}
 OUTPUT="$(run_wrapper "${VALID_REQUEST}")"
 printf '%s' "${OUTPUT}" | jq -e '
   .status == "ready"
+  and .pending_iids == [1,2,3,6]
   and [.dispatch_entries[].iid] == [2,3,6]
   and (all(.dispatch_entries[];
     (.attempt_number == 1)
@@ -297,6 +300,8 @@ for iid in 2 3 6; do
   PAYLOAD_PATH="$(printf '%s' "${OUTPUT}" | jq -r --argjson iid "${iid}" \
     '.dispatch_entries[] | select(.iid == $iid) | .payload_path')"
   [ -f "${PAYLOAD_PATH}" ] || fail "driven topup payload_path for IID ${iid} does not exist"
+  grep -Fq 'GITLAB_TOKEN=fake-token-direct' "${PAYLOAD_PATH}" \
+    || fail "rendered sessions_spawn task for IID ${iid} omitted the GitLab token"
 done
 
 jq -e '
@@ -307,9 +312,6 @@ jq -e '
   and .issue_iids_whitelist == [1,2,3,4,5,6]
   and .dispatch_owner == (.dispatch_owner | select(.mode == "driven" and .owner_id == "owner-A"))
 ' "${STATE_FILE}" >/dev/null || fail "driven topup pending state froze skips or omitted scheduler membership source"
-if grep -Fq 'fake-token-must-not-enter-state' "${STATE_FILE}"; then
-  fail "GitLab token leaked into campaign state metadata"
-fi
 
 [ "$(cat "${ALLOC_LOG}")" = $'2\n3\n6' ] \
   || fail "topup must allocate only executable grant IIDs 2, 3, and 6"
@@ -338,6 +340,7 @@ SKIP_ONLY="$(run_wrapper "${SKIP_ONLY_REQUEST}")"
 printf '%s' "${SKIP_ONLY}" | jq -e '
   .status == "no_eligible_iids"
   and .dispatch_entries == []
+  and .pending_iids == [1,2,3,6]
   and [.skipped_entries[] | {iid,reason}] == [
     {iid:4,reason:"closed"},
     {iid:5,reason:"pr_without_force_rerun"}
@@ -354,6 +357,7 @@ REPLAY="$(run_wrapper "${VALID_REQUEST}")"
 printf '%s' "${REPLAY}" | jq -e '
   (.status == "waiting_for_callbacks" or .status == "no_eligible_iids")
   and .dispatch_entries == []
+  and .pending_iids == [1,2,3,6]
   and [.skipped_entries[].iid] == [4,5]
 ' >/dev/null || fail "same grants replay must retain skips without re-preparing pending jobs"
 [ "$(cat "${ALLOC_LOG}")" = $'2\n3\n6' ] \

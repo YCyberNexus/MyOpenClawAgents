@@ -130,7 +130,8 @@ write_campaign_state() {
 }
 
 run_prepare() {
-  GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
+  GITLAB_TOKEN=fake-token \
+    GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
     bash "${FIXTURE_SCRIPTS}/dispatch_prepare_tick.sh"
 }
 
@@ -149,6 +150,20 @@ printf '%s' "${LEGACY_OUT}" | jq -e \
 jq -e '.dispatch_owner.mode == "scheduled" and .dispatch_owner.owner_id == "scheduled"' \
   "${STATE_FILE}" >/dev/null || fail "legacy state did not acquire scheduled owner"
 [ -s "${CALL_LOG}" ] || fail "legacy owner acquisition did not enter scheduled tick"
+
+# A driven topup must never claim legacy in-flight scheduled work merely because
+# the pre-owner state has no explicit dispatch_owner yet. The compatibility
+# migration belongs to the scheduled owner until all old pending entries drain.
+write_campaign_state "" "" true
+reset_call_log
+cp "${STATE_FILE}" "${TEST_ROOT}/legacy-driven-before.json"
+LEGACY_DRIVEN_OUT="$(driven_trigger | run_prepare)"
+printf '%s' "${LEGACY_DRIVEN_OUT}" | jq -e '
+  .status == "busy_owned_by_scheduled" and .dispatch_entries == []
+' >/dev/null || fail "driven topup claimed legacy scheduled pending work"
+jq -e '.dispatch_owner.mode == "scheduled" and .dispatch_owner.owner_id == "scheduled"' \
+  "${STATE_FILE}" >/dev/null || fail "legacy pending work was not migrated to scheduled owner"
+[ ! -s "${CALL_LOG}" ] || fail "rejected driven takeover reached external work"
 
 # Same mode and same owner is reentrant and renews the lease.
 write_campaign_state scheduled scheduled true

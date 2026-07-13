@@ -15,6 +15,7 @@ cat >"${CONFIG_DIR}/campaign_defaults.env" <<EOF
 REPO_PARENT_PATH=/data
 EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}
 EXECUTOR_MAX_CONCURRENCY=3
+DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0
 EOF
 
 out="$(CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh")"
@@ -28,7 +29,9 @@ fi
 for path in \
   "${SCHEDULER_ROOT}/batches" \
   "${SCHEDULER_ROOT}/callback_inbox" \
-  "${SCHEDULER_ROOT}/callback_outbox"
+  "${SCHEDULER_ROOT}/callback_outbox" \
+  "${SCHEDULER_ROOT}/callback_locks" \
+  "${SCHEDULER_ROOT}/launch_failed_receipts"
 do
   if [ ! -d "${path}" ]; then
     echo "expected scheduler directory to exist: ${path}" >&2
@@ -52,7 +55,10 @@ exported_paths="$(CONFIG_DIR="${CONFIG_DIR}" bash -c '
     --arg batches "${BATCHES_ROOT}" \
     --arg inbox "${CALLBACK_INBOX}" \
     --arg outbox "${CALLBACK_OUTBOX}" \
-    "{state:\$state,lock:\$lock,batches:\$batches,inbox:\$inbox,outbox:\$outbox}"
+    --arg callback_locks "${CALLBACK_LOCKS}" \
+    --arg launch_failed_receipts "${LAUNCH_FAILED_RECEIPTS_ROOT}" \
+    "{state:\$state,lock:\$lock,batches:\$batches,inbox:\$inbox,outbox:\$outbox,
+      callback_locks:\$callback_locks,launch_failed_receipts:\$launch_failed_receipts}"
 ' _ "${SKILL_DIR}/scripts/scheduler_env.sh")"
 jq -e \
   --arg root "${SCHEDULER_ROOT}" \
@@ -60,7 +66,9 @@ jq -e \
     and .lock == ($root + "/scheduler.lock")
     and .batches == ($root + "/batches")
     and .inbox == ($root + "/callback_inbox")
-    and .outbox == ($root + "/callback_outbox")' \
+    and .outbox == ($root + "/callback_outbox")
+    and .callback_locks == ($root + "/callback_locks")
+    and .launch_failed_receipts == ($root + "/launch_failed_receipts")' \
   <<<"${exported_paths}" >/dev/null
 
 PRESERVED_STATE='{"version":1,"round_robin_cursor":"batch-1","active_jobs":{},"batch_order":["batch-1"]}'
@@ -70,6 +78,37 @@ if [ "$(<"${STATE_FILE}")" != "${PRESERVED_STATE}" ]; then
   echo 'expected existing valid scheduler state to be preserved' >&2
   exit 1
 fi
+
+# Upgrade a large legacy hot tombstone map into directly addressable cold
+# receipts. Historical launch failures must never remain in scheduler_state.
+HOT_RECEIPTS='{}'
+for receipt_index in $(seq 0 104); do
+  receipt_job="history-${receipt_index}:snapshot-0"
+  HOT_RECEIPTS="$(jq -c \
+    --arg job_id "${receipt_job}" \
+    --argjson recorded_at "${receipt_index}" '
+    .[$job_id] = {
+      version:1,
+      job_id:$job_id,
+      claim_generation:1,
+      claim_token_sha256:("a" * 64),
+      action:"launch_failed",
+      recorded_at:$recorded_at
+    }
+  ' <<<"${HOT_RECEIPTS}")"
+done
+jq --argjson receipts "${HOT_RECEIPTS}" \
+  '.launch_failed_receipts = $receipts' "${STATE_FILE}" >"${STATE_FILE}.hot-history"
+mv "${STATE_FILE}.hot-history" "${STATE_FILE}"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+jq -e 'has("launch_failed_receipts") | not' "${STATE_FILE}" >/dev/null \
+  || { echo 'historical launch_failed receipts remained in hot scheduler state' >&2; exit 1; }
+[ "$(find "${SCHEDULER_ROOT}/launch_failed_receipts" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')" = 105 ] \
+  || { echo 'legacy launch_failed receipts were not migrated to cold storage' >&2; exit 1; }
+history_digest="$(printf '%s' 'history-104:snapshot-0' | shasum -a 256 | awk '{print $1}')"
+jq -e '.job_id == "history-104:snapshot-0" and .recorded_at == 104' \
+  "${SCHEDULER_ROOT}/launch_failed_receipts/${history_digest}.json" >/dev/null \
+  || { echo 'cold launch_failed receipt is not directly addressable by job digest' >&2; exit 1; }
 
 if CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_MAX_CONCURRENCY=0 bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null 2>&1; then
   echo 'expected invalid concurrency to fail' >&2

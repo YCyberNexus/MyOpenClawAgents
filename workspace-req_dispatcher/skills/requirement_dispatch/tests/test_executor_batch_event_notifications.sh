@@ -10,6 +10,9 @@ MIRROR_FILE="${STATE_ROOT_PATH}/_dispatcher/executor_batches.json"
 EVENT_LEDGER_FILE="${STATE_ROOT_PATH}/_dispatcher/executor_batch_events.jsonl"
 NOTIFICATIONS_FILE="${STATE_ROOT_PATH}/_dispatcher/executor_batch_notifications.json"
 ORIGIN='{"channel":"wecom","user":"event-user","conversation":"event-conversation","reply_agent":"reply-agent"}'
+export PROJECT='group/project'
+export CALLBACK_AUTH_MODE=legacy_pre_upgrade
+export ALLOW_LEGACY_PRE_UPGRADE=true
 
 STATE_ROOT="${STATE_ROOT_PATH}" \
 BATCH_ID="batch-events" \
@@ -35,6 +38,46 @@ EVENT_JSON="$(jq -cnS \
     mr_url:$mr_url,
     reason:null
   }')"
+
+# I3 ack latency is bounded by durable apply only. The handler must never call
+# a user notifier synchronously after the event commit.
+FAST_ACK_ROOT="${TEST_ROOT}/fast-ack-state"
+FAST_ACK_MARKER="${TEST_ROOT}/fast-ack-notifier.called"
+FAST_ACK_NOTIFY="${TEST_ROOT}/fast-ack-notify.sh"
+cat >"${FAST_ACK_NOTIFY}" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' called >"${FAST_ACK_MARKER:?}"
+exit 0
+FAKE
+chmod +x "${FAST_ACK_NOTIFY}"
+STATE_ROOT="${FAST_ACK_ROOT}" \
+BATCH_ID="batch-fast-ack" \
+PROJECT="group/project" \
+EXECUTOR_AGENT="req_executor" \
+CALLBACK_AUTH_MODE=legacy_pre_upgrade \
+ALLOW_LEGACY_PRE_UPGRADE=true \
+ORIGIN_JSON="${ORIGIN}" \
+MATCHED_COUNT=1 \
+REQUEST_DIGEST="request-digest-fast-ack" \
+  "${BASH}" "${SKILL_DIR}/scripts/record_executor_batch.sh" >/dev/null
+FAST_ACK_EVENT="$(jq -c '
+  .event_id = "batch-fast-ack:snapshot-0:terminal-1"
+  | .batch_id = "batch-fast-ack"
+' <<<"${EVENT_JSON}")"
+fast_ack_output="$(
+  STATE_ROOT="${FAST_ACK_ROOT}" \
+  WORKER_RESULT_JSON="${FAST_ACK_EVENT}" \
+  NOTIFY_USER_SCRIPT="${FAST_ACK_NOTIFY}" \
+  FAST_ACK_MARKER="${FAST_ACK_MARKER}" \
+    "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
+)"
+if ! jq -e '.status == "accepted"' <<<"${fast_ack_output}" >/dev/null \
+  || [ -e "${FAST_ACK_MARKER}" ] \
+  || ! jq -e '(.notifications | length) == 1' \
+    "${FAST_ACK_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null; then
+  echo "I3 handler synchronously drained user notifications before ack" >&2
+  exit 1
+fi
 
 apply_event() {
   STATE_ROOT="${STATE_ROOT_PATH}" \
@@ -89,8 +132,8 @@ fi
 if ! jq -e --arg event_id "${EVENT_ID}" '
   (.notifications | length) == 1
   and (.notifications[0] | keys | sort) == [
-    "attempts","delivered_at","event_id","iid","mr_url","origin",
-    "project","reason","status"
+    "attempts","delivered_at","event_id","iid","mr_url","next_attempt_at",
+    "origin","project","reason","status"
   ]
   and .notifications[0] == {
     event_id:$event_id,
@@ -106,7 +149,8 @@ if ! jq -e --arg event_id "${EVENT_ID}" '
     mr_url:"https://gitlab.example/group/project/-/merge_requests/9",
     reason:null,
     attempts:0,
-    delivered_at:null
+    delivered_at:null,
+    next_attempt_at:null
   }
 ' "${NOTIFICATIONS_FILE}" >/dev/null; then
   echo "expected one exact per-Issue notification item" >&2
@@ -531,6 +575,8 @@ run_strict_notify_drain() {
   REPLY_GATEWAY_TOKEN="reply-token" \
   DEFAULT_REPLY_AGENT="fallback-agent" \
   REPLY_NOTIFY_TIMEOUT_SECONDS="5" \
+  EXECUTOR_BATCH_NOTIFICATION_RETRY_BASE_SECONDS=1 \
+  EXECUTOR_BATCH_NOTIFICATION_RETRY_MAX_SECONDS=4 \
     "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh"
 }
 
@@ -548,6 +594,7 @@ if ! jq -e '
 fi
 
 printf '%s\n' success >"${STRICT_OPENCLAW_SUCCESS}"
+sleep 1
 strict_success_drain="$(run_strict_notify_drain 2>"${TEST_ROOT}/strict-notify-success.err")"
 if ! jq -e '
   .attempted == 1 and .delivered == 1 and .failed == 0
@@ -694,6 +741,8 @@ drain_notifications() {
   NOTIFY_USER_SCRIPT="${FAKE_NOTIFY}" \
   FAKE_NOTIFY_LOG="${FAKE_NOTIFY_LOG}" \
   FAKE_NOTIFY_MARKER="${FAKE_NOTIFY_MARKER}" \
+  EXECUTOR_BATCH_NOTIFICATION_RETRY_BASE_SECONDS=1 \
+  EXECUTOR_BATCH_NOTIFICATION_RETRY_MAX_SECONDS=4 \
     "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh"
 }
 
@@ -718,6 +767,7 @@ if ! jq -e '
   exit 1
 fi
 
+sleep 1
 second_drain="$(drain_notifications 2>"${TEST_ROOT}/fake-notify-success.err")"
 if ! jq -e '
   .status == "drained"
@@ -769,6 +819,51 @@ if ! jq -s -e '
 ' "${FAKE_NOTIFY_LOG}" >/dev/null; then
   echo "expected two lock-free notify attempts with the persisted item fields" >&2
   sed -n '1,80p' "${FAKE_NOTIFY_LOG}" >&2
+  exit 1
+fi
+
+# A periodic drain has a fixed work budget and failed deliveries receive a
+# durable exponential backoff timestamp instead of being retried in a tight
+# loop. Five eligible items therefore take two default-budget ticks.
+BUDGET_ROOT="${TEST_ROOT}/notification-budget-state"
+BUDGET_NOTIFY="${TEST_ROOT}/notification-budget-notify.sh"
+BUDGET_NOTIFY_LOG="${TEST_ROOT}/notification-budget.calls"
+cat >"${BUDGET_NOTIFY}" <<'FAKE'
+#!/usr/bin/env bash
+printf '%s\n' "${PROJECT}:${REASON}" >>"${BUDGET_NOTIFY_LOG:?}"
+exit 23
+FAKE
+chmod +x "${BUDGET_NOTIFY}"
+for batch_number in 1 2 3 4 5; do
+  STATE_ROOT="${BUDGET_ROOT}" \
+  BATCH_ID="budget-${batch_number}" \
+  PROJECT="group/project" \
+  ORIGIN_JSON=null \
+    "${BASH}" "${SKILL_DIR}/scripts/enqueue_executor_batch_empty_notification.sh" >/dev/null
+done
+
+budget_drain() {
+  STATE_ROOT="${BUDGET_ROOT}" \
+  NOTIFY_USER_SCRIPT="${BUDGET_NOTIFY}" \
+  BUDGET_NOTIFY_LOG="${BUDGET_NOTIFY_LOG}" \
+    "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh"
+}
+
+budget_first="$(budget_drain 2>"${TEST_ROOT}/budget-first.err")"
+budget_second="$(budget_drain 2>"${TEST_ROOT}/budget-second.err")"
+budget_third="$(budget_drain 2>"${TEST_ROOT}/budget-third.err")"
+if ! jq -e '.attempted == 3 and .failed == 3' <<<"${budget_first}" >/dev/null \
+  || ! jq -e '.attempted == 2 and .failed == 2' <<<"${budget_second}" >/dev/null \
+  || ! jq -e '.attempted == 0 and .failed == 0' <<<"${budget_third}" >/dev/null \
+  || [ "$(wc -l <"${BUDGET_NOTIFY_LOG}" | tr -d ' ')" -ne 5 ] \
+  || ! jq -e '
+    (.notifications | length) == 5
+    and all(.notifications[];
+      .attempts == 1
+      and .delivered_at == null
+      and (.next_attempt_at | type == "string" and length > 0))
+  ' "${BUDGET_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null; then
+  echo "notification budget or durable retry backoff contract was not enforced" >&2
   exit 1
 fi
 

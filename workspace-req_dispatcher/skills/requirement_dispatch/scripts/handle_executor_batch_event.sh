@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Fixed public I3 handler: strict transport unwrap, durable apply, same-event
-# ack, then notification drain.
+# Fixed public I3 handler: strict transport unwrap, durable apply, then return
+# the same-event ack. Periodic ticks recover bridges and drain notifications.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,58 +10,122 @@ handler_die() {
   exit "${2:-2}"
 }
 
-WORKER_RESULT_INPUT="${WORKER_RESULT_JSON:-${worker_result_json:-}}"
-if [ -z "${WORKER_RESULT_INPUT}" ] && [ "$#" -gt 0 ]; then
-  WORKER_RESULT_INPUT="$1"
+CALLBACK_INPUT="${CALLBACK_ENVELOPE_JSON:-${callback_envelope:-${WORKER_RESULT_JSON:-${worker_result_json:-}}}}"
+INPUT_WAS_EXPLICIT_ENVELOPE=false
+if [ -n "${CALLBACK_ENVELOPE_JSON:-${callback_envelope:-}}" ]; then
+  INPUT_WAS_EXPLICIT_ENVELOPE=true
 fi
-if [ -z "${WORKER_RESULT_INPUT}" ] && [ ! -t 0 ]; then
-  WORKER_RESULT_INPUT="$(cat)"
+if [ -z "${CALLBACK_INPUT}" ] && [ "$#" -gt 0 ]; then
+  CALLBACK_INPUT="$1"
 fi
-[ -n "${WORKER_RESULT_INPUT}" ] \
-  || handler_die "WORKER_RESULT_JSON or RUN_DRIVEN_BATCH_RESULT input required"
+if [ -z "${CALLBACK_INPUT}" ] && [ ! -t 0 ]; then
+  CALLBACK_INPUT="$(cat)"
+fi
+[ -n "${CALLBACK_INPUT}" ] \
+  || handler_die "CALLBACK_ENVELOPE_JSON or RUN_DRIVEN_BATCH_RESULT input required"
 
-PUBLIC_I3_INPUT="${WORKER_RESULT_INPUT}"
-if [[ "${WORKER_RESULT_INPUT}" == RUN_DRIVEN_BATCH_RESULT$'\n'* ]]; then
-  trigger_body="${WORKER_RESULT_INPUT#RUN_DRIVEN_BATCH_RESULT$'\n'}"
+TRANSPORT_MODE=auto
+TRANSPORT_JSON="${CALLBACK_INPUT}"
+if [[ "${CALLBACK_INPUT}" == RUN_DRIVEN_BATCH_RESULT$'\n'* ]]; then
+  trigger_body="${CALLBACK_INPUT#RUN_DRIVEN_BATCH_RESULT$'\n'}"
   case "${trigger_body}" in
-    worker_result_json=*) ;;
-    *) handler_die "RUN_DRIVEN_BATCH_RESULT must contain exactly one worker_result_json line" ;;
+    callback_envelope=*) TRANSPORT_MODE=authenticated ;;
+    worker_result_json=*) TRANSPORT_MODE=legacy_pre_upgrade ;;
+    *) handler_die "RUN_DRIVEN_BATCH_RESULT must contain exactly one callback transport line" ;;
   esac
-  PUBLIC_I3_INPUT="${trigger_body#worker_result_json=}"
-  [ -n "${PUBLIC_I3_INPUT}" ] \
-    || handler_die "RUN_DRIVEN_BATCH_RESULT worker_result_json must not be empty"
-  case "${PUBLIC_I3_INPUT}" in
+  case "${TRANSPORT_MODE}" in
+    authenticated) TRANSPORT_JSON="${trigger_body#callback_envelope=}" ;;
+    legacy_pre_upgrade) TRANSPORT_JSON="${trigger_body#worker_result_json=}" ;;
+  esac
+  [ -n "${TRANSPORT_JSON}" ] \
+    || handler_die "RUN_DRIVEN_BATCH_RESULT callback transport must not be empty"
+  case "${TRANSPORT_JSON}" in
     *$'\n'*) handler_die "RUN_DRIVEN_BATCH_RESULT must not contain extra or duplicate lines" ;;
   esac
-elif [[ "${WORKER_RESULT_INPUT}" == RUN_DRIVEN_BATCH_RESULT* ]]; then
+elif [[ "${CALLBACK_INPUT}" == RUN_DRIVEN_BATCH_RESULT* ]]; then
   handler_die "RUN_DRIVEN_BATCH_RESULT transport shape is invalid"
+elif [ "${INPUT_WAS_EXPLICIT_ENVELOPE}" = true ]; then
+  TRANSPORT_MODE=authenticated
 fi
 
-if ! PUBLIC_I3_JSON="$(jq -cseS '
-  if length == 1
-    and (.[0] | type == "object")
-    and ((.[0] | keys | sort) == [
-      "batch_id","event_id","iid","mr_url","project","reason",
-      "snapshot_index","status"
-    ])
-  then .[0]
-  else error("expected exactly one public I3 object with eight fields")
-  end
-' <<<"${PUBLIC_I3_INPUT}" 2>/dev/null)"; then
-  handler_die "worker_result_json must be exactly one public I3 object with eight fields"
+if [ "${TRANSPORT_MODE}" = auto ]; then
+  if jq -e '
+    type == "object"
+    and (keys | sort) == ["callback_nonce","executor_agent","worker_result_json"]
+  ' <<<"${TRANSPORT_JSON}" >/dev/null 2>&1; then
+    TRANSPORT_MODE=authenticated
+  else
+    TRANSPORT_MODE=legacy_pre_upgrade
+  fi
 fi
+
+if [ "${TRANSPORT_MODE}" = authenticated ]; then
+  if ! CALLBACK_ENVELOPE="$(jq -cseS '
+    def printable:
+      type == "string" and length > 0
+      and (explode | all(. >= 32 and . != 127));
+    def public_i3:
+      type == "object"
+      and (keys | sort) == [
+        "batch_id","event_id","iid","mr_url","project","reason",
+        "snapshot_index","status"
+      ];
+    if length == 1
+      and (.[0] | type == "object")
+      and ((.[0] | keys | sort) == [
+        "callback_nonce","executor_agent","worker_result_json"
+      ])
+      and (.[0].callback_nonce | type == "string"
+        and test("^[0-9a-f]{64}$"))
+      and (.[0].executor_agent | printable)
+      and (.[0].worker_result_json | public_i3)
+    then .[0]
+    else error("invalid authenticated callback envelope")
+    end
+  ' <<<"${TRANSPORT_JSON}" 2>/dev/null)"; then
+    handler_die "callback_envelope must be the exact authenticated callback object"
+  fi
+else
+  if ! PUBLIC_I3_JSON="$(jq -cseS '
+    if length == 1
+      and (.[0] | type == "object")
+      and ((.[0] | keys | sort) == [
+        "batch_id","event_id","iid","mr_url","project","reason",
+        "snapshot_index","status"
+      ])
+    then .[0]
+    else error("expected exactly one public I3 object with eight fields")
+    end
+  ' <<<"${TRANSPORT_JSON}" 2>/dev/null)"; then
+    handler_die "worker_result_json must be exactly one public I3 object with eight fields"
+  fi
+fi
+
+# The authenticated transport is needed only by the durable apply subprocess.
+# Remove caller-provided envelope variables before bridge/notification children
+# can inherit the nonce-bearing value.
+unset CALLBACK_ENVELOPE_JSON callback_envelope WORKER_RESULT_JSON worker_result_json
+unset CALLBACK_INPUT TRANSPORT_JSON trigger_body
 
 set +e
-ack="$(
-  WORKER_RESULT_JSON="${PUBLIC_I3_JSON}" \
-    "${BASH}" "${SCRIPT_DIR}/apply_executor_batch_event.sh"
-)"
+if [ "${TRANSPORT_MODE}" = authenticated ]; then
+  ack="$(
+    CALLBACK_ENVELOPE_JSON="${CALLBACK_ENVELOPE}" \
+      "${BASH}" "${SCRIPT_DIR}/apply_executor_batch_event.sh"
+  )"
+else
+  ack="$(
+    WORKER_RESULT_JSON="${PUBLIC_I3_JSON}" \
+      "${BASH}" "${SCRIPT_DIR}/apply_executor_batch_event.sh"
+  )"
+fi
 apply_rc=$?
 set -e
 if [ "${apply_rc}" -ne 0 ]; then
   [ -z "${ack}" ] || printf '%s\n' "${ack}"
   exit "${apply_rc}"
 fi
+unset CALLBACK_ENVELOPE PUBLIC_I3_JSON
 if ! jq -e '
   type == "object"
   and (keys | sort) == ["event_id","status"]
@@ -72,30 +136,7 @@ if ! jq -e '
   exit 3
 fi
 
-set +e
-bridge_result="$("${BASH}" "${SCRIPT_DIR}/recover_legacy_executor_batch_bridge.sh")"
-bridge_rc=$?
-set -e
-if [ "${bridge_rc}" -ne 0 ]; then
-  echo "handle_executor_batch_event.sh: legacy bridge recovery failed rc=${bridge_rc}; retained for tick" >&2
-  bridge_result='{"status":"recovery_failed"}'
-fi
-
-set +e
-"${BASH}" "${SCRIPT_DIR}/drain_executor_batch_notifications.sh" >/dev/null
-notification_rc=$?
-set -e
-if [ "${notification_rc}" -ne 0 ]; then
-  echo "handle_executor_batch_event.sh: notification drain failed rc=${notification_rc}; ack remains durable" >&2
-fi
-
-if [ "$(jq -r '.status // ""' <<<"${bridge_result}" 2>/dev/null)" = cleared ]; then
-  set +e
-  "${BASH}" "${SCRIPT_DIR}/run_executor_batch_tick.sh" >/dev/null
-  tick_rc=$?
-  set -e
-  if [ "${tick_rc}" -ne 0 ]; then
-    echo "handle_executor_batch_event.sh: follow-up tick failed rc=${tick_rc}; periodic tick will retry" >&2
-  fi
-fi
+# The durable apply is the I3 acknowledgement boundary. Bridge recovery,
+# notification delivery, and follow-up scheduling are periodic tick work; none
+# may delay or contaminate the executor-facing ack.
 printf '%s\n' "${ack}"

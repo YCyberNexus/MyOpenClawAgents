@@ -26,11 +26,22 @@ matched_count="$(jq -r '.driven_matched_count' <<<"${active_json}")"
 request_digest="$(jq -r '.driven_request_digest' <<<"${active_json}")"
 origin_json="$(jq -c '.origin // null' <<<"${active_json}")"
 project="$(jq -r '.project' <<<"${active_json}")"
+callback_auth_mode="$(jq -r '.driven_callback_auth_mode // "legacy_pre_upgrade"' <<<"${active_json}")"
+callback_nonce_sha256="$(jq -r '.driven_callback_nonce_sha256 // ""' <<<"${active_json}")"
+if [ "${callback_auth_mode}" = legacy_pre_upgrade ]; then
+  allow_legacy_pre_upgrade=true
+else
+  allow_legacy_pre_upgrade=false
+fi
 
 record_result="$(
   STATE_ROOT="${STATE_ROOT}" \
   BATCH_ID="${batch_id}" \
+  PROJECT="${project}" \
   EXECUTOR_AGENT="${executor_agent}" \
+  CALLBACK_AUTH_MODE="${callback_auth_mode}" \
+  CALLBACK_NONCE_SHA256="${callback_nonce_sha256}" \
+  ALLOW_LEGACY_PRE_UPGRADE="${allow_legacy_pre_upgrade}" \
   ORIGIN_JSON="${origin_json}" \
   MATCHED_COUNT="${matched_count}" \
   REQUEST_DIGEST="${request_digest}" \

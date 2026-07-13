@@ -16,6 +16,9 @@
 - OPEN 未完成：`处理 group/project 中未完成的 Issue`；
 - OPEN 指定标签：`处理 group/project 中 label 为 smoke 的 Issue`。
 
+同一请求出现多个不同 IID、单 IID 与范围混用，或给范围附加非 OPEN 状态/label 条件时，
+必须要求用户拆分或澄清，不能静默选取第一个条件。
+
 四类 selector 都只纳入创建 batch 时为 OPEN 的 Issue，CLOSED 始终不处理。未完成模式排除
 `pr,timeout,blocked,blocked-*,failed,failed-*`；指定标签模式不额外排除这些标签。
 
@@ -58,16 +61,21 @@ durable 日志修复，不再调用通知通道。
 ## 恢复与兼容
 
 - I1 在调用 executor 前先持久化；ack 丢失后同 batch/correlation/payload 重投。
+- 每个新 I1 使用独立 callback nonce；明文只留在私有 intent/I1，mirror 只保存摘要。I3 必须同时
+  通过 nonce 摘要、完整 project 与 executor 身份校验；纯 I3 只兼容明确的部署前 legacy mirror。
 - dispatcher mirror 不保存 IID snapshot，数百/数千 Issue 不会展开进旧 FIFO。
 - 升级前旧 FIFO 继续排空；它非空时新 batch 不发送。
 - 旧 `RUN_SINGLE_ISSUE` 在 executor 内转为 single batch，后续结果也走 I3；dispatcher bridge
   会在 terminal 或 zero-match 后清旧 active 并推进下一条。
 - I3 accepted/duplicate 都带原 event_id；重复事件不会重复通知。
 
-## 安全边界
+## 职责边界
 
-dispatcher 不读取或传递 executor GitLab token，不查询 GitLab Issue，不展开 IID，不自行跑
-Issue。GitLab snapshot、并发槽位、worktree、MR 和 retry 均由 req_executor 管理。
+dispatcher 不查询 GitLab Issue、不展开 IID、不自行跑 Issue。GitLab snapshot、并发槽位、
+worktree、MR 和 retry 均由 req_executor 管理。
+
+GitLab project 支持多层 subgroup path。多个裸路径候选会要求澄清；重跑动作允许放在 Issue
+宾语之后，但否定措辞及 label/branch 值不会触发重跑。
 
 配置见 [`config/dispatcher.env`](config/dispatcher.env) 与
 [`config/README.md`](config/README.md)。关键部署项包括

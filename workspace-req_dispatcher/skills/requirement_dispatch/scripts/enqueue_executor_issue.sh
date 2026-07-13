@@ -5,7 +5,13 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
+# shellcheck source=_executor_batch_outbox_lib.sh
+source "${SCRIPT_DIR}/_executor_batch_outbox_lib.sh"
 ensure_state_dirs
+
+# Never reuse or propagate a caller-provided nonce; every new intent gets fresh
+# entropy and only the lowercase local variable is persisted.
+unset CALLBACK_NONCE
 
 : "${PROJECT:?PROJECT required}"
 : "${IID:?IID required}"
@@ -44,6 +50,7 @@ fi
 
 QUEUED_AT="$(date -u +%s)"
 [[ "${QUEUED_AT}" =~ ^[0-9]+$ ]] || { echo "date -u +%s produced non-integer: ${QUEUED_AT}" >&2; exit 1; }
+callback_nonce="$(generate_executor_callback_nonce)"
 
 exec 9>"${LOCK_FILE}"
 flock 9
@@ -59,6 +66,7 @@ jq \
   --arg iid "${IID}" \
   --arg issue_url "${ISSUE_URL}" \
   --arg executor_agent "${EXECUTOR_AGENT}" \
+  --arg callback_nonce "${callback_nonce}" \
   --arg target_branch "${TARGET_BRANCH}" \
   --argjson origin "${ORIGIN_JSON:-null}" \
   --arg req_digest "${REQ_DIGEST}" \
@@ -71,6 +79,7 @@ jq \
       iid: ($iid | tonumber),
       issue_url: ($issue_url | select(. != "") // null),
       executor_agent: $executor_agent,
+      callback_nonce: $callback_nonce,
       target_branch: ($target_branch | select(. != "") // null),
       origin: $origin,
       req_digest: $req_digest,

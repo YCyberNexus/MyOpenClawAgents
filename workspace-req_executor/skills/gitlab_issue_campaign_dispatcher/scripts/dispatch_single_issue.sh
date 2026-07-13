@@ -15,6 +15,18 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
 GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
 GROUP_ENV_OVERRIDE="${GROUP:-}"
+EXECUTOR_AGENT_ENV_OVERRIDE="${EXECUTOR_AGENT:-}"
+CALLBACK_TARGET_ENV_OVERRIDE="${DISPATCHER_CALLBACK_TARGET:-}"
+REPO_PARENT_ENV_SET="${REPO_PARENT_PATH+x}"
+REPO_PARENT_ENV_OVERRIDE="${REPO_PARENT_PATH:-}"
+SCHEDULER_ROOT_ENV_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
+SCHEDULER_ROOT_ENV_OVERRIDE="${EXECUTOR_SCHEDULER_ROOT:-}"
+MAX_CONCURRENCY_ENV_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
+MAX_CONCURRENCY_ENV_OVERRIDE="${EXECUTOR_MAX_CONCURRENCY:-}"
+RUNNING_LEASE_ENV_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
+RUNNING_LEASE_ENV_OVERRIDE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
+LOCK_COMPAT_ENV_SET="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS+x}"
+LOCK_COMPAT_ENV_OVERRIDE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
 
 # ─── 1. Parse the I1 trigger from stdin ────────────────────────────
 # Same line discipline as dispatch_prepare_tick.sh: tolerate CRLF, skip blank /
@@ -172,7 +184,9 @@ fi
 PROJECT_IN="${T[project]:-${PARSED_URL_PROJECT}}"
 IID_IN="${T[iid]:-${PARSED_URL_IID}}"
 CORRELATION_ID_INPUT="${T[correlation_id]:-}"
-DISPATCHER_CALLBACK_TARGET="${T[dispatcher_callback_target]:-}"
+CALLBACK_TARGET_INPUT="${T[dispatcher_callback_target]:-}"
+EXECUTOR_AGENT_INPUT="${T[executor_agent]:-}"
+CALLBACK_NONCE="${T[callback_nonce]:-}"
 GROUP_IN="${T[group]:-}"
 BRANCH_IN="${T[branch]:-${T[target_branch]:-}}"
 
@@ -243,14 +257,56 @@ esac
 validate_project_path "${PROJECT_FULL}" \
   || { echo "dispatch_single_issue.sh: project must be a safe full group/project path" >&2; exit 2; }
 
-case "${CORRELATION_ID_INPUT}${DISPATCHER_CALLBACK_TARGET}" in
+case "${CORRELATION_ID_INPUT}${CALLBACK_TARGET_INPUT}${EXECUTOR_AGENT_INPUT}${CALLBACK_NONCE}" in
   *$'\n'*|*$'\r'*|*$'\t'*)
     echo "dispatch_single_issue.sh: correlation_id and dispatcher_callback_target must not contain control characters" >&2
     exit 2
     ;;
 esac
-[ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
+[ -n "${CALLBACK_TARGET_INPUT}" ] \
   || { echo "dispatch_single_issue.sh: missing required trigger field: dispatcher_callback_target" >&2; exit 2; }
+[[ "${CALLBACK_NONCE}" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "dispatch_single_issue.sh: callback_nonce must be exactly 64 lowercase hex characters" >&2; exit 2; }
+
+# Load only the two deployment routing pins; do not initialize scheduler state
+# and do not load GitLab credentials in this compatibility shim.
+EXECUTOR_AGENT=req_executor
+DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
+if [ -f "${CONFIG_DIR}/campaign_defaults.env" ]; then
+  # shellcheck disable=SC1091
+  source "${CONFIG_DIR}/campaign_defaults.env"
+fi
+if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
+  # shellcheck disable=SC1091
+  source "${CONFIG_DIR}/campaign_defaults.local.env"
+fi
+[ -z "${EXECUTOR_AGENT_ENV_OVERRIDE}" ] \
+  || EXECUTOR_AGENT="${EXECUTOR_AGENT_ENV_OVERRIDE}"
+[ -z "${CALLBACK_TARGET_ENV_OVERRIDE}" ] \
+  || DISPATCHER_CALLBACK_TARGET="${CALLBACK_TARGET_ENV_OVERRIDE}"
+if [ "${REPO_PARENT_ENV_SET}" = x ]; then
+  export REPO_PARENT_PATH="${REPO_PARENT_ENV_OVERRIDE}"
+fi
+if [ "${SCHEDULER_ROOT_ENV_SET}" = x ]; then
+  export EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT_ENV_OVERRIDE}"
+fi
+if [ "${MAX_CONCURRENCY_ENV_SET}" = x ]; then
+  export EXECUTOR_MAX_CONCURRENCY="${MAX_CONCURRENCY_ENV_OVERRIDE}"
+fi
+if [ "${RUNNING_LEASE_ENV_SET}" = x ]; then
+  export EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_ENV_OVERRIDE}"
+fi
+if [ "${LOCK_COMPAT_ENV_SET}" = x ]; then
+  DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_ENV_OVERRIDE}"
+fi
+[[ "${EXECUTOR_AGENT}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]] \
+  || { echo "dispatch_single_issue.sh: invalid deployment EXECUTOR_AGENT" >&2; exit 2; }
+[[ "${DISPATCHER_CALLBACK_TARGET}" =~ ^agent:req_dispatcher:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]] \
+  || { echo "dispatch_single_issue.sh: invalid deployment DISPATCHER_CALLBACK_TARGET" >&2; exit 2; }
+[ "${CALLBACK_TARGET_INPUT}" = "${DISPATCHER_CALLBACK_TARGET}" ] \
+  || { echo "dispatch_single_issue.sh: dispatcher_callback_target does not match the deployment pin" >&2; exit 2; }
+[ "${EXECUTOR_AGENT_INPUT}" = "${EXECUTOR_AGENT}" ] \
+  || { echo "dispatch_single_issue.sh: executor_agent does not match the pinned executor" >&2; exit 2; }
 
 sha256_text() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -266,11 +322,15 @@ sha256_text() {
 IDENTITY_JSON="$(jq -cnS \
   --arg project "${PROJECT_FULL}" \
   --argjson iid "${IID_IN}" \
-  --arg callback_target "${DISPATCHER_CALLBACK_TARGET}" \
+  --arg callback_target "${CALLBACK_TARGET_INPUT}" \
+  --arg executor_agent "${EXECUTOR_AGENT_INPUT}" \
+  --arg callback_nonce "${CALLBACK_NONCE}" \
   --arg branch "${BRANCH_IN}" '{
     project:$project,
     iid:$iid,
     dispatcher_callback_target:$callback_target,
+    executor_agent:$executor_agent,
+    callback_nonce:$callback_nonce,
     branch:(if $branch == "" then null else $branch end)
   }')"
 IDENTITY_DIGEST="$(printf '%s' "${IDENTITY_JSON}" | sha256_text)"
@@ -294,7 +354,9 @@ project=${PROJECT_FULL}
 selector_type=single
 iid=${IID_IN}
 force_rerun_pr=false
-dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}
+dispatcher_callback_target=${CALLBACK_TARGET_INPUT}
+executor_agent=${EXECUTOR_AGENT_INPUT}
+callback_nonce=${CALLBACK_NONCE}
 EOF
 )"
 [ -n "${BRANCH_IN}" ] \

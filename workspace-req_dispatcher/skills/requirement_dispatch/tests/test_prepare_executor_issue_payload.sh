@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 issue_url_input="$(
+  GITLAB_HOST='GITLAB-B.PXSEMIC.TECH:30000' \
   MESSAGE='请处理 http://gitlab-b.pxsemic.tech:30000/claw_gitlab/ifp_ui_testing_2/-/issues/42，目标分支：release/2026.07。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
@@ -36,6 +37,52 @@ fi
 if [ "$(jq -r '.target_branch' <<<"${issue_url_input}")" != "release/2026.07" ]; then
   echo "expected target_branch extracted from execution request" >&2
   printf '%s\n' "${issue_url_input}" >&2
+  exit 1
+fi
+
+subgroup_issue_url_input="$(
+  WIKI_GITLAB_HOST='gitlab.example.com' \
+  MESSAGE='请处理 https://gitlab.example.com/platform/agents/runtime/dispatcher/-/issues/42。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+' <<<"${subgroup_issue_url_input}" >/dev/null; then
+  echo "expected an issue URL to preserve every project segment before /-/" >&2
+  printf '%s\n' "${subgroup_issue_url_input}" >&2
+  exit 1
+fi
+
+quoted_glab_api_input="$(
+  MESSAGE='请执行 `glab api projects/platform%2Fagents%2Fruntime%2Fdispatcher/issues/42`，并处理 issue #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+' <<<"${quoted_glab_api_input}" >/dev/null; then
+  echo "expected a code-quoted standalone glab api command to remain explicit" >&2
+  printf '%s\n' "${quoted_glab_api_input}" >&2
+  exit 1
+fi
+
+configured_host_root_url_input="$(
+  GITLAB_HOST='code.internal.example:8443' \
+  MESSAGE='请处理 https://code.internal.example:8443/platform/agents/runtime/dispatcher.git/?view=files 的 issue #43。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:43}
+' <<<"${configured_host_root_url_input}" >/dev/null; then
+  echo "expected a configured GitLab repository root URL to preserve and normalize every subgroup" >&2
+  printf '%s\n' "${configured_host_root_url_input}" >&2
   exit 1
 fi
 
@@ -118,6 +165,71 @@ if ! jq -e '.selector == {type:"single",iid:312} and .force_rerun_pr == false' <
   exit 1
 fi
 
+encoded_subgroup_api_input="$(
+  MESSAGE='请执行 glab api projects/platform%2Fagents%2Fruntime%2Fdispatcher/issues/42，并处理 issue #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+' <<<"${encoded_subgroup_api_input}" >/dev/null; then
+  echo "expected an encoded API locator to preserve every subgroup segment" >&2
+  printf '%s\n' "${encoded_subgroup_api_input}" >&2
+  exit 1
+fi
+
+trusted_api_url_input="$(
+  GITLAB_HOST='gitlab.example.com' \
+  MESSAGE='请处理 https://gitlab.example.com/api/v4/projects/platform%2Fagents%2Fruntime%2Fdispatcher/issues/42 的 issue #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+' <<<"${trusted_api_url_input}" >/dev/null; then
+  echo "expected an API URL on the configured GitLab host to yield a project" >&2
+  printf '%s\n' "${trusted_api_url_input}" >&2
+  exit 1
+fi
+
+for untrusted_api_url in \
+  'https://evil.example/api/v4/projects/internal%2Fsensitive/issues/42' \
+  'https://evil.example/projects/internal%2Fsensitive/issues/42'
+do
+  untrusted_api_url_input="$(
+    GITLAB_HOST='gitlab.example.com' \
+    MESSAGE="请处理 ${untrusted_api_url} 的 issue #42" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and .project == null
+  ' <<<"${untrusted_api_url_input}" >/dev/null; then
+    echo "expected an encoded project inside an untrusted URL to be ignored: ${untrusted_api_url}" >&2
+    printf '%s\n' "${untrusted_api_url_input}" >&2
+    exit 1
+  fi
+done
+
+for non_explicit_api_locator in \
+  '请处理 projects/internal%2Fsensitive/issues/42 的 issue #42' \
+  '请处理 notglab api projects/internal%2Fsensitive/issues/42 的 issue #42'
+do
+  non_explicit_api_input="$(
+    MESSAGE="${non_explicit_api_locator}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '.status == "failed" and .project == null' \
+      <<<"${non_explicit_api_input}" >/dev/null; then
+    echo "expected only an explicit standalone glab api context to yield an encoded project" >&2
+    printf '%s\n' "${non_explicit_api_input}" >&2
+    exit 1
+  fi
+done
+
 range_json="$(
   MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #100 到 #250' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
@@ -126,6 +238,291 @@ range_json="$(
 if ! jq -e '.status == "success" and .selector == {type:"range",iid_min:100,iid_max:250} and .iid == null' <<<"${range_json}" >/dev/null; then
   echo "expected an IID range to produce a range selector and null legacy iid" >&2
   printf '%s\n' "${range_json}" >&2
+  exit 1
+fi
+
+for unsupported_range_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 failed' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 timeout' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 blocked' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 pr' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 done' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 closed' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且 status=FAILED'
+do
+  unsupported_range_json="$(
+    MESSAGE="${unsupported_range_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("single/range/open_unfinished/open_label"))
+    and (.reason | contains("拆"))
+  ' <<<"${unsupported_range_json}" >/dev/null; then
+    echo "expected a range plus unsupported status condition to fail closed: ${unsupported_range_message}" >&2
+    printf '%s\n' "${unsupported_range_json}" >&2
+    exit 1
+  fi
+done
+
+for conflicting_range_status_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue 1 到 3，状态 OPEN，状态 CLOSED' \
+  '处理 ai-infra/veqp_server_v3 的 issue 1 到 3，状态 CLOSED，状态 OPEN'
+do
+  conflicting_range_status_json="$(
+    MESSAGE="${conflicting_range_status_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("single/range/open_unfinished/open_label"))
+  ' <<<"${conflicting_range_status_json}" >/dev/null; then
+    echo "expected every range status condition to participate in validation: ${conflicting_range_status_message}" >&2
+    printf '%s\n' "${conflicting_range_status_json}" >&2
+    exit 1
+  fi
+done
+
+open_range_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且 status=OPEN' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .selector == {type:"range",iid_min:10,iid_max:20}
+' <<<"${open_range_json}" >/dev/null; then
+  echo "expected an explicit OPEN range condition to remain a supported range selector" >&2
+  printf '%s\n' "${open_range_json}" >&2
+  exit 1
+fi
+
+for ambiguous_selector_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，并处理 #30' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 和 #20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 和 20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10、20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 到 20 以及 30' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10，并处理 20，并再次确认 30'
+do
+  ambiguous_selector_json="$(
+    MESSAGE="${ambiguous_selector_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("多个不同 issue selector"))
+  ' <<<"${ambiguous_selector_json}" >/dev/null; then
+    echo "expected conflicting selector evidence to fail: ${ambiguous_selector_message}" >&2
+    printf '%s\n' "${ambiguous_selector_json}" >&2
+    exit 1
+  fi
+done
+
+for alternative_iid_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 或 20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 or 20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 OR 20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 跟 20'
+do
+  alternative_iid_json="$(
+    MESSAGE="${alternative_iid_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and .selector == null
+    and (.reason | contains("多个不同 issue selector"))
+  ' <<<"${alternative_iid_json}" >/dev/null; then
+    echo "expected an alternative multi-IID expression to fail closed: ${alternative_iid_message}" >&2
+    printf '%s\n' "${alternative_iid_json}" >&2
+    exit 1
+  fi
+done
+
+for mixed_typed_selector_message in \
+  '处理 ai-infra/veqp_server_v3 中未完成且 label 为 pr 的 issue' \
+  '处理 ai-infra/veqp_server_v3 中 label 为 pr 且未完成的 issue' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 到 20，且 label 为 pr' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10，且处理未完成的 issue' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10，且 label 为 pr' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 到 20，且处理未完成的 issue'
+do
+  mixed_typed_selector_json="$(
+    MESSAGE="${mixed_typed_selector_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and .selector == null
+    and (.reason | contains("多个不同 issue selector"))
+  ' <<<"${mixed_typed_selector_json}" >/dev/null; then
+    echo "expected mixed typed selectors to fail without priority truncation: ${mixed_typed_selector_message}" >&2
+    printf '%s\n' "${mixed_typed_selector_json}" >&2
+    exit 1
+  fi
+done
+
+repeated_range_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue 10 到 20，并再次确认 issue #10 至 #20' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .selector == {type:"range",iid_min:10,iid_max:20}
+' <<<"${repeated_range_json}" >/dev/null; then
+  echo "expected equivalent repeated range selectors to deduplicate" >&2
+  printf '%s\n' "${repeated_range_json}" >&2
+  exit 1
+fi
+
+repeated_label_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 中 label 为 pr 的 issue，并再次确认 label=pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .selector == {type:"open_label",label:"pr"}
+' <<<"${repeated_label_json}" >/dev/null; then
+  echo "expected equivalent repeated label selectors to deduplicate" >&2
+  printf '%s\n' "${repeated_label_json}" >&2
+  exit 1
+fi
+
+multiple_label_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 中 label=foo 和 label=bar' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and .selector == null
+  and (.reason | contains("多个不同 issue selector"))
+' <<<"${multiple_label_json}" >/dev/null; then
+  echo "expected multiple label selector expressions joined by prose to fail closed" >&2
+  printf '%s\n' "${multiple_label_json}" >&2
+  exit 1
+fi
+
+repeated_unfinished_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 中未完成的 issue，并再次确认未完成的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .selector == {type:"open_unfinished"}
+' <<<"${repeated_unfinished_json}" >/dev/null; then
+  echo "expected equivalent repeated unfinished selectors to deduplicate" >&2
+  printf '%s\n' "${repeated_unfinished_json}" >&2
+  exit 1
+fi
+
+for open_modifier_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue 10，且状态为 OPEN' \
+  '处理 ai-infra/veqp_server_v3 中 label 为 pr 的 issue，且状态为打开'
+do
+  open_modifier_json="$(
+    MESSAGE="${open_modifier_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '.status == "success" and .selector != null' \
+      <<<"${open_modifier_json}" >/dev/null; then
+    echo "expected an OPEN modifier not to create a second selector: ${open_modifier_message}" >&2
+    printf '%s\n' "${open_modifier_json}" >&2
+    exit 1
+  fi
+done
+
+if grep -F 'after = substr(remaining, RSTART + RLENGTH)' \
+  "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh" >/dev/null; then
+  echo "expected selector evidence scanning not to slice a multibyte tail with awk substr" >&2
+  exit 1
+fi
+
+selector_context_numbers_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #10，branch=release/2026.07，相关文件 src/v20/module.py，使用版本 20' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "ai-infra/veqp_server_v3"
+  and .selector == {type:"single",iid:10}
+  and .target_branch == "release/2026.07"
+' <<<"${selector_context_numbers_json}" >/dev/null; then
+  echo "expected branch, file-path, and prose version numbers not to become IID evidence" >&2
+  printf '%s\n' "${selector_context_numbers_json}" >&2
+  exit 1
+fi
+
+repeated_iid_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #10，并再次确认 #10' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .selector == {type:"single",iid:10}
+' <<<"${repeated_iid_json}" >/dev/null; then
+  echo "expected repeated references to the same IID to deduplicate" >&2
+  printf '%s\n' "${repeated_iid_json}" >&2
+  exit 1
+fi
+
+url_and_conflicting_iid_json="$(
+  GITLAB_HOST='gitlab.example.com' \
+  MESSAGE='处理 https://gitlab.example.com/ai-infra/veqp_server_v3/-/issues/42，并处理 #43' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("多个不同 issue selector"))
+' <<<"${url_and_conflicting_iid_json}" >/dev/null; then
+  echo "expected an issue URL and a different hash IID to fail" >&2
+  printf '%s\n' "${url_and_conflicting_iid_json}" >&2
+  exit 1
+fi
+
+url_and_bare_conflicting_iid_json="$(
+  GITLAB_HOST='gitlab.example.com' \
+  MESSAGE='处理 https://gitlab.example.com/ai-infra/veqp_server_v3/-/issues/42，并处理 43' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("多个不同 issue selector"))
+' <<<"${url_and_bare_conflicting_iid_json}" >/dev/null; then
+  echo "expected an issue URL and a different bare IID to fail" >&2
+  printf '%s\n' "${url_and_bare_conflicting_iid_json}" >&2
+  exit 1
+fi
+
+multiple_issue_urls_json="$(
+  GITLAB_HOST='gitlab.example.com' \
+  MESSAGE='处理 https://gitlab.example.com/ai-infra/veqp_server_v3/-/issues/42 和 https://gitlab.example.com/ai-infra/veqp_server_v3/-/issues/43' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("多个不同 issue selector"))
+' <<<"${multiple_issue_urls_json}" >/dev/null; then
+  echo "expected multiple distinct issue URLs to fail" >&2
+  printf '%s\n' "${multiple_issue_urls_json}" >&2
+  exit 1
+fi
+
+same_iid_across_locators_json="$(
+  GITLAB_HOST='gitlab.example.com' \
+  MESSAGE='处理 https://gitlab.example.com/ai-infra/veqp_server_v3/-/issues/42，并再次确认 issue #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "ai-infra/veqp_server_v3"
+  and .selector == {type:"single",iid:42}
+' <<<"${same_iid_across_locators_json}" >/dev/null; then
+  echo "expected equivalent URL and text IID evidence to deduplicate" >&2
+  printf '%s\n' "${same_iid_across_locators_json}" >&2
   exit 1
 fi
 
@@ -238,6 +635,293 @@ if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"}
   printf '%s\n' "${needed_rerun_json}" >&2
   exit 1
 fi
+
+object_before_rerun_json="$(
+  MESSAGE='请把 platform/agents/runtime/dispatcher 的 #42 重新执行一下' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+  and .force_rerun_pr == true
+' <<<"${object_before_rerun_json}" >/dev/null; then
+  echo "expected object-before-action wording to preserve subgroup path and force rerun" >&2
+  printf '%s\n' "${object_before_rerun_json}" >&2
+  exit 1
+fi
+
+object_before_please_rerun_json="$(
+  MESSAGE='platform/agents/runtime/dispatcher 的 issue #42 请重跑' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .force_rerun_pr == true
+' <<<"${object_before_please_rerun_json}" >/dev/null; then
+  echo "expected trailing please-rerun wording to force rerun" >&2
+  printf '%s\n' "${object_before_please_rerun_json}" >&2
+  exit 1
+fi
+
+trailing_negated_rerun_json="$(
+  MESSAGE='请把 platform/agents/runtime/dispatcher 的 #42 不要重跑' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .force_rerun_pr == false
+' <<<"${trailing_negated_rerun_json}" >/dev/null; then
+  echo "expected a trailing negation window to suppress rerun" >&2
+  printf '%s\n' "${trailing_negated_rerun_json}" >&2
+  exit 1
+fi
+
+trailing_unneeded_rerun_json="$(
+  MESSAGE='platform/agents/runtime/dispatcher 的 #42 无需重新执行' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .force_rerun_pr == false
+' <<<"${trailing_unneeded_rerun_json}" >/dev/null; then
+  echo "expected trailing unnecessary wording to suppress rerun" >&2
+  printf '%s\n' "${trailing_unneeded_rerun_json}" >&2
+  exit 1
+fi
+
+trailing_forbidden_rerun_json="$(
+  MESSAGE='请把 platform/agents/runtime/dispatcher 的 #42 不得重新执行' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .force_rerun_pr == false
+' <<<"${trailing_forbidden_rerun_json}" >/dev/null; then
+  echo "expected trailing forbidden wording to suppress rerun" >&2
+  printf '%s\n' "${trailing_forbidden_rerun_json}" >&2
+  exit 1
+fi
+
+for negated_message in \
+  '请把 platform/agents/runtime/dispatcher 的 #42 暂不重跑' \
+  '请把 platform/agents/runtime/dispatcher 的 #42 并非要重新执行' \
+  '请把 platform/agents/runtime/dispatcher 的 #42 不建议重跑'
+do
+  conservative_negation_json="$(
+    MESSAGE="${negated_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+
+  if ! jq -e '
+    .status == "success"
+    and .project == "platform/agents/runtime/dispatcher"
+    and .force_rerun_pr == false
+  ' <<<"${conservative_negation_json}" >/dev/null; then
+    echo "expected broader negative wording not to force rerun: ${negated_message}" >&2
+    printf '%s\n' "${conservative_negation_json}" >&2
+    exit 1
+  fi
+done
+
+subgroup_selector_json="$(
+  MESSAGE='处理 platform/agents/runtime/dispatcher 中 label 为 pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"open_label",label:"pr"}
+' <<<"${subgroup_selector_json}" >/dev/null; then
+  echo "expected a bare subgroup project to stop safely at the selector boundary" >&2
+  printf '%s\n' "${subgroup_selector_json}" >&2
+  exit 1
+fi
+
+slash_label_selector_json="$(
+  MESSAGE='处理 platform/agents/runtime/dispatcher 中 label 为 team/pr 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"open_label",label:"team/pr"}
+' <<<"${slash_label_selector_json}" >/dev/null; then
+  echo "expected a slash-containing label value not to become another project" >&2
+  printf '%s\n' "${slash_label_selector_json}" >&2
+  exit 1
+fi
+
+rerun_inside_label_value_json="$(
+  MESSAGE='处理 platform/agents/runtime/dispatcher 中 label 为 pr-重新执行 的 issue' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"open_label",label:"pr-重新执行"}
+  and .force_rerun_pr == false
+' <<<"${rerun_inside_label_value_json}" >/dev/null; then
+  echo "expected rerun wording inside a label value not to become an action" >&2
+  printf '%s\n' "${rerun_inside_label_value_json}" >&2
+  exit 1
+fi
+
+rerun_inside_branch_value_json="$(
+  MESSAGE='处理 platform/agents/runtime/dispatcher 的 #42，branch=feature/重新执行' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+  and .target_branch == "feature/重新执行"
+  and .force_rerun_pr == false
+' <<<"${rerun_inside_branch_value_json}" >/dev/null; then
+  echo "expected rerun wording inside a branch value not to become an action" >&2
+  printf '%s\n' "${rerun_inside_branch_value_json}" >&2
+  exit 1
+fi
+
+natural_quoted_branch_json="$(
+  MESSAGE='请基于‘feature/重新执行’分支处理 platform/agents/runtime/dispatcher 的 #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+  and .target_branch == "feature/重新执行"
+  and .force_rerun_pr == false
+' <<<"${natural_quoted_branch_json}" >/dev/null; then
+  echo "expected a quoted natural-language branch to share extraction and stripping boundaries" >&2
+  printf '%s\n' "${natural_quoted_branch_json}" >&2
+  exit 1
+fi
+
+same_project_all_locators_json="$(
+  GITLAB_HOST='code.internal.example' \
+  MESSAGE='请处理 https://code.internal.example/platform/agents/runtime/dispatcher/-/issues/42，并参考 https://code.internal.example/platform/agents/runtime/dispatcher/、projects/platform%2Fagents%2Fruntime%2Fdispatcher/issues/42 与 platform/agents/runtime/dispatcher。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "success"
+  and .project == "platform/agents/runtime/dispatcher"
+  and .selector == {type:"single",iid:42}
+' <<<"${same_project_all_locators_json}" >/dev/null; then
+  echo "expected equivalent project locators to normalize and deduplicate" >&2
+  printf '%s\n' "${same_project_all_locators_json}" >&2
+  exit 1
+fi
+
+for mixed_project_message in \
+  '请处理 https://gitlab.example.com/platform/agents/runtime/dispatcher/-/issues/42，同时参考 platform/agents/runtime/executor' \
+  '请处理 https://gitlab.example.com/platform/agents/runtime/dispatcher 的 issue #42，同时参考 platform/agents/runtime/executor' \
+  '请执行 glab api projects/platform%2Fagents%2Fruntime%2Fdispatcher/issues/42，同时参考 platform/agents/runtime/executor 的 issue #42'
+do
+  mixed_project_json="$(
+    GITLAB_HOST='gitlab.example.com' \
+    MESSAGE="${mixed_project_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("多个 GitLab project"))
+  ' <<<"${mixed_project_json}" >/dev/null; then
+    echo "expected every distinct locator source to participate in project ambiguity checks" >&2
+    printf '%s\n' "${mixed_project_json}" >&2
+    exit 1
+  fi
+done
+
+ambiguous_project_json="$(
+  MESSAGE='请处理 platform/agents/runtime/dispatcher 或 platform/agents/runtime/executor 的 issue #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("多个 GitLab project"))
+' <<<"${ambiguous_project_json}" >/dev/null; then
+  echo "expected multiple bare project paths to fail for clarification" >&2
+  printf '%s\n' "${ambiguous_project_json}" >&2
+  exit 1
+fi
+
+for file_reference_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，请参考 docs/design/spec.md' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，相关文件 src/main/app.py' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，请参考 docs/spec.md' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，相关文件 src/app.py' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，请参考目录 docs/design' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，相关目录 src/main' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，请参考 config/settings.yaml' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，相关脚本 scripts/check.sh' \
+  '处理 ai-infra/veqp_server_v3 的 issue #42，相关类型 lib/types.ts'
+do
+  file_reference_json="$(
+    MESSAGE="${file_reference_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "success"
+    and .project == "ai-infra/veqp_server_v3"
+    and .selector == {type:"single",iid:42}
+  ' <<<"${file_reference_json}" >/dev/null; then
+    echo "expected an ordinary local file path not to become a project: ${file_reference_message}" >&2
+    printf '%s\n' "${file_reference_json}" >&2
+    exit 1
+  fi
+done
+
+src_group_project_json="$(
+  MESSAGE='处理 GitLab src/team 的 issue #42' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "src/team"
+  and .selector == {type:"single",iid:42}
+' <<<"${src_group_project_json}" >/dev/null; then
+  echo "expected an explicit src namespace project not to be mistaken for a local path" >&2
+  printf '%s\n' "${src_group_project_json}" >&2
+  exit 1
+fi
+
+for dot_segment_message in \
+  '处理 group/../secret 的 issue #42' \
+  '执行 glab api projects/group%2F..%2Fsecret/issues/42 的 issue #42' \
+  '处理 https://gitlab.example.com/group/../secret/-/issues/42'
+do
+  dot_segment_json="$(
+    GITLAB_HOST='gitlab.example.com' \
+    MESSAGE="${dot_segment_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("project path"))
+  ' <<<"${dot_segment_json}" >/dev/null; then
+    echo "expected project dot segments to fail intake: ${dot_segment_message}" >&2
+    printf '%s\n' "${dot_segment_json}" >&2
+    exit 1
+  fi
+done
 
 missing_iid="$(
   MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 的 issue。' \
@@ -357,6 +1041,7 @@ if [ "$(jq -r '.status' <<<"${space_branch}")" != "failed" ]; then
 fi
 
 space_project_url="$(
+  GITLAB_HOST='gitlab-b.pxsemic.tech:30000' \
   MESSAGE='请处理 http://gitlab-b.pxsemic.tech:30000/claw_gitlab%20bad/ifp_ui_testing_2/-/issues/42' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
@@ -374,6 +1059,7 @@ if ! jq -r '.reason' <<<"${space_project_url}" | grep -q 'project path'; then
 fi
 
 bad_percent_url="$(
+  GITLAB_HOST='gitlab-b.pxsemic.tech:30000' \
   MESSAGE='请处理 http://gitlab-b.pxsemic.tech:30000/claw_gitlab%GG/ifp_ui_testing_2/-/issues/42' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
@@ -408,6 +1094,7 @@ if ! jq -r '.reason' <<<"${encoded_space_project}" | grep -q 'project path'; the
 fi
 
 non_gitlab_host_url="$(
+  GITLAB_HOST='gitlab-b.pxsemic.tech:30000' \
   MESSAGE='请处理 http://docs.example.com/claw_gitlab/ifp_ui_testing_2/-/issues/42' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
@@ -423,5 +1110,25 @@ if ! jq -r '.reason' <<<"${non_gitlab_host_url}" | grep -q 'GitLab host'; then
   printf '%s\n' "${non_gitlab_host_url}" >&2
   exit 1
 fi
+
+for attacker_host in \
+  'gitlab.attacker.example' \
+  'evil-gitlab.com' \
+  'gitlab-b.pxsemic.tech.evil.example'
+do
+  attacker_host_json="$(
+    GITLAB_HOST='gitlab-b.pxsemic.tech:30000' \
+    MESSAGE="请处理 https://${attacker_host}/claw_gitlab/ifp_ui_testing_2/-/issues/42" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("GitLab host"))
+  ' <<<"${attacker_host_json}" >/dev/null; then
+    echo "expected lookalike GitLab host to fail exact host validation: ${attacker_host}" >&2
+    printf '%s\n' "${attacker_host_json}" >&2
+    exit 1
+  fi
+done
 
 echo "ok prepare_executor_issue_payload extracts existing issue execution input"

@@ -91,6 +91,7 @@ RUN_DRIVEN_ISSUE_BATCH
 batch_id=<stable dispatcher batch ID>
 correlation_id=<dispatcher correlation ID>
 project=<full group/project path>
+executor_agent=<deployment-pinned executor agent>
 selector_type=single|range|open_unfinished|open_label
 iid=<positive integer; single only>
 iid_min=<positive integer; range only>
@@ -98,6 +99,7 @@ iid_max=<positive integer; range only>
 label=<exact label; open_label only>
 force_rerun_pr=true|false
 dispatcher_callback_target=<non-empty req_dispatcher target>
+callback_nonce=<64 lowercase hexadecimal characters>
 branch=<optional target branch>
 ```
 
@@ -106,13 +108,19 @@ issues. `open_unfinished` excludes `pr`, `timeout`, `blocked`, `blocked-*`,
 `failed`, and `failed-*` from the frozen snapshot. `open_label` matches the
 requested label exactly and does not apply those snapshot exclusions. Live
 preflight still skips an issue carrying `pr` unless `force_rerun_pr=true`; a
-closed issue is always skipped. The executor paginates GitLab and freezes the
-matching IID snapshot at intake, so later matching issues are not added.
+closed issue is always skipped. The executor uses the GitLab GraphQL cursor
+connection, rejects duplicate IIDs and unsafe/non-advancing or over-budget
+cursors, and freezes the matching IID snapshot only after two consecutive full
+scans normalize to the same result. Persistent movement fails closed, and later
+matching issues are not added.
 
 `batch_id` is idempotent: the same canonical request replays the existing
-batch, while the same ID with different bytes fails closed. The executor loads
-GitLab credentials and deployment roots only from its own process/config. A
-dispatcher trigger must never contain `gitlab_token` or `GITLAB_TOKEN`.
+batch, while the same ID with different bytes fails closed. The external I1
+uses the selector and callback-routing fields shown above. The executor loads
+`GITLAB_TOKEN` from its process environment or deployment config using the
+standard precedence, then carries it as `gitlab_token` in its internal
+`RUN_SCHEDULED_ISSUE_CAMPAIGN` trigger and as `GITLAB_TOKEN` in the spawned task
+prompt.
 
 The fixed `run_driven_issue_batch.sh` response includes `status`, `batch_id`,
 `matched_count`, `snapshot_digest`, `scheduler_status`, `spawn_grants`,
@@ -147,15 +155,18 @@ five-field public acceptance contract.
 `scripts/run_executor_batch_tick.sh` once for each trigger. The wrapper always
 performs these phases in order:
 
-1. Scan active/registered projects for durable Phase 6 handoff intents.
-2. Import handoffs and retry the callback outbox.
-3. Resume durable post-spawn coordinators in `ack_received`,
+1. Reconcile expired positive-generation running claims against their exact
+   project claim fence and ACPX deadline; due claims synthesize `timeout` via
+   the ordinary durable handoff path.
+2. Scan active/registered projects for durable Phase 6 handoff intents.
+3. Import handoffs and retry the callback outbox.
+4. Resume durable post-spawn coordinators in `ack_received`,
    `project_recorded`, or `scheduler_recorded` without requiring the original
    caller to resend an acknowledgement.
-4. Recover leases and reserve free executor-wide slots.
-5. Strictly round-robin runnable batches, top up project campaigns, and import
+5. Recover leases and reserve free executor-wide slots.
+6. Strictly round-robin runnable batches, top up project campaigns, and import
    claim-0 skips.
-6. Persist preparing claims and bind them before emitting safe spawn grants.
+7. Persist preparing claims and bind them before emitting safe spawn grants.
 
 Post-spawn recovery covers the exact commit/coordinator ambiguity windows. The
 project campaign state stores a job/generation/token-hash/exact-outcome receipt
@@ -175,6 +186,9 @@ project grouping must not reorder it. Explicit process values for
 `EXECUTOR_SCHEDULER_ROOT` and `EXECUTOR_MAX_CONCURRENCY` take precedence over
 config and are preserved consistently across intake, tick, top-up, and spawn
 recording, so one operation cannot split a batch across scheduler roots.
+Completed batches leave the hot `batch_order`; completed launch actions and
+delivered callbacks move to cold per-ID archives. Direct replay still resolves
+those records without making every periodic tick scan the full history.
 
 The response has exactly `status`, `spawn_grants`, `reconcile_actions`,
 `operation_results`, `max_launch_retries`, `backoff_seconds`, and
@@ -192,8 +206,8 @@ generation. A retry generation also receives a different label. The value is
 stable across replay, uses only `[A-Za-z0-9._-]`, is at most 96 bytes, and must
 be passed to `sessions_spawn` and matched during reconciliation verbatim.
 
-An expired `action_emitted` item appears as a token-free
-`reconcile_actions[]` item. Enumerate runtime subagents using its exact
+An expired `action_emitted` item appears in `reconcile_actions[]`. Enumerate
+runtime subagents using its exact
 `child_label`, then call `resolve_executor_batch_reconcile.sh` with one of the
 strict objects below:
 
@@ -213,10 +227,11 @@ Driven terminal results use durable I3 outbox events with stable `event_id`,
 `batch_id`, `snapshot_index`, `project`, `iid`, `status`, `mr_url`, and
 `reason`. The executor marks an event delivered only after req_dispatcher
 returns an accepted/duplicate acknowledgement containing the same `event_id`.
-The outbox transport removes `GITLAB_TOKEN`, `GLAB_TOKEN`,
-`GITLAB_PRIVATE_TOKEN`, `PRIVATE_TOKEN`, and `WIKI_GITLAB_TOKEN` from the
-`openclaw` process environment; callback payloads and the transport never need
-executor-owned GitLab credentials.
+The callback `openclaw` subprocess inherits the executor process environment,
+including the effective `GITLAB_TOKEN` selected from process/config.
+The transport is `RUN_DRIVEN_BATCH_RESULT` plus one strict `callback_envelope`
+containing only `callback_nonce`, `executor_agent`, and the public eight-field
+`worker_result_json`; the nonce never appears inside that public result.
 
 ## Single-Issue Compatibility Shim
 
@@ -224,15 +239,18 @@ executor-owned GitLab credentials.
 
 - `project` plus `iid`, or `issue_url` as their alternative source;
 - required non-empty `dispatcher_callback_target`;
+- required pinned `executor_agent` and 64-hex `callback_nonce`;
 - optional `correlation_id`, `branch`, and `group`.
 
 Explicit project/IID values must match `issue_url` when both are present.
 `dispatch_single_issue.sh` generates stable content-addressed correlation and
 batch IDs when needed, converts the request into a single-selector
 `RUN_DRIVEN_ISSUE_BATCH`, and delegates to the same executor-wide scheduler.
-It does not synthesize `RUN_SCHEDULED_ISSUE_CAMPAIGN`, create a private
-`max_concurrent_subagents=1` campaign, write `dispatch_origin.json`, or forward
-a GitLab token. After processing its runtime actions, use the same
+`dispatch_single_issue.sh` itself does not synthesize
+`RUN_SCHEDULED_ISSUE_CAMPAIGN`, create a private `max_concurrent_subagents=1`
+campaign, or write `dispatch_origin.json`. The downstream driven top-up carries
+the resolved token in its internal scheduled trigger and spawned task prompt.
+After processing its runtime actions, use the same
 `emit_driven_batch_acceptance.sh` call and exact five-field final reply described
 for dispatcher-driven batches; do not return its rich envelope or
 `chat_summary` as the public result.

@@ -50,14 +50,6 @@ set -euo pipefail
 
 utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-# Return the first line without creating a producer/consumer pipe. Long prompt
-# payloads can make `printf ... | head -n 1` terminate the producer with
-# SIGPIPE; under `set -o pipefail` that aborts the dispatcher with exit 141.
-first_line() {
-  local text="${1-}"
-  printf '%s\n' "${text%%$'\n'*}"
-}
-
 # Parse an ISO-8601 UTC timestamp into epoch seconds. Echoes 0 when the
 # input is empty / null / unparseable so callers can branch on `-gt 0`.
 iso_to_epoch() {
@@ -117,18 +109,10 @@ ensure_safety_bin_executable() {
 
 load_state() {
   if [ -f "${CAMPAIGN_STATE_FILE}" ]; then
-    jq 'del(.run_timeout_seconds)' "${CAMPAIGN_STATE_FILE}"
+    cat "${CAMPAIGN_STATE_FILE}"
   else
     fresh_init_state
   fi
-}
-
-# Keep the dispatcher eviction backstop 30 minutes beyond the nominal outer
-# budget that operators should configure for the subagent. OpenClaw owns that
-# global runtime limit; the campaign state only needs the derived stuck window.
-derive_stuck_after_minutes() {
-  local acpx_timeout_seconds="$1"
-  printf '%s\n' "$(( (acpx_timeout_seconds + 120 + 59) / 60 + 30 ))"
 }
 
 fresh_init_state() {
@@ -151,6 +135,7 @@ fresh_init_state() {
       max_concurrent_subagents: 1,
       max_accounts_per_issue: 14,
       stuck_after_minutes: 332,
+      run_timeout_seconds: 18120,
       acpx_timeout_seconds: 18000,
       kill_subagent_on_terminal: true,
       kill_subagent_on_done: true,

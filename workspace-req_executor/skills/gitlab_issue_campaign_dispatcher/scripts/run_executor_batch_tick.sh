@@ -18,6 +18,7 @@ IMPORT_SKIP_CMD="${IMPORT_SKIP_CMD:-${SCRIPT_DIR}/import_driven_skipped.sh}"
 RECORD_LAUNCH_CMD="${RECORD_LAUNCH_CMD:-${SCRIPT_DIR}/record_driven_batch_launch.sh}"
 BIND_CLAIM_CMD="${BIND_CLAIM_CMD:-${SCRIPT_DIR}/bind_driven_claim.sh}"
 RESUME_SPAWN_CMD="${RESUME_SPAWN_CMD:-${SCRIPT_DIR}/record_executor_batch_spawn.sh}"
+EXPIRE_RUNNING_CMD="${EXPIRE_RUNNING_CMD:-${SCRIPT_DIR}/dispatch_followup.sh}"
 
 tick_die() {
   echo "run_executor_batch_tick.sh: $*" >&2
@@ -37,6 +38,19 @@ validate_command() {
     || tick_die "${name} must be an executable regular file"
 }
 
+validate_bash_script() {
+  local name="$1" path="$2"
+  case "${path}" in
+    /*) ;;
+    *) tick_die "${name} must be absolute" ;;
+  esac
+  case "${path}" in
+    *$'\n'*|*$'\r'*|*$'\t'*) tick_die "${name} contains control characters" ;;
+  esac
+  [ -f "${path}" ] && [ -r "${path}" ] \
+    || tick_die "${name} must be a readable regular file"
+}
+
 for command_spec in \
   "SCHEDULER_ENV_CMD:${SCHEDULER_ENV_CMD}" \
   "RESOLVE_REPO_CMD:${RESOLVE_REPO_CMD}" \
@@ -51,15 +65,27 @@ for command_spec in \
 do
   validate_command "${command_spec%%:*}" "${command_spec#*:}"
 done
+validate_bash_script EXPIRE_RUNNING_CMD "${EXPIRE_RUNNING_CMD}"
 
-# Preserve process overrides before sourcing deployment pins. No credential is
-# ever printed or inserted into operation_results.
+# Preserve process overrides before sourcing deployment pins.
 GITLAB_TOKEN_PROCESS_OVERRIDE="${GITLAB_TOKEN:-}"
+GITLAB_HOST_PROCESS_SET="${GITLAB_HOST+x}"
+GITLAB_HOST_PROCESS_OVERRIDE="${GITLAB_HOST:-}"
+GITLAB_PROTOCOL_PROCESS_SET="${GITLAB_API_PROTOCOL+x}"
+GITLAB_PROTOCOL_PROCESS_OVERRIDE="${GITLAB_API_PROTOCOL:-}"
 REPO_PARENT_PROCESS_OVERRIDE="${REPO_PARENT_PATH:-}"
 SCHEDULER_ROOT_PROCESS_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 SCHEDULER_ROOT_PROCESS_OVERRIDE="${EXECUTOR_SCHEDULER_ROOT:-}"
 MAX_CONCURRENCY_PROCESS_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 MAX_CONCURRENCY_PROCESS_OVERRIDE="${EXECUTOR_MAX_CONCURRENCY:-}"
+RUNNING_LEASE_PROCESS_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
+RUNNING_LEASE_PROCESS_OVERRIDE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
+EXECUTOR_AGENT_PROCESS_SET="${EXECUTOR_AGENT+x}"
+EXECUTOR_AGENT_PROCESS_OVERRIDE="${EXECUTOR_AGENT:-}"
+CALLBACK_TARGET_PROCESS_SET="${DISPATCHER_CALLBACK_TARGET+x}"
+CALLBACK_TARGET_PROCESS_OVERRIDE="${DISPATCHER_CALLBACK_TARGET:-}"
+LOCK_COMPAT_PROCESS_SET="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS+x}"
+LOCK_COMPAT_PROCESS_OVERRIDE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
 [ -f "${CONFIG_DIR}/gitlab.env" ] \
   || tick_die "missing config/gitlab.env"
 [ -f "${CONFIG_DIR}/campaign_defaults.env" ] \
@@ -73,14 +99,34 @@ if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   # shellcheck disable=SC1091
   source "${CONFIG_DIR}/campaign_defaults.local.env"
 fi
+: "${EXECUTOR_RUNNING_LEASE_SECONDS:=21600}"
+if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
+  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
+fi
+if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
+  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
+fi
 if [ "${SCHEDULER_ROOT_PROCESS_SET}" = x ]; then
   EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT_PROCESS_OVERRIDE}"
 fi
 if [ "${MAX_CONCURRENCY_PROCESS_SET}" = x ]; then
   EXECUTOR_MAX_CONCURRENCY="${MAX_CONCURRENCY_PROCESS_OVERRIDE}"
 fi
+if [ "${RUNNING_LEASE_PROCESS_SET}" = x ]; then
+  EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_PROCESS_OVERRIDE}"
+fi
+if [ "${EXECUTOR_AGENT_PROCESS_SET}" = x ]; then
+  EXECUTOR_AGENT="${EXECUTOR_AGENT_PROCESS_OVERRIDE}"
+fi
+if [ "${CALLBACK_TARGET_PROCESS_SET}" = x ]; then
+  DISPATCHER_CALLBACK_TARGET="${CALLBACK_TARGET_PROCESS_OVERRIDE}"
+fi
+if [ "${LOCK_COMPAT_PROCESS_SET}" = x ]; then
+  DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_PROCESS_OVERRIDE}"
+fi
 GITLAB_TOKEN_EFF="${GITLAB_TOKEN_PROCESS_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"
 REPO_PARENT_BASE="${REPO_PARENT_PROCESS_OVERRIDE:-${REPO_PARENT_PATH:-/data}}"
+export REPO_PARENT_PATH="${REPO_PARENT_BASE}"
 [ -n "${GITLAB_TOKEN_EFF}" ] || tick_die "executor GitLab credential is unavailable"
 case "${GITLAB_TOKEN_EFF}" in
   *[[:cntrl:]]*) tick_die "executor GitLab credential contains control characters" ;;
@@ -91,6 +137,11 @@ esac
 # scheduler_env exports all paths and validates the deployment concurrency pin.
 # shellcheck disable=SC1090
 source "${SCHEDULER_ENV_CMD}" >/dev/null
+# scheduler_env sources the same deployment files for scheduler validation;
+# restore the already-resolved process/config repo parent afterwards so every
+# child wrapper observes the same effective clone root.
+export REPO_PARENT_PATH="${REPO_PARENT_BASE}"
+
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_driven_launch_coordinator.sh"
 
@@ -148,8 +199,74 @@ exec {SNAPSHOT_LOCK_FD}>&-
 
 PROJECTS_JSON="$(jq -c '[.active_jobs[].project] | unique' \
   <<<"${SCHEDULER_SNAPSHOT}")"
-shopt -s nullglob
-for request_file in "${BATCHES_ROOT}"/*/request.json; do
+
+# A runtime callback can be lost permanently across gateway/process failures.
+# Reconcile only positive-generation jobs whose durable running lease expired,
+# and pass the project wrapper a SHA-256 claim fence rather than the private
+# token. The wrapper re-checks the current project pending entry and its own
+# ACPX deadline before synthesizing a timeout through the ordinary handoff/I3
+# path, so an old observation cannot terminate a newer generation.
+TICK_NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
+EXPIRED_RUNNING_JOBS="$(jq -c \
+  --argjson now "${TICK_NOW_EPOCH}" \
+  --argjson lease "${EXECUTOR_RUNNING_LEASE_SECONDS}" '
+  [.active_jobs[]
+    | select(.status == "running"
+      and (.finalization // null) == null
+      and (.updated_at | type == "number" and . == floor and . >= 0)
+      and (.claim_generation | type == "number" and . == floor and . > 0)
+      and (.claim_token | type == "string" and length > 0)
+      and (($now - .updated_at) >= $lease))]
+  | sort_by(.reservation_seq // 0, .job_id)
+' <<<"${SCHEDULER_SNAPSHOT}")"
+while IFS= read -r expired_job; do
+  [ -n "${expired_job}" ] || continue
+  expired_job_id="$(jq -r '.job_id' <<<"${expired_job}")"
+  expired_project="$(jq -r '.project' <<<"${expired_job}")"
+  expired_iid="$(jq -r '.iid' <<<"${expired_job}")"
+  expired_generation="$(jq -r '.claim_generation' <<<"${expired_job}")"
+  expired_token_sha256="$(printf '%s' "$(jq -r '.claim_token' <<<"${expired_job}")" | dlc_sha256)" \
+    || tick_die "unable to hash running claim fence"
+  if ! expired_context="$(project_context "${expired_project}")"; then
+    append_operation "$(jq -cn --arg job_id "${expired_job_id}" '{
+      operation:"running_timeout_reconcile",job_id:$job_id,status:"invalid_project"
+    }')"
+    HAD_FAILURE=true
+    continue
+  fi
+  set +e
+  expired_output="$(printf '' | \
+    PROJECT="$(jq -r '.slug' <<<"${expired_context}")" \
+    GROUP="$(jq -r '.group' <<<"${expired_context}")" \
+    GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+    REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${expired_context}")" \
+    IID="${expired_iid}" DRIVEN_TIMEOUT_RECONCILE=1 \
+    DRIVEN_TIMEOUT_JOB_ID="${expired_job_id}" \
+    DRIVEN_TIMEOUT_CLAIM_GENERATION="${expired_generation}" \
+    DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${expired_token_sha256}" \
+    DRIVEN_TIMEOUT_NOW_EPOCH="${TICK_NOW_EPOCH}" \
+      bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
+  expired_rc=$?
+  set -e
+  if [ "${expired_rc}" -eq 0 ] \
+      && expired_status="$(jq -er '.callback_status | select(type == "string" and length > 0)' \
+        <<<"${expired_output}" 2>/dev/null)"; then
+    append_operation "$(jq -cn \
+      --arg job_id "${expired_job_id}" --arg status "${expired_status}" '{
+      operation:"running_timeout_reconcile",job_id:$job_id,status:$status
+    }')"
+  else
+    append_operation "$(jq -cn --arg job_id "${expired_job_id}" '{
+      operation:"running_timeout_reconcile",job_id:$job_id,status:"failed"
+    }')"
+    HAD_FAILURE=true
+  fi
+done < <(jq -c '.[]' <<<"${EXPIRED_RUNNING_JOBS}")
+
+while IFS= read -r active_batch_id; do
+  [ -n "${active_batch_id}" ] || continue
+  request_file="${BATCHES_ROOT}/${active_batch_id}/request.json"
+  [ -f "${request_file}" ] || tick_die "active batch request is missing"
   request_project="$(jq -er '
     if type == "object"
       and (.project | type == "string"
@@ -158,7 +275,7 @@ for request_file in "${BATCHES_ROOT}"/*/request.json; do
   ' "${request_file}")" || tick_die "registered batch request is invalid"
   PROJECTS_JSON="$(jq -c --arg project "${request_project}" \
     '(. + [$project]) | unique' <<<"${PROJECTS_JSON}")"
-done
+done < <(jq -r '.batch_order[]' <<<"${SCHEDULER_SNAPSHOT}")
 
 # Phase A: scan every related project for durable Phase 6 intents. The project
 # drainer snapshots under campaign.lock and imports only after releasing it.
@@ -264,6 +381,14 @@ resume_durable_launch_actions() {
     action_stage="$(jq -r '.stage' <<<"${action}")"
     case "${action_stage}" in
       ack_received|project_recorded|scheduler_recorded) ;;
+      completed)
+        dlc_archive_completed || {
+          dlc_close
+          tick_die "completed launch action could not be archived"
+        }
+        dlc_close
+        continue
+        ;;
       *) dlc_close; continue ;;
     esac
 
@@ -351,6 +476,28 @@ resume_durable_launch_actions() {
 
 resume_durable_launch_actions
 
+# One agent-wide tick owns only the cross-state topup transaction: reserve,
+# read project pending, decide whether a live-preflight skip is safe, and
+# finalize that skip against the scheduler claim. Callback delivery and other
+# independently fenced recovery phases above must not hold this lock because
+# they can wait on network transports for minutes.
+EXECUTOR_TICK_LOCK_FILE="${EXECUTOR_SCHEDULER_ROOT}/executor_batch_tick.lock"
+exec {EXECUTOR_TICK_LOCK_FD}>"${EXECUTOR_TICK_LOCK_FILE}"
+chmod 600 "${EXECUTOR_TICK_LOCK_FILE}" 2>/dev/null \
+  || tick_die "executor tick lock must be private"
+if ! flock -n -x "${EXECUTOR_TICK_LOCK_FD}"; then
+  jq -cn '{
+    status:"idle",
+    spawn_grants:[],
+    reconcile_actions:[],
+    operation_results:[{operation:"tick_lock",status:"held"}],
+    max_launch_retries:3,
+    backoff_seconds:2,
+    chat_summary:"another executor batch tick owns the topup transaction"
+  }'
+  exit 0
+fi
+
 # Phase C: lease recovery + strict round-robin reservation. A hard reserve
 # failure is terminal for this tick because no safe grant set exists.
 set +e
@@ -411,10 +558,11 @@ CANDIDATES="$(jq -cn \
 
 TOPUP_ENTRIES='[]'
 SKIPPED_ENTRIES='[]'
+PROJECT_PENDING_ENTRIES='[]'
 topup_candidate_set() {
   local candidate_set="$1"
   local candidate_projects project project_grants context topup_request
-  local topup_output topup_rc topup_json
+  local topup_output topup_rc topup_json project_pending_iids
 
   candidate_projects="$(jq -c '[.[].project] | unique' <<<"${candidate_set}")"
   while IFS= read -r project; do
@@ -434,7 +582,10 @@ topup_candidate_set() {
     set +e
     topup_output="$(printf '%s' "${topup_request}" | \
       CONFIG_DIR="${CONFIG_DIR}" GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+      REPO_PARENT_PATH="${REPO_PARENT_BASE}" \
+      EXECUTOR_SCHEDULER_ROOT="${EXECUTOR_SCHEDULER_ROOT}" \
       EXECUTOR_MAX_CONCURRENCY="${EXECUTOR_MAX_CONCURRENCY}" \
+      EXECUTOR_RUNNING_LEASE_SECONDS="${EXECUTOR_RUNNING_LEASE_SECONDS}" \
       bash "${TOPUP_CMD}" 2>/dev/null)"
     topup_rc=$?
     set -e
@@ -443,6 +594,12 @@ topup_candidate_set() {
           and (.status | type == "string")
           and (.dispatch_entries | type == "array")
           and ((.skipped_entries // []) | type == "array")
+          and (if ((.skipped_entries // []) | length) > 0 then
+            (.pending_iids | type == "array")
+            and (all(.pending_iids[];
+              type == "number" and . == floor and . > 0))
+            and ((.pending_iids | length) == (.pending_iids | unique | length))
+          else true end)
         then . else error("invalid topup envelope") end
       ' 2>/dev/null)"; then
       append_operation "$(jq -cn --arg project "${project}" '{
@@ -468,6 +625,16 @@ topup_candidate_set() {
       --argjson current "${SKIPPED_ENTRIES}" \
       --argjson additions "$(jq -c '.skipped_entries // []' <<<"${topup_json}")" \
       '$current + $additions')"
+    if [ "$(jq -r '(.skipped_entries // []) | length' <<<"${topup_json}")" -gt 0 ]; then
+      project_pending_iids="$(jq -c '.pending_iids' <<<"${topup_json}")"
+      PROJECT_PENDING_ENTRIES="$(jq -cn \
+        --argjson current "${PROJECT_PENDING_ENTRIES}" \
+        --arg project "${project}" \
+        --argjson pending_iids "${project_pending_iids}" '
+        [$current[] | select(.project != $project)]
+        + [$pending_iids[] | {project:$project,iid:.}]
+        | sort_by(.project,.iid)')"
+    fi
   done < <(jq -r '.[]' <<<"${candidate_projects}")
 }
 
@@ -585,20 +752,34 @@ if [ "${DRIVEN_COORDINATOR_FAULT:-}" = after_topup_seed ]; then
   exit 83
 fi
 
-# Every live-preflight skip is terminalized through claim-0 before any physical
-# job is allowed to enter preparing. This both guarantees zero spawn for skips
-# and releases their global slots before actionable claims are emitted.
+# Every live-preflight skip is terminalized through its exact scheduler claim:
+# claim-0 for a fresh reservation, or the current positive claim for a running
+# continuation whose project pending entry has drained. This guarantees zero
+# new spawn for skips and releases slots before actionable claims are emitted.
 import_candidate_skips() {
   local candidate_set="$1"
-  local grant job_id skipped skipped_count skip_output skip_rc skip_status
+  local grant job_id project iid skipped skipped_count skip_output skip_rc skip_status
   LAST_IMPORTED_SKIP_COUNT=0
   while IFS= read -r grant; do
     [ -n "${grant}" ] || continue
     job_id="$(jq -r '.job_id' <<<"${grant}")"
+    project="$(jq -r '.project' <<<"${grant}")"
+    iid="$(jq -r '.iid' <<<"${grant}")"
     skipped="$(jq -c --arg job_id "${job_id}" \
       '[.[] | select(.job_id == $job_id)]' <<<"${SKIPPED_ENTRIES}")"
     skipped_count="$(jq -r 'length' <<<"${skipped}")"
     [ "${skipped_count}" -eq 0 ] && continue
+    if jq -e --arg job_id "${job_id}" \
+        'any(.[]; .job_id == $job_id)' <<<"${ACTIVE_CONTINUATIONS}" >/dev/null; then
+      if jq -e --arg project "${project}" --argjson iid "${iid}" '
+          any(.[]; .project == $project and .iid == $iid)
+        ' <<<"${PROJECT_PENDING_ENTRIES}" >/dev/null; then
+        append_operation "$(jq -cn --arg job_id "${job_id}" '{
+          operation:"running_preflight_skip",job_id:$job_id,status:"suppressed"
+        }')"
+        continue
+      fi
+    fi
     if [ "${skipped_count}" -ne 1 ]; then
       append_operation "$(jq -cn --arg job_id "${job_id}" '{
         operation:"synthetic_skip",job_id:$job_id,status:"duplicate_entry"
@@ -681,6 +862,9 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
   import_candidate_skips "${NOVEL_REFILL_GRANTS}"
 done
 
+flock -u "${EXECUTOR_TICK_LOCK_FD}"
+exec {EXECUTOR_TICK_LOCK_FD}>&-
+
 # Preserve scheduler grant order even though project topups were grouped.
 while IFS= read -r grant; do
   [ -n "${grant}" ] || continue
@@ -731,7 +915,7 @@ while IFS= read -r grant; do
     # sessions_spawn may already have succeeded even though its acknowledgement
     # never reached the fixed post-spawn wrapper. Once the preparing lease has
     # been fenced back to reserved, never guess by rotating the claim here.
-    # Return a token-free reconciliation action; only explicit runtime evidence
+    # Return a claim-token-free reconciliation action; only explicit runtime evidence
     # handled by resolve_executor_batch_reconcile.sh may recover or reset it.
     exec {EMITTED_RECOVERY_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
     flock -x "${EMITTED_RECOVERY_LOCK_FD}"

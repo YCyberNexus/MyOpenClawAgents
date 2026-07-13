@@ -124,7 +124,8 @@ if [ -n "${MESSAGE_FILE}" ]; then
     echo "run_agent_turn: MESSAGE_FILE not found: ${MESSAGE_FILE}" >&2
     exit 2
   fi
-  MESSAGE_FOR_SESSION="$(cat "${MESSAGE_FILE}")"
+  MESSAGE="$(cat "${MESSAGE_FILE}")"
+  MESSAGE_FOR_SESSION="${MESSAGE}"
 elif [ -z "${MESSAGE}" ]; then
   MESSAGE="$(cat)"
   MESSAGE_FOR_SESSION="${MESSAGE}"
@@ -185,11 +186,10 @@ openclaw_args=(agent --agent "${TARGET_AGENT}")
 if [ -n "${TARGET_SESSION_SELECTOR}" ]; then
   openclaw_args+=(--session-key "${TARGET_SESSION_SELECTOR}")
 fi
-if [ -n "${MESSAGE_FILE}" ]; then
-  openclaw_args+=(--message-file "${MESSAGE_FILE}")
-else
-  openclaw_args+=(--message "${MESSAGE}")
-fi
+# Never place a payload (and especially callback_nonce) in process argv. The
+# CLI reads the already in-memory message through the inherited stdin pipe;
+# no additional plaintext message file is created.
+openclaw_args+=(--message-file /dev/stdin)
 openclaw_args+=(--timeout "${AGENT_TIMEOUT_SECONDS}")
 
 RUN_AGENT_TURN_HEARTBEAT_SECONDS="${RUN_AGENT_TURN_HEARTBEAT_SECONDS:-30}"
@@ -224,7 +224,8 @@ cleanup_auto_temp_files() {
 trap cleanup_auto_temp_files EXIT
 (
   set +e
-  "${OPENCLAW_BIN}" "${openclaw_args[@]}" >"${RAW_OUTPUT_FILE}" 2>&1
+  printf '%s' "${MESSAGE}" \
+    | "${OPENCLAW_BIN}" "${openclaw_args[@]}" >"${RAW_OUTPUT_FILE}" 2>&1
   printf '%s\n' "$?" >"${STATUS_FILE}"
 ) &
 OPENCLAW_PID=$!

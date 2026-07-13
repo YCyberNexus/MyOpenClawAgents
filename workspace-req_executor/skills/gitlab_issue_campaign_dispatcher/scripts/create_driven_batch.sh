@@ -4,6 +4,10 @@
 set -euo pipefail
 
 CREATE_BATCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GITLAB_HOST_PROCESS_SET="${GITLAB_HOST+x}"
+GITLAB_HOST_PROCESS_OVERRIDE="${GITLAB_HOST:-}"
+GITLAB_PROTOCOL_PROCESS_SET="${GITLAB_API_PROTOCOL+x}"
+GITLAB_PROTOCOL_PROCESS_OVERRIDE="${GITLAB_API_PROTOCOL:-}"
 
 batch_die() {
   echo "create_driven_batch.sh: $1" >&2
@@ -79,7 +83,7 @@ while IFS= read -r trigger_line || [ -n "${trigger_line}" ]; do
   trigger_key="${trigger_line%%=*}"
   trigger_value="${trigger_line#*=}"
   case "${trigger_key}" in
-    batch_id|correlation_id|project|selector_type|iid|iid_min|iid_max|label|force_rerun_pr|dispatcher_callback_target|branch)
+    batch_id|correlation_id|project|selector_type|iid|iid_min|iid_max|label|force_rerun_pr|dispatcher_callback_target|executor_agent|callback_nonce|branch)
       ;;
     *)
       batch_die "unsupported trigger field: ${trigger_key}"
@@ -95,7 +99,7 @@ while IFS= read -r trigger_line || [ -n "${trigger_line}" ]; do
 done
 
 for required_name in \
-  batch_id correlation_id project selector_type force_rerun_pr dispatcher_callback_target
+  batch_id correlation_id project selector_type force_rerun_pr dispatcher_callback_target executor_agent callback_nonce
 do
   require_field "${required_name}"
 done
@@ -105,15 +109,19 @@ CORRELATION_ID="${TRIGGER_FIELDS[correlation_id]}"
 PROJECT_FULL="${TRIGGER_FIELDS[project]}"
 SELECTOR_TYPE="${TRIGGER_FIELDS[selector_type]}"
 FORCE_RERUN_PR="${TRIGGER_FIELDS[force_rerun_pr]}"
-DISPATCHER_CALLBACK_TARGET="${TRIGGER_FIELDS[dispatcher_callback_target]}"
+CALLBACK_TARGET_INPUT="${TRIGGER_FIELDS[dispatcher_callback_target]}"
+EXECUTOR_AGENT_INPUT="${TRIGGER_FIELDS[executor_agent]}"
+CALLBACK_NONCE="${TRIGGER_FIELDS[callback_nonce]}"
 BRANCH="${TRIGGER_FIELDS[branch]:-}"
 
 if ! [[ "${BATCH_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   batch_die "batch_id must be a safe path component"
 fi
 [ -n "${CORRELATION_ID}" ] || batch_die "correlation_id must not be empty"
-[ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
+[ -n "${CALLBACK_TARGET_INPUT}" ] \
   || batch_die "dispatcher_callback_target must not be empty"
+[[ "${CALLBACK_NONCE}" =~ ^[0-9a-f]{64}$ ]] \
+  || batch_die "callback_nonce must be exactly 64 lowercase hex characters"
 if ! [[ "${PROJECT_FULL}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; then
   batch_die "project must be <group>/<project>"
 fi
@@ -178,13 +186,36 @@ case "${SELECTOR_TYPE}" in
     ;;
 esac
 
+# scheduler_env.sh loads the deployment-pinned agent and callback route before
+# the request is frozen. Process/local overrides remain deployment controls;
+# untrusted trigger fields must match them exactly.
+# shellcheck disable=SC1091
+source "${CREATE_BATCH_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
+if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
+  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
+fi
+if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
+  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
+fi
+GITLAB_HOST_EFFECTIVE_SET="${GITLAB_HOST+x}"
+GITLAB_HOST_EFFECTIVE="${GITLAB_HOST:-}"
+GITLAB_PROTOCOL_EFFECTIVE_SET="${GITLAB_API_PROTOCOL+x}"
+GITLAB_PROTOCOL_EFFECTIVE="${GITLAB_API_PROTOCOL:-}"
+[ "${EXECUTOR_AGENT_INPUT}" = "${EXECUTOR_AGENT}" ] \
+  || batch_die "executor_agent does not match the pinned executor"
+PINNED_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET}"
+[ "${CALLBACK_TARGET_INPUT}" = "${PINNED_CALLBACK_TARGET}" ] \
+  || batch_die "dispatcher_callback_target does not match the deployment pin"
+
 REQUEST_JSON="$(jq -cnS \
   --arg batch_id "${BATCH_ID}" \
   --arg correlation_id "${CORRELATION_ID}" \
   --arg project "${PROJECT_FULL}" \
   --argjson selector "${SELECTOR_JSON}" \
   --argjson force_rerun_pr "${FORCE_RERUN_PR}" \
-  --arg dispatcher_callback_target "${DISPATCHER_CALLBACK_TARGET}" \
+  --arg dispatcher_callback_target "${CALLBACK_TARGET_INPUT}" \
+  --arg executor_agent "${EXECUTOR_AGENT_INPUT}" \
+  --arg callback_nonce "${CALLBACK_NONCE}" \
   --arg branch "${BRANCH}" \
   '{
     version: 1,
@@ -194,14 +225,11 @@ REQUEST_JSON="$(jq -cnS \
     selector: $selector,
     force_rerun_pr: $force_rerun_pr,
     dispatcher_callback_target: $dispatcher_callback_target,
+    executor_agent: $executor_agent,
+    callback_nonce: $callback_nonce,
     branch: (if $branch == "" then null else $branch end)
   }')"
 REQUEST_DIGEST="$(printf '%s' "${REQUEST_JSON}" | sha256_text)"
-
-# scheduler_env.sh loads only deployment/local scheduler settings; it never
-# accepts GitLab credentials from the trigger.
-# shellcheck disable=SC1091
-source "${CREATE_BATCH_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
 
 FAILED_INTAKE_ROOT="${EXECUTOR_SCHEDULER_ROOT}/failed-intake"
 BATCH_LOCK_ROOT="${EXECUTOR_SCHEDULER_ROOT}/batch-locks"
@@ -257,8 +285,29 @@ if [ -e "${BATCH_DIR}" ]; then
   flock -x "${SCHEDULER_LOCK_FD}"
   BATCH_ORDER_COUNT="$(jq -r --arg batch_id "${BATCH_ID}" \
     '[.batch_order[] | select(. == $batch_id)] | length' "${SCHEDULER_STATE_FILE}")"
-  case "${BATCH_ORDER_COUNT}" in
-    0)
+  EXISTING_SCHEDULER_STATUS="$(jq -r '.status' <<<"${EXISTING_STATE}")"
+  if [ "${EXISTING_SCHEDULER_STATUS}" = completed ]; then
+    case "${BATCH_ORDER_COUNT}" in
+      0) ;;
+      1)
+        COMPACTED_SCHEDULER_STATE="$(jq -c --arg batch_id "${BATCH_ID}" '
+          .batch_order = [.batch_order[] | select(. != $batch_id)]
+          | if .round_robin_cursor == $batch_id
+            then .round_robin_cursor = null else . end
+        ' "${SCHEDULER_STATE_FILE}")"
+        COMPACTED_STATE_TMP="$(mktemp "${EXECUTOR_SCHEDULER_ROOT}/.scheduler_state.json.XXXXXX")"
+        printf '%s' "${COMPACTED_SCHEDULER_STATE}" >"${COMPACTED_STATE_TMP}"
+        mv "${COMPACTED_STATE_TMP}" "${SCHEDULER_STATE_FILE}"
+        ;;
+      *)
+        flock -u "${SCHEDULER_LOCK_FD}"
+        exec {SCHEDULER_LOCK_FD}>&-
+        batch_die "completed batch scheduler registration is duplicated" 3
+        ;;
+    esac
+  else
+    case "${BATCH_ORDER_COUNT}" in
+      0)
       RECOVERED_SCHEDULER_STATE="$(jq -c --arg batch_id "${BATCH_ID}" \
         '.batch_order += [$batch_id]' "${SCHEDULER_STATE_FILE}")" || {
         flock -u "${SCHEDULER_LOCK_FD}"
@@ -275,14 +324,15 @@ if [ -e "${BATCH_DIR}" ]; then
         exec {SCHEDULER_LOCK_FD}>&-
         batch_die "failed to publish recovered scheduler registration" 3
       fi
-      ;;
-    1) ;;
-    *)
-      flock -u "${SCHEDULER_LOCK_FD}"
-      exec {SCHEDULER_LOCK_FD}>&-
-      batch_die "existing batch scheduler registration is duplicated" 3
-      ;;
-  esac
+        ;;
+      1) ;;
+      *)
+        flock -u "${SCHEDULER_LOCK_FD}"
+        exec {SCHEDULER_LOCK_FD}>&-
+        batch_die "existing batch scheduler registration is duplicated" 3
+        ;;
+    esac
+  fi
   flock -u "${SCHEDULER_LOCK_FD}"
   exec {SCHEDULER_LOCK_FD}>&-
 
@@ -324,40 +374,202 @@ intake_fail() {
 
 printf '%s\n' "${REQUEST_JSON}" >"${INTAKE_DIR}/request.json"
 
-# glab_auth.sh gives process env precedence over executor config and never
-# consults trigger fields. Sourcing it keeps the pinned host/protocol exports.
+# glab_auth.sh loads the tracked credential pin. Restore the effective
+# process/local host and protocol afterwards so
+# workstation overrides keep their deployment precedence for intake API calls.
 INTAKE_FAILURE_REASON=gitlab_auth_failed
 # shellcheck disable=SC1091
 source "${CREATE_BATCH_SCRIPT_DIR}/glab_auth.sh" >/dev/null
+if [ "${GITLAB_HOST_EFFECTIVE_SET}" = x ]; then
+  export GITLAB_HOST="${GITLAB_HOST_EFFECTIVE}"
+fi
+if [ "${GITLAB_PROTOCOL_EFFECTIVE_SET}" = x ]; then
+  export GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_EFFECTIVE}"
+fi
 
-PROJECT_URI="$(printf '%s' "${PROJECT_FULL}" | jq -sRr @uri)"
 ALL_ISSUES='[]'
-page=1
-while :; do
-  endpoint="projects/${PROJECT_URI}/issues?state=opened&per_page=100&page=${page}"
-  INTAKE_FAILURE_REASON="gitlab_page_${page}_failed"
-  if ! PAGE_JSON="$("${GLAB_BIN:-glab}" api "${endpoint}")"; then
-    intake_fail "${INTAKE_FAILURE_REASON}" "GitLab Issue page ${page} request failed"
+PREVIOUS_FULL_SCAN=''
+SNAPSHOT_STABLE=false
+MAX_SNAPSHOT_SCANS=4
+HARD_MAX_CURSOR_PAGES=1000
+HARD_MAX_SNAPSHOT_NODES=100000
+MAX_CURSOR_PAGES="${CREATE_BATCH_MAX_CURSOR_PAGES:-${HARD_MAX_CURSOR_PAGES}}"
+MAX_SNAPSHOT_NODES="${CREATE_BATCH_MAX_SNAPSHOT_NODES:-${HARD_MAX_SNAPSHOT_NODES}}"
+if ! [[ "${MAX_CURSOR_PAGES}" =~ ^[1-9][0-9]*$ ]] \
+    || [ "${#MAX_CURSOR_PAGES}" -gt "${#HARD_MAX_CURSOR_PAGES}" ]; then
+  intake_fail gitlab_cursor_limit_invalid \
+    "GitLab cursor page limit must be a bounded positive integer"
+fi
+if ! [[ "${MAX_SNAPSHOT_NODES}" =~ ^[1-9][0-9]*$ ]] \
+    || [ "${#MAX_SNAPSHOT_NODES}" -gt "${#HARD_MAX_SNAPSHOT_NODES}" ]; then
+  intake_fail gitlab_snapshot_limit_invalid \
+    "GitLab snapshot node limit must be a bounded positive integer"
+fi
+if [ "${MAX_CURSOR_PAGES}" -gt "${HARD_MAX_CURSOR_PAGES}" ]; then
+  intake_fail gitlab_cursor_limit_invalid \
+    "GitLab cursor page limit must be between 1 and ${HARD_MAX_CURSOR_PAGES}"
+fi
+if [ "${MAX_SNAPSHOT_NODES}" -gt "${HARD_MAX_SNAPSHOT_NODES}" ]; then
+  intake_fail gitlab_snapshot_limit_invalid \
+    "GitLab snapshot node limit must be between 1 and ${HARD_MAX_SNAPSHOT_NODES}"
+fi
+GRAPHQL_QUERY='query($fullPath: ID!, $after: String) {
+  project(fullPath: $fullPath) {
+    issues(first: 100, after: $after, state: opened, sort: created_asc) {
+      nodes {
+        iid
+        state
+        labels(first: 100) {
+          nodes { title }
+          pageInfo { hasNextPage }
+        }
+      }
+      pageInfo { endCursor hasNextPage }
+    }
+  }
+}'
+SCAN_PAGES_FILE="${INTAKE_DIR}/normalized-issue-pages.jsonl"
+snapshot_scan=1
+while [ "${snapshot_scan}" -le "${MAX_SNAPSHOT_SCANS}" ]; do
+  INTAKE_FAILURE_REASON="gitlab_scan_${snapshot_scan}_initialize_failed"
+  if ! : >"${SCAN_PAGES_FILE}"; then
+    intake_fail "${INTAKE_FAILURE_REASON}" \
+      "failed to initialize GitLab Issue scan ${snapshot_scan} accumulator"
   fi
-  if ! jq -e 'type == "array"' <<<"${PAGE_JSON}" >/dev/null; then
-    intake_fail "gitlab_page_${page}_not_array" "GitLab Issue page ${page} is not a JSON array"
-  fi
-  if ! jq -e '
-    all(.[ ];
-      type == "object"
-      and (.iid | type == "number" and . == floor and . > 0)
-      and (.state | type == "string")
-      and (.labels | type == "array" and all(.[ ]; type == "string")))
-  ' <<<"${PAGE_JSON}" >/dev/null; then
-    intake_fail "gitlab_page_${page}_invalid_issue" "GitLab Issue page ${page} contains an invalid Issue"
-  fi
+  cursor=''
+  cursor_page=1
+  snapshot_node_count=0
+  declare -A SCAN_CURSORS=()
+  while :; do
+    # GitLab GraphQL connections have cursor/keyset semantics on old releases
+    # that predate REST Issue keyset pagination. Every cursor is passed as a
+    # separate CLI field, must advance exactly once, and the complete normalized
+    # result must still agree with the immediately following full scan.
+    if [ "${cursor_page}" -gt "${MAX_CURSOR_PAGES}" ]; then
+      intake_fail gitlab_cursor_page_limit \
+        "GitLab GraphQL Issue scan exceeded ${MAX_CURSOR_PAGES} cursor pages"
+    fi
+    GRAPHQL_ARGS=(
+      api graphql
+      -f "query=${GRAPHQL_QUERY}"
+      -F "fullPath=${PROJECT_FULL}"
+    )
+    if [ -n "${cursor}" ]; then
+      GRAPHQL_ARGS+=( -f "after=${cursor}" )
+    fi
+    INTAKE_FAILURE_REASON="gitlab_cursor_page_${cursor_page}_failed"
+    if ! PAGE_JSON="$("${GLAB_BIN:-glab}" "${GRAPHQL_ARGS[@]}")"; then
+      intake_fail "${INTAKE_FAILURE_REASON}" \
+        "GitLab GraphQL Issue cursor page ${cursor_page} request failed"
+    fi
+    if ! ISSUE_CONNECTION="$(jq -ce '
+      if type == "object"
+        and ((.errors // []) | type == "array" and length == 0)
+        and (.data | type == "object")
+        and (.data.project | type == "object")
+        and (.data.project.issues | type == "object")
+        and (.data.project.issues.nodes | type == "array")
+        and (.data.project.issues.pageInfo | type == "object")
+        and (.data.project.issues.pageInfo.hasNextPage | type == "boolean")
+        and ((.data.project.issues.pageInfo.endCursor == null)
+          or (.data.project.issues.pageInfo.endCursor | type == "string"))
+      then .data.project.issues else error("invalid Issue connection") end
+    ' <<<"${PAGE_JSON}")"; then
+      intake_fail "gitlab_cursor_page_${cursor_page}_invalid_connection" \
+        "GitLab GraphQL Issue cursor page ${cursor_page} is invalid"
+    fi
+    if ! jq -e '
+      all(.nodes[];
+        (.labels.pageInfo | type == "object")
+        and (.labels.pageInfo.hasNextPage | type == "boolean")
+        and (.labels.pageInfo.hasNextPage == false))
+    ' <<<"${ISSUE_CONNECTION}" >/dev/null; then
+      intake_fail "gitlab_cursor_page_${cursor_page}_incomplete_labels" \
+        "GitLab GraphQL Issue cursor page ${cursor_page} has an incomplete labels connection"
+    fi
+    if ! NORMALIZED_PAGE="$(jq -ce '
+      def valid_iid:
+        (type == "number" and . == floor and . > 0)
+        or (type == "string" and test("^[1-9][0-9]*$"));
+      if all(.nodes[];
+          type == "object"
+          and (.iid | valid_iid)
+          and (.state | type == "string")
+          and (.labels | type == "object")
+          and (.labels.nodes | type == "array")
+          and (all(.labels.nodes[];
+            type == "object" and (.title | type == "string"))))
+        then [.nodes[] | {
+          iid:(.iid | tonumber),
+          state:(.state | ascii_downcase),
+          labels:(.labels.nodes | map(.title) | sort)
+        }]
+        else error("invalid Issue node") end
+    ' <<<"${ISSUE_CONNECTION}")"; then
+      intake_fail "gitlab_cursor_page_${cursor_page}_invalid_issue" \
+        "GitLab GraphQL Issue cursor page ${cursor_page} contains an invalid Issue"
+    fi
+    if ! jq -e '
+        ([.[].iid] | length) == ([.[].iid] | unique | length)
+      ' <<<"${NORMALIZED_PAGE}" >/dev/null; then
+      intake_fail gitlab_cursor_duplicate_iid \
+        "GitLab GraphQL Issue cursor page ${cursor_page} repeats an IID"
+    fi
+    INTAKE_FAILURE_REASON="gitlab_cursor_page_${cursor_page}_accumulate_failed"
+    if ! printf '%s\n' "${NORMALIZED_PAGE}" >>"${SCAN_PAGES_FILE}"; then
+      intake_fail "${INTAKE_FAILURE_REASON}" \
+        "failed to accumulate GitLab GraphQL Issue cursor page ${cursor_page}"
+    fi
+    page_node_count="$(jq -r 'length' <<<"${NORMALIZED_PAGE}")"
+    snapshot_node_count=$((snapshot_node_count + page_node_count))
+    if [ "${snapshot_node_count}" -gt "${MAX_SNAPSHOT_NODES}" ]; then
+      intake_fail gitlab_snapshot_node_limit \
+        "GitLab GraphQL Issue scan exceeded ${MAX_SNAPSHOT_NODES} nodes"
+    fi
+    HAS_NEXT_PAGE="$(jq -r '.pageInfo.hasNextPage' <<<"${ISSUE_CONNECTION}")"
+    [ "${HAS_NEXT_PAGE}" = true ] || break
+    NEXT_CURSOR="$(jq -r '.pageInfo.endCursor // empty' <<<"${ISSUE_CONNECTION}")"
+    if [ -z "${NEXT_CURSOR}" ] \
+        || has_control_characters "${NEXT_CURSOR}" \
+        || [ "${#NEXT_CURSOR}" -gt 4096 ] \
+        || ! [[ "${NEXT_CURSOR}" =~ ^[A-Za-z0-9_+/=-]+$ ]]; then
+      intake_fail gitlab_cursor_invalid \
+        "GitLab GraphQL Issue cursor page ${cursor_page} has no safe next cursor"
+    fi
+    if [ "${NEXT_CURSOR}" = "${cursor}" ] \
+        || [ "${SCAN_CURSORS[${NEXT_CURSOR}]+x}" = x ]; then
+      intake_fail gitlab_cursor_not_advanced \
+        "GitLab GraphQL Issue cursor did not advance at page ${cursor_page}"
+    fi
+    SCAN_CURSORS["${NEXT_CURSOR}"]=1
+    cursor="${NEXT_CURSOR}"
+    cursor_page=$((cursor_page + 1))
+  done
 
-  page_length="$(jq -r 'length' <<<"${PAGE_JSON}")"
-  [ "${page_length}" -gt 0 ] || break
-  ALL_ISSUES="$(printf '%s\n%s\n' "${ALL_ISSUES}" "${PAGE_JSON}" | jq -cs '.[0] + .[1]')" || \
-    intake_fail merge_failed "failed to merge GitLab Issue pages"
-  page=$((page + 1))
+  if ! CURRENT_FULL_SCAN="$(jq -cSse '
+      [ .[][] ] as $merged
+      | if ([ $merged[].iid ] | length)
+          == ([ $merged[].iid ] | unique | length)
+        then $merged | sort_by(.iid, .state, .labels)
+        else error("duplicate IID across cursor pages") end
+    ' "${SCAN_PAGES_FILE}")"; then
+    intake_fail gitlab_cursor_duplicate_iid \
+      "GitLab GraphQL Issue cursor pages repeat an IID"
+  fi
+  if [ "${snapshot_scan}" -gt 1 ] \
+      && [ "${CURRENT_FULL_SCAN}" = "${PREVIOUS_FULL_SCAN}" ]; then
+    ALL_ISSUES="${CURRENT_FULL_SCAN}"
+    SNAPSHOT_STABLE=true
+    break
+  fi
+  PREVIOUS_FULL_SCAN="${CURRENT_FULL_SCAN}"
+  snapshot_scan=$((snapshot_scan + 1))
 done
+
+if [ "${SNAPSHOT_STABLE}" != true ]; then
+  intake_fail gitlab_snapshot_unstable \
+    "GitLab Issue list changed across ${MAX_SNAPSHOT_SCANS} consecutive full scans"
+fi
 
 INTAKE_FAILURE_REASON=selector_failed
 MATCHED_IIDS="$(jq -cS \
@@ -390,10 +602,9 @@ MATCHED_IIDS="$(jq -cS \
     | map(.iid)
   ' <<<"${ALL_ISSUES}")" || intake_fail selector_failed "failed to select GitLab Issues"
 
-SNAPSHOT_JSON="$(jq -cnS \
+SNAPSHOT_JSON="$(jq -cS \
   --arg project "${PROJECT_FULL}" \
-  --argjson iids "${MATCHED_IIDS}" \
-  '{version:1,project:$project,iids:$iids}')"
+  '{version:1,project:$project,iids:.}' <<<"${MATCHED_IIDS}")"
 SNAPSHOT_DIGEST="$(printf '%s' "${SNAPSHOT_JSON}" | sha256_text)"
 MATCHED_COUNT="$(jq -r 'length' <<<"${MATCHED_IIDS}")"
 if [ "${MATCHED_COUNT}" -eq 0 ]; then
@@ -424,7 +635,13 @@ STATE_JSON="$(jq -cnS \
     memberships: {}
   }')"
 
-printf '%s\n' "${SNAPSHOT_JSON}" >"${INTAKE_DIR}/snapshot.json"
+INTAKE_FAILURE_REASON=snapshot_persist_failed
+if ! printf '%s\n' "${SNAPSHOT_JSON}" >"${SCAN_PAGES_FILE}"; then
+  intake_fail snapshot_persist_failed "failed to write snapshot candidate"
+fi
+if ! mv "${SCAN_PAGES_FILE}" "${INTAKE_DIR}/snapshot.json"; then
+  intake_fail snapshot_persist_failed "failed to publish snapshot candidate"
+fi
 printf '%s\n' "${STATE_JSON}" >"${INTAKE_DIR}/state.json"
 
 for intake_name in request.json snapshot.json state.json; do
@@ -444,7 +661,9 @@ if jq -e --arg batch_id "${BATCH_ID}" '.batch_order | index($batch_id) != null' 
 fi
 
 UPDATED_SCHEDULER_STATE="$(jq -c --arg batch_id "${BATCH_ID}" \
-  '.batch_order += [$batch_id]' "${SCHEDULER_STATE_FILE}")" || {
+  --argjson matched_count "${MATCHED_COUNT}" '
+    if $matched_count == 0 then . else .batch_order += [$batch_id] end
+  ' "${SCHEDULER_STATE_FILE}")" || {
   flock -u "${SCHEDULER_LOCK_FD}"
   exec {SCHEDULER_LOCK_FD}>&-
   intake_fail scheduler_state_update_failed "failed to update scheduler state"

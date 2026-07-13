@@ -7,7 +7,7 @@
 
 114/WebUI 自然语言先交给 `capture_origin.sh`。origin 优先读取 OpenClaw 运行时来源元数据，
 正文 `[origin]` 行只是 fallback。origin 只允许
-`channel,user,conversation,reply_agent,source_agent,source_session`；不得包含 token。
+`channel,user,conversation,reply_agent,source_agent,source_session`，不接受其他字段。
 
 动作只有 `create_issue|execute_issue|create_and_execute|clarify_or_reject`。建单继续使用既有
 git_issuer 准备与调用 wrapper；所有执行动作进入下面的 batch wrapper。
@@ -66,7 +66,7 @@ executor outbox 发送的真实 message 是：
 
 ```text
 RUN_DRIVEN_BATCH_RESULT
-worker_result_json={"event_id":"<id>","batch_id":"<batch>","snapshot_index":0,"project":"group/project","iid":42,"status":"done","mr_url":null,"reason":null}
+callback_envelope={"callback_nonce":"<64 个小写 hex>","executor_agent":"req_executor","worker_result_json":{"event_id":"<id>","batch_id":"<batch>","snapshot_index":0,"project":"group/subgroup/project","iid":42,"status":"done","mr_url":null,"reason":null}}
 ```
 
 ```bash
@@ -74,9 +74,16 @@ WORKER_RESULT_JSON='<完整 RUN_DRIVEN_BATCH_RESULT message>' \
 bash scripts/handle_executor_batch_event.sh
 ```
 
-handler 兼容直接传纯八字段 I3 JSON，但不得由 LLM 手工解包真实 transport。transport 必须只有
-精确首行和唯一一行 `worker_result_json=`；额外行、重复 `worker_result_json`、非 object、缺字段或
-多字段都非零 fail closed，且不得进入 durable apply、bridge、通知或网络调用。
+handler 也接受把严格三字段 `callback_envelope` 对象直接放入 `CALLBACK_ENVELOPE_JSON`，但不得由
+LLM 手工解包真实 transport。transport 必须只有精确首行和唯一一行 `callback_envelope=`；外层
+必须恰好是 `callback_nonce,executor_agent,worker_result_json`，内层 public I3 仍必须恰好八字段。
+额外行、重复字段、非 object、缺字段或多字段都非零 fail closed，且不得进入 durable apply、
+bridge、通知或网络调用。纯八字段 I3 只兼容已经明确标记 `legacy_pre_upgrade` 的部署前 mirror；
+任何新 batch/single mirror 都禁止降级接受纯 I3。
+
+durable apply 在提交 event ledger 前固定校验：nonce 的 SHA-256 等于 mirror 摘要、I3 project 等于
+mirror project、envelope executor_agent 等于路由后 executor。nonce 明文不得进入 public
+acceptance、compact mirror、event ledger、用户通知或日志。
 
 stdout 必须只有一个严格 accepted/duplicate ack JSON；bridge、通知和网络 stdout 均被隔离，
 通知失败只写 stderr/state。
@@ -89,7 +96,8 @@ stdout 必须只有一个严格 accepted/duplicate ack JSON；bridge、通知和
 RUN_DRIVEN_ISSUE_BATCH
 batch_id=<稳定安全 ID>
 correlation_id=<稳定 reqd-N>
-project=<完整 group/project>
+project=<完整 group/subgroup/.../project>
+executor_agent=<路由后的 executor agent>
 selector_type=single|range|open_unfinished|open_label
 iid=<single 专用正整数>
 iid_min=<range 专用正整数>
@@ -97,6 +105,7 @@ iid_max=<range 专用正整数，且 >= iid_min>
 label=<open_label 专用精确标签>
 force_rerun_pr=true|false
 dispatcher_callback_target=<非空回调目标>
+callback_nonce=<dispatcher 生成的 64 个小写 hex>
 branch=<可选安全 Git ref>
 ```
 
@@ -107,13 +116,24 @@ branch=<可选安全 Git ref>
 - `open_unfinished`：无 selector 附加字段；
 - `open_label`：仅非空 `label`。
 
+解析原始请求时，必须先把 `single/range/open_unfinished/open_label` 全部规范化为 selector
+证据并去重，不能按类型优先级静默选中一个。由“和、或、跟、and、or”等连接的多个不同
+IID、任意跨类型组合、同类型不同值，以及范围附加非 OPEN 状态都必须失败并要求拆分/澄清。
+只有同一 selector 的等价重复可以去重通过；`OPEN/打开`仅是状态修饰词，不产生第二个
+`open_unfinished` selector。
+
 四类 selector 都只查询 intake 时为 OPEN 的 Issue。`open_unfinished` 排除
 `pr,timeout,blocked,blocked-*,failed,failed-*`，`open_label` 不追加终态标签排除；普通处理实时
 遇到 `pr` 时跳过，只有明确重跑语义把 `force_rerun_pr` 设为 true。CLOSED 不进入 snapshot。
+重跑动作词可以位于 Issue 宾语之后；同分句中的“不要、无需、不需要、不得”等否定窗口保持
+false，label/branch selector 值中的动作词不算动作。project 支持多层 subgroup；可信 GitLab
+仓库根 URL 保留完整 path，带 `/-/` 的 URL 保留其前 path。Issue URL、仓库 URL、
+`projects/...` 与裸路径候选统一规范化去重，多个不同候选必须澄清，不能静默截断或选第一个。
 
 `dispatcher_callback_target` 为空时必须在 ID 分配、intent 落盘和网络调用之前拒绝。
-I1 不允许 `gitlab_token,GITLAB_TOKEN,GLAB_TOKEN,WIKI_GITLAB_TOKEN` 或任何 IID snapshot。
-executor 使用自己的部署凭据查询 GitLab。
+I1 字段固定为上表，不携带任何 IID snapshot。
+`callback_nonce` 只允许以明文存在私有 durable outbox/intent 与发送中的 I1；重投必须复用原值，
+不得重新生成。
 
 ### I1 durable intent
 
@@ -124,6 +144,12 @@ executor 使用自己的部署凭据查询 GitLab。
 旧队列清空后，`drain_executor_batch_outbox.sh` 以 intent 中原始 payload 发送。调用失败、
 ack 丢失或进程中断只增加 attempts/保留错误，后续仍使用同一
 `batch_id/correlation_id/payload`。
+
+submit 使用 `BATCH_ID` 定向 drain。若并发 tick 已把该 batch 标成 `accepted`，定向调用只从
+outbox 重建 `record_status=duplicate` 的 compact acceptance，不再调用 executor；若另一个进程
+正持有该 batch 的投递锁，则从 outbox 返回
+`retryable_failure/reason=delivery_in_progress`。对仍存在的目标 batch 不返回内部锁状态
+`busy`，也不把并发完成误报成 `idle`。
 
 ### Executor public acceptance
 
@@ -144,7 +170,7 @@ ack 丢失或进程中断只增加 attempts/保留错误，后续仍使用同一
   必须非零 fail closed。
 - `scheduler_status` 只允许向前演进：`queued -> running -> completed`。
 - receipt 先持久化为 `received`，再创建 Task 8 mirror，最后标 `accepted`。
-- public acceptance 不得含 IID 数组、grant、claim token、GitLab token、raw scheduler state。
+- public acceptance 不得含 callback nonce、IID 数组、grant、claim token 或 raw scheduler state。
 
 Dispatcher 顶层返回：
 
@@ -182,13 +208,17 @@ project=<group/project>
 iid=<正整数>
 correlation_id=<稳定 reqd-N>
 dispatcher_callback_target=<非空目标>
+executor_agent=<路由后的 executor agent；升级后新 intent 必填>
+callback_nonce=<64 个小写 hex；升级后新 intent 必填>
 branch=<可选>
 ```
 
 executor single shim 把它转成 single driven batch，并返回上面的严格五字段 public acceptance。
-dispatcher 以 acceptance `batch_id` 写入旧 active 的 `driven_batch_id` bridge，然后创建 mirror。
+dispatcher 以 acceptance `batch_id` 写入旧 active 的 `driven_batch_id` bridge，同时保存
+`driven_project,driven_callback_auth_mode,driven_callback_nonce_sha256`，然后创建只含 nonce 摘要的
+mirror。升级前已在途且没有 nonce 的旧 active/receipt 会被明确标记为 `legacy_pre_upgrade`。
 
-single shim 后续只发送 I3：
+single shim 后续只在上述认证 envelope 的 `worker_result_json` 中发送 I3：
 
 ```text
 event_id=<single-batch-id>:snapshot-0:terminal-1
@@ -213,8 +243,10 @@ snapshot_index=0
 }
 ```
 
-这条旧 I2 仍走 pending/correlation 二次校验、`notify_user.sh`、`drain_pending.sh`、
-`finish_executor_queue_active.sh`。新 batch 不发送旧 I2。
+这条旧 I2 仍走 `find_pending.sh`、`notify_user.sh`、`drain_pending.sh`、
+`finish_executor_queue_active.sh`，但仅限同一 launched active/pending 在 dispatcher 锁内显式
+投影为 `legacy_pre_upgrade`、身份逐项一致且完全没有 nonce 的部署前状态。nonce_v1、launching、
+身份冲突或缺少已授权 drain ledger 证明时必须失败关闭。新 batch 不发送旧 I2。
 
 ## I3：逐项终态
 
@@ -238,7 +270,8 @@ public I3 必须精确八字段：
 - `event_id` 必须等于
   `<batch_id>:snapshot-<snapshot_index>:terminal-1`；重投保持不变。
 - handler 先提交 event ledger，再修 mirror/notification 投影。
-- 第一次返回 `accepted`；一致重放返回 `duplicate`；两者都带同 event_id，且都触发通知 drain。
+- 第一次返回 `accepted`；一致重放返回 `duplicate`；两者都带同 event_id，并在 durable apply 后
+  立即返回。bridge 恢复和通知 drain 由后续 `RUN_EXECUTOR_BATCH_TICK` 完成。
 - event_id 内容冲突、snapshot_index 越界或 batch 未记录时 fail closed；unknown 不 ack。
 - I3 handler stdout 精确为：
 
@@ -246,7 +279,7 @@ public I3 必须精确八字段：
 {"status":"accepted|duplicate","event_id":"<same event_id>"}
 ```
 
-通知失败不改变 ack。通知成功日志已经持久化、但 `delivered_at` 尚未提交就崩溃时，下次 drain
+通知失败不改变 ack。通知成功日志已经持久化、但 `delivered_at` 尚未提交就崩溃时，下次 tick/drain
 先从 event 专属 state root 的 durable log 修复 `delivered_at`，不得再次调用 OpenClaw。
 
 ## Zero-match
@@ -265,9 +298,9 @@ public I3 必须精确八字段：
 它进入同一 durable notification queue；重启、receipt 重放和 tick 只能保留一条 intent，交付后
 不再调用通知通道。
 
-## Token 边界
+## 外部进程环境
 
-- wiki 读取仍可在本地准备脚本使用 `WIKI_GITLAB_TOKEN`。
+- wiki 读取仍由本地准备脚本使用只读 `WIKI_GITLAB_TOKEN`，不得用于 GitLab 写操作。
 - git_issuer 的既有 `run_agent_turn.sh` 环境契约不改。
-- 只有 req_executor I1/旧 single I1 与 batch notification 外部进程边界显式 scrub GitLab token。
-- token 不得进入 payload、outbox、mirror、event ledger、notification item 或错误摘要。
+- req_executor I1、旧 single I1 与 batch notification 外部进程继承调用方进程环境；transport、
+  payload 与 notification 数据仍按本文件定义的严格 schema 构造。

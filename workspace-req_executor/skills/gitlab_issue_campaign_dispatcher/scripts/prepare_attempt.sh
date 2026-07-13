@@ -132,27 +132,37 @@ fi
 BASE_REF="origin/${BRANCH}"
 ACTUAL_MODE="${ISSUE_MODE}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
-  if git ls-remote --exit-code --heads origin "${WORK_BRANCH}" >/dev/null 2>&1; then
-    BASE_REF="origin/${WORK_BRANCH}"
-  else
-    PREVIOUS_LOCAL_BRANCH=""
-    prev=$((ATTEMPT_NUMBER - 1))
-    while [ "${prev}" -ge 1 ]; do
-      prev_padded="$(printf '%03d' "${prev}")"
-      candidate="${WORK_BRANCH}-att${prev_padded}"
-      if git rev-parse --verify --quiet "refs/heads/${candidate}" >/dev/null; then
-        PREVIOUS_LOCAL_BRANCH="${candidate}"
-        break
+  set +e
+  git ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
+    >/dev/null
+  ls_remote_status=$?
+  set -e
+  case "${ls_remote_status}" in
+    0)
+      BASE_REF="origin/${WORK_BRANCH}"
+      ;;
+    2)
+      PREVIOUS_LOCAL_BRANCH=""
+      prev=$((ATTEMPT_NUMBER - 1))
+      while [ "${prev}" -ge 1 ]; do
+        prev_padded="$(printf '%03d' "${prev}")"
+        candidate="${WORK_BRANCH}-att${prev_padded}"
+        if git rev-parse --verify --quiet \
+            "refs/heads/${candidate}" >/dev/null; then
+          PREVIOUS_LOCAL_BRANCH="${candidate}"
+          break
+        fi
+        prev=$((prev - 1))
+      done
+      if [ -n "${PREVIOUS_LOCAL_BRANCH}" ]; then
+        BASE_REF="${PREVIOUS_LOCAL_BRANCH}"
+      else
+        ACTUAL_MODE=fresh
+        BASE_REF="origin/${BRANCH}"
       fi
-      prev=$((prev - 1))
-    done
-    if [ -n "${PREVIOUS_LOCAL_BRANCH}" ]; then
-      BASE_REF="${PREVIOUS_LOCAL_BRANCH}"
-    else
-      ACTUAL_MODE=fresh
-      BASE_REF="origin/${BRANCH}"
-    fi
-  fi
+      ;;
+    *) exit "${ls_remote_status}" ;;
+  esac
 fi
 
 # Sanity check the resolved BASE_REF actually exists. If BRANCH is
@@ -296,7 +306,8 @@ if [ "${WORKTREE_REUSE}" = false ]; then
     mv "${WORKTREE_DIR}" "${WORKTREE_OBSTRUCTION_BACKUP}"
   fi
   if worktree_registered; then
-    git worktree remove --force "${WORKTREE_DIR}" >/dev/null 2>&1 || true
+    git worktree remove --force \
+      "${WORKTREE_DIR}" >/dev/null 2>&1 || true
   fi
 fi
 git worktree prune >&2
@@ -361,7 +372,8 @@ archive_fresh_active_runtime_tree() {
   fi
 
   local tracked_paths
-  if ! tracked_paths="$(git -C "${WORKTREE_DIR}" ls-files -- "${ISSUE_WORKTREE_REL}")"; then
+  if ! tracked_paths="$(git -C "${WORKTREE_DIR}" \
+      ls-files -- "${ISSUE_WORKTREE_REL}")"; then
     echo "prepare_attempt: failed to inspect tracked paths under ${ISSUE_WORKTREE_REL}" >&2
     exit 7
   fi
@@ -385,7 +397,8 @@ refresh_shared_config_from_branch() {
   # `.claude/`. Missing optional config is skipped with a warning rather than
   # fatal.
   for path in "${candidate_paths[@]}"; do
-    if git -C "${REPO_PATH}" cat-file -e "${config_ref}:${path}" 2>/dev/null; then
+    if git -C "${REPO_PATH}" \
+        cat-file -e "${config_ref}:${path}" 2>/dev/null; then
       config_paths+=("${path}")
     else
       echo "prepare_attempt: shared config path ${path} not present on ${config_ref}; skipping its refresh" >&2
@@ -401,19 +414,23 @@ refresh_shared_config_from_branch() {
   # skip-worktree. Clear that bit for tracked config paths before overlaying
   # origin/${BRANCH}, otherwise explicit config updates can be ignored.
   local tracked_config_paths
-  if tracked_config_paths="$(git -C "${WORKTREE_DIR}" ls-files -- "${config_paths[@]}")" \
+  if tracked_config_paths="$(git -C "${WORKTREE_DIR}" \
+      ls-files -- "${config_paths[@]}")" \
      && [ -n "${tracked_config_paths}" ]; then
     while IFS= read -r path || [ -n "${path}" ]; do
       [ -n "${path}" ] || continue
-      git -C "${WORKTREE_DIR}" update-index --no-skip-worktree -- "${path}" 2>/dev/null || true
+      git -C "${WORKTREE_DIR}" update-index \
+        --no-skip-worktree -- "${path}" 2>/dev/null || true
     done <<<"${tracked_config_paths}"
   fi
 
   echo "prepare_attempt: refreshing shared config paths from ${config_ref}: ${config_paths[*]}" >&2
-  git -C "${WORKTREE_DIR}" checkout "${config_ref}" -- "${config_paths[@]}" >&2
+  git -C "${WORKTREE_DIR}" checkout \
+    "${config_ref}" -- "${config_paths[@]}" >&2
   # `git checkout <tree> -- <path>` stages those paths. Leave them unstaged so
   # stage_and_guard.sh captures the full pre-stage diff/evidence before commit.
-  git -C "${WORKTREE_DIR}" reset -q -- "${config_paths[@]}" 2>/dev/null || true
+  git -C "${WORKTREE_DIR}" reset \
+    -q -- "${config_paths[@]}" 2>/dev/null || true
 }
 
 if [ "${WORKTREE_REUSE}" = true ]; then
@@ -428,7 +445,8 @@ if [ "${WORKTREE_REUSE}" = true ]; then
   # archives it outside the active worktree. Prior local attempt branches
   # (e.g. ${WORK_BRANCH}-att001) remain in the registry for audit; only the
   # worktree's HEAD moves.
-  git -C "${WORKTREE_DIR}" checkout -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force >&2
+  git -C "${WORKTREE_DIR}" checkout \
+    -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force >&2
 else
   # First attempt for this IID (or recovery from a broken state). Create
   # the shared per-issue linked worktree branched from ${BASE_REF}. This
@@ -436,7 +454,8 @@ else
   # OUTPUT_DIR is force-added by stage_and_guard.sh after the run; LOG_DIR and
   # generic logs/ directories stay local and are removed from the index.
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
-  git worktree add -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
+  git worktree add \
+    -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
 refresh_shared_config_from_branch
 if [ "${ACTUAL_MODE}" = "continue" ]; then

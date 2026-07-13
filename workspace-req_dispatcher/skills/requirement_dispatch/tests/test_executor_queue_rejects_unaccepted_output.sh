@@ -18,15 +18,19 @@ fi
 shift
 target_agent=""
 message=""
+message_file=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent) target_agent="$2"; shift 2 ;;
     --session-key) shift 2 ;;
     --message) message="$2"; shift 2 ;;
+    --message-file) message_file="$2"; shift 2 ;;
     --timeout) shift 2 ;;
     *) echo "unexpected openclaw arg: $1" >&2; exit 8 ;;
   esac
 done
+[ -z "${message_file}" ] || [ "${message_file}" = /dev/stdin ] || exit 7
+[ -z "${message_file}" ] || message="$(cat)"
 jq -nc --arg agent "${target_agent}" --arg message "${message}" \
   '{agent:$agent, message:$message}' >>"${OPENCLAW_CALL_LOG:?OPENCLAW_CALL_LOG required}"
 printf '%s\n' '{"status":"completed","chat_summary":"nothing to spawn"}'

@@ -50,7 +50,7 @@ SCHEDULER_JSON="$(jq -ce --arg batch_id "${BATCH_ID}" '
   if type == "object"
     and .version == 1
     and (.batch_order | type == "array")
-    and ([.batch_order[] | select(. == $batch_id)] | length) == 1
+    and ([.batch_order[] | select(. == $batch_id)] | length) <= 1
     and (.active_jobs | type == "object")
     and (has("pending_transaction") | not)
   then .
@@ -58,6 +58,8 @@ SCHEDULER_JSON="$(jq -ce --arg batch_id "${BATCH_ID}" '
   end
 ' "${SCHEDULER_STATE_FILE}" 2>/dev/null)" \
   || acceptance_die "scheduler registration is not safe to acknowledge: ${BATCH_ID}" 3
+SCHEDULER_REGISTRATION_COUNT="$(jq -r --arg batch_id "${BATCH_ID}" \
+  '[.batch_order[] | select(. == $batch_id)] | length' <<<"${SCHEDULER_JSON}")"
 
 REQUEST_JSON="$(jq -ceS --arg batch_id "${BATCH_ID}" '
   def printable:
@@ -82,8 +84,9 @@ REQUEST_JSON="$(jq -ceS --arg batch_id "${BATCH_ID}" '
     );
   if type == "object"
     and ((keys - [
-      "batch_id","branch","correlation_id","dispatcher_callback_target",
-      "entry_mode","force_rerun_pr","project","selector","version"
+      "batch_id","branch","callback_nonce","correlation_id",
+      "dispatcher_callback_target","entry_mode","executor_agent",
+      "force_rerun_pr","project","selector","version"
     ]) | length == 0)
     and .version == 1
     and .batch_id == $batch_id
@@ -93,6 +96,9 @@ REQUEST_JSON="$(jq -ceS --arg batch_id "${BATCH_ID}" '
     and (.selector | selector)
     and (.force_rerun_pr | type == "boolean")
     and (.dispatcher_callback_target | printable)
+    and (.executor_agent | type == "string"
+      and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"))
+    and (.callback_nonce | type == "string" and test("^[0-9a-f]{64}$"))
     and ((.branch == null) or (.branch | printable))
     and ((has("entry_mode") | not)
       or .entry_mode == "auto"
@@ -176,6 +182,10 @@ STATE_JSON="$(jq -ce \
   || acceptance_die "batch state is invalid or disagrees with its immutable snapshot: ${BATCH_ID}" 3
 
 SCHEDULER_STATUS="$(jq -r '.status' <<<"${STATE_JSON}")"
+if [ "${SCHEDULER_REGISTRATION_COUNT}" -eq 0 ] \
+    && [ "${SCHEDULER_STATUS}" != completed ]; then
+  acceptance_die "non-terminal batch is absent from the runnable index: ${BATCH_ID}" 3
+fi
 
 flock -u "${SCHEDULER_LOCK_FD}"
 exec {SCHEDULER_LOCK_FD}>&-

@@ -66,11 +66,23 @@ if ! INPUT_JSON="$(jq -ce '
 fi
 
 GITLAB_TOKEN_PROCESS_OVERRIDE="${GITLAB_TOKEN:-}"
+GITLAB_HOST_PROCESS_SET="${GITLAB_HOST+x}"
+GITLAB_HOST_PROCESS_OVERRIDE="${GITLAB_HOST:-}"
+GITLAB_PROTOCOL_PROCESS_SET="${GITLAB_API_PROTOCOL+x}"
+GITLAB_PROTOCOL_PROCESS_OVERRIDE="${GITLAB_API_PROTOCOL:-}"
 REPO_PARENT_PROCESS_OVERRIDE="${REPO_PARENT_PATH:-}"
 SCHEDULER_ROOT_PROCESS_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 SCHEDULER_ROOT_PROCESS_OVERRIDE="${EXECUTOR_SCHEDULER_ROOT:-}"
 MAX_CONCURRENCY_PROCESS_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 MAX_CONCURRENCY_PROCESS_OVERRIDE="${EXECUTOR_MAX_CONCURRENCY:-}"
+RUNNING_LEASE_PROCESS_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
+RUNNING_LEASE_PROCESS_OVERRIDE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
+EXECUTOR_AGENT_PROCESS_SET="${EXECUTOR_AGENT+x}"
+EXECUTOR_AGENT_PROCESS_OVERRIDE="${EXECUTOR_AGENT:-}"
+CALLBACK_TARGET_PROCESS_SET="${DISPATCHER_CALLBACK_TARGET+x}"
+CALLBACK_TARGET_PROCESS_OVERRIDE="${DISPATCHER_CALLBACK_TARGET:-}"
+LOCK_COMPAT_PROCESS_SET="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS+x}"
+LOCK_COMPAT_PROCESS_OVERRIDE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
 [ -f "${CONFIG_DIR}/gitlab.env" ] || die "missing config/gitlab.env"
 [ -f "${CONFIG_DIR}/campaign_defaults.env" ] || die "missing config/campaign_defaults.env"
 # shellcheck disable=SC1091
@@ -82,11 +94,29 @@ if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   # shellcheck disable=SC1091
   source "${CONFIG_DIR}/campaign_defaults.local.env"
 fi
+if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
+  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
+fi
+if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
+  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
+fi
 if [ "${SCHEDULER_ROOT_PROCESS_SET}" = x ]; then
   EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT_PROCESS_OVERRIDE}"
 fi
 if [ "${MAX_CONCURRENCY_PROCESS_SET}" = x ]; then
   EXECUTOR_MAX_CONCURRENCY="${MAX_CONCURRENCY_PROCESS_OVERRIDE}"
+fi
+if [ "${RUNNING_LEASE_PROCESS_SET}" = x ]; then
+  EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_PROCESS_OVERRIDE}"
+fi
+if [ "${EXECUTOR_AGENT_PROCESS_SET}" = x ]; then
+  EXECUTOR_AGENT="${EXECUTOR_AGENT_PROCESS_OVERRIDE}"
+fi
+if [ "${CALLBACK_TARGET_PROCESS_SET}" = x ]; then
+  DISPATCHER_CALLBACK_TARGET="${CALLBACK_TARGET_PROCESS_OVERRIDE}"
+fi
+if [ "${LOCK_COMPAT_PROCESS_SET}" = x ]; then
+  DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_PROCESS_OVERRIDE}"
 fi
 GITLAB_TOKEN_EFF="${GITLAB_TOKEN_PROCESS_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"
 REPO_PARENT_BASE="${REPO_PARENT_PROCESS_OVERRIDE:-${REPO_PARENT_PATH:-/data}}"
@@ -96,6 +126,15 @@ REPO_PARENT_BASE="${REPO_PARENT_PROCESS_OVERRIDE:-${REPO_PARENT_PATH:-/data}}"
 
 # shellcheck disable=SC1090
 source "${SCHEDULER_ENV_CMD}" >/dev/null
+if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
+  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
+fi
+if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
+  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
+fi
+if [ "${RUNNING_LEASE_PROCESS_SET}" = x ]; then
+  EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_PROCESS_OVERRIDE}"
+fi
 
 JOB_ID="$(jq -r '.job_id' <<<"${INPUT_JSON}")"
 CLAIM_GENERATION="$(jq -r '.claim_generation' <<<"${INPUT_JSON}")"
@@ -331,15 +370,22 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
   if [ "${DRIVEN_COORDINATOR_FAULT:-}" = after_project_record ]; then
     exit 87
   fi
-  ACTION_JSON="$(jq -c --argjson now "$(date +%s)" \
-    '.stage = "project_recorded" | .updated_at = $now' <<<"${ACTION_JSON}")"
+  PROJECT_RECEIPT_SHA256="$(printf '%s' "$(jq -cS . <<<"${PROJECT_OUTPUT}")" | dlc_sha256)" \
+    || die "unable to hash the durable project receipt"
+  ACTION_JSON="$(jq -c \
+    --arg project_receipt_sha256 "${PROJECT_RECEIPT_SHA256}" \
+    --argjson now "$(date +%s)" '
+    .stage = "project_recorded"
+    | .project_receipt_sha256 = $project_receipt_sha256
+    | .updated_at = $now
+  ' <<<"${ACTION_JSON}")"
   dlc_write "${ACTION_JSON}"
   CURRENT_STAGE=project_recorded
 fi
 
 if [ "${CURRENT_STAGE}" = project_recorded ]; then
   EFFECTIVE_SCHEDULER_ACTION="${SCHEDULER_ACTION}"
-  if [ "${RESULT_STATUS}" = spawned ]; then
+  if [ "${RESULT_STATUS}" = spawned ] || [ "${RESULT_STATUS}" = launch_failed ]; then
     # reserve may have fenced an unacknowledged preparing lease back to the
     # same reserved generation before runtime reconciliation found the child.
     # Restore that exact generation; never allocate or infer a new claim here.
@@ -356,7 +402,11 @@ if [ "${CURRENT_STAGE}" = project_recorded ]; then
         and .claim_generation == $generation
         and .claim_token == null
       ' <<<"${RECOVERY_SCHEDULER_JOB}" >/dev/null; then
-      EFFECTIVE_SCHEDULER_ACTION=recovered_spawned
+      if [ "${RESULT_STATUS}" = spawned ]; then
+        EFFECTIVE_SCHEDULER_ACTION=recovered_spawned
+      else
+        EFFECTIVE_SCHEDULER_ACTION=recovered_launch_failed
+      fi
     fi
   fi
   set +e

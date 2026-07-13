@@ -41,7 +41,7 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ACPX_TIMEOUT_MINUTES}` | `floor({ACPX_TIMEOUT_SECONDS} / 60)`; used in the constraints block's hard wall-clock soft cap. Always derived from `{ACPX_TIMEOUT_SECONDS}` so the two stay in lockstep. |
 `{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
 
-`{GITLAB_TOKEN}` is sensitive. The rendered prompt is the only place it appears in subagent context; do not log or echo it.
+`{GITLAB_TOKEN}` is substituted directly into the rendered prompt and each executor script invocation.
 
 `{ISSUE_BODY}` is for human context only. The dispatcher has already written the full `prompt.txt` to `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* (not this snippet) to acpx. Truncate the snippet here at ~4 KB if necessary; do not inflate spawn payloads.
 

@@ -32,7 +32,7 @@ This workspace assumes a single GitLab deployment per runner. If you ever need t
 
 ## `campaign_defaults.env`
 
-Pins the clone parent used by the **driven** `RUN_SINGLE_ISSUE` entry point and the agent-wide driven-batch scheduler settings. On the single-issue driven path, `req_dispatcher` sends only the I1 trigger inputs: `project`, `iid`, `correlation_id`, `dispatcher_callback_target`, and optional `group` / `branch`.
+Pins the clone parent used by the **driven** `RUN_SINGLE_ISSUE` entry point and the agent-wide driven-batch scheduler settings. On the single-issue driven path, the I1 schema includes `project`, `iid`, `correlation_id`, pinned routing identity, `callback_nonce`, and optional `group` / `branch`.
 
 Like `gitlab.env`, this file is `source`d (and may be loaded under `set -a`), so it must stay pure `KEY=value` lines — no shell logic, no command substitution, no conditionals.
 
@@ -47,10 +47,14 @@ The runner has to know where to clone repositories before it can read issue cont
 | `REPO_PARENT_PATH` | `/data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. Use ignored `campaign_defaults.local.env` to override this for local testing. |
 | `EXECUTOR_SCHEDULER_ROOT` | `/data/req_executor/_scheduler` | Absolute agent-level root for scheduler state, lock, batch records, and callback inbox/outbox. |
 | `EXECUTOR_MAX_CONCURRENCY` | `3` | Positive integer physical concurrency limit shared across all driven batches. |
+| `EXECUTOR_RUNNING_LEASE_SECONDS` | `21600` | Backstop before tick checks a running claim for a lost callback; the project-side ACPX deadline is still authoritative. |
+| `DRIVEN_LEGACY_LOCK_COMPAT_SECONDS` | `86400` | Persisted rollout window in which new wrappers acquire both old and new callback/launch lock paths. Set to `0` only after all pre-upgrade executor processes have stopped; expired windows migrate old locks out of hot directories without replacing canonical lock inodes. |
+| `EXECUTOR_AGENT` | `req_executor` | Exact executor identity accepted in authenticated I1/I3 routing. |
+| `DISPATCHER_CALLBACK_TARGET` | `agent:req_dispatcher:main` | Exact callback task; trigger data cannot redirect Issue results elsewhere. |
 
-`scheduler_env.sh` accepts workstation overrides for the two scheduler fields from ignored `campaign_defaults.local.env` or the process environment. Scheduler roots must be strictly nested below `/data`, normalized `${HOME}`, or normalized `${TMPDIR:-/tmp}`; this keeps the blue-zone default valid while limiting workstation overrides to the user's home or temporary tree. The script rejects paths equal to those allowed roots, paths outside them, relative/unsafe paths, and non-positive/non-integer concurrency values before creating state.
+`scheduler_env.sh` accepts workstation overrides for scheduler fields and the two route pins from ignored `campaign_defaults.local.env` or the process environment. An explicit process value wins and must be supplied consistently to intake, tick, import, and delivery. Scheduler roots must be strictly nested below `/data`, normalized `${HOME}`, or normalized `${TMPDIR:-/tmp}`; this keeps the blue-zone default valid while limiting workstation overrides to the user's home or temporary tree. The script rejects paths equal to those allowed roots, paths outside them, relative/unsafe paths, and non-positive/non-integer concurrency values before creating state.
 
-Do not put branch, per-project quota, timeout, token, runtime basename, project data directory, or account-pool fields in `campaign_defaults.env`.
+`campaign_defaults.env` does not define branch, per-project quota, timeout, runtime basename, project data directory, account-pool, or GitLab token fields. `GITLAB_TOKEN` continues to use the process-environment-then-`gitlab.env` selection order above.
 
 ## OpenClaw subagent timeout
 
@@ -76,7 +80,7 @@ expected and does not mean the global timeout was dropped.
 If logs report that an outer `GITLAB_TOKEN` differs from the deployment pin,
 remember that the process environment wins by contract. Update or unset the
 stale token in the OpenClaw service environment if `config/gitlab.env` should
-provide the fallback; never print either token while diagnosing.
+provide the fallback.
 
 ## Runtime Layout
 
@@ -91,7 +95,22 @@ Driven-batch scheduling state is agent-wide rather than repository-local. By def
   batches/
   callback_inbox/
   callback_outbox/
+  callback_archive/
+  callback_locks/
+  launch_actions/
+  launch_action_archive/
+  launch_action_locks/
+  launch_failed_receipts/
 ```
+
+These scheduler directories are mode `0700` because batch requests and callback
+outbox entries contain private callback nonces and active scheduler records can
+contain claim tokens. They are runtime authentication state, not public logs.
+Hot callback/action directories contain only active JSON. Stable per-event locks
+live in their independent lock directories, delivered callbacks and completed
+actions move to cold archives, and token-digest-only launch-failure receipts are
+directly addressable by the SHA-256 of `job_id` instead of accumulating inside
+`scheduler_state.json`.
 
 There is no UI-account pool configuration in this workspace. The issue body is passed to Claude Code as the task prompt; credentials, account pools, or project-specific data directories must be described by the issue itself if they are relevant.
 
@@ -99,8 +118,11 @@ There is no UI-account pool configuration in this workspace. The issue body is p
 
 - tracked 蓝区默认保持 `EXECUTOR_MAX_CONCURRENCY=3` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。不得为了工作站测试修改 tracked `campaign_defaults.env` 中的 `/data` 默认值、GitLab host/protocol 或 token 注入契约。
 - 工作站覆盖只能放在进程环境或 ignored `campaign_defaults.local.env`。对 scheduler 字段，显式进程环境优先于 local env，local env 优先于 tracked defaults；不要提交本机绝对路径、临时 session、测试 endpoint 或额外凭据。
-- `dispatcher_callback_target` 是 `RUN_DRIVEN_ISSUE_BATCH` 与 `RUN_SINGLE_ISSUE` 兼容 shim 的必填 I1 字段。executor 从自身进程环境或 `config/gitlab.env` 加载 GitLab 凭据；req_dispatcher 的 I1 不携带 token。
+- `dispatcher_callback_target`、`executor_agent` 与 `callback_nonce` 是 `RUN_DRIVEN_ISSUE_BATCH` 与新发 `RUN_SINGLE_ISSUE` 的必填 I1 字段。前两者必须匹配部署 pin，nonce 必须为 64 个小写 hex，只进入私有 durable state 和认证回调信封。I1 定义项目、selector 与回调路由字段；executor 按进程环境优先、`config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，并将它直接用于内部 scheduled trigger 与子任务 prompt。
+- 私有仓库的 clone、fetch、ls-remote、push 使用普通 `git`，`origin` 采用 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL。Git 子进程与 callback `openclaw` 子进程继承 executor 当前环境，包括按上述优先级选中的 `GITLAB_TOKEN`。
+- 只有升级前已存在于 mode `0700` scheduler 根、同时缺少 executor/nonce 的旧 request/outbox 才会被 executor 显式投影为 `legacy_pre_upgrade` 并沿 raw 八字段 I3 兼容投递。新 intake 缺少认证字段或携带 `callback_auth_mode=legacy_pre_upgrade` 都必须失败，不能由请求输入降级。
+- lock layout 升级由 `${EXECUTOR_SCHEDULER_ROOT}/lock_layout_v2.json` 固定起点。默认 86400 秒兼容窗口内，新进程按旧路径→新路径的固定顺序同时加锁，避免尚在运行的旧 drainer/coordinator 与新进程分裂互斥域；窗口结束后同时锁住两侧再把旧 inode 移到独立锁目录，绝不覆盖 canonical 新锁。确认所有旧进程已停止时可通过进程环境或 local env 将窗口设为 `0` 提前收口。
 - 默认 3 个物理槽位由所有 driven batch 共享。scheduler 持久保存 snapshot 游标与 round-robin 游标；即使单批包含 100+ Issue，也只按严格轮转逐步发放 grant，不把 IID 列表或全部 runtime action 展开到聊天上下文。
-- 部署周期触发固定为 `RUN_EXECUTOR_BATCH_TICK`，建议每分钟在 executor main session 唤醒一次。tick 先恢复 durable handoff/outbox 和未完成协调阶段，再按严格 round-robin 补满空槽；它不依赖此前聊天 turn 的内存。
+- 部署周期触发固定为 `RUN_EXECUTOR_BATCH_TICK`，建议每分钟在 executor main session 唤醒一次。tick 会对丢回调 running claim 做同代 fence 与 ACPX deadline 校验，恢复 durable handoff/outbox 和未完成协调阶段，再按严格 round-robin 补满空槽；outbox 每 tick 默认最多投递 3 条，失败按持久时间退避，因此大量失败回调不会阻止 reservation；完成数据退出热扫描后仍保留冷归档，它不依赖此前聊天 turn 的内存。
 - 升级时先让 req_dispatcher 排空旧 FIFO。旧 active/queue 非空期间，新 batch 保持 `waiting_for_legacy_drain`，不得与旧 single active 重叠启动；旧队列清空后再由周期 tick 推进新 scheduler。
 - 回滚时先停止新的 batch 入口和周期 `RUN_EXECUTOR_BATCH_TICK`。可以在停用前排空，也可以原样保留 `${EXECUTOR_SCHEDULER_ROOT}` 下的 scheduler state、batch snapshot、handoff 与 callback outbox，等待恢复后继续；不得删除这些 durable runtime 记录。

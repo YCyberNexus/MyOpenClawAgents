@@ -16,6 +16,7 @@
 #         "payload_path": "/data/.../spawn_payload.txt"
 #       }, ...
 #     ],
+#     "run_timeout_seconds": 18120,
 #     "max_launch_retries": 3,
 #     "backoff_seconds": 2,
 #     "cleanup_actions": [
@@ -28,9 +29,9 @@
 #
 # When status=="ready", the LLM loops over dispatch_entries[] and for
 # each entry:
-#   1. Reads payload_path file → sessions_spawn(task=payload,
-#      label=child_label, runtime="subagent", mode="run", cleanup="keep",
-#      context="isolated") with up to max_launch_retries attempts and
+#   1. Reads payload_path file → sessions_spawn(payload, label=child_label,
+#      timeoutSeconds=30, runTimeoutSeconds=run_timeout_seconds,
+#      cleanup="keep") with up to max_launch_retries attempts and
 #      backoff_seconds between attempts (per §No-Fallback rule 2).
 #   2. Calls dispatch_record_spawn.sh STATUS=spawned ... on success, or
 #      STATUS=launch_failed LAUNCH_ATTEMPTS=N LAUNCH_ERROR=... on
@@ -134,10 +135,6 @@ if [ "${TRIGGER_NAME}" != "RUN_SCHEDULED_ISSUE_CAMPAIGN" ] && [ -z "${TRIGGER_NA
 fi
 if [ -n "${TRIGGER_NAME}" ] && [ "${TRIGGER_NAME}" != "RUN_SCHEDULED_ISSUE_CAMPAIGN" ]; then
   emit_chat_failure "dispatch_prepare_tick.sh is for RUN_SCHEDULED_ISSUE_CAMPAIGN only (got ${TRIGGER_NAME})"
-fi
-
-if [ "${T[run_timeout_seconds]+present}" = "present" ]; then
-  emit_chat_failure "unsupported trigger field: run_timeout_seconds; configure agents.defaults.subagents.runTimeoutSeconds globally if desired"
 fi
 
 # ─── 2. Fixed-value preflight ─────────────────────────────────────
@@ -368,6 +365,8 @@ MAX_CONCURRENT="${T[max_concurrent_subagents]:-}"
 MAX_ACCOUNTS="${T[max_accounts_per_issue]:-}"
 STUCK_AFTER="${T[stuck_after_minutes]:-}"
 ACPX_TIMEOUT="${T[acpx_timeout_seconds]:-}"
+RUN_TIMEOUT="${T[run_timeout_seconds]:-}"
+OUTER_TIMEOUT_GRACE_SECONDS=120
 
 # Defaults when trigger omits.
 [ -z "${MAX_CONCURRENT}" ] && MAX_CONCURRENT=1
@@ -380,10 +379,15 @@ case "${MAX_ACCOUNTS}" in *[!0-9]*|"") emit_chat_failure "invalid_max_accounts_p
 [ "${MAX_ACCOUNTS}" -ge 1 ] || emit_chat_failure "invalid_max_accounts_per_issue: must be >= 1"
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
 [ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
-# stuck_after_minutes keeps the dispatcher backstop beyond the recommended
-# global OpenClaw subagent limit of acpx_timeout_seconds + 120 seconds.
+[ -z "${RUN_TIMEOUT}"    ] && RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
+case "${RUN_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_run_timeout_seconds: must be >= 60" ;; esac
+[ "${RUN_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_run_timeout_seconds: must be >= 60"
+MIN_RUN_TIMEOUT=$((ACPX_TIMEOUT + OUTER_TIMEOUT_GRACE_SECONDS))
+[ "${RUN_TIMEOUT}" -ge "${MIN_RUN_TIMEOUT}" ] || emit_chat_failure "run_timeout_seconds_below_acpx_timeout_seconds_plus_${OUTER_TIMEOUT_GRACE_SECONDS}"
+# stuck_after_minutes defaults to ceil(run_timeout_seconds / 60) + 30, so the
+# runtime's own timeout always fires before the dispatcher's eviction backstop.
 # Operators may still override explicitly for tighter or looser eviction.
-[ -z "${STUCK_AFTER}" ] && STUCK_AFTER="$(derive_stuck_after_minutes "${ACPX_TIMEOUT}")"
+[ -z "${STUCK_AFTER}" ] && STUCK_AFTER=$(( (RUN_TIMEOUT + 59) / 60 + 30 ))
 case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac
 [ "${STUCK_AFTER}" -ge 5 ] || emit_chat_failure "invalid_stuck_after_minutes: must be >= 5"
 
@@ -491,6 +495,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
   --argjson max_concurrent_subagents "${MAX_CONCURRENT}" \
   --argjson max_accounts_per_issue "${MAX_ACCOUNTS}" \
   --argjson stuck_after_minutes "${STUCK_AFTER}" \
+  --argjson run_timeout_seconds "${RUN_TIMEOUT}" \
   --argjson acpx_timeout_seconds "${ACPX_TIMEOUT}" \
   --argjson kill_subagent_on_terminal "${KILL_TERMINAL}" \
   --argjson issue_iids_whitelist "${ISSUE_IIDS_JSON}" \
@@ -515,6 +520,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     max_concurrent_subagents: $max_concurrent_subagents,
     max_accounts_per_issue: $max_accounts_per_issue,
     stuck_after_minutes: $stuck_after_minutes,
+    run_timeout_seconds: $run_timeout_seconds,
     acpx_timeout_seconds: $acpx_timeout_seconds,
     kill_subagent_on_terminal: $kill_subagent_on_terminal,
     result_note_enabled: (if $result_note_provided then $result_note_enabled else (.result_note_enabled // false) end),
@@ -526,7 +532,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     quota_launched_this_tick: 0,
     quota_completed_this_tick: 0
   }
-  | del(.accounts_per_issue, .run_timeout_seconds)')"
+  | del(.accounts_per_issue)')"
 
 # Diagnostic for the "stale scalar in campaign_state.json" class of report
 # (e.g. blocked_cooldown_ticks edited 10->1 but the file still shows 10). The
@@ -591,7 +597,7 @@ for piid in ${PENDING_KEYS}; do
   # (parked in timeout_iids, no auto-retry) instead of `blocked` (retryable).
   # Scope evictions and surviving placeholders are not time-based failures
   # and stay `blocked`. With the default stuck_after_minutes
-  # (ceil((acpx_timeout_seconds+120)/60)+30) every stuck eviction passes the budget
+  # (ceil(run_timeout_seconds/60)+30) every stuck eviction passes the budget
   # check; only an operator-shortened stuck_after_minutes can evict a run
   # early enough to stay `blocked`.
   EVICT_SYNTH="blocked"
@@ -1509,7 +1515,7 @@ for iid in "${BATCH_IIDS[@]}"; do
     prep_blocked "executor_prompt.md fenced block missing or sentinel not found"
     continue
   fi
-  first_template_line="$(first_line "${template}")"
+  first_template_line="$(printf '%s\n' "${template}" | head -n 1)"
   if [ "${first_template_line}" != "# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1" ]; then
     prep_blocked "executor_prompt.md fenced block does not start with sentinel"
     continue
@@ -1566,13 +1572,13 @@ PYEOF
   RENDER_RC=$?
   set -e
   if [ "${RENDER_RC}" -ne 0 ] || [ -z "${rendered}" ]; then
-    miss="$(awk '/^UNSUBSTITUTED_PLACEHOLDER=/{sub(/^UNSUBSTITUTED_PLACEHOLDER=/, ""); print; exit}' "${RENDER_ERR}")"
+    miss="$(sed -n 's/^UNSUBSTITUTED_PLACEHOLDER=//p' "${RENDER_ERR}" | head -n 1)"
     prep_blocked "prompt template render incomplete: ${miss:-unknown}"
     continue
   fi
 
   # Sentinel check.
-  sentinel_first_line="$(first_line "${rendered}")"
+  sentinel_first_line="$(printf '%s\n' "${rendered}" | head -n 1)"
   if [ "${sentinel_first_line}" != "# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1" ]; then
     prep_blocked "spawn payload missing executor sentinel — refused to ship inner Claude Code prompt (${LOG_DIR_X}/prompt.txt) as the outer spawn payload"
     continue
@@ -1605,13 +1611,14 @@ SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s, pool=%s)' \
 
 if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
   jq -nc \
+    --argjson run_timeout "${RUN_TIMEOUT}" \
     --argjson outcomes "${TICK_OUTCOMES}" \
     --argjson evicted "${EVICTED_IIDS_JSON}" \
     --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
     --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
     --arg ev "${EVIDENCE_PATH}" \
     --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
-    {status:"no_eligible_iids", dispatch_entries:[],
+    {status:"no_eligible_iids", dispatch_entries:[], run_timeout_seconds:$run_timeout,
      evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
      cleanup_actions:$cleanup_actions,
      max_launch_retries:3, backoff_seconds:2,
@@ -1621,6 +1628,7 @@ fi
 
 jq -nc \
   --argjson dispatch_entries "${DISPATCH_ENTRIES}" \
+  --argjson run_timeout "${RUN_TIMEOUT}" \
   --argjson outcomes "${TICK_OUTCOMES}" \
   --argjson evicted "${EVICTED_IIDS_JSON}" \
   --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
@@ -1630,7 +1638,7 @@ jq -nc \
   --arg ev "${EVIDENCE_PATH}" \
   --arg chat "${SUMMARY}" '
   {status:"ready", dispatch_entries:$dispatch_entries,
-   max_launch_retries:3, backoff_seconds:2,
+   run_timeout_seconds:$run_timeout, max_launch_retries:3, backoff_seconds:2,
    evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
    cleanup_actions:$cleanup_actions,
    label_filtered_in:$label_in, label_filtered_out:$label_out,

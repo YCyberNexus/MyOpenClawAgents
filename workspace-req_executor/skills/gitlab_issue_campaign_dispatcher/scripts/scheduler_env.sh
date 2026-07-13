@@ -12,6 +12,78 @@ die() {
   exit 2
 }
 
+scheduler_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    die "no SHA-256 command is available"
+  fi
+}
+
+scheduler_atomic_write_json() {
+  local destination="$1" json="$2"
+  local destination_dir destination_name candidate
+  destination_dir="$(dirname "${destination}")"
+  destination_name="$(basename "${destination}")"
+  candidate="$(mktemp "${destination_dir}/.${destination_name}.XXXXXX")"
+  ( umask 077; printf '%s\n' "${json}" >"${candidate}" )
+  jq -e . "${candidate}" >/dev/null \
+    || die "refusing to publish invalid JSON for ${destination_name}"
+  mv "${candidate}" "${destination}"
+  chmod 600 "${destination}" 2>/dev/null || true
+}
+
+scheduler_migrate_hot_launch_failed_receipts() {
+  local scheduler_state hot_receipts receipt job_id receipt_digest
+
+  scheduler_state="$(jq -c . "${SCHEDULER_STATE_FILE}")"
+  [ "$(jq -r 'has("launch_failed_receipts")' <<<"${scheduler_state}")" = true ] \
+    || return 0
+  hot_receipts="$(jq -c '.launch_failed_receipts // {}' <<<"${scheduler_state}")"
+  while IFS= read -r receipt; do
+    [ -n "${receipt}" ] || continue
+    job_id="$(jq -r '.job_id' <<<"${receipt}")"
+    receipt_digest="$(printf '%s' "${job_id}" | scheduler_sha256_text)"
+    scheduler_atomic_write_json \
+      "${LAUNCH_FAILED_RECEIPTS_ROOT}/${receipt_digest}.json" \
+      "$(jq -cS . <<<"${receipt}")"
+  done < <(jq -c '.[]' <<<"${hot_receipts}")
+  scheduler_state="$(jq -c 'del(.launch_failed_receipts)' <<<"${scheduler_state}")"
+  scheduler_atomic_write_json "${SCHEDULER_STATE_FILE}" "${scheduler_state}"
+}
+
+scheduler_migrate_legacy_callback_locks() {
+  local legacy_lock legacy_name legacy_event digest canonical_lock archived_lock
+  local LEGACY_MIGRATE_FD CANONICAL_MIGRATE_FD
+
+  shopt -s nullglob
+  LEGACY_CALLBACK_LOCK_FILES=("${CALLBACK_OUTBOX}"/.*.lock)
+  for legacy_lock in "${LEGACY_CALLBACK_LOCK_FILES[@]}"; do
+    legacy_name="$(basename "${legacy_lock}")"
+    legacy_event="${legacy_name#.}"
+    legacy_event="${legacy_event%.lock}"
+    digest="$(printf '%s' "${legacy_event}" | scheduler_sha256_text)"
+    canonical_lock="${CALLBACK_LOCKS}/${digest}.lock"
+    archived_lock="${CALLBACK_LOCKS}/legacy-${digest}.lock"
+
+    # Never replace the canonical inode: another new process may already hold
+    # it. Quiesce both old and new lock domains, then move only the retired old
+    # inode to a non-canonical history path outside the hot JSON directory.
+    exec {LEGACY_MIGRATE_FD}>"${legacy_lock}"
+    flock -x "${LEGACY_MIGRATE_FD}"
+    exec {CANONICAL_MIGRATE_FD}>"${canonical_lock}"
+    flock -x "${CANONICAL_MIGRATE_FD}"
+    mv "${legacy_lock}" "${archived_lock}"
+    flock -u "${CANONICAL_MIGRATE_FD}"
+    exec {CANONICAL_MIGRATE_FD}>&-
+    flock -u "${LEGACY_MIGRATE_FD}"
+    exec {LEGACY_MIGRATE_FD}>&-
+  done
+  shopt -u nullglob
+}
+
 unsafe_scheduler_root() {
   die "unsafe EXECUTOR_SCHEDULER_ROOT: $1"
 }
@@ -34,6 +106,14 @@ ROOT_ENV_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 ROOT_ENV_VALUE="${EXECUTOR_SCHEDULER_ROOT:-}"
 CONCURRENCY_ENV_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 CONCURRENCY_ENV_VALUE="${EXECUTOR_MAX_CONCURRENCY:-}"
+RUNNING_LEASE_ENV_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
+RUNNING_LEASE_ENV_VALUE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
+EXECUTOR_AGENT_ENV_SET="${EXECUTOR_AGENT+x}"
+EXECUTOR_AGENT_ENV_VALUE="${EXECUTOR_AGENT:-}"
+CALLBACK_TARGET_ENV_SET="${DISPATCHER_CALLBACK_TARGET+x}"
+CALLBACK_TARGET_ENV_VALUE="${DISPATCHER_CALLBACK_TARGET:-}"
+LOCK_COMPAT_ENV_SET="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS+x}"
+LOCK_COMPAT_ENV_VALUE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
 
 DEFAULT_CONFIG="${CONFIG_DIR}/campaign_defaults.env"
 LOCAL_CONFIG="${CONFIG_DIR}/campaign_defaults.local.env"
@@ -41,6 +121,10 @@ LOCAL_CONFIG="${CONFIG_DIR}/campaign_defaults.local.env"
 
 EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler
 EXECUTOR_MAX_CONCURRENCY=3
+EXECUTOR_RUNNING_LEASE_SECONDS=21600
+EXECUTOR_AGENT=req_executor
+DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
+DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=86400
 # shellcheck disable=SC1090
 source "${DEFAULT_CONFIG}"
 if [ -f "${LOCAL_CONFIG}" ]; then
@@ -53,6 +137,18 @@ if [ "${ROOT_ENV_SET}" = x ]; then
 fi
 if [ "${CONCURRENCY_ENV_SET}" = x ]; then
   EXECUTOR_MAX_CONCURRENCY="${CONCURRENCY_ENV_VALUE}"
+fi
+if [ "${RUNNING_LEASE_ENV_SET}" = x ]; then
+  EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_ENV_VALUE}"
+fi
+if [ "${EXECUTOR_AGENT_ENV_SET}" = x ]; then
+  EXECUTOR_AGENT="${EXECUTOR_AGENT_ENV_VALUE}"
+fi
+if [ "${CALLBACK_TARGET_ENV_SET}" = x ]; then
+  DISPATCHER_CALLBACK_TARGET="${CALLBACK_TARGET_ENV_VALUE}"
+fi
+if [ "${LOCK_COMPAT_ENV_SET}" = x ]; then
+  DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_ENV_VALUE}"
 fi
 
 case "${EXECUTOR_SCHEDULER_ROOT}" in
@@ -92,20 +188,72 @@ esac
 if [[ "${EXECUTOR_MAX_CONCURRENCY}" =~ ^0+$ ]]; then
   die "EXECUTOR_MAX_CONCURRENCY must be a positive integer"
 fi
+case "${EXECUTOR_RUNNING_LEASE_SECONDS}" in
+  ''|*[!0-9]*) die "EXECUTOR_RUNNING_LEASE_SECONDS must be a positive integer" ;;
+esac
+if [[ "${EXECUTOR_RUNNING_LEASE_SECONDS}" =~ ^0+$ ]]; then
+  die "EXECUTOR_RUNNING_LEASE_SECONDS must be a positive integer"
+fi
+if ! [[ "${EXECUTOR_AGENT}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+  die "EXECUTOR_AGENT must be a safe agent identifier"
+fi
+if ! [[ "${DISPATCHER_CALLBACK_TARGET}" =~ ^agent:req_dispatcher:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+  die "DISPATCHER_CALLBACK_TARGET must pin agent:req_dispatcher:<safe-session>"
+fi
+case "${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS}" in
+  ''|*[!0-9]*) die "DRIVEN_LEGACY_LOCK_COMPAT_SECONDS must be a non-negative integer" ;;
+esac
 
 SCHEDULER_STATE_FILE="${EXECUTOR_SCHEDULER_ROOT}/scheduler_state.json"
 SCHEDULER_LOCK_FILE="${EXECUTOR_SCHEDULER_ROOT}/scheduler.lock"
 BATCHES_ROOT="${EXECUTOR_SCHEDULER_ROOT}/batches"
 CALLBACK_INBOX="${EXECUTOR_SCHEDULER_ROOT}/callback_inbox"
 CALLBACK_OUTBOX="${EXECUTOR_SCHEDULER_ROOT}/callback_outbox"
+CALLBACK_ARCHIVE="${EXECUTOR_SCHEDULER_ROOT}/callback_archive"
+CALLBACK_LOCKS="${EXECUTOR_SCHEDULER_ROOT}/callback_locks"
+LAUNCH_FAILED_RECEIPTS_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_failed_receipts"
+LOCK_LAYOUT_V2_MARKER="${EXECUTOR_SCHEDULER_ROOT}/lock_layout_v2.json"
 
 export EXECUTOR_SCHEDULER_ROOT EXECUTOR_MAX_CONCURRENCY
-export SCHEDULER_STATE_FILE SCHEDULER_LOCK_FILE BATCHES_ROOT CALLBACK_INBOX CALLBACK_OUTBOX
+export EXECUTOR_RUNNING_LEASE_SECONDS
+export EXECUTOR_AGENT DISPATCHER_CALLBACK_TARGET
+export SCHEDULER_STATE_FILE SCHEDULER_LOCK_FILE BATCHES_ROOT CALLBACK_INBOX CALLBACK_OUTBOX CALLBACK_ARCHIVE CALLBACK_LOCKS
+export LAUNCH_FAILED_RECEIPTS_ROOT
+export DRIVEN_LEGACY_LOCK_COMPAT_SECONDS LOCK_LAYOUT_V2_MARKER
 
-mkdir -p "${BATCHES_ROOT}" "${CALLBACK_INBOX}" "${CALLBACK_OUTBOX}"
+mkdir -p "${BATCHES_ROOT}" "${CALLBACK_INBOX}" "${CALLBACK_OUTBOX}" \
+  "${CALLBACK_ARCHIVE}" "${CALLBACK_LOCKS}"
+mkdir -p "${LAUNCH_FAILED_RECEIPTS_ROOT}"
+chmod 700 "${EXECUTOR_SCHEDULER_ROOT}" "${BATCHES_ROOT}" \
+  "${CALLBACK_INBOX}" "${CALLBACK_OUTBOX}" "${CALLBACK_ARCHIVE}" \
+  "${CALLBACK_LOCKS}" \
+  "${LAUNCH_FAILED_RECEIPTS_ROOT}" \
+  || die "scheduler state directories must be private to the executor account"
 
 exec {SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
 flock -x "${SCHEDULER_LOCK_FD}"
+LOCK_LAYOUT_WALL_NOW="$(date +%s)"
+if [ ! -e "${LOCK_LAYOUT_V2_MARKER}" ]; then
+  scheduler_atomic_write_json "${LOCK_LAYOUT_V2_MARKER}" \
+    "$(jq -cnS --argjson started_at "${LOCK_LAYOUT_WALL_NOW}" \
+      '{version:1,started_at:$started_at}')"
+fi
+LOCK_LAYOUT_STARTED_AT="$(jq -er '
+  if type == "object" and .version == 1
+    and (.started_at | type == "number" and . == floor and . >= 0)
+  then .started_at else error("invalid lock layout marker") end
+' "${LOCK_LAYOUT_V2_MARKER}")" \
+  || die "lock layout marker is invalid: ${LOCK_LAYOUT_V2_MARKER}"
+LEGACY_LOCK_COMPAT_ACTIVE=false
+if [ "${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS}" -gt 0 ] \
+    && [ "${LOCK_LAYOUT_WALL_NOW}" -lt \
+      $((LOCK_LAYOUT_STARTED_AT + DRIVEN_LEGACY_LOCK_COMPAT_SECONDS)) ]; then
+  LEGACY_LOCK_COMPAT_ACTIVE=true
+fi
+export LEGACY_LOCK_COMPAT_ACTIVE
+if [ "${LEGACY_LOCK_COMPAT_ACTIVE}" != true ]; then
+  scheduler_migrate_legacy_callback_locks
+fi
 if [ ! -e "${SCHEDULER_STATE_FILE}" ]; then
   INITIAL_STATE='{"version":1,"round_robin_cursor":null,"active_jobs":{},"batch_order":[]}'
   STATE_TMP="$(mktemp "${EXECUTOR_SCHEDULER_ROOT}/.scheduler_state.json.XXXXXX")"
@@ -140,23 +288,36 @@ elif ! jq -e '
 ' "${SCHEDULER_STATE_FILE}" >/dev/null; then
   die "existing scheduler state is invalid: ${SCHEDULER_STATE_FILE}"
 fi
+scheduler_migrate_hot_launch_failed_receipts
 flock -u "${SCHEDULER_LOCK_FD}"
 exec {SCHEDULER_LOCK_FD}>&-
 
 jq -cn \
   --arg scheduler_root "${EXECUTOR_SCHEDULER_ROOT}" \
   --arg max_concurrency "${EXECUTOR_MAX_CONCURRENCY}" \
+  --arg running_lease_seconds "${EXECUTOR_RUNNING_LEASE_SECONDS}" \
   --arg scheduler_state_file "${SCHEDULER_STATE_FILE}" \
   --arg scheduler_lock_file "${SCHEDULER_LOCK_FILE}" \
   --arg batches_root "${BATCHES_ROOT}" \
   --arg callback_inbox "${CALLBACK_INBOX}" \
   --arg callback_outbox "${CALLBACK_OUTBOX}" \
+  --arg callback_archive "${CALLBACK_ARCHIVE}" \
+  --arg callback_locks "${CALLBACK_LOCKS}" \
+  --arg launch_failed_receipts "${LAUNCH_FAILED_RECEIPTS_ROOT}" \
+  --arg executor_agent "${EXECUTOR_AGENT}" \
+  --arg dispatcher_callback_target "${DISPATCHER_CALLBACK_TARGET}" \
   '{
     scheduler_root: $scheduler_root,
     max_concurrency: ($max_concurrency | tonumber),
+    running_lease_seconds: ($running_lease_seconds | tonumber),
     scheduler_state_file: $scheduler_state_file,
     scheduler_lock_file: $scheduler_lock_file,
     batches_root: $batches_root,
     callback_inbox: $callback_inbox,
-    callback_outbox: $callback_outbox
+    callback_outbox: $callback_outbox,
+    callback_archive: $callback_archive,
+    callback_locks: $callback_locks,
+    launch_failed_receipts: $launch_failed_receipts,
+    executor_agent: $executor_agent,
+    dispatcher_callback_target: $dispatcher_callback_target
   }'

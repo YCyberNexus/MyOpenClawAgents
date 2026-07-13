@@ -2,7 +2,7 @@
 
 > 状态：**待与同事对齐**。本文件是给 `git_issuer` 作者的对接契约：在"创建 issue"之外，新增"对已存在 issue 的变更（更新 / 撤销 / 取代）"能力，使"需求已变成 issue #N、但还没处理或正在处理时需要改需求"的场景可被处理。`req_dispatcher` 在此流程里只做入口消息准备、pending 审计与后续编排；重活在 git_issuer（+ 可选的 114）。
 >
-> ⚠️ **主动编排（driven 路径）下的 req_dispatcher 变化**（见 [`../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md`](../superpowers/specs/2026-06-29-req_dispatcher-active-orchestration-design.md)）：req_dispatcher 会先用 `prepare_downstream_payloads.sh` 生成面向 git_issuer 的标准化消息，不再把 114 原文整段透传给 git_issuer；之后仍按 `run_id` 记 pending(stage=git_issuer) + 回调 drain（见 SKILL 接入路径 / git_issuer 回调路径，[`../../skills/requirement_dispatch/SKILL.md`](../../skills/requirement_dispatch/SKILL.md)）。创建成功后的后续编排（route + spawn executor + 推用户）仍与本变更契约正交。下方 §6"关联（conversation → #N）"中复用 `req_origin` 作锚点的提示仅适用于 **cron 路径**（driven 路径 origin 由 req_dispatcher 自持，见 [`gitissuer_contract.md`](gitissuer_contract.md) 顶部）。
+> ⚠️ **主动编排（driven 路径）下的 req_dispatcher 变化**（以当前 [`requirement_dispatch/SKILL.md`](../../skills/requirement_dispatch/SKILL.md) 为准）：req_dispatcher 会先用 `prepare_downstream_payloads.sh` 生成面向 git_issuer 的标准化消息，不再把 114 原文整段透传给 git_issuer；之后仍按 `run_id` 记 pending(stage=git_issuer) + 回调 drain。创建成功后的后续编排（route + spawn executor + 推用户）仍与本变更契约正交。下方 §6"关联（conversation → #N）"中复用 `req_origin` 作锚点的提示仅适用于 **cron 路径**（driven 路径 origin 由 req_dispatcher 自持，见 [`gitissuer_contract.md`](gitissuer_contract.md) 顶部）。
 
 ## 1. 适用场景
 

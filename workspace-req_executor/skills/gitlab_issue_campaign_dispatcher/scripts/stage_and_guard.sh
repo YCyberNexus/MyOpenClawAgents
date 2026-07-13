@@ -30,7 +30,8 @@ set -euo pipefail
 
 # __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/env_paths.sh"
 
 : "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${LOG_DIR:?}" "${ISSUE_IID:?}"
 
@@ -53,7 +54,8 @@ filter_non_log_paths() {
 git status --porcelain > "${LOG_DIR}/git_status.txt"
 git diff > "${LOG_DIR}/git_diff.patch"
 
-deleted_paths="$(git diff --name-only --diff-filter=D | filter_non_log_paths)"
+deleted_paths="$(git diff --name-only --diff-filter=D \
+  | filter_non_log_paths)"
 if [ -n "${deleted_paths}" ]; then
   {
     echo "stage_and_guard: refusing to stage deleted files; destructive deletion is forbidden"
@@ -73,7 +75,8 @@ git add -A
 # anything under that subtree before any output force-add below.
 unstage_log_paths
 
-staged_deleted_paths="$(git diff --cached --name-only --diff-filter=D | filter_non_log_paths)"
+staged_deleted_paths="$(git diff --cached --name-only --diff-filter=D \
+  | filter_non_log_paths)"
 if [ -n "${staged_deleted_paths}" ]; then
   {
     echo "stage_and_guard: refusing to commit deleted files; destructive deletion is forbidden"

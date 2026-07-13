@@ -10,6 +10,7 @@ ROUTING_FILE="${TEST_ROOT}/routing.env"
 cat >"${ROUTING_FILE}" <<'EOF'
 # Specific overrides still win when a project needs a dedicated executor.
 special/group = special_executor
+platform/agents/runtime/dispatcher = subgroup_executor
 EOF
 
 default_route="$(
@@ -33,6 +34,18 @@ override_route="$(
 
 if [ "${override_route}" != "special_executor" ]; then
   echo "expected explicit routing override to win, got: ${override_route}" >&2
+  exit 1
+fi
+
+subgroup_route="$(
+  PROJECT="platform/agents/runtime/dispatcher" \
+  ROUTING_FILE="${ROUTING_FILE}" \
+  DEFAULT_EXECUTOR_AGENT="req_executor" \
+  bash "${SKILL_DIR}/scripts/route_project.sh"
+)"
+
+if [ "${subgroup_route}" != "subgroup_executor" ]; then
+  echo "expected a complete subgroup project path to match its exact override" >&2
   exit 1
 fi
 

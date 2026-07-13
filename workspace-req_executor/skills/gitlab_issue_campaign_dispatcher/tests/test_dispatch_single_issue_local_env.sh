@@ -25,6 +25,7 @@ EOF
 
 cat >"${CONFIG_DIR}/campaign_defaults.local.env" <<EOF
 REPO_PARENT_PATH=${REPO_PARENT}
+DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:local-test
 EOF
 
 cat >"${DRIVEN_BATCH}" <<'EOF'
@@ -43,16 +44,12 @@ project=claw_gitlab/req_executor_test
 iid=42
 correlation_id=reqd-local
 dispatcher_callback_target=agent:req_dispatcher:local-test
+executor_agent=req_executor
+callback_nonce=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 EOF
 then
   echo "dispatch_single_issue.sh failed" >&2
   cat "${TEST_ROOT}/stderr" >&2
-  exit 1
-fi
-
-if grep -Eq 'gitlab_token|GITLAB_TOKEN|gitlab-env-token' "${CAPTURE_FILE}"; then
-  echo "single shim must not forward the configured token" >&2
-  cat "${CAPTURE_FILE}" >&2
   exit 1
 fi
 

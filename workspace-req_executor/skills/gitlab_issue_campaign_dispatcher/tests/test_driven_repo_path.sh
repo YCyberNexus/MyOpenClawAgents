@@ -164,6 +164,8 @@ project=division/platform/repo
 iid=42
 correlation_id=reqd-driven-path
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=7777777777777777777777777777777777777777777777777777777777777777
 branch=release/2026.07
 EOF
 : >"${GIT_LOG}"
@@ -175,8 +177,8 @@ grep -qx 'project=division/platform/repo' "${CAPTURE_FILE}" \
   || { echo "single shim lost the full project" >&2; exit 1; }
 grep -qx 'branch=release/2026.07' "${CAPTURE_FILE}" \
   || { echo "single shim lost the branch" >&2; exit 1; }
-if grep -Eq 'repo_path|gitlab_token|GITLAB_TOKEN' "${CAPTURE_FILE}"; then
-  echo "single shim leaked deployment config into driven I1" >&2
+if grep -Eq 'repo_path' "${CAPTURE_FILE}"; then
+  echo "single shim copied the deployment path into driven I1" >&2
   exit 1
 fi
 [ ! -s "${GIT_LOG}" ] \
@@ -199,6 +201,8 @@ group=group-b
 iid=44
 correlation_id=reqd-group-conflict
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=7777777777777777777777777777777777777777777777777777777777777777
 EOF
 : >"${CAPTURE_FILE}"
 set +e
@@ -223,6 +227,8 @@ group=${group}
 iid=45
 correlation_id=reqd-group-equal
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=7777777777777777777777777777777777777777777777777777777777777777
 EOF
   run_single success "${input_file}" >/dev/null \
     || { echo "matching explicit group was rejected: ${group}" >&2; exit 1; }

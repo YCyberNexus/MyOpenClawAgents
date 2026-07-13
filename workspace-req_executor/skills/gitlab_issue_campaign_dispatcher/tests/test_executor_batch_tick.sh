@@ -41,6 +41,15 @@ cat >"${SCHEDULER_ROOT}/batches/A/request.json" <<'EOF'
 {"version":1,"batch_id":"A","project":"group/repo","dispatcher_callback_target":"agent:req_dispatcher:main"}
 EOF
 
+# Cold batch directories are retained for direct idempotent lookup but must not
+# participate in each tick's project scan. Invalid sentinels make this a
+# deterministic scale regression: a historical-directory glob would fail.
+for historical_index in $(seq 1 256); do
+  historical_dir="${SCHEDULER_ROOT}/batches/HIST-${historical_index}"
+  mkdir -p "${historical_dir}"
+  printf '%s\n' '{"historical":true}' >"${historical_dir}/request.json"
+done
+
 write_fake() {
   local name="$1"
   shift
@@ -125,6 +134,7 @@ case "${jobs}" in
         job_id:\"A:snapshot-0\",batch_id:\"A\",snapshot_index:0,
         memberships_source:\"scheduler_active_job\"
       }],
+      pending_iids:[],
       skipped_entries:[{
         job_id:\"A:snapshot-1\",batch_id:\"A\",snapshot_index:1,
         project:\"group/repo\",iid:43,status:\"skipped\",reason:\"closed\"
@@ -188,6 +198,21 @@ write_fake sessions_spawn '
 exit 99
 '
 
+write_fake expire_running.sh '
+printf "timeout:%s:%s:%s\n" \
+  "${DRIVEN_TIMEOUT_JOB_ID}" "${DRIVEN_TIMEOUT_CLAIM_GENERATION}" \
+  "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
+if [ "${TIMEOUT_TEST_RELEASE:-0}" = 1 ]; then
+  jq --arg job_id "${DRIVEN_TIMEOUT_JOB_ID}" \
+    "del(.active_jobs[\$job_id])" "${SCHEDULER_ROOT}/scheduler_state.json" \
+    >"${SCHEDULER_ROOT}/scheduler_state.timeout.json"
+  mv "${SCHEDULER_ROOT}/scheduler_state.timeout.json" \
+    "${SCHEDULER_ROOT}/scheduler_state.json"
+fi
+jq -cn --argjson iid "${IID}" \
+  "{callback_status:\"handled\",iid:\$iid,terminal_status:\"timeout\"}"
+'
+
 printf '%s' 'payload contains a private runtime credential' >"${TEST_ROOT}/payload-42.txt"
 printf '%s' 'second payload contains another private runtime credential' >"${TEST_ROOT}/payload-44.txt"
 
@@ -204,6 +229,7 @@ run_tick() {
   RESOLVE_REPO_CMD="${FAKE_BIN}/resolve_driven_repo_path.sh" \
   DRAIN_HANDOFF_CMD="${FAKE_BIN}/drain_driven_handoff_intents.sh" \
   DRAIN_OUTBOX_CMD="${FAKE_BIN}/drain_driven_outbox.sh" \
+  EXPIRE_RUNNING_CMD="${FAKE_BIN}/expire_running.sh" \
   RESERVE_CMD="${FAKE_BIN}/reserve_driven_batch_items.sh" \
   TOPUP_CMD="${FAKE_BIN}/dispatch_driven_topup.sh" \
   IMPORT_SKIP_CMD="${FAKE_BIN}/import_driven_skipped.sh" \
@@ -267,7 +293,7 @@ jq -e '
   and (tostring | contains("private-claim-token") | not)
   and (tostring | contains("payload contains") | not)
 ' <<<"${tick_output}" >/dev/null \
-  || fail "tick did not return the strict token-free spawn grant envelope: ${tick_output}"
+  || fail "tick did not return the strict claim-token-free spawn grant envelope: ${tick_output}"
 archive_launch_actions initial
 
 # A duplicate preparing observer must never bind or return a spawn grant.
@@ -357,6 +383,136 @@ jq -e '
 grep -q '^topup:A:snapshot-0$' "${ORDER_LOG}" \
   || fail "running job was not sent back through the project campaign"
 archive_launch_actions continuation
+
+# A live preflight may report that a continuation now looks closed/pr-labeled.
+# While the exact project pending entry still exists, its runtime callback is
+# authoritative and the preflight skip must remain suppressed.
+: >"${ORDER_LOG}"
+cat >"${FAKE_BIN}/dispatch_driven_topup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+request="$(cat)"
+printf "topup:%s\n" "$(jq -r '.grants | map(.job_id) | join(",")' <<<"${request}")" >>"${ORDER_LOG}"
+jq -cn '{
+  status:"ready",dispatch_entries:[],
+  pending_iids:[42],
+  skipped_entries:[{
+    job_id:"A:snapshot-0",batch_id:"A",snapshot_index:0,
+    project:"group/repo",iid:42,status:"skipped",reason:"pr"
+  }]
+}'
+EOF
+chmod +x "${FAKE_BIN}/dispatch_driven_topup.sh"
+running_skip_output="$(run_tick)" || fail "running preflight-skip tick failed"
+if grep -q '^skip:A:snapshot-0$' "${ORDER_LOG}"; then
+  fail "running continuation with project pending was terminalized early"
+fi
+jq -e '
+  .spawn_grants == []
+  and ([.operation_results[]
+    | select(.operation == "running_preflight_skip"
+      and .job_id == "A:snapshot-0" and .status == "suppressed")]
+    | length) == 1
+  and ([.operation_results[]
+    | select(.operation == "synthetic_skip" and .job_id == "A:snapshot-0")]
+    | length) == 0
+' <<<"${running_skip_output}" >/dev/null \
+  || fail "running continuation produced a synthetic skip result"
+
+# A scheduler running job may outlive its project pending entry after a
+# blocked attempt was imported. If the next live preflight observes closed/pr,
+# the absence of that exact project pending IID is authoritative: terminalize
+# the physical job instead of suppressing the skip forever and leaking a slot.
+cat >"${FAKE_BIN}/dispatch_driven_topup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+request="$(cat)"
+printf "topup:%s\n" "$(jq -r '.grants | map(.job_id) | join(",")' <<<"${request}")" >>"${ORDER_LOG}"
+jq -cn '{
+  status:"no_eligible_iids",dispatch_entries:[],pending_iids:[],
+  skipped_entries:[{
+    job_id:"A:snapshot-0",batch_id:"A",snapshot_index:0,
+    project:"group/repo",iid:42,status:"skipped",reason:"closed"
+  }]
+}'
+EOF
+chmod +x "${FAKE_BIN}/dispatch_driven_topup.sh"
+running_without_pending_output="$(run_tick)" \
+  || fail "running job without project pending tick failed"
+grep -q '^skip:A:snapshot-0$' "${ORDER_LOG}" \
+  || fail "running job without an exact project pending entry leaked its scheduler slot"
+jq -e '
+  .spawn_grants == []
+  and ([.operation_results[]
+    | select(.operation == "synthetic_skip"
+      and .job_id == "A:snapshot-0" and .status == "imported")]
+    | length) == 1
+  and ([.operation_results[]
+    | select(.operation == "running_preflight_skip"
+      and .job_id == "A:snapshot-0")]
+    | length) == 0
+' <<<"${running_without_pending_output}" >/dev/null \
+  || fail "missing project pending entry did not release the running physical job"
+
+# An expired positive-generation running job is reconciled before handoff
+# draining/reservation. The timeout worker receives only a SHA-256 fence, and a
+# successful claim-bound terminal frees the slot in the same tick.
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"branch":null,"entry_mode":"auto",
+    "force_rerun_pr":false,"status":"running","reservation_seq":1,
+    "reserved_at":1,"updated_at":1,"claim_generation":2,
+    "claim_token":"running-private-claim",
+    "owner":{"batch_id":"A","snapshot_index":0},
+    "memberships":[{"batch_id":"A","snapshot_index":0}]
+  }
+}}
+EOF
+timeout_output="$(NOW_EPOCH=50000 EXECUTOR_RUNNING_LEASE_SECONDS=10 \
+  TIMEOUT_TEST_RELEASE=1 run_tick)" || fail "expired running recovery tick failed"
+grep -Eq '^timeout:A:snapshot-0:2:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "expired running job did not receive an exact hashed claim fence"
+if grep -q 'running-private-claim' "${ORDER_LOG}" \
+    || grep -q 'running-private-claim' <<<"${timeout_output}"; then
+  fail "running timeout recovery exposed the private claim token"
+fi
+jq -e '
+  ([.operation_results[] | select(
+    .operation == "running_timeout_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "handled")] | length) == 1
+' <<<"${timeout_output}" >/dev/null \
+  || fail "expired running recovery was not reported"
+
+# Completed launch coordinators are cold evidence. A later tick archives them
+# by deterministic job hash, so the recovery scan remains bounded by unfinished
+# launch actions while direct duplicate acknowledgement can still locate them.
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":null,"batch_order":["A"],"active_jobs":{}}
+EOF
+archive_job_id='archive-test:snapshot-0'
+archive_digest="$(printf '%s' "${archive_job_id}" | shasum -a 256 | awk '{print $1}')"
+mkdir -p "${SCHEDULER_ROOT}/launch_actions"
+jq -cnS --arg job_id "${archive_job_id}" '{
+  version:1,job_id:$job_id,project:"group/repo",iid:42,
+  batch_id:"A",snapshot_index:0,attempt_number:1,
+  child_label:"reqx-iid42-gen1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  payload_path:"/private/payload",runtime_label_version:1,
+  claim_generation:1,claim_token:"archive-private-claim",
+  stage:"completed",outcome:"spawned",
+  ack:{run_id:"run-archive",child_session_key:"agent:req_executor:archive"},
+  created_at:1,updated_at:2
+}' >"${SCHEDULER_ROOT}/launch_actions/${archive_digest}.json"
+archive_tick_out="$(run_tick)" || fail "completed launch-action archive tick failed"
+[ ! -e "${SCHEDULER_ROOT}/launch_actions/${archive_digest}.json" ] \
+  || fail "completed launch action remained in the hot recovery directory"
+[ -f "${SCHEDULER_ROOT}/launch_action_archive/${archive_digest}.json" ] \
+  || fail "completed launch action was not retained in cold archive"
+if grep -q 'archive-private-claim' <<<"${archive_tick_out}"; then
+  fail "launch-action archive exposed a private claim"
+fi
 
 # The post-spawn fixed wrapper must recover the exact private claim internally,
 # update project pending first, and record the same claim in the scheduler.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Atomically persist one canonical token-free I1 request before any network call.
+# Atomically persist one canonical I1 request before any network call.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,6 +15,7 @@ ensure_state_dirs
 : "${SELECTOR_JSON:?SELECTOR_JSON required}"
 : "${FORCE_RERUN_PR:?FORCE_RERUN_PR required}"
 : "${EXECUTOR_AGENT:?EXECUTOR_AGENT required}"
+: "${CALLBACK_NONCE:?CALLBACK_NONCE required}"
 : "${PAYLOAD:?PAYLOAD required}"
 : "${REQUEST_DIGEST:?REQUEST_DIGEST required}"
 TARGET_BRANCH="${TARGET_BRANCH:-}"
@@ -27,6 +28,12 @@ ORIGIN_JSON="$(printf '%s' "${ORIGIN_JSON}" | normalize_executor_batch_origin 2>
   || executor_batch_outbox_die "ORIGIN_JSON is invalid"
 
 case "${FORCE_RERUN_PR}" in true|false) ;; *) executor_batch_outbox_die "FORCE_RERUN_PR must be true or false" ;; esac
+validate_executor_callback_nonce "${CALLBACK_NONCE}" \
+  || executor_batch_outbox_die "CALLBACK_NONCE must be 64 lowercase hexadecimal characters"
+if ! grep -Fqx "executor_agent=${EXECUTOR_AGENT}" <<<"${PAYLOAD}" \
+  || ! grep -Fqx "callback_nonce=${CALLBACK_NONCE}" <<<"${PAYLOAD}"; then
+  executor_batch_outbox_die "PAYLOAD callback authentication fields do not match the durable intent"
+fi
 
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 exec 9>"${LOCK_FILE}"
@@ -68,6 +75,7 @@ entry_json="$(jq -cn \
   --argjson force_rerun_pr "${FORCE_RERUN_PR}" \
   --arg target_branch "${TARGET_BRANCH}" \
   --arg executor_agent "${EXECUTOR_AGENT}" \
+  --arg callback_nonce "${CALLBACK_NONCE}" \
   --argjson origin "${ORIGIN_JSON}" \
   --arg payload "${PAYLOAD}" \
   --arg request_digest "${REQUEST_DIGEST}" \
@@ -80,6 +88,7 @@ entry_json="$(jq -cn \
     force_rerun_pr:$force_rerun_pr,
     target_branch:(if $target_branch == "" then null else $target_branch end),
     executor_agent:$executor_agent,
+    callback_nonce:$callback_nonce,
     origin:$origin,
     payload:$payload,
     request_digest:$request_digest,

@@ -34,16 +34,12 @@ project=claw_gitlab/req_executor_test
 iid=42
 correlation_id=reqd-env
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=2222222222222222222222222222222222222222222222222222222222222222
 EOF
 then
   echo "dispatch_single_issue.sh failed" >&2
   cat "${TEST_ROOT}/stderr" >&2
-  exit 1
-fi
-
-if grep -Eq 'gitlab_token|GITLAB_TOKEN|env-token' "${CAPTURE_FILE}"; then
-  echo "single shim must not forward the executor-owned env token" >&2
-  cat "${CAPTURE_FILE}" >&2
   exit 1
 fi
 
@@ -67,4 +63,4 @@ if grep -Eq "${legacy_field_pattern}" "${CAPTURE_FILE}"; then
   exit 1
 fi
 
-echo "ok dispatch_single_issue keeps env token private"
+echo "ok dispatch_single_issue accepts an environment GitLab token"

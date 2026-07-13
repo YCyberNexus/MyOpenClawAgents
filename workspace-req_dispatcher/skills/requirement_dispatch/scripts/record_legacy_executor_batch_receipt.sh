@@ -7,6 +7,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
+# shellcheck source=_executor_batch_outbox_lib.sh
+source "${SCRIPT_DIR}/_executor_batch_outbox_lib.sh"
 ensure_state_dirs
 
 : "${QUEUE_ID:?QUEUE_ID required}"
@@ -44,6 +46,24 @@ active_json="$(jq -ce '.active // null' "${EXECUTOR_QUEUE_FILE}")" \
 [ "$(jq -r '.executor_agent // ""' <<<"${active_json}")" = "${EXECUTOR_AGENT}" ] \
   || { echo "legacy receipt executor_agent mismatch" >&2; exit 3; }
 
+project="$(jq -r '.project // ""' <<<"${active_json}")"
+callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${active_json}")"
+if [ -n "${callback_nonce}" ]; then
+  if ! [[ "${SNAPSHOT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "nonce_v1 legacy receipt SNAPSHOT_DIGEST is invalid" >&2
+    exit 2
+  fi
+  callback_auth_mode=nonce_v1
+  callback_nonce_sha256="$(executor_callback_nonce_sha256 "${callback_nonce}")"
+  if [[ "${SNAPSHOT_DIGEST}" == *"${callback_nonce}"* ]]; then
+    echo "legacy receipt contains callback authentication material" >&2
+    exit 3
+  fi
+else
+  callback_auth_mode=legacy_pre_upgrade
+  callback_nonce_sha256=""
+fi
+
 receipt_status=accepted
 existing_batch_id="$(jq -r '.driven_batch_id // ""' <<<"${active_json}")"
 if [ -n "${existing_batch_id}" ]; then
@@ -54,6 +74,22 @@ if [ -n "${existing_batch_id}" ]; then
     || { echo "legacy receipt request_digest conflict" >&2; exit 3; }
   [ "$(jq -r '.driven_executor_agent // ""' <<<"${active_json}")" = "${EXECUTOR_AGENT}" ] \
     || { echo "legacy receipt executor_agent conflict" >&2; exit 3; }
+  existing_project="$(jq -r '.driven_project // ""' <<<"${active_json}")"
+  if [ "${existing_project}" != "${project}" ] \
+    && ! { [ "${callback_auth_mode}" = legacy_pre_upgrade ] \
+      && [ -z "${existing_project}" ]; }; then
+    echo "legacy receipt project conflict" >&2
+    exit 3
+  fi
+  existing_callback_auth_mode="$(jq -r '.driven_callback_auth_mode // ""' <<<"${active_json}")"
+  if [ "${existing_callback_auth_mode}" != "${callback_auth_mode}" ] \
+    && ! { [ "${callback_auth_mode}" = legacy_pre_upgrade ] \
+      && [ -z "${existing_callback_auth_mode}" ]; }; then
+    echo "legacy receipt callback_auth_mode conflict" >&2
+    exit 3
+  fi
+  [ "$(jq -r '.driven_callback_nonce_sha256 // ""' <<<"${active_json}")" = "${callback_nonce_sha256}" ] \
+    || { echo "legacy receipt callback nonce digest conflict" >&2; exit 3; }
   [ "$(jq -r '.driven_matched_count // -1' <<<"${active_json}")" = "${MATCHED_COUNT}" ] \
     || { echo "legacy receipt matched_count conflict" >&2; exit 3; }
   [ "$(jq -r '.driven_snapshot_digest // ""' <<<"${active_json}")" = "${SNAPSHOT_DIGEST}" ] \
@@ -69,6 +105,9 @@ next_queue="$(jq -c \
   --arg batch_id "${BATCH_ID}" \
   --arg request_digest "${REQUEST_DIGEST}" \
   --arg executor_agent "${EXECUTOR_AGENT}" \
+  --arg project "${project}" \
+  --arg callback_auth_mode "${callback_auth_mode}" \
+  --arg callback_nonce_sha256 "${callback_nonce_sha256}" \
   --argjson matched_count "${MATCHED_COUNT}" \
   --arg snapshot_digest "${SNAPSHOT_DIGEST}" \
   --arg scheduler_status "${SCHEDULER_STATUS}" \
@@ -80,6 +119,9 @@ next_queue="$(jq -c \
     driven_batch_id:$batch_id,
     driven_request_digest:$request_digest,
     driven_executor_agent:$executor_agent,
+    driven_project:$project,
+    driven_callback_auth_mode:$callback_auth_mode,
+    driven_callback_nonce_sha256:(if $callback_nonce_sha256 == "" then null else $callback_nonce_sha256 end),
     driven_matched_count:$matched_count,
     driven_snapshot_digest:$snapshot_digest,
     driven_scheduler_status:$scheduler_status,
@@ -99,10 +141,16 @@ if jq -e --arg run_id "${run_id}" '.pending | has($run_id)' \
   next_pending="$(jq -c \
     --arg run_id "${run_id}" \
     --arg batch_id "${BATCH_ID}" \
+    --arg project "${project}" \
+    --arg callback_auth_mode "${callback_auth_mode}" \
+    --arg callback_nonce_sha256 "${callback_nonce_sha256}" \
     --arg snapshot_digest "${SNAPSHOT_DIGEST}" \
     --argjson matched_count "${MATCHED_COUNT}" '
     .pending[$run_id] += {
       driven_batch_id:$batch_id,
+      project:$project,
+      callback_auth_mode:$callback_auth_mode,
+      callback_nonce_sha256:(if $callback_nonce_sha256 == "" then null else $callback_nonce_sha256 end),
       driven_matched_count:$matched_count,
       driven_snapshot_digest:$snapshot_digest
     }

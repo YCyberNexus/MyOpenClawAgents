@@ -21,7 +21,8 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `execute_issue`：只调 `submit_executor_batch.sh`；支持 single/range/open_unfinished/open_label。
 - `create_and_execute`：git_issuer 严格成功后，把返回 Issue URL 交同一个 batch wrapper。
 - `clarify_or_reject`：不调用下游。
-- I3：只调 `handle_executor_batch_event.sh`，返回唯一 accepted/duplicate ack。
+- I3：只调 `handle_executor_batch_event.sh`；新 batch/single 必须使用带 nonce 与 executor 身份的
+  严格 `callback_envelope`，返回唯一 accepted/duplicate ack。
 - 周期恢复：只调 `run_executor_batch_tick.sh`。
 - 旧 I2/FIFO：仅兼容部署前遗留 active/queue，排空后不再接收新项。
 
@@ -44,6 +45,11 @@ I1 在网络调用前持久化。旧 FIFO 非空时为 `waiting_for_legacy_drain
 同 batch/correlation/payload 重投。严格 receipt 先写 `received`，再修 Task 8 mirror，最后
 `accepted`。
 
+每个新 I1 生成独立 64 字符小写 hex `callback_nonce`。明文只存在私有 outbox/old active intent
+与发送中的 I1；compact mirror、single bridge/pending 只保存 SHA-256，并同时固定完整 project
+与路由后的 executor agent。I3 apply 在落账前核对 nonce 摘要、project、executor；纯八字段 I3
+只兼容明确标记 `legacy_pre_upgrade` 的部署前 mirror，新请求不得降级。
+
 receipt immutable 字段为 `executor_agent,matched_count,snapshot_digest`；冲突 fail closed。
 `scheduler_status` 可 `queued -> running -> completed`。
 
@@ -51,11 +57,17 @@ receipt immutable 字段为 `executor_agent,matched_count,snapshot_digest`；冲
 Issue。`open_unfinished` 的终态标签排除、`open_label` 精确匹配及 `pr` 重跑覆盖均由 executor
 按冻结 snapshot 与实时预检执行。
 
+project locator 支持 `group/subgroup/.../project`；可信 GitLab 仓库根 URL 使用完整 path，带
+`/-/` 的 URL 使用其前全部 path。Issue URL、仓库 URL、`projects/...` 与裸路径候选统一规范化去重，
+出现多个不同 project 必须澄清。重跑动作词可位于 Issue 宾语之后，但“不要、无需、不需要、不得”等否定
+窗口及 label/branch 值不能触发 `force_rerun_pr`。
+
 ## Legacy single shim bridge
 
 旧 `RUN_SINGLE_ISSUE` 被 executor 转为 stable single batch。`drain_executor_queue.sh` 接收严格
 五字段 public acceptance，把 `batch_id` 先写进 old active bridge，再创建 mirror。single 后续
-只发 I3，不发旧 I2。
+只发认证 I3，不发旧 I2。升级后兼容 single intent 也携带 nonce；部署前无 nonce 的在途项会
+显式标记为 `legacy_pre_upgrade`。
 
 `recover_legacy_executor_batch_bridge.sh` 可从 bridge 修 mirror；single I3 或 zero-match 后清旧
 pending/active，tick 推进下一项。bridge 与 mirror 的发布顺序禁止反转。
@@ -64,7 +76,7 @@ pending/active，tick 推进下一项。bridge 与 mirror 的发布顺序禁止�
 
 `${STATE_ROOT}/_dispatcher/` 主要文件：
 
-- `executor_batch_outbox.json`：token-free I1 intent/receipt；
+- `executor_batch_outbox.json`：durable I1 intent/receipt；
 - `executor_batches.json`：compact mirror，无 IID snapshot；
 - `executor_batch_events.jsonl`：canonical I3 ledger；
 - `executor_batch_notifications.json`：逐项与 zero-match 通知 intent；
@@ -74,17 +86,11 @@ pending/active，tick 推进下一项。bridge 与 mirror 的发布顺序禁止�
 
 完整 schema：[`skills/requirement_dispatch/references/state_schema.md`](skills/requirement_dispatch/references/state_schema.md)。
 
-## Token boundary
-
-dispatcher batch state/payload 不得出现 GitLab token。req_executor I1、旧 single I1 与 batch
-notification 外部进程调用前显式 scrub token；不得把 scrub 扩展到 git_issuer/wiki 的既有本地
-调用环境。
-
 ## Deployment Pin
 
 蓝区默认值保持在 tracked config：`STATE_ROOT=/data/req_dispatcher`、默认 executor、route、
 callback 与 gateway pin 契约。本机覆盖只能放 ignored `config/dispatcher.local.env` 或进程环境。
-不得把 `/Users/...`、临时 session、测试 endpoint/token 写入 tracked config。
+不得把 `/Users/...`、临时 session 或测试 endpoint 写入 tracked config。
 
 `DISPATCHER_CALLBACK_TARGET` 必须非空，否则 batch wrapper 在 intent 前拒绝。部署周期唤醒使用
 `RUN_EXECUTOR_BATCH_TICK`；旧 `RUN_EXECUTOR_QUEUE_DRAIN` 仅兼容同一 dispatcher wrapper。
@@ -92,4 +98,4 @@ callback 与 gateway pin 契约。本机覆盖只能放 ignored `config/dispatch
 ## 本机验证
 
 不在本机启动 agent。使用 `/opt/homebrew/bin/bash` 运行 shell 测试与 `bash -n`；本机
-`/bin/bash` 版本过旧。禁止用本机 GitLab token 或路径改 tracked 蓝区默认。
+`/bin/bash` 版本过旧。禁止为本机测试改动 tracked 蓝区默认；使用 ignored 本地覆盖或进程环境。

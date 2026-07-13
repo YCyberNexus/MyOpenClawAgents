@@ -434,9 +434,11 @@ derive_stuck_after_minutes() {
 }
 
 # Decide whether a project campaign owner may enter while the caller holds the
-# campaign flock. This helper is deliberately pure: a rejected transition must
-# leave campaign_state.json byte-for-byte untouched, so persistence remains the
-# caller's responsibility only after `allowed == true`.
+# campaign flock. This helper is deliberately pure. Normal rejected transitions
+# leave state byte-stable, but legacy state with pending work and no owner sets
+# `migration_required=true` and returns a durable scheduled owner even when the
+# requested owner is busy/rejected. The caller persists `updated_state` after an
+# allowed transition or that explicit migration; the helper never writes it.
 dispatch_owner_transition() {
   local state_json="$1" mode="$2" owner_id="$3" leased_at="$4"
   printf '%s' "${state_json}" | jq -c \
@@ -445,18 +447,27 @@ dispatch_owner_transition() {
     --arg leased_at "${leased_at}" '
     . as $state
     | (($state.pending_subagents // {}) | length) as $pending_count
-    | ($state.dispatch_owner // null) as $current
-    | (($current | type) == "object"
-       and (($current.mode == "driven") or ($current.mode == "scheduled"))
-       and (($current.owner_id | type) == "string")
-       and (($current.owner_id | length) > 0)) as $has_current
+    | ($state.dispatch_owner // null) as $persisted_current
+    | (($persisted_current | type) == "object"
+       and (($persisted_current.mode == "driven") or ($persisted_current.mode == "scheduled"))
+       and (($persisted_current.owner_id | type) == "string")
+       and (($persisted_current.owner_id | length) > 0)) as $has_current
+    | ($pending_count > 0 and ($has_current | not)) as $migration_required
+    | (if $migration_required then
+         {mode:"scheduled",owner_id:"scheduled",leased_at:$leased_at}
+       else $persisted_current end) as $current
     | ($pending_count > 0
-       and $has_current
+       and ($has_current or $migration_required)
        and (($current.mode != $mode) or ($current.owner_id != $owner_id))) as $busy
     | {
         allowed: ($busy | not),
+        migration_required: $migration_required,
         status: (if $busy then ("busy_owned_by_" + $current.mode) else "acquired" end),
-        updated_state: (if $busy then $state else
+        updated_state: (if $busy then
+          (if $migration_required then
+             ($state | .dispatch_owner = $current)
+           else $state end)
+        else
           ($state | .dispatch_owner = {
             mode: $mode,
             owner_id: $owner_id,

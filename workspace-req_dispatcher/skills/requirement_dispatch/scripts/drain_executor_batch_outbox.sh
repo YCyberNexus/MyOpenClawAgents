@@ -8,6 +8,7 @@ source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck source=_executor_batch_outbox_lib.sh
 source "${SCRIPT_DIR}/_executor_batch_outbox_lib.sh"
 ensure_state_dirs
+unset CALLBACK_NONCE CALLBACK_ENVELOPE_JSON callback_envelope
 
 TARGET_BATCH_ID="${BATCH_ID:-}"
 if [ -n "${TARGET_BATCH_ID}" ] \
@@ -35,10 +36,44 @@ publish_status_transitions_locked() {
   printf '%s' "${next_outbox}"
 }
 
+emit_accepted_entry() {
+  local accepted_entry="$1"
+  jq -cn --argjson entry "${accepted_entry}" '{
+    status:"accepted",
+    batch_id:$entry.batch_id,
+    correlation_id:$entry.correlation_id,
+    matched_count:$entry.matched_count,
+    snapshot_digest:$entry.snapshot_digest,
+    scheduler_status:$entry.scheduler_status,
+    record_status:"duplicate"
+  }'
+}
+
+emit_delivery_in_progress() {
+  local durable_entry="$1"
+  jq -cn --argjson entry "${durable_entry}" '{
+    status:"retryable_failure",
+    batch_id:$entry.batch_id,
+    correlation_id:$entry.correlation_id,
+    reason:"delivery_in_progress",
+    attempts:$entry.attempts
+  }'
+}
+
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 exec 9>"${LOCK_FILE}"
 flock 9
 outbox_json="$(load_executor_batch_outbox_locked)"
+outbox_json="$(compact_executor_accepted_outbox_locked "${outbox_json}")"
+outbox_json="$(reconcile_executor_accepted_hot_entries_locked "${outbox_json}")"
+if [ -n "${TARGET_BATCH_ID}" ]; then
+  target_entry_json="$(load_executor_accepted_intent_by_batch_id_locked "${TARGET_BATCH_ID}")"
+  if [ "${target_entry_json}" != null ]; then
+    flock -u 9
+    emit_accepted_entry "${target_entry_json}"
+    exit 0
+  fi
+fi
 legacy_queue_json="$(load_legacy_executor_queue_locked)"
 if legacy_executor_queue_is_busy "${legacy_queue_json}" >/dev/null; then
   outbox_json="$(publish_status_transitions_locked "${outbox_json}" waiting_for_legacy_drain "${now}")"
@@ -106,17 +141,60 @@ batch_lock_file="${DISPATCHER_DIR}/executor_batch_outbox.${batch_lock_crc}.${bat
 exec {batch_lock_fd}>"${batch_lock_file}"
 if ! flock -n "${batch_lock_fd}"; then
   exec {batch_lock_fd}>&-
-  jq -cn --arg batch_id "${batch_id}" '{status:"busy",batch_id:$batch_id}'
+  flock 9
+  locked_outbox_json="$(load_executor_batch_outbox_locked)"
+  locked_outbox_json="$(compact_executor_accepted_outbox_locked "${locked_outbox_json}")"
+  locked_outbox_json="$(reconcile_executor_accepted_hot_entries_locked "${locked_outbox_json}")"
+  locked_entry_json="$(jq -c --arg batch_id "${batch_id}" '
+    [.requests[] | select(.batch_id == $batch_id)][0] // null
+  ' <<<"${locked_outbox_json}")"
+  cold_entry_json="$(load_executor_accepted_intent_by_batch_id_locked "${batch_id}")"
+  flock -u 9
+  if [ "${cold_entry_json}" != null ]; then
+    emit_accepted_entry "${cold_entry_json}"
+    exit 0
+  fi
+  locked_status="$(jq -r '.status // ""' <<<"${locked_entry_json}")"
+  case "${locked_status}" in
+    accepted)
+      emit_accepted_entry "${locked_entry_json}"
+      ;;
+    waiting_for_legacy_drain)
+      jq -cn --argjson entry "${locked_entry_json}" '{
+        status:"waiting_for_legacy_drain",
+        batch_id:$entry.batch_id,
+        correlation_id:$entry.correlation_id,
+        waiting_count:1
+      }'
+      ;;
+    queued|received)
+      emit_delivery_in_progress "${locked_entry_json}"
+      ;;
+    *)
+      jq -cn --arg batch_id "${batch_id}" \
+        '{status:"idle",batch_id:$batch_id,queued_count:0}'
+      ;;
+  esac
   exit 0
 fi
 
 # Recheck the migration gate after acquiring the per-batch delivery lock.
 flock 9
 outbox_json="$(load_executor_batch_outbox_locked)"
+outbox_json="$(compact_executor_accepted_outbox_locked "${outbox_json}")"
+outbox_json="$(reconcile_executor_accepted_hot_entries_locked "${outbox_json}")"
 legacy_queue_json="$(load_legacy_executor_queue_locked)"
 current_status="$(jq -r --arg batch_id "${batch_id}" '
   [.requests[] | select(.batch_id == $batch_id)][0].status // ""
 ' <<<"${outbox_json}")"
+cold_entry_json="$(load_executor_accepted_intent_by_batch_id_locked "${batch_id}")"
+if [ "${cold_entry_json}" != null ]; then
+  flock -u 9
+  flock -u "${batch_lock_fd}"
+  exec {batch_lock_fd}>&-
+  emit_accepted_entry "${cold_entry_json}"
+  exit 0
+fi
 if legacy_executor_queue_is_busy "${legacy_queue_json}" >/dev/null \
   && [ "${current_status}" != received ]; then
   next_outbox="$(jq -c --arg batch_id "${batch_id}" --arg now "${now}" '
@@ -154,10 +232,16 @@ executor_agent="$(jq -r '.executor_agent' <<<"${entry_json}")"
 payload="$(jq -r '.payload' <<<"${entry_json}")"
 attempts="$(jq -r '.attempts' <<<"${entry_json}")"
 entry_status="$(jq -r '.status' <<<"${entry_json}")"
+callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${entry_json}")"
 
 acceptance_json=null
 network_attempted=false
 if [ "${entry_status}" = received ]; then
+  if [ -n "${callback_nonce}" ] \
+    && [[ "$(jq -r '.snapshot_digest' <<<"${entry_json}")" == *"${callback_nonce}"* ]]; then
+    executor_batch_outbox_die \
+      "durable receipt contains callback authentication material" 3
+  fi
   acceptance_json="$(jq -c '{
     status:"success",
     batch_id:.batch_id,
@@ -188,11 +272,6 @@ else
   set +e
   envelope="$(
     env \
-      -u GITLAB_TOKEN \
-      -u GLAB_TOKEN \
-      -u GITLAB_PRIVATE_TOKEN \
-      -u PRIVATE_TOKEN \
-      -u WIKI_GITLAB_TOKEN \
       OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}" \
       TARGET_AGENT="${executor_agent}" \
       RUN_ID="executor-batch-${batch_id}" \
@@ -206,9 +285,17 @@ else
   set -e
 
   failure_reason=run_agent_turn_failed
-  if [ "${run_rc}" -eq 0 ] && jq -e '.status == "success"' <<<"${envelope}" >/dev/null 2>&1; then
+  if [ -n "${callback_nonce}" ] && [[ "${envelope}" == *"${callback_nonce}"* ]]; then
+    failure_reason=callback_nonce_echo
+  elif [ "${run_rc}" -eq 0 ] && jq -e '.status == "success"' <<<"${envelope}" >/dev/null 2>&1; then
     candidate_acceptance="$(jq -c '.worker_result_json // null' <<<"${envelope}" 2>/dev/null || printf null)"
-    if acceptance_json="$(jq -ce --arg batch_id "${batch_id}" '
+    requires_sha256_snapshot=false
+    if jq -e 'has("callback_nonce")' <<<"${entry_json}" >/dev/null; then
+      requires_sha256_snapshot=true
+    fi
+    if acceptance_json="$(jq -ce \
+      --arg batch_id "${batch_id}" \
+      --argjson requires_sha256_snapshot "${requires_sha256_snapshot}" '
       if type == "object"
         and (keys | sort) == [
           "batch_id","matched_count","scheduler_status","snapshot_digest","status"
@@ -217,7 +304,9 @@ else
         and .batch_id == $batch_id
         and (.matched_count | type == "number" and . == floor and . >= 0)
         and (.snapshot_digest | type == "string" and length > 0
-          and (explode | all(. >= 32 and . != 127)))
+          and (explode | all(. >= 32 and . != 127))
+          and (if $requires_sha256_snapshot
+            then test("^[0-9a-f]{64}$") else true end))
         and (.scheduler_status == "queued" or .scheduler_status == "running"
           or .scheduler_status == "completed")
         and (if .matched_count == 0 then .scheduler_status == "completed" else true end)
@@ -282,6 +371,15 @@ scheduler_status="$(jq -r '.scheduler_status' <<<"${acceptance_json}")"
 request_digest="$(jq -r '.request_digest' <<<"${entry_json}")"
 origin_json="$(jq -c '.origin' <<<"${entry_json}")"
 project="$(jq -r '.project' <<<"${entry_json}")"
+if [ -n "${callback_nonce}" ]; then
+  callback_auth_mode=nonce_v1
+  callback_nonce_sha256="$(executor_callback_nonce_sha256 "${callback_nonce}")"
+  allow_legacy_pre_upgrade=false
+else
+  callback_auth_mode=legacy_pre_upgrade
+  callback_nonce_sha256=""
+  allow_legacy_pre_upgrade=true
+fi
 
 if [ "${network_attempted}" = true ]; then
   STATE_ROOT="${STATE_ROOT}" \
@@ -296,7 +394,11 @@ fi
 record_result="$(
   STATE_ROOT="${STATE_ROOT}" \
   BATCH_ID="${batch_id}" \
+  PROJECT="${project}" \
   EXECUTOR_AGENT="${executor_agent}" \
+  CALLBACK_AUTH_MODE="${callback_auth_mode}" \
+  CALLBACK_NONCE_SHA256="${callback_nonce_sha256}" \
+  ALLOW_LEGACY_PRE_UPGRADE="${allow_legacy_pre_upgrade}" \
   ORIGIN_JSON="${origin_json}" \
   MATCHED_COUNT="${matched_count}" \
   REQUEST_DIGEST="${request_digest}" \
@@ -335,7 +437,12 @@ next_outbox="$(jq -c \
     else . end
   )
 ' <<<"${outbox_json}")"
-publish_executor_batch_outbox_locked "${next_outbox}"
+accepted_entry_json="$(jq -c --arg batch_id "${batch_id}" '
+  [.requests[] | select(.batch_id == $batch_id and .status == "accepted")][0] // null
+' <<<"${next_outbox}")"
+[ "${accepted_entry_json}" != null ] \
+  || executor_batch_outbox_die "accepted intent disappeared before archival: ${batch_id}" 3
+next_outbox="$(compact_executor_accepted_outbox_locked "${next_outbox}")"
 flock -u 9
 flock -u "${batch_lock_fd}"
 exec {batch_lock_fd}>&-

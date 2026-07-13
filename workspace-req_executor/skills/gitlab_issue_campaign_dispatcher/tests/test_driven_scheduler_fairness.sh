@@ -68,12 +68,21 @@ create_batch_fixture() {
 
 create_batch_fixture A '[1,2,3]'
 create_batch_fixture B '[10,11]'
-jq '.batch_order = ["A","B"]' \
+create_batch_fixture HISTORICAL '[]'
+jq '.status = "completed"' \
+  "${SCHEDULER_ROOT}/batches/HISTORICAL/state.json" \
+  >"${SCHEDULER_ROOT}/batches/HISTORICAL/state.completed.json"
+mv "${SCHEDULER_ROOT}/batches/HISTORICAL/state.completed.json" \
+  "${SCHEDULER_ROOT}/batches/HISTORICAL/state.json"
+jq '.batch_order = ["HISTORICAL","A","B"]' \
   "${SCHEDULER_ROOT}/scheduler_state.json" \
   >"${SCHEDULER_ROOT}/scheduler_state.next.json"
 mv "${SCHEDULER_ROOT}/scheduler_state.next.json" "${SCHEDULER_ROOT}/scheduler_state.json"
 
 first_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
+jq -e '.batch_order == ["A","B"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || { echo "completed batch remained in the hot fairness index" >&2; exit 1; }
 jq -e '
   .status == "ready"
   and .active_count == 3

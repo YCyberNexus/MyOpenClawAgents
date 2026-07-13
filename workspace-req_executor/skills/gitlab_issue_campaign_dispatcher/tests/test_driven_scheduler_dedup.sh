@@ -304,8 +304,10 @@ jq -e '.grants == [] and .active_count == 1 and .available_slots == 2' \
 jq -e '
   (.pending_transaction | not)
   and (.active_jobs | length) == 1
-  and .batch_order[-1] == "Y"
+  and (.batch_order | index("Y") == null)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+[ -d "${Y_BATCH_DIR}" ] \
+  || { echo "completed batch evidence was not retained for direct lookup" >&2; exit 1; }
 jq -e '.status == "completed" and .memberships["0"].status == "terminal"' \
   "${SCHEDULER_ROOT}/batches/D/state.json" >/dev/null
 

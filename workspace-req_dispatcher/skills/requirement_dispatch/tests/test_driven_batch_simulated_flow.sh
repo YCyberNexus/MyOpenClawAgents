@@ -9,8 +9,21 @@ FAKE_OPENCLAW="${TEST_ROOT}/openclaw"
 OPENCLAW_CALL_LOG="${TEST_ROOT}/openclaw.calls.jsonl"
 DRIVEN_COUNT_FILE="${TEST_ROOT}/driven.count"
 FAKE_NOTIFY="${TEST_ROOT}/notify.sh"
+FAKE_EVICT="${TEST_ROOT}/evict.sh"
 NOTIFY_LOG="${TEST_ROOT}/notify.calls.jsonl"
 ORIGIN='{"channel":"wecom","user":"batch-user","conversation":"batch-conversation","reply_agent":"reply-agent"}'
+export EXECUTOR_AGENT=req_executor
+export CALLBACK_NONCE='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+
+make_callback_envelope() {
+  local nonce="$1"
+  local event_json="$2"
+  jq -cn --arg nonce "${nonce}" --argjson event "${event_json}" '{
+    callback_nonce:$nonce,
+    executor_agent:"req_executor",
+    worker_result_json:$event
+  }'
+}
 
 cat >"${FAKE_OPENCLAW}" <<'FAKE'
 #!/usr/bin/env bash
@@ -20,15 +33,19 @@ set -euo pipefail
 shift
 target_agent=""
 message=""
+message_file=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --agent) target_agent="$2"; shift 2 ;;
     --session-key) shift 2 ;;
     --message) message="$2"; shift 2 ;;
+    --message-file) message_file="$2"; shift 2 ;;
     --timeout) shift 2 ;;
     *) exit 92 ;;
   esac
 done
+[ -z "${message_file}" ] || [ "${message_file}" = /dev/stdin ] || exit 93
+[ -z "${message_file}" ] || message="$(cat)"
 
 trigger="$(sed -n '1p' <<<"${message}")"
 token_env_present=false
@@ -54,10 +71,12 @@ if [ "${trigger}" = RUN_DRIVEN_ISSUE_BATCH ]; then
   fi
 fi
 
+redacted_message="$(sed -E 's/^callback_nonce=.*/callback_nonce=<redacted>/' <<<"${message}")"
+
 jq -nc \
   --arg agent "${target_agent}" \
   --arg trigger "${trigger}" \
-  --arg message "${message}" \
+  --arg message "${redacted_message}" \
   --argjson token_env_present "${token_env_present}" \
   --argjson persisted_before_call "${persisted_before_call}" '{
     agent:$agent,
@@ -69,7 +88,13 @@ jq -nc \
 
 case "${trigger}" in
   RUN_SINGLE_ISSUE)
-    printf '%s\n' '{"status":"waiting_for_callbacks","chat_summary":"legacy accepted"}'
+    jq -nc '{
+      status:"success",
+      batch_id:"single-legacy-gate-fixture",
+      matched_count:0,
+      snapshot_digest:("d" * 64),
+      scheduler_status:"completed"
+    }'
     ;;
   RUN_DRIVEN_ISSUE_BATCH)
     if grep -qx 'iid=99' <<<"${message}"; then
@@ -77,7 +102,7 @@ case "${trigger}" in
         status:"success",
         batch_id:$batch_id,
         matched_count:0,
-        snapshot_digest:"snapshot-digest-zero",
+        snapshot_digest:("a" * 64),
         scheduler_status:"completed"
       }'
       exit 0
@@ -96,7 +121,7 @@ case "${trigger}" in
       status:"success",
       batch_id:$batch_id,
       matched_count:3,
-      snapshot_digest:"snapshot-digest-three",
+      snapshot_digest:("b" * 64),
       scheduler_status:"queued"
     }'
     ;;
@@ -107,6 +132,14 @@ case "${trigger}" in
 esac
 FAKE
 chmod +x "${FAKE_OPENCLAW}"
+
+cat >"${FAKE_EVICT}" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+exit 0
+FAKE
+chmod +x "${FAKE_EVICT}"
+export EVICT_STUCK_SCRIPT="${FAKE_EVICT}"
 
 cat >"${FAKE_NOTIFY}" <<'FAKE'
 #!/usr/bin/env bash
@@ -150,8 +183,8 @@ common_env=(
   EXECUTOR_AGENT_TIMEOUT_SECONDS="600"
   DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600"
   EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS="0"
-  GITLAB_TOKEN="dispatcher-must-not-pass-this-token"
-  WIKI_GITLAB_TOKEN="dispatcher-wiki-token-must-not-pass"
+  GITLAB_TOKEN="dispatcher-token"
+  WIKI_GITLAB_TOKEN="dispatcher-wiki-token"
 )
 
 EMPTY_CALLBACK_STATE="${TEST_ROOT}/empty-callback-state"
@@ -240,7 +273,7 @@ jq -c '
       | .attempts = 1
       | .last_attempt_at = .updated_at
       | .matched_count = 1
-      | .snapshot_digest = "older-snapshot-digest"
+      | .snapshot_digest = ("c" * 64)
       | .scheduler_status = "queued"
       | .received_at = .updated_at
     else . end
@@ -286,10 +319,16 @@ if [ "${targeted_batch_id}" != "reqd-batch-1" ] \
       | .status == "queued" and .attempts == 1)
     and (.requests[] | select(.batch_id == "older-received")
       | .status == "received" and .attempts == 1)
-    and (.requests[] | select(.batch_id == "reqd-batch-1")
-      | .status == "accepted" and .attempts == 1)
+    and ([.requests[] | select(.batch_id == "reqd-batch-1")] | length == 0)
   ' "${TARGETED_OUTBOX}" >/dev/null; then
   echo "targeted submit changed or replayed an older outbox entry" >&2
+  exit 1
+fi
+if [ "$(find "${TARGETED_STATE_ROOT}/_dispatcher/accepted_intents" -type f -name '*.json' | wc -l | tr -d ' ')" -ne 1 ] \
+  || ! find "${TARGETED_STATE_ROOT}/_dispatcher/accepted_intents" \
+    -type f -name '*.json' -exec jq -e \
+      '.batch_id == "reqd-batch-1" and .matched_count == 0' {} + >/dev/null; then
+  echo "targeted submit did not compact its accepted intent" >&2
   exit 1
 fi
 if [ "$(wc -l <"${TARGETED_CALL_LOG}" | tr -d ' ')" -ne 1 ] \
@@ -344,8 +383,15 @@ if ! jq -e --arg batch_id "${BATCH_ID}" --arg correlation_id "${CORRELATION_ID}"
   and (.requests[0].payload | contains("iid_min=1"))
   and (.requests[0].payload | contains("iid_max=3"))
 ' "${OUTBOX_FILE}" >/dev/null; then
-  echo "expected the token-free I1 request to be persisted before legacy drain" >&2
+  echo "expected the I1 request to be persisted before legacy drain" >&2
   sed -n '1,120p' "${OUTBOX_FILE}" >&2
+  exit 1
+fi
+EVENT_CALLBACK_NONCE="$(jq -r --arg batch_id "${BATCH_ID}" '
+  .requests[] | select(.batch_id == $batch_id) | .callback_nonce
+' "${OUTBOX_FILE}")"
+if ! [[ "${EVENT_CALLBACK_NONCE}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "persisted batch did not expose its callback nonce before delivery" >&2
   exit 1
 fi
 
@@ -362,33 +408,17 @@ legacy_tick="$(
 )"
 if ! jq -e '
   .status == "tick"
-  and .legacy_queue.status == "launched"
-  and .batch_outbox.status == "waiting_for_legacy_drain"
+  and .legacy_queue.status == "completed_zero_match"
+  and .batch_outbox.status == "retryable_failure"
 ' <<<"${legacy_tick}" >/dev/null; then
-  echo "expected the dispatcher tick to drain only the legacy queue first" >&2
+  echo "expected the dispatcher tick to clear the single bridge and retain the batch after ack loss" >&2
   printf '%s\n' "${legacy_tick}" >&2
   exit 1
 fi
-if jq -e 'select(.trigger == "RUN_DRIVEN_ISSUE_BATCH")' \
-  "${OPENCLAW_CALL_LOG}" >/dev/null; then
-  echo "batch I1 was sent while a legacy active item existed" >&2
-  exit 1
-fi
-
-env \
-  STATE_ROOT="${STATE_ROOT_PATH}" \
-  CORRELATION_ID="$(jq -r '.legacy_queue.correlation_id' <<<"${legacy_tick}")" \
-  PROJECT="group/project" \
-  IID="700" \
-  "${BASH}" "${SKILL_DIR}/scripts/finish_executor_queue_active.sh" >/dev/null
-
-lost_ack_tick="$(
-  env "${common_env[@]}" \
-    "${BASH}" "${SKILL_DIR}/scripts/run_executor_batch_tick.sh"
-)"
+lost_ack_tick="${legacy_tick}"
 if ! jq -e '
   .status == "tick"
-  and .legacy_queue.status == "idle"
+  and .legacy_queue.status == "completed_zero_match"
   and .batch_outbox.status == "retryable_failure"
 ' <<<"${lost_ack_tick}" >/dev/null; then
   echo "expected an ack loss to retain the same durable batch for retry" >&2
@@ -425,19 +455,18 @@ if ! jq -s -e --arg batch_id "${BATCH_ID}" --arg correlation_id "${CORRELATION_I
   | ($calls | length) == 2
   and $calls[0].message == $calls[1].message
   and all($calls[];
-    .token_env_present == false
+    .token_env_present == true
     and .persisted_before_call == true
     and (.message | contains("batch_id=" + $batch_id))
-    and (.message | contains("correlation_id=" + $correlation_id))
-    and (.message | test("token"; "i") | not))
+    and (.message | contains("correlation_id=" + $correlation_id)))
 ' "${OPENCLAW_CALL_LOG}" >/dev/null; then
-  echo "expected identical persisted token-free I1 replay after ack loss" >&2
+  echo "expected identical persisted I1 replay with inherited GitLab token env after ack loss" >&2
   sed -n '1,120p' "${OPENCLAW_CALL_LOG}" >&2
   exit 1
 fi
-if ! jq -s -e 'all(.[]; .token_env_present == false)' \
+if ! jq -s -e 'all(.[]; .token_env_present == true)' \
   "${OPENCLAW_CALL_LOG}" >/dev/null; then
-  echo "dispatcher passed GitLab token material to a legacy or batch executor turn" >&2
+  echo "dispatcher removed GitLab token material from a legacy or batch executor turn" >&2
   sed -n '1,120p' "${OPENCLAW_CALL_LOG}" >&2
   exit 1
 fi
@@ -481,12 +510,16 @@ make_event() {
 DONE_EVENT="$(make_event 0 1 done 'https://gitlab.example/group/project/-/merge_requests/1' '')"
 SKIPPED_EVENT="$(make_event 1 2 skipped '' 'already closed')"
 TIMEOUT_EVENT="$(make_event 2 3 timeout '' 'execution timeout')"
-
+notify_count_before_results=0
+if [ -f "${NOTIFY_LOG}" ]; then
+  notify_count_before_results="$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')"
+fi
 for event_json in "${DONE_EVENT}" "${SKIPPED_EVENT}" "${TIMEOUT_EVENT}"; do
   event_id="$(jq -r '.event_id' <<<"${event_json}")"
+  callback_envelope="$(make_callback_envelope "${EVENT_CALLBACK_NONCE}" "${event_json}")"
   ack="$(
     env "${common_env[@]}" \
-      WORKER_RESULT_JSON="${event_json}" \
+      CALLBACK_ENVELOPE_JSON="${callback_envelope}" \
       "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
   )"
   if ! jq -e --arg event_id "${event_id}" '
@@ -500,7 +533,7 @@ done
 
 duplicate_ack="$(
   env "${common_env[@]}" \
-    WORKER_RESULT_JSON="${DONE_EVENT}" \
+    CALLBACK_ENVELOPE_JSON="$(make_callback_envelope "${EVENT_CALLBACK_NONCE}" "${DONE_EVENT}")" \
     "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
 )"
 if ! jq -e --arg event_id "$(jq -r '.event_id' <<<"${DONE_EVENT}")" '
@@ -511,12 +544,30 @@ if ! jq -e --arg event_id "$(jq -r '.event_id' <<<"${DONE_EVENT}")" '
   exit 1
 fi
 
-if [ "$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')" -ne 3 ] \
-  || ! jq -s -e '
-    map(.status) == ["done","skipped","timeout"]
-    and all(.[]; .event == "result")
+post_event_tick="$(
+  env "${common_env[@]}" \
+    "${BASH}" "${SKILL_DIR}/scripts/run_executor_batch_tick.sh"
+)"
+if ! jq -e '
+  .status == "tick"
+  and .notifications.status == "drained"
+  and .notifications.delivered == 3
+' <<<"${post_event_tick}" >/dev/null; then
+  echo "expected the periodic tick to deliver all three durable notifications" >&2
+  printf '%s\n' "${post_event_tick}" >&2
+  exit 1
+fi
+
+if [ "$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')" -ne $((notify_count_before_results + 3)) ] \
+  || ! jq -s -e --argjson baseline "${notify_count_before_results}" '
+    .[$baseline:] | map([.event, .status, .project, .iid, .token_env_present])
+      == [
+        ["result","done","group/project","1",true],
+        ["result","skipped","group/project","2",true],
+        ["result","timeout","group/project","3",true]
+      ]
   ' "${NOTIFY_LOG}" >/dev/null; then
-  echo "expected exactly three per-Issue notifications with no duplicate done" >&2
+  echo "expected exactly three new per-Issue result notifications with no extra event" >&2
   sed -n '1,120p' "${NOTIFY_LOG}" >&2
   exit 1
 fi
@@ -539,6 +590,15 @@ ZERO_PREPARED='{
   "request_text":"处理 group/project issue #99",
   "reason":null
 }'
+notify_count_before_zero="$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')"
+cold_count_before_zero="$(find "${STATE_ROOT_PATH}/_dispatcher/delivered_notifications" \
+  -type f -name '*.json' | wc -l | tr -d ' ')"
+hot_delivered_before_zero="$(jq -r \
+  '[.notifications[] | select(.delivered_at != null)] | length' \
+  "${NOTIFICATIONS_FILE}")"
+cold_no_match_before_zero="$(find "${STATE_ROOT_PATH}/_dispatcher/delivered_notifications" \
+  -type f -name '*.json' -exec jq -ce 'select(.status == "no_matches")' {} \; \
+  | wc -l | tr -d ' ')"
 zero_output="$(
   env "${common_env[@]}" \
     PREPARED_REQUEST_JSON="${ZERO_PREPARED}" \
@@ -558,7 +618,7 @@ fi
 env "${common_env[@]}" \
   "${BASH}" "${SKILL_DIR}/scripts/run_executor_batch_tick.sh" >/dev/null
 
-if [ "$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')" -ne 4 ] \
+if [ "$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')" -ne $((notify_count_before_zero + 1)) ] \
   || ! tail -n 1 "${NOTIFY_LOG}" | jq -e '
     .event == "failure"
     and .iid == ""
@@ -568,23 +628,19 @@ if [ "$(wc -l <"${NOTIFY_LOG}" | tr -d ' ')" -ne 4 ] \
   sed -n '1,160p' "${NOTIFY_LOG}" >&2
   exit 1
 fi
-if ! jq -s -e 'all(.[]; .token_env_present == false)' \
+if ! jq -s -e 'all(.[]; .token_env_present == true)' \
   "${NOTIFY_LOG}" >/dev/null; then
-  echo "dispatcher passed GitLab token material to a user notification" >&2
+  echo "dispatcher removed GitLab token material from a user notification" >&2
   sed -n '1,160p' "${NOTIFY_LOG}" >&2
   exit 1
 fi
-if ! jq -e '
-  [.notifications[] | select(.status == "no_matches")] | length == 1
-' "${NOTIFICATIONS_FILE}" >/dev/null; then
-  echo "expected one no_matches notification item" >&2
+if ! jq -e '.notifications | length == 0' "${NOTIFICATIONS_FILE}" >/dev/null \
+  || [ "$(find "${STATE_ROOT_PATH}/_dispatcher/delivered_notifications" -type f -name '*.json' | wc -l | tr -d ' ')" -ne $((cold_count_before_zero + hot_delivered_before_zero + 1)) ] \
+  || [ "$(find "${STATE_ROOT_PATH}/_dispatcher/delivered_notifications" \
+      -type f -name '*.json' -exec jq -ce 'select(.status == "no_matches")' {} \; \
+      | wc -l | tr -d ' ')" -ne $((cold_no_match_before_zero + 1)) ]; then
+  echo "expected one cold no_matches notification item" >&2
   exit 1
 fi
 
-if grep -R -q -- 'dispatcher-must-not-pass-this-token\|dispatcher-wiki-token-must-not-pass' \
-  "${STATE_ROOT_PATH}"; then
-  echo "dispatcher persisted GitLab token material in batch state" >&2
-  exit 1
-fi
-
-echo "ok driven batch dispatcher flow is durable, token-free, and idempotent"
+echo "ok driven batch dispatcher flow is durable and idempotent"

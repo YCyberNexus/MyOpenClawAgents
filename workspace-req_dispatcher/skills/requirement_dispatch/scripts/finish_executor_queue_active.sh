@@ -29,50 +29,47 @@ if [ "${active}" = "null" ]; then
   exit 0
 fi
 
+if ! jq -e '
+  .driven_callback_auth_mode == "legacy_pre_upgrade"
+  and ((has("callback_nonce")) | not)
+  and (.driven_callback_nonce_sha256 // null) == null
+  and (.launch_state // "launched") == "launched"
+' <<<"${active}" >/dev/null; then
+  echo "finish_executor_queue_active.sh: active is not authorized for legacy I2" >&2
+  exit 3
+fi
+
+# The callback nonce is a bearer secret kept only in private queue state. Public
+# status responses expose the durable intent without that field.
+public_active="$(jq -c 'del(.callback_nonce, .launch_error)' <<<"${active}")"
+
 active_correlation="$(jq -r '.correlation_id // ""' <<<"${active}")"
 active_project="$(jq -r '.project // ""' <<<"${active}")"
 active_iid="$(jq -r '.iid // ""' <<<"${active}")"
 
 if [ "${active_correlation}" != "${CORRELATION_ID}" ]; then
-  flock -u 9
-  jq -nc \
-    --arg status "ignored" \
-    --arg reason "correlation_mismatch" \
-    --arg active_correlation "${active_correlation}" \
-    --arg correlation_id "${CORRELATION_ID}" \
-    --argjson active "${active}" \
-    --argjson queued_count "${queued_count}" \
-    '{status:$status, reason:$reason, active_correlation:$active_correlation,
-      correlation_id:$correlation_id, active:$active, queued_count:$queued_count}'
-  exit 0
+  echo "finish_executor_queue_active.sh: legacy I2 correlation identity mismatch" >&2
+  exit 3
 fi
 
 if [ -n "${PROJECT}" ] && [ "${active_project}" != "${PROJECT}" ]; then
-  flock -u 9
-  jq -nc \
-    --arg status "ignored" \
-    --arg reason "project_mismatch" \
-    --arg active_project "${active_project}" \
-    --arg project "${PROJECT}" \
-    --argjson active "${active}" \
-    --argjson queued_count "${queued_count}" \
-    '{status:$status, reason:$reason, active_project:$active_project,
-      project:$project, active:$active, queued_count:$queued_count}'
-  exit 0
+  echo "finish_executor_queue_active.sh: legacy I2 project identity mismatch" >&2
+  exit 3
 fi
 
 if [ -n "${IID}" ] && [ "${active_iid}" != "${IID}" ]; then
-  flock -u 9
-  jq -nc \
-    --arg status "ignored" \
-    --arg reason "iid_mismatch" \
-    --arg active_iid "${active_iid}" \
-    --arg iid "${IID}" \
-    --argjson active "${active}" \
-    --argjson queued_count "${queued_count}" \
-    '{status:$status, reason:$reason, active_iid:$active_iid,
-      iid:$iid, active:$active, queued_count:$queued_count}'
-  exit 0
+  echo "finish_executor_queue_active.sh: legacy I2 IID identity mismatch" >&2
+  exit 3
+fi
+
+active_run_id="$(jq -r '.run_id // ""' <<<"${active}")"
+if jq -e --arg run_id "${active_run_id}" '.pending | has($run_id)' \
+    "${PENDING_FILE}" >/dev/null \
+  || ! jq -e --arg run_id "${active_run_id}" '
+    select(.run_id == $run_id and .stage == "executor" and .was_pending == true)
+  ' "${LEDGER_FILE}" >/dev/null 2>&1; then
+  echo "finish_executor_queue_active.sh: legacy I2 drain proof is missing" >&2
+  exit 3
 fi
 
 tmp="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
@@ -84,7 +81,7 @@ flock -u 9
 jq -nc \
   --arg status "cleared" \
   --arg correlation_id "${CORRELATION_ID}" \
-  --argjson cleared_active "${active}" \
+  --argjson cleared_active "${public_active}" \
   --argjson queued_count "${queued_count}" \
   '{status:$status, correlation_id:$correlation_id,
     cleared_active:$cleared_active, queued_count:$queued_count}'

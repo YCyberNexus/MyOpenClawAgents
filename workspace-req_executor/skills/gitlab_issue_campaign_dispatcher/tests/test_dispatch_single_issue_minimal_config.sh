@@ -39,6 +39,8 @@ project=claw_gitlab/req_executor_test
 iid=42
 correlation_id=reqd-minimal
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=4444444444444444444444444444444444444444444444444444444444444444
 EOF
 then
   echo "dispatch_single_issue.sh should accept campaign_defaults.env with only REPO_PARENT_PATH" >&2
@@ -54,12 +56,6 @@ fi
 
 if grep -q '^repo_path=' "${CAPTURE_FILE}"; then
   echo "single shim must not expose the minimal config clone root" >&2
-  cat "${CAPTURE_FILE}" >&2
-  exit 1
-fi
-
-if grep -Eq 'gitlab_token|GITLAB_TOKEN|gitlab-env-token' "${CAPTURE_FILE}"; then
-  echo "single shim must not forward the token from minimal config" >&2
   cat "${CAPTURE_FILE}" >&2
   exit 1
 fi

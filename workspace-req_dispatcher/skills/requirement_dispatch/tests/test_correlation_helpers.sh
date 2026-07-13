@@ -28,6 +28,25 @@ IID="42" \
 CORRELATION_ID="${cid1}" \
 bash "${SKILL_DIR}/scripts/record_pending.sh" >/dev/null
 
+# An executor pending entry is discoverable through the legacy I2 helper only
+# when the same pre-upgrade launched active exists. find_pending.sh atomically
+# projects both records to explicit legacy_pre_upgrade state.
+queue_candidate="$(mktemp "${STATE_ROOT}/_dispatcher/executor_queue.XXXXXX")"
+jq \
+  --arg run_id "executor-run-1" \
+  --arg correlation_id "${cid1}" '
+  .active = {
+    queue_id:"legacy-correlation-fixture",
+    run_id:$run_id,
+    correlation_id:$correlation_id,
+    project:"claw_gitlab/px_ifp_hulat_test",
+    iid:42,
+    executor_agent:"req_executor",
+    launch_state:"launched"
+  }
+' "${STATE_ROOT}/_dispatcher/executor_queue.json" >"${queue_candidate}"
+mv "${queue_candidate}" "${STATE_ROOT}/_dispatcher/executor_queue.json"
+
 found="$(STATE_ROOT="${STATE_ROOT}" CORRELATION_ID="${cid1}" bash "${SKILL_DIR}/scripts/find_pending.sh")"
 run_id="$(printf '%s' "${found}" | jq -r '.run_id')"
 stage="$(printf '%s' "${found}" | jq -r '.stage')"

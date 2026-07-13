@@ -91,8 +91,8 @@ PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 # status-less worker_result_json). 只要超时就不重试: when the run already
 # outlived its acpx wall-clock budget (elapsed since spawned_at ≥
 # acpx_timeout_seconds - 60s slack for ack-timestamp skew), the
-# termination is timeout-shaped — a runtime termination or a death inside
-# the subagent's own timeout flow — so the IID is parked
+# termination is timeout-shaped — the runtime's runTimeoutSeconds kill or
+# a death inside the subagent's own timeout flow — so the IID is parked
 # as `timeout` (no auto-retry) instead of `blocked` (retryable). A reply
 # that parses and carries an explicit status is never reclassified: a
 # live subagent's own verdict wins (phase6_normalize_reply contract).

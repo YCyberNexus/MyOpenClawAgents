@@ -20,22 +20,35 @@ set -euo pipefail
 
 # __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/env_paths.sh"
 
 : "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
   "${LOCAL_ATTEMPT_BRANCH:?}" "${WORK_BRANCH:?}" "${ISSUE_TITLE:?}"
 
 cd "${WORKTREE_DIR}"
 
-git commit -m "fix(issue-${ISSUE_IID}): ${ISSUE_TITLE} (attempt ${ATTEMPT_NUMBER_PADDED})"
+git commit -m \
+  "fix(issue-${ISSUE_IID}): ${ISSUE_TITLE} (attempt ${ATTEMPT_NUMBER_PADDED})"
 
 # Force-push the local attempt branch to the fixed remote branch.
-# Use --force-with-lease where possible; fall back to --force if the
-# remote ref doesn't exist yet (first attempt).
-if git ls-remote --exit-code --heads origin "${WORK_BRANCH}" >/dev/null 2>&1; then
-  git push --force-with-lease origin "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}"
-else
-  git push origin "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}"
-fi
+# Use --force-with-lease for an existing ref; use a normal push when the
+# remote ref does not exist yet (first attempt).
+set +e
+git ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
+  >/dev/null
+ls_remote_status=$?
+set -e
+case "${ls_remote_status}" in
+  0)
+    git push --force-with-lease origin \
+      "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}" >&2
+    ;;
+  2)
+    git push origin \
+      "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}" >&2
+    ;;
+  *) exit "${ls_remote_status}" ;;
+esac
 
 git rev-parse HEAD

@@ -30,7 +30,8 @@
 | `REPLY_GATEWAY_TOKEN` | 否 | 114 OpenClaw 网关 token。仅由 `notify_user.sh` 用于 `openclaw agent run` 投递结果信封；为空时兼容回落到旧 `ZHIBAN_GATEWAY_TOKEN`；不要写入日志。 |
 | `DEFAULT_REPLY_AGENT` | 否 | 114 上接收结果信封的默认 agent 名。`notify_user.sh` 只有在 `ORIGIN_JSON` 是合法 object 时才允许出站推送；目标 agent 优先使用 `origin.reply_agent`，该字段只在合法 origin 未提供 `reply_agent` 时兜底。`ORIGIN_JSON` 为空/null/非 object 时视为手动入口，不使用该兜底值；为空时兼容回落到旧 `ZHIBAN_AGENT`。接收 agent 负责根据信封里的 `origin` 完成企微最后一跳。 |
 | `REPLY_NOTIFY_TIMEOUT_SECONDS` | 否 | 104 反向调用 114 接收 agent 的超时秒数，默认 `30`；为空时兼容回落到旧 `ZHIBAN_NOTIFY_TIMEOUT_SECONDS`；必须为正整数，配置形态错误时 `notify_user.sh` 以 `2` 退出。实际投递超时只写 `user_notify_failed` 留痕并 `exit 0`，不阻断终态回调路径。 |
-| `DISPATCHER_CALLBACK_TARGET` | 是 | executor 结果回调目标：batch I1 与旧 `RUN_SINGLE_ISSUE` bridge 都把它作为 `dispatcher_callback_target` 传给 req_executor，执行器 Phase 6 据此把 I3 结果投回 req_dispatcher。支持 `agent:req_dispatcher:main` 这类 session key selector 或裸 agent 名。必须非空；缺失时 intake/legacy drain 会在分配序号、修改 active/pending、落 batch intent 或网络调用前失败关闭，payload builder 还会二次校验。 |
+| `DISPATCHER_CALLBACK_TARGET` | 是 | executor 结果回调的部署期固定 pin：batch I1 与旧 `RUN_SINGLE_ISSUE` bridge 都把它作为 `dispatcher_callback_target` 传给 req_executor，执行器 Phase 6 据此把 I3 结果投回 req_dispatcher。仅允许 `agent:req_dispatcher:<safe-session>`，其中 `<safe-session>` 必须匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`；不接受裸 agent、其他 agent 或调用方临时指定的 session。req_executor intake 与 delivery 还会要求它精确等于自身部署 pin。必须非空；缺失时 intake/legacy drain 会在分配序号、修改 active/pending、落 batch intent 或网络调用前失败关闭，payload builder 还会二次校验。 |
+| callback 认证 | 自动生成 | 不设静态配置。dispatcher 为每个新 batch/single intent 生成独立 64 字符小写 hex nonce，并在 I1 中私密传给路由后的 executor；mirror 只保存 SHA-256。executor 回调使用严格 `callback_envelope={callback_nonce,executor_agent,worker_result_json}`，dispatcher 在 I3 落账前同时核对 nonce 摘要、完整 project 与 executor。nonce 不得进入 public acceptance、用户通知或日志。 |
 | 跨 agent 调用契约 | 已定 | `scripts/run_agent_turn.sh` 包装 `openclaw agent --agent <target> --session-key <session-key> --message <payload> --timeout <seconds>`；普通调用默认 `agent:<target>:main`，`RUN_SINGLE_ISSUE` 默认 `agent:<target>:issue-<sanitized-project>-<iid>`；旧 `TARGET_SESSION_ID` 输入仅作兼容且同样转为 `--session-key`，但 `RUN_SINGLE_ISSUE` 显式传 `agent:<target>:main` 时会改投 issue 级 session；CLI 使用 runner 已配置的 OpenClaw Gateway，不在本文件重复 pin 网关地址/token。 |
 
 ## 两类 timeout 的边界
@@ -53,7 +54,7 @@ openclaw config validate
 
 ## `routing.env`（多 project 路由表）
 
-当 action 是 `execute_issue` 或 `create_and_execute` 时，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`。新执行请求由 `submit_executor_batch.sh` 持久化无 token 的 I1，并向目标 executor 发送 `RUN_DRIVEN_ISSUE_BATCH`；旧 `executor_queue.json` 只用于排空升级前已经入队的 `RUN_SINGLE_ISSUE`，新请求不得再写入旧 FIFO。只建单 action 不查本表、不创建 executor batch。消费方 `scripts/route_project.sh`。
+当 action 是 `execute_issue` 或 `create_and_execute` 时，req_dispatcher 先查本表是否有专属 executor 覆盖项；未命中时统一路由到 `DEFAULT_EXECUTOR_AGENT`。project key 支持完整多层 namespace path（例如 `group/subgroup/project`），始终整体精确匹配。新执行请求由 `submit_executor_batch.sh` 持久化 I1，并向目标 executor 发送 `RUN_DRIVEN_ISSUE_BATCH`；旧 `executor_queue.json` 只用于排空升级前已经入队的 `RUN_SINGLE_ISSUE`，新请求不得再写入旧 FIFO。只建单 action 不查本表、不创建 executor batch。消费方 `scripts/route_project.sh`。
 
 行格式：每行一条 `PROJECT=AGENT`。
 
@@ -72,12 +73,12 @@ openclaw config validate
 
 `req_dispatcher` 是**全公司共用**的需求接入链路。不同员工/团队的需求会落到不同的 GitLab project。把 project 写死在 config 里会让这个 agent 变成单租户、违背"共用接入点"的目标。
 
-因此：**114/WebUI 发送的 prompt 决定目标 project 和动作**。建单入口从 wiki URL 的 `<group>/<project>/-/wikis/<slug>` 或自由文本里的 `group/project`、GitLab 仓库/Wiki URL、`glab api projects/<encoded-group%2Fproject>/...` 片段确定 project，并生成带 `repo=<group/project>` 的 `git_issuer_payload`；既有 issue 执行入口从 GitLab issue URL 或显式 `group/project` + issue IID 提取 project/iid。若必需字段缺失则在调用下游前失败并通知用户。`req_dispatcher` 仍不写 GitLab，建单事实仍以 git_issuer 返回 JSON 为准。
+因此：**114/WebUI 发送的 prompt 决定目标 project 和动作**。建单入口从 wiki URL 的 `<group>/<project>/-/wikis/<slug>` 或自由文本里的 `group/project`、GitLab 仓库/Wiki URL、`glab api projects/<encoded-group%2Fproject>/...` 片段确定 project，并生成带 `repo=<group/project>` 的 `git_issuer_payload`；既有 issue 执行入口统一收集 GitLab Issue URL、可信 GitLab 仓库根 URL、`projects/...` locator 与显式多段 project path，规范化去重后再结合 selector 提取。多个不同 project 必须在调用下游前歧义失败。`req_dispatcher` 仍不写 GitLab，建单事实仍以 git_issuer 返回 JSON 为准。
 
 ## 受驱动批次部署、迁移与回滚
 
-- `DISPATCHER_CALLBACK_TARGET` 是新 batch I1 和旧 single bridge 的必填部署 pin。蓝区默认继续使用 `agent:req_dispatcher:main`；不得把本机 session 或临时 callback 目标写回 tracked 配置。空值必须在生成 ID、持久化 intent 或调用 executor 前失败关闭。
-- req_dispatcher 发送的 I1 不含 `GITLAB_TOKEN`、`GLAB_TOKEN` 或其他 GitLab 凭据。GitLab host、protocol 和 token 仍由 req_executor 自身的进程环境或 tracked `config/gitlab.env` 加载，dispatcher 不复制、不转发。
+- `DISPATCHER_CALLBACK_TARGET` 是新 batch I1 和旧 single bridge 的必填部署 pin。蓝区固定使用 `agent:req_dispatcher:main`；只允许 `agent:req_dispatcher:<safe-session>`，不得使用裸 agent、其他 agent、本机 session 或临时 callback 目标。空值必须在生成 ID、持久化 intent 或调用 executor 前失败关闭。
+- req_executor I1、旧 single I1 与 batch notification 的外部进程调用继承 req_dispatcher 进程环境；I1 payload 与 callback/notification 数据仍按各自严格 schema 构造。
 - executor 的公开受理响应必须来自固定 acceptance emitter，且只含精确五字段 `status,batch_id,matched_count,snapshot_digest,scheduler_status`。rich orchestration envelope、`chat_summary` 或手工拼接 JSON 都不是有效 acceptance。
 - executor 每个 Issue 终态都以 `RUN_DRIVEN_BATCH_RESULT` transport 单独回投 I3。dispatcher 对同一 `event_id` 返回 `accepted` 或 `duplicate` 都能确认该事件；重复事件不会重复计数或重复通知用户。
 - 升级时保留并先排空旧 `executor_queue.json` 的 active/queue。旧 FIFO 非空期间，新 batch 只持久化为 `waiting_for_legacy_drain`，不得向 executor 发送 I1；旧 active/queue 清空后，统一 tick 才会提交这些 durable intent。禁止删除旧 queue 或把它破坏性迁移进新 scheduler。
@@ -92,10 +93,10 @@ openclaw config validate
 4. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
 5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token。只有执行动作会用到它；只建单动作不会入队。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。执行分支由用户 prompt 明确指定后作为 executor `branch=` 下发，未指定时由 executor 解析远端默认分支。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数。
-7. `DISPATCHER_CALLBACK_TARGET` 必须按 req_dispatcher 长期 session 配好；蓝区默认 `agent:req_dispatcher:main`。不得留空，否则 batch intake 与旧 FIFO drain 都会在任何持久状态变更和网络调用前拒绝。
+7. `DISPATCHER_CALLBACK_TARGET` 必须精确 pin 到 req_dispatcher 长期安全 session；蓝区固定为 `agent:req_dispatcher:main`，session 部分匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`。不得留空或使用裸 agent/其他 agent，否则 batch intake 与旧 FIFO drain 会拒绝，req_executor 也会在 intake 与 delivery 双重拒绝。
 8. req_dispatcher 部署侧必须每分钟周期性唤醒 `RUN_EXECUTOR_BATCH_TICK`。该统一路径先恢复旧 single bridge 并排空升级前 FIFO，再发送 durable batch I1、修复 receipt/mirror，最后重试逐 Issue 通知；只建单请求不会进入 executor batch。
 9. req_executor 部署侧也必须每分钟在其 main session 唤醒 `RUN_EXECUTOR_BATCH_TICK`，让默认 3 槽严格 round-robin 调度、handoff 导入和 callback outbox 在没有新聊天消息时持续恢复与补位。
 
 ## 与 acpx 工作区的差异
 
-`req_dispatcher` **不**像 `acpx_auto_tester` 那样 pin UI 账号池或执行器 token。它只保存 wiki 只读 GitLab pin 和派发相关 pin；写 GitLab 的 token 仍归 `git_issuer` / `req_executor` 自己持有。
+`req_dispatcher` **不**像 `acpx_auto_tester` 那样管理 UI 账号池。它只保存 wiki 只读 GitLab pin 和派发相关 pin；GitLab 写操作仍由 `git_issuer` / `req_executor` 执行。

@@ -28,6 +28,8 @@ project=claw_gitlab/req_executor_test
 iid=42
 correlation_id=reqd-branch
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=1111111111111111111111111111111111111111111111111111111111111111
 branch=release/2026.07
 EOF
 then
@@ -50,6 +52,8 @@ project=claw_gitlab/req_executor_test
 iid=42
 correlation_id=reqd-branch
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=1111111111111111111111111111111111111111111111111111111111111111
 branch=../bad
 EOF
 then

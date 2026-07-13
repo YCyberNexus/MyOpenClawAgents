@@ -7,6 +7,7 @@ IMPORT_HANDOFF="${SKILL_DIR}/scripts/import_driven_handoff.sh"
 DRAIN_OUTBOX="${SKILL_DIR}/scripts/drain_driven_outbox.sh"
 BIND_CLAIM="${SKILL_DIR}/scripts/bind_driven_claim.sh"
 RECORD_LAUNCH="${SKILL_DIR}/scripts/record_driven_batch_launch.sh"
+RESERVE_ITEMS="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh"
 
 fail() {
   echo "test_driven_callback_outbox.sh: $*" >&2
@@ -16,6 +17,7 @@ fail() {
 [ -x "${IMPORT_HANDOFF}" ] || fail "import_driven_handoff.sh is missing or not executable"
 [ -x "${DRAIN_OUTBOX}" ] || fail "drain_driven_outbox.sh is missing or not executable"
 [ -x "${BIND_CLAIM}" ] || fail "bind_driven_claim.sh is missing or not executable"
+[ -x "${RESERVE_ITEMS}" ] || fail "reserve_driven_batch_items.sh is missing or not executable"
 
 TMP_PARENT="${TMPDIR:-/tmp}"
 TMP_PARENT="${TMP_PARENT%/}"
@@ -27,6 +29,9 @@ printf '%s\n' \
   'REPO_PARENT_PATH=/data' \
   "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
   'EXECUTOR_MAX_CONCURRENCY=3' \
+  'EXECUTOR_AGENT=req_executor' \
+  'DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main' \
+  'DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0' \
   >"${CONFIG_DIR}/campaign_defaults.env"
 CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
 
@@ -168,6 +173,8 @@ create_batch_fixture() {
       selector:{type:"single",iid:42},
       force_rerun_pr:false,
       dispatcher_callback_target:$target,
+      executor_agent:"req_executor",
+      callback_nonce:("a" * 64),
       branch:"main"
     }' >"${batch_dir}/request.json"
   jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
@@ -198,9 +205,9 @@ create_batch_fixture() {
     }' >"${batch_dir}/state.json"
 }
 
-create_batch_fixture batch-A agent:req_dispatcher:batch-a preparing
-create_batch_fixture batch-B agent:req_dispatcher:batch-b attached
-create_batch_fixture batch-R agent:req_dispatcher:batch-r attached
+create_batch_fixture batch-A agent:req_dispatcher:main preparing
+create_batch_fixture batch-B agent:req_dispatcher:main attached
+create_batch_fixture batch-R agent:req_dispatcher:main attached
 
 # batch-C is registered by the fake recorder only after importer released the
 # scheduler lock. It models a late same-intent membership in the crash window.
@@ -212,7 +219,9 @@ jq -cnS '{
   project:"group/repo",
   selector:{type:"single",iid:42},
   force_rerun_pr:false,
-  dispatcher_callback_target:"agent:req_dispatcher:batch-c",
+  dispatcher_callback_target:"agent:req_dispatcher:main",
+  executor_agent:"req_executor",
+  callback_nonce:("b" * 64),
   branch:"main"
 }' >"${SCHEDULER_ROOT}/batches/batch-C/request.json"
 jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
@@ -671,9 +680,9 @@ jq -e '
   .event_id == "batch-A:snapshot-0:claim-1:terminal-1"
   and .job_id == "batch-A:snapshot-0"
   and [.memberships[] | {batch_id,snapshot_index,target}] == [
-    {batch_id:"batch-A",snapshot_index:0,target:"agent:req_dispatcher:batch-a"},
-    {batch_id:"batch-B",snapshot_index:0,target:"agent:req_dispatcher:batch-b"},
-    {batch_id:"batch-R",snapshot_index:0,target:"agent:req_dispatcher:batch-r"}
+    {batch_id:"batch-A",snapshot_index:0,target:"agent:req_dispatcher:main"},
+    {batch_id:"batch-B",snapshot_index:0,target:"agent:req_dispatcher:main"},
+    {batch_id:"batch-R",snapshot_index:0,target:"agent:req_dispatcher:main"}
   ]
   and .claim_generation == 1
   and .claim_token == "claim-token-42"
@@ -685,7 +694,9 @@ jq -e '
 for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .version == 1
-    and (.target | startswith("agent:req_dispatcher:"))
+    and .target == "agent:req_dispatcher:main"
+    and .executor_agent == "req_executor"
+    and (.callback_nonce | test("^[0-9a-f]{64}$"))
     and .attempts == 0
     and (.ready_at | type == "number" and . >= 0)
     and .delivered_at == null
@@ -796,13 +807,171 @@ if CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${ORPHAN_HANDOFF}" \
   fail "missing scheduler job without a receipt was forged as success"
 fi
 
+# A callback transport may occupy its full network timeout, but it must not
+# hold the per-event lock for that duration. Otherwise an importer replay takes
+# scheduler.lock and waits on that event lock, transitively blocking every new
+# reservation. The durable delivery-attempt fence also prevents a second
+# drainer from sending the same event while the first transport is in flight.
+LEASE_FIXTURE_DIR="${TEST_ROOT}/delivery-lease-fixture"
+LEASE_OPENCLAW="${TEST_ROOT}/lease-openclaw.sh"
+LEASE_SEND_LOG="${TEST_ROOT}/lease-send.log"
+LEASE_NETWORK_STARTED="${TEST_ROOT}/lease-network-started"
+LEASE_NETWORK_RELEASE="${TEST_ROOT}/lease-network-release"
+LEASE_IMPORT_RC_FILE="${TEST_ROOT}/lease-import.rc"
+LEASE_RESERVE_RC_FILE="${TEST_ROOT}/lease-reserve.rc"
+mkdir -p "${LEASE_FIXTURE_DIR}"
+cp "${OUTBOX_A}" "${LEASE_FIXTURE_DIR}/outbox-a.json"
+cp "${OUTBOX_B}" "${LEASE_FIXTURE_DIR}/outbox-b.json"
+cp "${OUTBOX_R}" "${LEASE_FIXTURE_DIR}/outbox-r.json"
+for deferred_outbox in "${OUTBOX_B}" "${OUTBOX_R}"; do
+  jq '.next_attempt_at = 2100000000' "${deferred_outbox}" \
+    >"${deferred_outbox}.lease-test"
+  mv "${deferred_outbox}.lease-test" "${deferred_outbox}"
+done
+: >"${LEASE_SEND_LOG}"
+cat >"${LEASE_OPENCLAW}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+message=""
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message) shift; message="${1:-}" ;;
+    --message-file) shift; message_file="${1:-}" ;;
+  esac
+  [ "$#" -gt 0 ] && shift
+done
+if [ -n "${message_file}" ]; then
+  [ "${message_file}" = /dev/stdin ]
+  message="$(cat)"
+fi
+envelope="${message#*callback_envelope=}"
+event_id="$(jq -er '.worker_result_json.event_id' <<<"${envelope}")"
+printf '%s\n' "${event_id}" >>"${LEASE_SEND_LOG:?}"
+[ "${event_id}" = "${LEASE_EVENT_ID:?}" ] || exit 94
+: >"${LEASE_NETWORK_STARTED:?}"
+for _wait in $(seq 1 500); do
+  [ -e "${LEASE_NETWORK_RELEASE:?}" ] && exit 23
+  sleep 0.01
+done
+exit 95
+EOF
+chmod +x "${LEASE_OPENCLAW}"
+
+CONFIG_DIR="${CONFIG_DIR}" OPENCLAW_BIN="${LEASE_OPENCLAW}" \
+LEASE_SEND_LOG="${LEASE_SEND_LOG}" LEASE_EVENT_ID="${EVENT_A}" \
+LEASE_NETWORK_STARTED="${LEASE_NETWORK_STARTED}" \
+LEASE_NETWORK_RELEASE="${LEASE_NETWORK_RELEASE}" \
+NOW_EPOCH=1999999000 DRIVEN_CALLBACK_TIMEOUT_SECONDS=5 \
+DRIVEN_CALLBACK_MAX_ATTEMPTS_PER_TICK=1 \
+bash "${DRAIN_OUTBOX}" >"${TEST_ROOT}/lease-drain-first.out" &
+LEASE_DRAIN_PID=$!
+for _wait in $(seq 1 300); do
+  [ -e "${LEASE_NETWORK_STARTED}" ] && break
+  sleep 0.01
+done
+[ -e "${LEASE_NETWORK_STARTED}" ] || {
+  : >"${LEASE_NETWORK_RELEASE}"
+  wait "${LEASE_DRAIN_PID}" || true
+  fail "blocking callback transport did not start"
+}
+
+lease_second_drain="$(CONFIG_DIR="${CONFIG_DIR}" \
+  OPENCLAW_BIN="${LEASE_OPENCLAW}" LEASE_SEND_LOG="${LEASE_SEND_LOG}" \
+  LEASE_EVENT_ID="${EVENT_A}" LEASE_NETWORK_STARTED="${LEASE_NETWORK_STARTED}" \
+  LEASE_NETWORK_RELEASE="${LEASE_NETWORK_RELEASE}" \
+  NOW_EPOCH=1999999000 DRIVEN_CALLBACK_TIMEOUT_SECONDS=5 \
+  DRIVEN_CALLBACK_MAX_ATTEMPTS_PER_TICK=1 bash "${DRAIN_OUTBOX}")"
+jq -e '.attempted == 0' <<<"${lease_second_drain}" >/dev/null \
+  || fail "concurrent drainer ignored the active delivery-attempt fence"
+[ "$(grep -Fxc "${EVENT_A}" "${LEASE_SEND_LOG}")" = 1 ] \
+  || fail "active delivery attempt was sent more than once"
+
+(
+  set +e
+  CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${HANDOFF_FILE}" \
+    NOW_EPOCH=1999999001 bash "${IMPORT_HANDOFF}" \
+    >"${TEST_ROOT}/lease-import.out" 2>"${TEST_ROOT}/lease-import.err"
+  printf '%s\n' "$?" >"${LEASE_IMPORT_RC_FILE}"
+) &
+LEASE_IMPORT_PID=$!
+
+# Wait until the importer either finishes (new lock discipline) or is observed
+# holding scheduler.lock while blocked on the old cross-network event lock.
+LEASE_IMPORT_OBSERVED=false
+exec 9>"${SCHEDULER_ROOT}/scheduler.lock"
+for _wait in $(seq 1 300); do
+  if [ -e "${LEASE_IMPORT_RC_FILE}" ]; then
+    LEASE_IMPORT_OBSERVED=true
+    break
+  fi
+  if ! flock -n 9; then
+    LEASE_IMPORT_OBSERVED=true
+    break
+  fi
+  flock -u 9
+  sleep 0.01
+done
+exec 9>&-
+[ "${LEASE_IMPORT_OBSERVED}" = true ] || {
+  : >"${LEASE_NETWORK_RELEASE}"
+  wait "${LEASE_DRAIN_PID}" || true
+  wait "${LEASE_IMPORT_PID}" || true
+  fail "import replay neither progressed nor reached its scheduler critical section"
+}
+
+(
+  set +e
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=1999999002 \
+    bash "${RESERVE_ITEMS}" >"${TEST_ROOT}/lease-reserve.out" \
+    2>"${TEST_ROOT}/lease-reserve.err"
+  printf '%s\n' "$?" >"${LEASE_RESERVE_RC_FILE}"
+) &
+LEASE_RESERVE_PID=$!
+LEASE_RESERVATION_FINISHED=false
+for _wait in $(seq 1 150); do
+  if [ -e "${LEASE_RESERVE_RC_FILE}" ]; then
+    LEASE_RESERVATION_FINISHED=true
+    break
+  fi
+  sleep 0.01
+done
+
+: >"${LEASE_NETWORK_RELEASE}"
+set +e
+wait "${LEASE_DRAIN_PID}"
+LEASE_DRAIN_RC=$?
+wait "${LEASE_IMPORT_PID}"
+LEASE_IMPORT_WAIT_RC=$?
+wait "${LEASE_RESERVE_PID}"
+LEASE_RESERVE_WAIT_RC=$?
+set -e
+[ "${LEASE_DRAIN_RC}" -eq 0 ] || fail "lease drain wrapper failed"
+[ "${LEASE_IMPORT_WAIT_RC}" -eq 0 ] \
+  && [ "$(cat "${LEASE_IMPORT_RC_FILE}")" -eq 0 ] \
+  || fail "import replay failed around an in-flight callback"
+[ "${LEASE_RESERVE_WAIT_RC}" -eq 0 ] \
+  && [ "$(cat "${LEASE_RESERVE_RC_FILE}")" -eq 0 ] \
+  || fail "reservation command failed around an in-flight callback"
+[ "${LEASE_RESERVATION_FINISHED}" = true ] \
+  || fail "reservation was transitively blocked by the callback network call"
+[ "$(grep -Fxc "${EVENT_A}" "${LEASE_SEND_LOG}")" = 1 ] \
+  || fail "delivery-attempt fencing duplicated or lost the in-flight event"
+jq -e '.attempts == 1 and (has("delivery_attempt") | not)' \
+  "${OUTBOX_A}" >/dev/null \
+  || fail "completed delivery attempt did not clear its durable fence"
+cp "${LEASE_FIXTURE_DIR}/outbox-a.json" "${OUTBOX_A}"
+cp "${LEASE_FIXTURE_DIR}/outbox-b.json" "${OUTBOX_B}"
+cp "${LEASE_FIXTURE_DIR}/outbox-r.json" "${OUTBOX_R}"
+
 # Delivery keeps failed entries durable, rejects a wrong accepted event and an
 # unsupported same-event status, and accepts a same-event duplicate after the
 # dispatcher committed the first attempt but its acknowledgement was lost.
 # Retries keep byte-identical public event bodies. The fake also proves that no
-# scheduler lock is held during the network call and that executor-owned GitLab
-# credentials are removed from the callback transport environment.
+# scheduler lock is held during the network call and that GitLab credentials
+# remain available to the callback transport process.
 OPENCLAW_LOG="${TEST_ROOT}/openclaw.jsonl"
+OPENCLAW_ARGV_LOG="${TEST_ROOT}/openclaw.argv"
 OPENCLAW_BARRIER_DIR="${TEST_ROOT}/openclaw-barrier"
 FAKE_OPENCLAW="${TEST_ROOT}/fake-openclaw.sh"
 mkdir -p "${OPENCLAW_BARRIER_DIR}"
@@ -810,7 +979,7 @@ cat >"${FAKE_OPENCLAW}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
-secrets_clear=true
+token_env_present=true
 for secret_name in \
   GITLAB_TOKEN \
   GLAB_TOKEN \
@@ -819,11 +988,15 @@ for secret_name in \
   WIKI_GITLAB_TOKEN
 do
   secret_value="${!secret_name-}"
-  [ -z "${secret_value}" ] || secrets_clear=false
+  [ -n "${secret_value}" ] || token_env_present=false
 done
 
 target=""
 message=""
+message_file=""
+if [ -n "${OPENCLAW_ARGV_LOG:-}" ]; then
+  printf '%s\n' '---' "$@" >>"${OPENCLAW_ARGV_LOG}"
+fi
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --session-key)
@@ -834,9 +1007,17 @@ while [ "$#" -gt 0 ]; do
       shift
       message="${1:-}"
       ;;
+    --message-file)
+      shift
+      message_file="${1:-}"
+      ;;
   esac
   [ "$#" -gt 0 ] && shift
 done
+if [ -n "${message_file}" ]; then
+  [ "${message_file}" = /dev/stdin ]
+  message="$(cat)"
+fi
 
 exec 8>"${EXPECT_SCHEDULER_LOCK:?}"
 if ! flock -n 8; then
@@ -846,14 +1027,26 @@ fi
 flock -u 8
 exec 8>&-
 
-body="${message#*worker_result_json=}"
+envelope="${message#*callback_envelope=}"
+jq -e '
+  (keys | sort) == ["callback_nonce","executor_agent","worker_result_json"]
+  and (.callback_nonce | test("^[0-9a-f]{64}$"))
+  and .executor_agent == "req_executor"
+  and (.worker_result_json | keys | sort) == [
+    "batch_id","event_id","iid","mr_url","project","reason","snapshot_index","status"
+  ]
+' <<<"${envelope}" >/dev/null
+body="$(jq -c '.worker_result_json' <<<"${envelope}")"
 event_id="$(jq -er '.event_id' <<<"${body}")"
 jq -nc \
   --arg event_id "${event_id}" \
   --arg target "${target}" \
-  --argjson secrets_clear "${secrets_clear}" \
+  --argjson token_env_present "${token_env_present}" \
+  --arg callback_nonce "$(jq -r '.callback_nonce' <<<"${envelope}")" \
+  --arg executor_agent "$(jq -r '.executor_agent' <<<"${envelope}")" \
   --argjson body "${body}" \
-  '{event_id:$event_id,target:$target,secrets_clear:$secrets_clear,body:$body}' \
+  '{event_id:$event_id,target:$target,token_env_present:$token_env_present,
+    callback_nonce:$callback_nonce,executor_agent:$executor_agent,body:$body}' \
   >>"${OPENCLAW_LOG:?}"
 call_count="$(jq -sr --arg event_id "${event_id}" \
   '[.[] | select(.event_id == $event_id)] | length' "${OPENCLAW_LOG}")"
@@ -899,22 +1092,49 @@ fi
 jq -nc --arg event_id "${event_id}" '{status:"accepted",event_id:$event_id}'
 EOF
 chmod +x "${FAKE_OPENCLAW}"
+: >"${OPENCLAW_ARGV_LOG}"
+export OPENCLAW_ARGV_LOG
 
-export GITLAB_TOKEN='must-not-reach-callback-transport'
-export GLAB_TOKEN='must-not-reach-callback-transport'
-export GITLAB_PRIVATE_TOKEN='must-not-reach-callback-transport'
-export PRIVATE_TOKEN='must-not-reach-callback-transport'
-export WIKI_GITLAB_TOKEN='must-not-reach-callback-transport'
+export GITLAB_TOKEN='callback-transport-token'
+export GLAB_TOKEN='callback-transport-token'
+export GITLAB_PRIVATE_TOKEN='callback-transport-token'
+export PRIVATE_TOKEN='callback-transport-token'
+export WIKI_GITLAB_TOKEN='callback-transport-token'
 
 CONFIG_DIR="${CONFIG_DIR}" \
 OPENCLAW_BIN="${FAKE_OPENCLAW}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
 OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+NOW_EPOCH=2000000000 \
 bash "${DRAIN_OUTBOX}" >/dev/null
-jq -se 'length == 3 and all(.[]; .secrets_clear == true)' \
+grep -Fxq -- '--message-file' "${OPENCLAW_ARGV_LOG}" \
+  || fail "callback transport did not use --message-file"
+grep -Fxq -- '/dev/stdin' "${OPENCLAW_ARGV_LOG}" \
+  || fail "callback transport did not stream the message through stdin"
+if grep -Fxq -- '--message' "${OPENCLAW_ARGV_LOG}"; then
+  fail "callback transport still placed the envelope in --message argv"
+fi
+for private_nonce in \
+  "$(jq -r '.callback_nonce' "${OUTBOX_A}")" \
+  "$(jq -r '.callback_nonce' "${OUTBOX_B}")" \
+  "$(jq -r '.callback_nonce' "${OUTBOX_R}")"
+do
+  if grep -Fq -- "${private_nonce}" "${OPENCLAW_ARGV_LOG}"; then
+    fail "callback nonce leaked into openclaw argv"
+  fi
+done
+jq -se 'length == 3 and all(.[]; .token_env_present == true)' \
   "${OPENCLAW_LOG}" >/dev/null \
-  || fail "callback transport inherited executor-owned GitLab credentials"
+  || fail "callback transport did not inherit GitLab credentials"
+jq -se '
+  all(.[];
+    (.callback_nonce | test("^[0-9a-f]{64}$"))
+    and .executor_agent == "req_executor"
+    and (.body | has("callback_nonce") | not)
+    and (.body | has("executor_agent") | not))
+' "${OPENCLAW_LOG}" >/dev/null \
+  || fail "callback authentication was absent or leaked into public worker_result_json"
 for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}" "${OUTBOX_R}"; do
   jq -e '
     .attempts == 1
@@ -929,6 +1149,7 @@ OPENCLAW_BIN="${FAKE_OPENCLAW}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
 OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+NOW_EPOCH=2000000030 \
 bash "${DRAIN_OUTBOX}" >"${TEST_ROOT}/drain-a.out" &
 DRAIN_PID_A=$!
 CONFIG_DIR="${CONFIG_DIR}" \
@@ -936,10 +1157,14 @@ OPENCLAW_BIN="${FAKE_OPENCLAW}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
 OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+NOW_EPOCH=2000000030 \
 bash "${DRAIN_OUTBOX}" >"${TEST_ROOT}/drain-b.out" &
 DRAIN_PID_B=$!
 wait "${DRAIN_PID_A}"
 wait "${DRAIN_PID_B}"
+
+OUTBOX_B="${SCHEDULER_ROOT}/callback_archive/${EVENT_B}.json"
+OUTBOX_R="${SCHEDULER_ROOT}/callback_archive/${EVENT_R}.json"
 
 jq -e '
   .attempts == 2
@@ -963,7 +1188,9 @@ OPENCLAW_BIN="${FAKE_OPENCLAW}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
 OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
 EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+NOW_EPOCH=2000000090 \
 bash "${DRAIN_OUTBOX}" >/dev/null
+OUTBOX_A="${SCHEDULER_ROOT}/callback_archive/${EVENT_A}.json"
 jq -e '
   .attempts == 3
   and (.delivered_at | type == "number" and . >= 0)
@@ -971,7 +1198,7 @@ jq -e '
 ' "${OUTBOX_A}" >/dev/null \
   || fail "single matching duplicate did not complete delivery after stream rejection"
 [ -f "${OUTBOX_A}" ] && [ -f "${OUTBOX_B}" ] && [ -f "${OUTBOX_R}" ] \
-  || fail "drain deleted durable outbox evidence"
+  || fail "drain did not retain durable outbox evidence in cold archive"
 jq -se \
   --arg event_a "${EVENT_A}" \
   --arg event_b "${EVENT_B}" \
@@ -982,6 +1209,341 @@ jq -se \
   and ((bodies($event_r) | length) == 2 and (bodies($event_r) | unique | length) == 1)
 ' "${OPENCLAW_LOG}" >/dev/null \
   || fail "drain changed the public event body across retries or duplicated a concurrent send"
+
+cold_only_drain="$(CONFIG_DIR="${CONFIG_DIR}" \
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
+  EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+  bash "${DRAIN_OUTBOX}")"
+jq -e '.scanned == 0 and .attempted == 0' <<<"${cold_only_drain}" >/dev/null \
+  || fail "delivered callback history remained in the hot outbox scan"
+
+# Rolling lock-layout upgrade: an old drainer can create the former hot lock
+# after the new process already completed its migration scan. The new drainer
+# must still acquire that late old-path lock before sending the same event.
+ROLLING_FIRST_EVENT='aaa-rolling-lock:snapshot-0:terminal-1'
+ROLLING_RACE_EVENT='zzz-rolling-lock:snapshot-0:terminal-1'
+for rolling_event in "${ROLLING_FIRST_EVENT}" "${ROLLING_RACE_EVENT}"; do
+  jq --arg event_id "${rolling_event}" '
+    .event_id = $event_id
+    | .body.event_id = $event_id
+    | .body.batch_id = ($event_id | split(":")[0])
+    | .attempts = 0
+    | .last_error = null
+    | .delivered_at = null
+    | .ready_at = 1
+    | .next_attempt_at = null
+  ' "${OUTBOX_A}" >"${SCHEDULER_ROOT}/callback_outbox/${rolling_event}.json"
+done
+ROLLING_SCAN_DONE="${TEST_ROOT}/rolling-scan-done"
+ROLLING_OLD_READY="${TEST_ROOT}/rolling-old-ready"
+ROLLING_RELEASE="${TEST_ROOT}/rolling-release"
+ROLLING_SEND_LOG="${TEST_ROOT}/rolling-send.log"
+ROLLING_OPENCLAW="${TEST_ROOT}/rolling-openclaw.sh"
+cat >"${ROLLING_OPENCLAW}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+message=""
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --message) shift; message="${1:-}" ;;
+    --message-file) shift; message_file="${1:-}" ;;
+  esac
+  [ "$#" -gt 0 ] && shift
+done
+if [ -n "${message_file}" ]; then
+  [ "${message_file}" = /dev/stdin ]
+  message="$(cat)"
+fi
+envelope="${message#*callback_envelope=}"
+event_id="$(jq -r '.worker_result_json.event_id' <<<"${envelope}")"
+printf '%s\n' "${event_id}" >>"${ROLLING_SEND_LOG:?}"
+if [ "${event_id}" = "${ROLLING_FIRST_EVENT:?}" ]; then
+  : >"${ROLLING_SCAN_DONE:?}"
+  for _wait in $(seq 1 200); do
+    [ -e "${ROLLING_OLD_READY:?}" ] && break
+    sleep 0.01
+  done
+  [ -e "${ROLLING_OLD_READY}" ]
+fi
+jq -nc --arg event_id "${event_id}" '{status:"accepted",event_id:$event_id}'
+EOF
+chmod +x "${ROLLING_OPENCLAW}"
+: >"${ROLLING_SEND_LOG}"
+(
+  for _wait in $(seq 1 200); do
+    [ -e "${ROLLING_SCAN_DONE}" ] && break
+    sleep 0.01
+  done
+  [ -e "${ROLLING_SCAN_DONE}" ]
+  exec 8>"${SCHEDULER_ROOT}/callback_outbox/.${ROLLING_RACE_EVENT}.lock"
+  flock -x 8
+  : >"${ROLLING_OLD_READY}"
+  for _wait in $(seq 1 300); do
+    [ -e "${ROLLING_RELEASE}" ] && break
+    sleep 0.01
+  done
+  [ -e "${ROLLING_RELEASE}" ]
+  flock -u 8
+) &
+ROLLING_OLD_PID=$!
+CONFIG_DIR="${CONFIG_DIR}" OPENCLAW_BIN="${ROLLING_OPENCLAW}" \
+ROLLING_SEND_LOG="${ROLLING_SEND_LOG}" \
+ROLLING_FIRST_EVENT="${ROLLING_FIRST_EVENT}" \
+ROLLING_SCAN_DONE="${ROLLING_SCAN_DONE}" ROLLING_OLD_READY="${ROLLING_OLD_READY}" \
+NOW_EPOCH=2000000100 DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=86400 \
+bash "${DRAIN_OUTBOX}" >"${TEST_ROOT}/rolling-drain.out" &
+ROLLING_DRAIN_PID=$!
+for _wait in $(seq 1 300); do
+  [ -e "${ROLLING_OLD_READY}" ] && break
+  sleep 0.01
+done
+[ -e "${ROLLING_OLD_READY}" ] || fail "rolling callback old lock was not established"
+sleep 0.2
+if grep -Fxq "${ROLLING_RACE_EVENT}" "${ROLLING_SEND_LOG}"; then
+  : >"${ROLLING_RELEASE}"
+  wait "${ROLLING_OLD_PID}" || true
+  wait "${ROLLING_DRAIN_PID}" || true
+  fail "new callback drainer bypassed a late old-path rolling-upgrade lock"
+fi
+: >"${ROLLING_RELEASE}"
+wait "${ROLLING_OLD_PID}"
+wait "${ROLLING_DRAIN_PID}"
+grep -Fxq "${ROLLING_RACE_EVENT}" "${ROLLING_SEND_LOG}" \
+  || fail "rolling callback did not resume after the old lock released"
+
+# A crash/upgrade can leave the delivered JSON in hot storage after
+# delivered_at was committed. The next drain must archive it without a second
+# network send; otherwise this history remains in every hot scan forever.
+PREDELIVERED_EVENT='batch-pre-delivered:snapshot-0:terminal-1'
+PREDELIVERED_HOT="${SCHEDULER_ROOT}/callback_outbox/${PREDELIVERED_EVENT}.json"
+PREDELIVERED_ARCHIVE="${SCHEDULER_ROOT}/callback_archive/${PREDELIVERED_EVENT}.json"
+jq --arg event_id "${PREDELIVERED_EVENT}" '
+  .event_id = $event_id
+  | .body.event_id = $event_id
+  | .body.batch_id = "batch-pre-delivered"
+  | .attempts = 7
+  | .delivered_at = 12345
+  | .updated_at = 12345
+  | .target = "agent:req_dispatcher:legacy-pre-delivered"
+  | del(.callback_auth_mode, .executor_agent, .callback_nonce)
+' "${OUTBOX_A}" >"${PREDELIVERED_HOT}"
+OPENCLAW_CALLS_BEFORE_PREDELIVERED="$(wc -l <"${OPENCLAW_LOG}" | tr -d ' ')"
+CONFIG_DIR="${CONFIG_DIR}" \
+OPENCLAW_BIN="${FAKE_OPENCLAW}" OPENCLAW_LOG="${OPENCLAW_LOG}" \
+OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
+EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+bash "${DRAIN_OUTBOX}" >/dev/null
+[ ! -e "${PREDELIVERED_HOT}" ] && [ -f "${PREDELIVERED_ARCHIVE}" ] \
+  || fail "pre-delivered hot callback was not idempotently archived"
+jq -e '.callback_auth_mode == "legacy_pre_upgrade"' \
+  "${PREDELIVERED_ARCHIVE}" >/dev/null \
+  || fail "pre-delivered legacy callback was archived without explicit upgrade classification"
+[ "$(wc -l <"${OPENCLAW_LOG}" | tr -d ' ')" = "${OPENCLAW_CALLS_BEFORE_PREDELIVERED}" ] \
+  || fail "pre-delivered hot callback was sent again"
+
+# Upgrade old stable lock files out of the hot JSON directory. Their history
+# must not affect the callback glob/readdir cost or the reported scan count.
+for history_lock_index in $(seq 0 104); do
+  : >"${SCHEDULER_ROOT}/callback_outbox/.history-${history_lock_index}.lock"
+done
+history_lock_drain="$(CONFIG_DIR="${CONFIG_DIR}" \
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  OPENCLAW_BARRIER_DIR="${OPENCLAW_BARRIER_DIR}" \
+  EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
+  bash "${DRAIN_OUTBOX}")"
+jq -e '.scanned == 0 and .attempted == 0' <<<"${history_lock_drain}" >/dev/null \
+  || fail "historical callback locks polluted the hot callback scan"
+if find "${SCHEDULER_ROOT}/callback_outbox" -maxdepth 1 -type f -name '*.lock' \
+    -print -quit | grep -q .; then
+  fail "historical callback locks remained beside hot JSON"
+fi
+[ "$(find "${SCHEDULER_ROOT}/callback_locks" -maxdepth 1 -type f -name '*.lock' | wc -l | tr -d ' ')" -ge 105 ] \
+  || fail "historical callback locks were not migrated to the independent lock directory"
+
+# A large failed callback backlog must not monopolize the executor tick. Limit
+# actual sends per invocation and persist a retry clock so the same earliest
+# entries do not immediately consume every later tick.
+BUDGET_BACKLOG_ARCHIVE="${TEST_ROOT}/budget-backlog-fixture"
+BUDGET_OPENCLAW_LOG="${TEST_ROOT}/budget-openclaw.log"
+mkdir -p "${BUDGET_BACKLOG_ARCHIVE}"
+: >"${BUDGET_OPENCLAW_LOG}"
+for budget_index in $(seq 0 104); do
+  budget_suffix="$(printf '%03d' "${budget_index}")"
+  budget_event="budget-${budget_suffix}:snapshot-0:terminal-1"
+  jq --arg event_id "${budget_event}" --arg batch_id "budget-${budget_suffix}" '
+    .event_id = $event_id
+    | .body.event_id = $event_id
+    | .body.batch_id = $batch_id
+    | .attempts = 0
+    | .last_error = null
+    | .delivered_at = null
+    | .ready_at = 1
+    | .created_at = 1
+    | .updated_at = 1
+    | del(.next_attempt_at)
+  ' "${OUTBOX_A}" >"${SCHEDULER_ROOT}/callback_outbox/${budget_event}.json"
+done
+budget_first_out="$(CONFIG_DIR="${CONFIG_DIR}" \
+  OPENCLAW_BIN="${NOT_READY_OPENCLAW}" \
+  NOT_READY_OPENCLAW_LOG="${BUDGET_OPENCLAW_LOG}" \
+  NOW_EPOCH=1000 DRIVEN_CALLBACK_MAX_ATTEMPTS_PER_TICK=3 \
+  DRIVEN_CALLBACK_BACKOFF_BASE_SECONDS=10 \
+  DRIVEN_CALLBACK_BACKOFF_MAX_SECONDS=100 \
+  bash "${DRAIN_OUTBOX}")"
+jq -e '.attempted == 3 and .failed == 3' <<<"${budget_first_out}" >/dev/null \
+  || fail "outbox tick exceeded its configured delivery-attempt budget"
+jq -e '.attempts == 1 and .next_attempt_at == 1010' \
+  "${SCHEDULER_ROOT}/callback_outbox/budget-000:snapshot-0:terminal-1.json" >/dev/null \
+  || fail "failed callback did not persist its first retry backoff"
+budget_second_out="$(CONFIG_DIR="${CONFIG_DIR}" \
+  OPENCLAW_BIN="${NOT_READY_OPENCLAW}" \
+  NOT_READY_OPENCLAW_LOG="${BUDGET_OPENCLAW_LOG}" \
+  NOW_EPOCH=1000 DRIVEN_CALLBACK_MAX_ATTEMPTS_PER_TICK=3 \
+  DRIVEN_CALLBACK_BACKOFF_BASE_SECONDS=10 \
+  DRIVEN_CALLBACK_BACKOFF_MAX_SECONDS=100 \
+  bash "${DRAIN_OUTBOX}")"
+jq -e '.attempted == 3 and .failed == 3' <<<"${budget_second_out}" >/dev/null \
+  || fail "deferred callback backlog prevented the next bounded drain"
+jq -e '.attempts == 1 and .next_attempt_at == 1010' \
+  "${SCHEDULER_ROOT}/callback_outbox/budget-000:snapshot-0:terminal-1.json" >/dev/null \
+  || fail "callback was retried before its persisted next_attempt_at"
+[ "$(wc -l <"${BUDGET_OPENCLAW_LOG}" | tr -d ' ')" = 6 ] \
+  || fail "bounded drains performed an unexpected number of network sends"
+mv "${SCHEDULER_ROOT}"/callback_outbox/budget-*.json \
+  "${BUDGET_BACKLOG_ARCHIVE}/"
+
+# Rolling upgrade: a trusted pre-upgrade request can already be running before
+# callback auth fields existed. Its real terminal import must still release the
+# scheduler slot and explicitly classify a raw-I3 legacy delivery.
+LEGACY_BATCH_ID='batch-legacy-pre-upgrade'
+LEGACY_JOB_ID="${LEGACY_BATCH_ID}:snapshot-0"
+LEGACY_EVENT_ID="${LEGACY_BATCH_ID}:snapshot-0:terminal-1"
+LEGACY_PHYSICAL_EVENT_ID="${LEGACY_JOB_ID}:claim-1:terminal-1"
+LEGACY_BATCH_DIR="${SCHEDULER_ROOT}/batches/${LEGACY_BATCH_ID}"
+LEGACY_HANDOFF="${TEST_ROOT}/legacy-pre-upgrade-handoff.json"
+LEGACY_OUTBOX_HOT="${SCHEDULER_ROOT}/callback_outbox/${LEGACY_EVENT_ID}.json"
+LEGACY_OUTBOX_ARCHIVE="${SCHEDULER_ROOT}/callback_archive/${LEGACY_EVENT_ID}.json"
+mkdir -p "${LEGACY_BATCH_DIR}"
+jq -cnS --arg batch_id "${LEGACY_BATCH_ID}" '{
+  version:1,
+  batch_id:$batch_id,
+  correlation_id:"legacy-correlation",
+  project:"group/repo",
+  selector:{type:"single",iid:42},
+  force_rerun_pr:false,
+  dispatcher_callback_target:"agent:req_dispatcher:legacy-session",
+  branch:"main"
+}' >"${LEGACY_BATCH_DIR}/request.json"
+jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
+  >"${LEGACY_BATCH_DIR}/snapshot.json"
+jq -cnS --arg batch_id "${LEGACY_BATCH_ID}" --arg job_id "${LEGACY_JOB_ID}" '{
+  version:1,batch_id:$batch_id,status:"running",
+  matched_count:1,terminal_count:0,done_count:0,failed_count:0,
+  timeout_count:0,skipped_count:0,next_snapshot_index:1,
+  request_digest:"legacy-request",snapshot_digest:"legacy-snapshot",
+  memberships:{"0":{snapshot_index:0,iid:42,status:"running",job_id:$job_id}}
+}' >"${LEGACY_BATCH_DIR}/state.json"
+jq --arg batch_id "${LEGACY_BATCH_ID}" --arg job_id "${LEGACY_JOB_ID}" '
+  .batch_order = ((.batch_order + [$batch_id]) | unique)
+  | .active_jobs[$job_id] = {
+      job_id:$job_id,physical_key:"group/repo#42",project:"group/repo",iid:42,
+      branch:"main",entry_mode:"auto",force_rerun_pr:false,status:"running",
+      reservation_seq:99,claim_generation:1,claim_token:"legacy-private-claim",
+      reserved_at:200,updated_at:201,
+      owner:{batch_id:$batch_id,snapshot_index:0},
+      memberships:[{batch_id:$batch_id,snapshot_index:0}]
+    }
+' "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.legacy-running"
+mv "${SCHEDULER_ROOT}/scheduler_state.legacy-running" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+jq -cnS --arg event_id "${LEGACY_PHYSICAL_EVENT_ID}" \
+  --arg job_id "${LEGACY_JOB_ID}" '{
+  version:1,event_id:$event_id,job_id:$job_id,
+  memberships:[],memberships_source:"scheduler_active_job",
+  claim_generation:1,claim_token:"legacy-private-claim",
+  project:"group/repo",iid:42,status:"done",mr_url:null,reason:null
+}' >"${LEGACY_HANDOFF}"
+legacy_import_out="$(CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${LEGACY_HANDOFF}" \
+  NOW_EPOCH=300 bash "${IMPORT_HANDOFF}")" \
+  || fail "trusted pre-upgrade request could not import its terminal handoff"
+jq -e '.status == "imported" and .terminal_recorded == true and .outbox_count == 1' \
+  <<<"${legacy_import_out}" >/dev/null \
+  || fail "pre-upgrade terminal import returned an invalid result"
+jq -e --arg job_id "${LEGACY_JOB_ID}" '.active_jobs | has($job_id) | not' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "pre-upgrade terminal import did not release the scheduler slot"
+jq -e '
+  .callback_auth_mode == "legacy_pre_upgrade"
+  and (has("executor_agent") | not)
+  and (has("callback_nonce") | not)
+  and .target == "agent:req_dispatcher:legacy-session"
+' "${LEGACY_OUTBOX_HOT}" >/dev/null \
+  || fail "pre-upgrade outbox was not explicitly classified without fabricating auth"
+# Also model an outbox file written by the old binary before the importer
+# itself knew about the explicit marker. The drainer must classify that trusted
+# exact legacy shape once before transport.
+jq 'del(.callback_auth_mode)' "${LEGACY_OUTBOX_HOT}" \
+  >"${LEGACY_OUTBOX_HOT}.pre-upgrade"
+mv "${LEGACY_OUTBOX_HOT}.pre-upgrade" "${LEGACY_OUTBOX_HOT}"
+
+LEGACY_OPENCLAW="${TEST_ROOT}/legacy-openclaw.sh"
+LEGACY_OPENCLAW_LOG="${TEST_ROOT}/legacy-openclaw.jsonl"
+cat >"${LEGACY_OPENCLAW}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+target=""
+message=""
+message_file=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --session-key) shift; target="${1:-}" ;;
+    --message) shift; message="${1:-}" ;;
+    --message-file) shift; message_file="${1:-}" ;;
+  esac
+  [ "$#" -gt 0 ] && shift
+done
+if [ -n "${message_file}" ]; then
+  [ "${message_file}" = /dev/stdin ]
+  message="$(cat)"
+fi
+[ "${target}" = "agent:req_dispatcher:legacy-session" ]
+[[ "${message}" == RUN_DRIVEN_BATCH_RESULT$'\n'worker_result_json=* ]]
+[[ "${message}" != *callback_envelope=* ]]
+body="${message#*worker_result_json=}"
+jq -e '(keys | sort) == [
+  "batch_id","event_id","iid","mr_url","project","reason","snapshot_index","status"
+]' <<<"${body}" >/dev/null
+printf '%s\n' "${body}" >>"${LEGACY_OPENCLAW_LOG:?}"
+jq -nc --arg event_id "$(jq -r '.event_id' <<<"${body}")" \
+  '{status:"accepted",event_id:$event_id}'
+EOF
+chmod +x "${LEGACY_OPENCLAW}"
+: >"${LEGACY_OPENCLAW_LOG}"
+legacy_drain_out="$(CONFIG_DIR="${CONFIG_DIR}" OPENCLAW_BIN="${LEGACY_OPENCLAW}" \
+  LEGACY_OPENCLAW_LOG="${LEGACY_OPENCLAW_LOG}" NOW_EPOCH=2000000200 \
+  bash "${DRAIN_OUTBOX}")"
+jq -e '.attempted == 1 and .delivered == 1 and .failed == 0' \
+  <<<"${legacy_drain_out}" >/dev/null \
+  || fail "pre-upgrade raw I3 callback was not delivered"
+[ ! -e "${LEGACY_OUTBOX_HOT}" ] && [ -f "${LEGACY_OUTBOX_ARCHIVE}" ] \
+  || fail "delivered pre-upgrade callback did not leave hot storage"
+jq -e '.callback_auth_mode == "legacy_pre_upgrade"' \
+  "${LEGACY_OUTBOX_ARCHIVE}" >/dev/null \
+  || fail "old outbox shape was not durably upgraded before raw delivery"
+jq -se 'length == 1 and .[0].event_id == "batch-legacy-pre-upgrade:snapshot-0:terminal-1"' \
+  "${LEGACY_OPENCLAW_LOG}" >/dev/null \
+  || fail "pre-upgrade callback did not preserve the strict raw eight-field I3"
+legacy_replay_out="$(CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${LEGACY_HANDOFF}" \
+  NOW_EPOCH=500 bash "${IMPORT_HANDOFF}")" \
+  || fail "delivered legacy_pre_upgrade handoff was not replayable"
+jq -e '.status == "replayed" and .terminal_recorded == true and .outbox_count == 1' \
+  <<<"${legacy_replay_out}" >/dev/null \
+  || fail "legacy_pre_upgrade replay returned an invalid result"
+[ "$(wc -l <"${LEGACY_OPENCLAW_LOG}" | tr -d ' ')" = 1 ] \
+  || fail "legacy_pre_upgrade import replay resent an archived callback"
 
 INVALID_OUTBOX="${SCHEDULER_ROOT}/callback_outbox/not-the-event.json"
 jq '
@@ -1029,11 +1591,12 @@ cat >"${FOLLOWUP_SCRIPTS}/reconcile.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 evidence="${DISPATCHER_LOG_DIR}/reconcile-20260711T000000Z.json"
-jq -cn --argjson iid "${MIN_IID:?}" '[{
+jq -cn --argjson iid "${MIN_IID:?}" \
+  --argjson completed "${RECONCILE_LIVE_COMPLETED:-false}" '[{
   iid:$iid,
-  is_closed_on_gitlab:false,
+  is_closed_on_gitlab:$completed,
   is_done_on_gitlab:false,
-  has_done_pr:false
+  has_done_pr:$completed
 }]' >"${evidence}"
 printf '%s\n' "${evidence}"
 EOF
@@ -1091,6 +1654,8 @@ jq -cnS '{
   timeout_iids:[],
   campaign_status:"waiting_for_callbacks"
 }' >"${FOLLOWUP_STATE}"
+cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/campaign-state-baseline.json"
+: >"${FOLLOWUP_IMPORT_LOG}"
 
 FAKE_IMPORTER="${FOLLOWUP_ROOT}/fake-importer.sh"
 cat >"${FAKE_IMPORTER}" <<'EOF'
@@ -1105,11 +1670,13 @@ fi
 flock -u 8
 exec 8>&-
 
-jq -e '
+jq -e --arg expected_status "${EXPECT_HANDOFF_STATUS:-done}" '
   (.pending_subagents | has("42") | not)
-  and .completed_iids == [42]
+  and (if $expected_status == "done" then .completed_iids == [42]
+       elif $expected_status == "timeout" then .timeout_iids == [42]
+       else .completed_iids == [] and .timeout_iids == [] end)
 ' "${EXPECT_CAMPAIGN_STATE:?}" >/dev/null
-jq -e '
+jq -e --arg expected_status "${EXPECT_HANDOFF_STATUS:-done}" '
   .event_id == "batch-A:snapshot-0:claim-1:terminal-1"
   and .job_id == "batch-A:snapshot-0"
   and .memberships == []
@@ -1118,12 +1685,122 @@ jq -e '
   and .claim_token == "claim-token-42"
   and .project == "group/repo"
   and .iid == 42
-  and .status == "done"
+  and .status == $expected_status
 ' "${HANDOFF_FILE:?}" >/dev/null
 printf '%s\n' "${HANDOFF_FILE}" >>"${FOLLOWUP_IMPORT_LOG:?}"
 exit 47
 EOF
 chmod +x "${FAKE_IMPORTER}"
+
+TIMEOUT_TOKEN_SHA="$(printf '%s' 'claim-token-42' | shasum -a 256 | awk '{print $1}')"
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-wrong-timeout-fence.json"
+wrong_timeout_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_TIMEOUT_RECONCILE=1 \
+  DRIVEN_TIMEOUT_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_TIMEOUT_CLAIM_GENERATION=2 \
+  DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_TIMEOUT_NOW_EPOCH=2000000000 \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "stale_claim"' <<<"${wrong_timeout_out}" >/dev/null \
+  || fail "timeout reconcile accepted a stale claim generation"
+cmp -s "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-wrong-timeout-fence.json" \
+  || fail "stale timeout claim mutated campaign state"
+
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"].spawned_at = "1970-01-01T00:00:01Z"' \
+  "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.not-due"
+mv "${FOLLOWUP_STATE}.not-due" "${FOLLOWUP_STATE}"
+cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-not-due.json"
+not_due_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_TIMEOUT_RECONCILE=1 \
+  DRIVEN_TIMEOUT_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_TIMEOUT_CLAIM_GENERATION=1 \
+  DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_TIMEOUT_NOW_EPOCH=100 \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "not_due"' <<<"${not_due_out}" >/dev/null \
+  || fail "timeout reconcile terminated a claim before its ACPX deadline"
+cmp -s "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-not-due.json" \
+  || fail "not-due timeout reconcile mutated campaign state"
+
+# A lost running callback can be discovered after GitLab already shows the
+# issue closed/pr-complete. The timeout reconciler must preserve those labels
+# while still emitting the exact claim-bound terminal handoff that releases
+# the scheduler slot. A plain ghost drop would strand active_jobs forever.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
+live_completed_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  RECONCILE_LIVE_COMPLETED=true \
+  DRIVEN_TIMEOUT_RECONCILE=1 \
+  DRIVEN_TIMEOUT_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_TIMEOUT_CLAIM_GENERATION=1 \
+  DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_TIMEOUT_NOW_EPOCH=2000000000 \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=skipped EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "skipped"
+' <<<"${live_completed_out}" >/dev/null \
+  || fail "live-completed timeout reconcile did not emit a claim-bound skipped handoff"
+[ "$(wc -l <"${FOLLOWUP_IMPORT_LOG}" | tr -d ' ')" = 1 ] \
+  || fail "live-completed timeout reconcile did not invoke the handoff importer once"
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .completed_iids == []
+  and .timeout_iids == []
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "live-completed timeout reconcile regressed project terminal labels/state"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs-live-completed"
+fi
+
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
+
+due_timeout_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_TIMEOUT_RECONCILE=1 \
+  DRIVEN_TIMEOUT_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_TIMEOUT_CLAIM_GENERATION=1 \
+  DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_TIMEOUT_NOW_EPOCH=2000000000 \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=timeout EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "handled" and .terminal_status == "timeout"' \
+  <<<"${due_timeout_out}" >/dev/null \
+  || fail "due running claim did not synthesize a timeout terminal"
+jq -e '(.pending_subagents | has("42") | not) and .timeout_iids == [42]' \
+  "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "due timeout did not durably drain project pending state"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs-timeout"
+fi
+
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
 
 FOLLOWUP_OUTPUT="$(
   printf '%s\n' '{

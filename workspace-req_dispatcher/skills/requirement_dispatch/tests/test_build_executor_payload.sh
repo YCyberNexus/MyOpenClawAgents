@@ -4,6 +4,8 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-build-executor.XXXXXX")"
+export EXECUTOR_AGENT=req_executor
+export CALLBACK_NONCE='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 payload="$(
   PROJECT="ai-infra/veqp_server_v3" \
@@ -17,7 +19,9 @@ expected='RUN_SINGLE_ISSUE
 project=ai-infra/veqp_server_v3
 iid=312
 correlation_id=reqd-7
-dispatcher_callback_target=agent:req_dispatcher:main'
+dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 if [ "${payload}" != "${expected}" ]; then
   echo "unexpected executor payload" >&2
@@ -39,6 +43,8 @@ project=ai-infra/veqp_server_v3
 iid=312
 correlation_id=reqd-7
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 branch=release/2026.07'
 
 if [ "${payload_with_branch}" != "${expected_with_branch}" ]; then

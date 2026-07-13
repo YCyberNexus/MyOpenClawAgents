@@ -169,11 +169,15 @@ if [ -n "${STATUS_INPUT}" ] && [ -n "${ACTION_INPUT}" ]; then
 fi
 ACTION_MODE=false
 RECOVERED_SPAWNED=false
+RECOVERED_LAUNCH_FAILED=false
 if [ -n "${ACTION_INPUT}" ]; then
   ACTION_MODE=true
   if [ "${ACTION_INPUT}" = recovered_spawned ]; then
     STATUS=spawned
     RECOVERED_SPAWNED=true
+  elif [ "${ACTION_INPUT}" = recovered_launch_failed ]; then
+    STATUS=launch_failed
+    RECOVERED_LAUNCH_FAILED=true
   else
     STATUS="${ACTION_INPUT}"
   fi
@@ -182,7 +186,7 @@ else
 fi
 case "${STATUS}" in
   preparing|spawned|launch_failed|terminal) ;;
-  *) record_die "STATUS/ACTION must be preparing, spawned, recovered_spawned, launch_failed, or terminal" ;;
+  *) record_die "STATUS/ACTION must be preparing, spawned, recovered_spawned, launch_failed, recovered_launch_failed, or terminal" ;;
 esac
 case "${RECORDED_AT}" in
   ''|*[!0-9]*) record_die "NOW_EPOCH must be a non-negative integer" ;;
@@ -220,6 +224,63 @@ esac
 # shellcheck disable=SC1091
 source "${RECORD_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
 
+launch_failed_receipt_file() {
+  local job_id="$1" digest
+  digest="$(printf '%s' "${job_id}" | sha256_text)"
+  printf '%s/%s.json\n' "${LAUNCH_FAILED_RECEIPTS_ROOT}" "${digest}"
+}
+
+load_launch_failed_receipt() {
+  local job_id="$1" receipt_file
+  receipt_file="$(launch_failed_receipt_file "${job_id}")"
+  if [ ! -f "${receipt_file}" ]; then
+    printf '%s\n' null
+    return 0
+  fi
+  jq -ce --arg job_id "${job_id}" '
+    if type == "object"
+      and (keys | sort) == [
+        "action","claim_generation","claim_token_sha256",
+        "job_id","recorded_at","version"
+      ]
+      and .version == 1
+      and .job_id == $job_id
+      and (.claim_generation | type == "number" and . == floor and . > 0)
+      and (.claim_token_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
+      and .action == "launch_failed"
+      and (.recorded_at | type == "number" and . == floor and . >= 0)
+    then .
+    else error("invalid cold launch_failed receipt")
+    end
+  ' "${receipt_file}" \
+    || record_die "cold launch_failed receipt is invalid: ${job_id}" 3
+}
+
+if [ "${RECOVERED_LAUNCH_FAILED}" = true ]; then
+  RECOVERY_ACTION_DIGEST="$(printf '%s' "${JOB_ID}" | sha256_text)"
+  RECOVERY_ACTION_FILE="${EXECUTOR_SCHEDULER_ROOT}/launch_actions/${RECOVERY_ACTION_DIGEST}.json"
+  [ -f "${RECOVERY_ACTION_FILE}" ] \
+    || record_die "recovered_launch_failed durable action is missing: ${JOB_ID}" 3
+  jq -e \
+    --arg job_id "${JOB_ID}" \
+    --argjson generation "${CLAIM_GENERATION_INPUT}" \
+    --arg token "${CLAIM_TOKEN_INPUT}" '
+    type == "object"
+    and .version == 1
+    and .job_id == $job_id
+    and .claim_generation == $generation
+    and .claim_token == $token
+    and .stage == "project_recorded"
+    and .outcome == "launch_failed"
+    and (.ack | type == "object")
+    and (.ack.launch_attempts | type == "number" and . == floor and . > 0)
+    and (.ack.launch_error | type == "string" and length > 0)
+    and (.project_receipt_sha256 | type == "string"
+      and test("^[0-9a-f]{64}$"))
+  ' "${RECOVERY_ACTION_FILE}" >/dev/null \
+    || record_die "recovered_launch_failed durable action does not authorize this claim: ${JOB_ID}" 3
+fi
+
 # Keep the migration implementation single-sourced in reserve. Its private
 # migration-only entry point takes and releases the same scheduler lock, runs
 # no scheduling pass, and leaves a strictly validated state for record.
@@ -233,6 +294,10 @@ exec {SCHEDULER_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
 flock -x "${SCHEDULER_LOCK_FD}"
 
 recover_pending_transaction
+# An old pending transaction can republish a hot receipt after scheduler_env's
+# first migration pass. Compact it again under the same scheduler lock before
+# loading authoritative state.
+scheduler_migrate_hot_launch_failed_receipts
 
 SCHEDULER_STATE="$(jq -ce '
   def valid_launch_failed_receipts:
@@ -285,8 +350,7 @@ BASE_SCHEDULER_STATE="${SCHEDULER_STATE}"
 if ! jq -e --arg job_id "${JOB_ID}" '.active_jobs[$job_id] != null' \
   <<<"${SCHEDULER_STATE}" >/dev/null; then
   if [ "${ACTION_MODE}" = true ] && [ "${STATUS}" = launch_failed ]; then
-    LAUNCH_FAILED_RECEIPT="$(jq -c --arg job_id "${JOB_ID}" \
-      '.launch_failed_receipts[$job_id] // null' <<<"${SCHEDULER_STATE}")"
+    LAUNCH_FAILED_RECEIPT="$(load_launch_failed_receipt "${JOB_ID}")"
     if [ "${LAUNCH_FAILED_RECEIPT}" != null ]; then
       CLAIM_TOKEN_SHA256="$(printf '%s' "${CLAIM_TOKEN_INPUT}" | sha256_text)"
       if ! jq -e \
@@ -434,7 +498,11 @@ else
         || record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3
       ;;
     spawned:preparing|spawned:running) ;;
-    launch_failed:reserved|launch_failed:preparing) ;;
+    launch_failed:reserved)
+      [ "${RECOVERED_LAUNCH_FAILED}" = true ] \
+        || record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3
+      ;;
+    launch_failed:preparing) ;;
     terminal:reserved|terminal:preparing|terminal:running) ;;
     *) record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3 ;;
   esac
@@ -454,7 +522,13 @@ else
       fi
       ;;
     launch_failed|terminal)
-      if [ "${CURRENT_STATUS}" = preparing ] || [ "${CURRENT_STATUS}" = running ]; then
+      if [ "${RECOVERED_LAUNCH_FAILED}" = true ]; then
+        [ "${CURRENT_STATUS}" = reserved ] \
+          && [ "${CURRENT_CLAIM_GENERATION}" -eq "${CLAIM_GENERATION_INPUT}" ] \
+          && [ -z "${CURRENT_CLAIM_TOKEN}" ] \
+          && [ -n "${CLAIM_TOKEN_INPUT}" ] || \
+          record_die "recovered_launch_failed does not match the fenced generation: ${JOB_ID}" 3
+      elif [ "${CURRENT_STATUS}" = preparing ] || [ "${CURRENT_STATUS}" = running ]; then
         [ -n "${CURRENT_CLAIM_TOKEN}" ] \
           && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] || \
           record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
@@ -634,12 +708,11 @@ elif [ "${STATUS}" = launch_failed ]; then
       action:"launch_failed",
       recorded_at:$recorded_at
     }')"
-    SCHEDULER_STATE="$(jq -c \
-      --arg job_id "${JOB_ID}" \
-      --argjson receipt "${LAUNCH_FAILED_RECEIPT}" '
-      .launch_failed_receipts = (.launch_failed_receipts // {})
-      | .launch_failed_receipts[$job_id] = $receipt
-    ' <<<"${SCHEDULER_STATE}")"
+    # Publish the token-digest tombstone before the transaction can remove the
+    # active job. A crash at any later write is replayable from this cold,
+    # directly addressable receipt without growing scheduler_state.json.
+    atomic_write_json "$(launch_failed_receipt_file "${JOB_ID}")" \
+      "${LAUNCH_FAILED_RECEIPT}"
   fi
 else
   SCHEDULER_STATE="$(jq -c --arg job_id "${JOB_ID}" 'del(.active_jobs[$job_id])' <<<"${SCHEDULER_STATE}")"

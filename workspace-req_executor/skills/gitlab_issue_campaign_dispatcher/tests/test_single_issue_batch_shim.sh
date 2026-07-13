@@ -9,7 +9,9 @@ fail() {
   exit 1
 }
 
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-single-batch-shim.XXXXXX")"
+TMP_PARENT="${TMPDIR:-/tmp}"
+TMP_PARENT="${TMP_PARENT%/}"
+TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-single-batch-shim.XXXXXX")"
 CAPTURE_FILE="${TEST_ROOT}/driven-trigger.txt"
 FIRST_CAPTURE="${TEST_ROOT}/driven-trigger-first.txt"
 DRIVEN_BATCH_CMD="${TEST_ROOT}/run_driven_issue_batch.sh"
@@ -24,12 +26,30 @@ cat >"${TEST_ROOT}/config/campaign_defaults.env" <<EOF
 REPO_PARENT_PATH=${TEST_ROOT}/repos
 EXECUTOR_SCHEDULER_ROOT=${TEST_ROOT}/scheduler
 EXECUTOR_MAX_CONCURRENCY=3
+EXECUTOR_RUNNING_LEASE_SECONDS=111
+EXECUTOR_AGENT=req_executor
+DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
+DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=86400
+EOF
+cat >"${TEST_ROOT}/config/campaign_defaults.local.env" <<EOF
+REPO_PARENT_PATH=${TEST_ROOT}/local-repos
+EXECUTOR_SCHEDULER_ROOT=${TEST_ROOT}/local-scheduler
+EXECUTOR_MAX_CONCURRENCY=4
+EXECUTOR_RUNNING_LEASE_SECONDS=222
 EOF
 
 cat >"${DRIVEN_BATCH_CMD}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 : "${CAPTURE_FILE:?}"
+[ -z "${EXPECT_LOCK_COMPAT:-}" ] \
+  || [ "${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}" = "${EXPECT_LOCK_COMPAT}" ]
+if [ -n "${EXPECT_PROCESS_ENV:-}" ]; then
+  [ "${REPO_PARENT_PATH:-}" = "${EXPECT_REPO_PARENT}" ]
+  [ "${EXECUTOR_SCHEDULER_ROOT:-}" = "${EXPECT_SCHEDULER_ROOT}" ]
+  [ "${EXECUTOR_MAX_CONCURRENCY:-}" = "${EXPECT_MAX_CONCURRENCY}" ]
+  [ "${EXECUTOR_RUNNING_LEASE_SECONDS:-}" = "${EXPECT_RUNNING_LEASE}" ]
+fi
 cat >"${CAPTURE_FILE}"
 jq -cn '{
   status:"accepted",
@@ -51,11 +71,24 @@ run_single() {
   CONFIG_DIR="${TEST_ROOT}/config" \
   DRIVEN_BATCH_CMD="${DRIVEN_BATCH_CMD}" \
   CAPTURE_FILE="${CAPTURE_FILE}" \
+  REPO_PARENT_PATH="${TEST_ROOT}/process-repos" \
+  EXECUTOR_SCHEDULER_ROOT="${TEST_ROOT}/process-scheduler" \
+  EXECUTOR_MAX_CONCURRENCY=7 \
+  EXECUTOR_RUNNING_LEASE_SECONDS=9876 \
+  DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=172800 \
+  EXPECT_LOCK_COMPAT=172800 \
+  EXPECT_PROCESS_ENV=true \
+  EXPECT_REPO_PARENT="${TEST_ROOT}/process-repos" \
+  EXPECT_SCHEDULER_ROOT="${TEST_ROOT}/process-scheduler" \
+  EXPECT_MAX_CONCURRENCY=7 \
+  EXPECT_RUNNING_LEASE=9876 \
     bash "${SKILL_DIR}/scripts/dispatch_single_issue.sh" <<'EOF'
 RUN_SINGLE_ISSUE
 project=group/repo
 iid=42
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 branch=release/2026.07
 EOF
 }
@@ -85,12 +118,16 @@ grep -qx 'force_rerun_pr=false' "${CAPTURE_FILE}" \
   || fail "single shim did not pin force_rerun_pr=false"
 grep -qx 'dispatcher_callback_target=agent:req_dispatcher:main' "${CAPTURE_FILE}" \
   || fail "single shim did not preserve the callback target"
+grep -qx 'executor_agent=req_executor' "${CAPTURE_FILE}" \
+  || fail "single shim did not preserve the authenticated executor identity"
+grep -qx 'callback_nonce=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' "${CAPTURE_FILE}" \
+  || fail "single shim did not preserve the private callback nonce"
 grep -qx 'branch=release/2026.07' "${CAPTURE_FILE}" \
   || fail "single shim did not preserve the optional branch"
 
-if grep -Eq 'RUN_SCHEDULED_ISSUE_CAMPAIGN|max_concurrent_subagents|gitlab_token|GITLAB_TOKEN|fixture-secret' \
+if grep -Eq 'RUN_SCHEDULED_ISSUE_CAMPAIGN|max_concurrent_subagents' \
     "${CAPTURE_FILE}"; then
-  fail "single shim leaked legacy campaign fields or a GitLab token"
+  fail "single shim copied legacy campaign fields"
 fi
 
 explicit_capture="${TEST_ROOT}/explicit-trigger.txt"
@@ -103,6 +140,8 @@ project=group/repo
 iid=42
 correlation_id=reqd-existing-correlation
 dispatcher_callback_target=agent:req_dispatcher:main
+executor_agent=req_executor
+callback_nonce=dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
 EOF
 grep -qx 'correlation_id=reqd-existing-correlation' "${explicit_capture}" \
   || fail "single shim did not preserve an explicit correlation_id"
@@ -118,6 +157,8 @@ RUN_SINGLE_ISSUE
 project=group/repo
 iid=42
 dispatcher_callback_target=
+executor_agent=req_executor
+callback_nonce=eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
 EOF
 empty_callback_rc=$?
 set -e

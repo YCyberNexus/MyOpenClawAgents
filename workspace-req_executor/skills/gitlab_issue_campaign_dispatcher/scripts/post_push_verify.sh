@@ -20,12 +20,13 @@ set -euo pipefail
 
 # __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/env_paths.sh"
 
 : "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" "${BRANCH:?}" "${ISSUE_IID:?}"
 
 cd "${WORKTREE_DIR}"
-git fetch origin "${WORK_BRANCH}"
-git fetch origin "${BRANCH}"
+git fetch origin "${WORK_BRANCH}" >&2
+git fetch origin "${BRANCH}" >&2
 
 echo "REMOTE_CLEAN"

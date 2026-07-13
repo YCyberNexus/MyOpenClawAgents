@@ -65,11 +65,6 @@ retire_temp_file() {
   [ -n "${path}" ] || return 0
   [ -e "${path}" ] || return 0
 
-  # Trigger/payload temp files can contain credentials. Blank the file before
-  # moving it out of the active temp path; keep the inode around for audit
-  # instead of deleting it.
-  : >"${path}" 2>/dev/null || true
-
   local retire_dir="${TMPDIR:-/tmp}/req_executor.retired"
   mkdir -p "${retire_dir}" 2>/dev/null || return 0
   mv "${path}" "${retire_dir}/$(basename "${path}").$$.${RANDOM}" 2>/dev/null || true
@@ -147,6 +142,12 @@ fi
 [ "${T[scheduling_mode]:-}"   = "quota_carryover" ] || emit_chat_failure "scheduling_mode must be quota_carryover"
 [ "${T[blocked_policy]:-}"    = "skip_and_retry"  ] || emit_chat_failure "blocked_policy must be skip_and_retry"
 
+DISPATCH_MODE="${T[dispatch_mode]:-scheduled}"
+case "${DISPATCH_MODE}" in
+  scheduled|driven_topup) ;;
+  *) emit_chat_failure "invalid_dispatch_mode" ;;
+esac
+
 # ─── 3. Required scalar validation ────────────────────────────────
 require() {
   local key="$1"
@@ -212,7 +213,6 @@ source "${SCRIPT_DIR}/_dispatch_lib.sh"
 # would convert this into a hard clone failure.
 if [ ! -d "${REPO_PATH}/.git" ]; then
   BOOTSTRAP_CLONE_OUT="$(mktemp)"
-  chmod 600 "${BOOTSTRAP_CLONE_OUT}" 2>/dev/null || true
   CLEANUP_FILES+=("${BOOTSTRAP_CLONE_OUT}")
   set +e
   PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
@@ -224,8 +224,8 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
   # Land diagnostics where an operator can find them. After a successful clone
   # DISPATCHER_LOG_DIR exists (clone_or_pull.sh created it); after a FAILED first
   # clone it does NOT — which is exactly when the error matters most — so fall
-  # back to a fixed out-of-repo path (chmod 600: output may carry the authed
-  # remote URL). This fallback is a deliberate persistent diagnostic, so it is
+  # back to a fixed out-of-repo path. This fallback is a deliberate persistent
+  # diagnostic, so it is
   # NOT registered in CLEANUP_FILES. Raw output never enters chat regardless —
   # the chat reason carries only the file path, never its contents (see the
   # emit_chat_failure contract).
@@ -235,7 +235,6 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
   else
     BOOTSTRAP_LOG_HINT="${TMPDIR:-/tmp}/req_executor.bootstrap.${PROJECT}.log"
     cat "${BOOTSTRAP_CLONE_OUT}" >>"${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
-    chmod 600 "${BOOTSTRAP_LOG_HINT}" 2>/dev/null || true
   fi
   [ "${BOOT_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (bootstrap before flock; exit ${BOOT_RC}; full output in ${BOOTSTRAP_LOG_HINT})"
 fi
@@ -248,12 +247,6 @@ fi
 # Owner admission is the first campaign-state decision under the project lock.
 # In particular, a rejected owner must not reach trigger overrides, pending
 # eviction, reconcile, clone, or any campaign_state.json persistence.
-DISPATCH_MODE="${T[dispatch_mode]:-scheduled}"
-case "${DISPATCH_MODE}" in
-  scheduled|driven_topup) ;;
-  *) emit_chat_failure "invalid_dispatch_mode" ;;
-esac
-
 DRIVEN_REQUEST_JSON=""
 DRIVEN_GRANTS_JSON="[]"
 DRIVEN_EXECUTABLE_GRANTS_JSON="[]"
@@ -309,6 +302,9 @@ OWNER_DECISION="$(dispatch_owner_transition "${STATE_JSON}" \
   "${REQUESTED_OWNER_MODE}" "${REQUESTED_OWNER_ID}" "${OWNER_NOW}")"
 if [ "$(printf '%s' "${OWNER_DECISION}" | jq -r '.allowed')" != "true" ]; then
   OWNER_BUSY_STATUS="$(printf '%s' "${OWNER_DECISION}" | jq -r '.status')"
+  if [ "$(printf '%s' "${OWNER_DECISION}" | jq -r '.migration_required // false')" = "true" ]; then
+    persist_state "$(printf '%s' "${OWNER_DECISION}" | jq -c '.updated_state')"
+  fi
   jq -nc --arg status "${OWNER_BUSY_STATUS}" \
     '{status:$status, dispatch_entries:[], cleanup_actions:[], chat_summary:$status}'
   exit 0
@@ -844,8 +840,10 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     jq -nc \
       --arg ev "${EVIDENCE_PATH}" \
       --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson pending_iids "${CURRENT_PENDING_IIDS_JSON}" \
       --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
-      '{status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+      '{status:"no_eligible_iids", dispatch_entries:[], pending_iids:$pending_iids,
+        skipped_entries:$skipped_entries,
         cleanup_actions:$cleanup_actions, chat_summary:"all driven grants skipped by live preflight",
         last_reconcile_evidence:$ev}'
     exit 0
@@ -911,10 +909,11 @@ set -e
 [ "${EL_RC}" -eq 0 ] || emit_chat_failure "ensure_labels_failed (exit ${EL_RC})"
 
 set +e
-PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-  REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-  BRANCH="${T[branch]:-}" \
+(
+  export PROJECT GROUP GITLAB_TOKEN REPO_PARENT_PATH
+  export BRANCH="${T[branch]:-}"
   bash "${SCRIPT_DIR}/clone_or_pull.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
+)
 CP_RC=$?
 set -e
 [ "${CP_RC}" -eq 0 ] || emit_chat_failure "clone_or_pull_failed (exit ${CP_RC})"
@@ -948,10 +947,14 @@ fi
 ELAPSED_MIN=$(( ($(date -u +%s) - TICK_START_TS) / 60 ))
 if [ "${ELAPSED_MIN}" -ge "${T[max_runtime_minutes]}" ]; then
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    CURRENT_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+      | jq -c '.pending_subagents | keys | map(tonumber) | sort')"
     jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
       --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson pending_iids "${CURRENT_PENDING_IIDS_JSON}" \
       --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
-      '{status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+      '{status:"no_eligible_iids", dispatch_entries:[], pending_iids:$pending_iids,
+        skipped_entries:$skipped_entries,
         cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   else
     jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "time_budget reached before launch (elapsed_min=${ELAPSED_MIN})" \
@@ -1071,10 +1074,14 @@ fi
 BATCH_SIZE="$(printf '%s' "${BATCH_JSON}" | jq -r 'length')"
 if [ "${BATCH_SIZE}" = "0" ]; then
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    CURRENT_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+      | jq -c '.pending_subagents | keys | map(tonumber) | sort')"
     jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
       --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson pending_iids "${CURRENT_PENDING_IIDS_JSON}" \
       --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
-      '{status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+      '{status:"no_eligible_iids", dispatch_entries:[], pending_iids:$pending_iids,
+        skipped_entries:$skipped_entries,
         cleanup_actions:$cleanup_actions, chat_summary:$chat, last_reconcile_evidence:$ev}'
   else
     jq -nc --arg ev "${EVIDENCE_PATH}" --arg chat "no eligible IIDs this tick" \
@@ -1367,7 +1374,8 @@ for iid in "${BATCH_IIDS[@]}"; do
     if ! cp "${MODEL_SETTINGS_SRC}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
       prep_blocked "model_tiers settings copy failed"; continue
     fi
-    git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
+    git -C "${WORKTREE_DIR_X}" update-index \
+      --skip-worktree .claude/settings.json || true
   elif [ -n "${T[claude_settings_path]:-}" ]; then
     csp="${T[claude_settings_path]}"
     case "${csp}" in
@@ -1388,7 +1396,8 @@ for iid in "${BATCH_IIDS[@]}"; do
     if ! cp "${csp}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
       prep_blocked "claude_settings copy failed"; continue
     fi
-    git -C "${WORKTREE_DIR_X}" update-index --skip-worktree .claude/settings.json || true
+    git -C "${WORKTREE_DIR_X}" update-index \
+      --skip-worktree .claude/settings.json || true
   fi
 
   # Read live issue via glab.
@@ -1601,16 +1610,8 @@ PYEOF
     continue
   fi
 
-  # The rendered payload contains the GitLab token (substituted from
-  # {GITLAB_TOKEN}). Tighten permissions so only the agent user can read
-  # it; dispatch_record_spawn.sh STATUS=spawned scrubs the file once the
-  # subagent is launched (the runtime already has the prompt in memory).
-  ( umask 077; printf '%s' "${rendered}" >"${payload_path}" )
-  chmod 600 "${payload_path}" 2>/dev/null || true
+  printf '%s' "${rendered}" >"${payload_path}"
   PAYLOAD_PATH["${iid}"]="${payload_path}"
-  # Clear the in-memory variable so any future diagnostic (a stray
-  # `wrapper_log "rendered ..."`) cannot accidentally leak the token.
-  rendered=""
 
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
@@ -1647,15 +1648,19 @@ SUMMARY="$(printf 'prepared %s/%s IIDs for spawn (max_concurrent=%s)' \
 
 if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    CURRENT_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+      | jq -c '.pending_subagents | keys | map(tonumber) | sort')"
     jq -nc \
       --argjson outcomes "${TICK_OUTCOMES}" \
       --argjson evicted "${EVICTED_IIDS_JSON}" \
       --argjson scope_evicted "${SCOPE_EVICTED_IIDS_JSON}" \
       --argjson cleanup_actions "${CLEANUP_ACTIONS_JSON}" \
+      --argjson pending_iids "${CURRENT_PENDING_IIDS_JSON}" \
       --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
       --arg ev "${EVIDENCE_PATH}" \
       --arg chat "all batch IIDs blocked during prep — see tick_outcome_per_iid" '
-      {status:"no_eligible_iids", dispatch_entries:[], skipped_entries:$skipped_entries,
+      {status:"no_eligible_iids", dispatch_entries:[], pending_iids:$pending_iids,
+       skipped_entries:$skipped_entries,
        evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
        cleanup_actions:$cleanup_actions,
        max_launch_retries:3, backoff_seconds:2,
@@ -1678,8 +1683,11 @@ if [ "${SURVIVOR_COUNT}" -eq 0 ]; then
 fi
 
 if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+  CURRENT_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+    | jq -c '.pending_subagents | keys | map(tonumber) | sort')"
   jq -nc \
     --argjson dispatch_entries "${DISPATCH_ENTRIES}" \
+    --argjson pending_iids "${CURRENT_PENDING_IIDS_JSON}" \
     --argjson skipped_entries "${SKIPPED_ENTRIES_JSON}" \
     --argjson outcomes "${TICK_OUTCOMES}" \
     --argjson evicted "${EVICTED_IIDS_JSON}" \
@@ -1689,7 +1697,8 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     --argjson label_out "${LABEL_FILTERED_OUT_JSON}" \
     --arg ev "${EVIDENCE_PATH}" \
     --arg chat "${SUMMARY}" '
-    {status:"ready", dispatch_entries:$dispatch_entries, skipped_entries:$skipped_entries,
+    {status:"ready", dispatch_entries:$dispatch_entries, pending_iids:$pending_iids,
+     skipped_entries:$skipped_entries,
      max_launch_retries:3, backoff_seconds:2,
      evicted_iids:$evicted, scope_evicted_iids:$scope_evicted,
      cleanup_actions:$cleanup_actions,

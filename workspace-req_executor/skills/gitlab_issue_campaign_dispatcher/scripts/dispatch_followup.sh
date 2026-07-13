@@ -42,6 +42,35 @@ source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_dispatch_lib.sh"
 
+sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "dispatch_followup.sh: no SHA-256 command is available" >&2
+    return 2
+  fi
+}
+
+TIMEOUT_RECONCILE="${DRIVEN_TIMEOUT_RECONCILE:-0}"
+case "${TIMEOUT_RECONCILE}" in
+  0|1) ;;
+  *) echo "dispatch_followup.sh: DRIVEN_TIMEOUT_RECONCILE must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "${TIMEOUT_RECONCILE}" = 1 ]; then
+  : "${DRIVEN_TIMEOUT_JOB_ID:?dispatch_followup.sh: DRIVEN_TIMEOUT_JOB_ID required}"
+  : "${DRIVEN_TIMEOUT_CLAIM_GENERATION:?dispatch_followup.sh: DRIVEN_TIMEOUT_CLAIM_GENERATION required}"
+  : "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256:?dispatch_followup.sh: DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256 required}"
+  : "${DRIVEN_TIMEOUT_NOW_EPOCH:?dispatch_followup.sh: DRIVEN_TIMEOUT_NOW_EPOCH required}"
+  [[ "${DRIVEN_TIMEOUT_CLAIM_GENERATION}" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "dispatch_followup.sh: invalid timeout claim generation" >&2; exit 2; }
+  [[ "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+    || { echo "dispatch_followup.sh: invalid timeout claim digest" >&2; exit 2; }
+  [[ "${DRIVEN_TIMEOUT_NOW_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]] \
+    || { echo "dispatch_followup.sh: invalid timeout clock" >&2; exit 2; }
+fi
+
 # Run the reusable recovery entry for one stable physical event. The caller
 # must release fd 9 first; the drainer itself only snapshots/updates campaign
 # state under that lock and performs materialization/import lock-free.
@@ -161,6 +190,23 @@ if jq -e '
   IS_SCHEDULER_DRIVEN=true
 fi
 
+if [ "${TIMEOUT_RECONCILE}" = 1 ]; then
+  timeout_pending_token="$(jq -r '.claim_token // empty' <<<"${PENDING_ENTRY}")"
+  timeout_pending_digest=""
+  [ -z "${timeout_pending_token}" ] \
+    || timeout_pending_digest="$(printf '%s' "${timeout_pending_token}" | sha256_text)"
+  if [ "${IS_SCHEDULER_DRIVEN}" != true ] \
+      || [ "$(jq -r '.job_id // empty' <<<"${PENDING_ENTRY}")" != "${DRIVEN_TIMEOUT_JOB_ID}" ] \
+      || [ "$(jq -r '.claim_generation // 0' <<<"${PENDING_ENTRY}")" != "${DRIVEN_TIMEOUT_CLAIM_GENERATION}" ] \
+      || [ "${timeout_pending_digest}" != "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256}" ]; then
+    jq -nc --argjson iid "${IID}" '{
+      callback_status:"stale_claim",iid:$iid,
+      chat_summary:("stale timeout claim ignored for #" + ($iid|tostring))
+    }'
+    exit 0
+  fi
+fi
+
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 
 # Synthesized-reply status for a dead subagent (empty / unparseable /
@@ -182,12 +228,23 @@ ACPX_TIMEOUT_S="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.acpx_timeout_seconds 
 [ -n "${ACPX_TIMEOUT_S}" ] || ACPX_TIMEOUT_S="$(printf '%s' "${STATE_JSON}" | jq -r '.acpx_timeout_seconds // 18000')"
 SP_EPOCH="$(iso_to_epoch "$(printf '%s' "${PENDING_ENTRY}" | jq -r '.spawned_at // ""')")"
 if [ "${SP_EPOCH}" -gt 0 ]; then
-  ELAPSED_S=$(( $(date -u +%s) - SP_EPOCH ))
+  CALLBACK_NOW_EPOCH="$(date -u +%s)"
+  [ "${TIMEOUT_RECONCILE}" != 1 ] \
+    || CALLBACK_NOW_EPOCH="${DRIVEN_TIMEOUT_NOW_EPOCH}"
+  ELAPSED_S=$(( CALLBACK_NOW_EPOCH - SP_EPOCH ))
   TIMEOUT_FLOOR_S=$(( ACPX_TIMEOUT_S - 60 ))
   [ "${TIMEOUT_FLOOR_S}" -lt 0 ] && TIMEOUT_FLOOR_S=0
   if [ "${ELAPSED_S}" -ge "${TIMEOUT_FLOOR_S}" ]; then
     SYNTH_STATUS="timeout"
   fi
+fi
+
+if [ "${TIMEOUT_RECONCILE}" = 1 ] && [ "${SYNTH_STATUS}" != timeout ]; then
+  jq -nc --argjson iid "${IID}" '{
+    callback_status:"not_due",iid:$iid,
+    chat_summary:("running claim is not yet due for timeout #" + ($iid|tostring))
+  }'
+  exit 0
 fi
 
 # Read the compact reply from stdin. Empty stdin → synthesize a terminal
@@ -239,6 +296,94 @@ fi
 REPLY_STATUS="$(printf '%s' "${REPLY_JSON}" | jq -r '.status')"
 if [ "${REPLY_STATUS}" != "done" ] && [ -n "${RECON_EVIDENCE_PATH}" ] \
    && phase6_evidence_shows_completed "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
+  if [ "${TIMEOUT_RECONCILE}" = 1 ] && [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
+    # A scheduler-owned running claim still needs its exact terminal I3 even
+    # when GitLab already shows a completed/closed issue. Classify this as a
+    # non-regressing `skipped` handoff instead of running Phase 6 label sync.
+    # The pending claim digest was checked above; the importer independently
+    # rechecks generation+token against active_jobs before releasing the slot.
+    COMPLETED_REASON="GitLab live state already completed/closed during running-timeout reconciliation"
+    COMPLETED_STATE="$(printf '%s' "${STATE_JSON}" | jq -c \
+      --argjson iid "${IID}" --arg project "${PROJECT}" '
+      .pending_subagents       = (.pending_subagents | del(.[($iid|tostring)]))
+      | .active_issue_iids     = (.pending_subagents | keys | map(tonumber) | sort)
+      | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))
+      | if (.active_issue_iids | length) == 0 and .campaign_status == "waiting_for_callbacks"
+        then .campaign_status = "running"
+        else .
+        end
+    ')"
+    COMPLETED_INTENT="$(phase6_build_driven_handoff_intent \
+      "${PENDING_ENTRY}" "${IID}" "${REPLY_ATTEMPT}" \
+      skipped "" "${COMPLETED_REASON}")"
+    COMPLETED_EVENT_ID="$(jq -r '.handoff.event_id' <<<"${COMPLETED_INTENT}")"
+    COMPLETED_STATE="$(phase6_put_driven_handoff_intent \
+      "${COMPLETED_STATE}" "${COMPLETED_INTENT}")"
+    persist_state "${COMPLETED_STATE}"
+    if [ "${DRIVEN_HANDOFF_TEST_FAULT:-}" = crash_after_intent_persist ]; then
+      wrapper_log followup \
+        "live-completed handoff crash fault after intent persist iid=${IID} event_id=${COMPLETED_EVENT_ID}"
+      exit 86
+    fi
+
+    COMPLETED_CLEANUP="$(phase6_decide_cleanup \
+      "${COMPLETED_STATE}" "${IID}" skipped \
+      "$(jq -r '.child_session_key // empty' <<<"${PENDING_ENTRY}")")"
+    COMPLETED_REMAINING="$(jq -c '.pending_subagents | keys | map(tonumber)' \
+      <<<"${COMPLETED_STATE}")"
+    COMPLETED_CAMPAIGN_STATUS="$(jq -r '.campaign_status // "running"' \
+      <<<"${COMPLETED_STATE}")"
+
+    flock -u 9
+    exec 9>&-
+    set +e
+    COMPLETED_DRAIN_OUT="$(drain_driven_handoff_event "${COMPLETED_EVENT_ID}" \
+      2>>"${DISPATCHER_LOG_DIR}/wrapper.log")"
+    COMPLETED_DRAIN_RC=$?
+    set -e
+    COMPLETED_DRAIN_RESULT=""
+    if [ "${COMPLETED_DRAIN_RC}" -eq 0 ]; then
+      COMPLETED_DRAIN_RESULT="$(jq -c --arg event_id "${COMPLETED_EVENT_ID}" \
+        '.results[]? | select(.event_id == $event_id)' \
+        <<<"${COMPLETED_DRAIN_OUT}" 2>/dev/null || true)"
+    fi
+    COMPLETED_HANDOFF_PATH=""
+    COMPLETED_IMPORT_STATUS="pending"
+    if [ -n "${COMPLETED_DRAIN_RESULT}" ]; then
+      COMPLETED_HANDOFF_PATH="$(jq -r '.handoff_path // ""' \
+        <<<"${COMPLETED_DRAIN_RESULT}")"
+      case "$(jq -r '.status' <<<"${COMPLETED_DRAIN_RESULT}")" in
+        imported|imported_cleanup_pending) COMPLETED_IMPORT_STATUS="imported" ;;
+      esac
+    fi
+    wrapper_log followup \
+      "live-completed handoff iid=${IID} event_id=${COMPLETED_EVENT_ID} import_status=${COMPLETED_IMPORT_STATUS} drain_rc=${COMPLETED_DRAIN_RC}"
+    jq -nc \
+      --argjson iid "${IID}" \
+      --argjson attempt_number "${REPLY_ATTEMPT}" \
+      --arg block_reason "${COMPLETED_REASON}" \
+      --argjson cleanup "${COMPLETED_CLEANUP}" \
+      --argjson remaining_pending_iids "${COMPLETED_REMAINING}" \
+      --arg campaign_status "${COMPLETED_CAMPAIGN_STATUS}" \
+      --arg handoff_path "${COMPLETED_HANDOFF_PATH}" \
+      --arg handoff_import_status "${COMPLETED_IMPORT_STATUS}" '{
+      callback_status:"handled",
+      iid:$iid,
+      attempt_number:$attempt_number,
+      terminal_status:"skipped",
+      merge_request_url:"",
+      block_reason:$block_reason,
+      cleanup:$cleanup,
+      remaining_pending_iids:$remaining_pending_iids,
+      campaign_status:$campaign_status,
+      handoff_path:$handoff_path,
+      handoff_import_status:$handoff_import_status,
+      chat_summary:("#" + ($iid|tostring) + " skipped reason=" + $block_reason
+        + " handoff_import=" + $handoff_import_status)
+    }'
+    exit 0
+  fi
+
   DRAINED_STATE="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" --arg project "${PROJECT}" '
     .pending_subagents       = (.pending_subagents | del(.[($iid|tostring)]))
     | .active_issue_iids     = (.pending_subagents | keys | map(tonumber) | sort)

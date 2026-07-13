@@ -49,8 +49,7 @@ source "${SCRIPT_DIR}/branch_utils.sh"
   "${GITLAB_API_PROTOCOL:?run scripts/glab_auth.sh first}"
 BRANCH="${BRANCH:-}"
 
-REMOTE_URL="${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${GROUP}/${PROJECT}.git"
-AUTHED_REMOTE_URL="$(echo "${REMOTE_URL}" | sed "s#://#://oauth2:${GITLAB_TOKEN}@#")"
+AUTHED_REMOTE_URL="${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git"
 
 mkdir -p "$(dirname "${REPO_PATH}")"
 
@@ -77,9 +76,9 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
       exit 12
     fi
     if [ -n "${BRANCH}" ]; then
-      git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
+      git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}" >&2
     else
-      git clone "${AUTHED_REMOTE_URL}" "${REPO_PATH}"
+      git clone "${AUTHED_REMOTE_URL}" "${REPO_PATH}" >&2
     fi
   fi
   flock -u 7
@@ -104,8 +103,8 @@ exec 8>"${LOCK_DIR}/repo.lock"
 flock 8
 
 cd "${REPO_PATH}"
-git remote set-url origin "${AUTHED_REMOTE_URL}"
-git fetch --prune origin
+git remote set-url origin "${AUTHED_REMOTE_URL}" >&2
+git fetch --prune origin >&2
 if [ -z "${BRANCH}" ]; then
   BRANCH="$(resolve_origin_default_branch "${REPO_PATH}")" || {
     echo "clone_or_pull: unable to resolve origin/HEAD default branch" >&2

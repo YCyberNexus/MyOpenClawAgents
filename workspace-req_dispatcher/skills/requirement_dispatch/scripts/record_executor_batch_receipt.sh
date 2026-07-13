@@ -39,6 +39,18 @@ match_count="$(jq -r 'length' <<<"${matches}")"
   || executor_batch_outbox_die "receipt batch_id is missing or duplicated: ${BATCH_ID}" 3
 entry_json="$(jq -c '.[0]' <<<"${matches}")"
 
+if jq -e 'has("callback_nonce")' <<<"${entry_json}" >/dev/null \
+  && ! [[ "${SNAPSHOT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+  executor_batch_outbox_die \
+    "nonce_v1 SNAPSHOT_DIGEST must be 64 lowercase hexadecimal characters" 3
+fi
+persisted_callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${entry_json}")"
+if [ -n "${persisted_callback_nonce}" ] \
+  && [[ "${SNAPSHOT_DIGEST}" == *"${persisted_callback_nonce}"* ]]; then
+  executor_batch_outbox_die \
+    "nonce_v1 receipt contains callback authentication material" 3
+fi
+
 persisted_executor="$(jq -r '.executor_agent' <<<"${entry_json}")"
 [ "${persisted_executor}" = "${EXECUTOR_AGENT}" ] \
   || executor_batch_outbox_die "receipt executor_agent conflicts with intent" 3

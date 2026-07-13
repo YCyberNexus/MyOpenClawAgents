@@ -11,6 +11,20 @@ ensure_state_dirs
 
 DEFAULT_NOTIFY_USER_SCRIPT="${SCRIPT_DIR}/notify_user.sh"
 NOTIFY_USER_SCRIPT="${NOTIFY_USER_SCRIPT:-${DEFAULT_NOTIFY_USER_SCRIPT}}"
+NOTIFICATION_BUDGET="${EXECUTOR_BATCH_NOTIFICATION_BUDGET:-3}"
+RETRY_BASE_SECONDS="${EXECUTOR_BATCH_NOTIFICATION_RETRY_BASE_SECONDS:-30}"
+RETRY_MAX_SECONDS="${EXECUTOR_BATCH_NOTIFICATION_RETRY_MAX_SECONDS:-3600}"
+case "${NOTIFICATION_BUDGET}" in
+  ''|*[!0-9]*|0) echo "EXECUTOR_BATCH_NOTIFICATION_BUDGET must be a positive integer" >&2; exit 2 ;;
+esac
+case "${RETRY_BASE_SECONDS}" in
+  ''|*[!0-9]*|0) echo "EXECUTOR_BATCH_NOTIFICATION_RETRY_BASE_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+case "${RETRY_MAX_SECONDS}" in
+  ''|*[!0-9]*|0) echo "EXECUTOR_BATCH_NOTIFICATION_RETRY_MAX_SECONDS must be a positive integer" >&2; exit 2 ;;
+esac
+[ "${RETRY_MAX_SECONDS}" -ge "${RETRY_BASE_SECONDS}" ] \
+  || { echo "notification retry max must be >= base" >&2; exit 2; }
 
 drain_die() {
   echo "drain_executor_batch_notifications.sh: $1" >&2
@@ -36,6 +50,24 @@ notification_event_key() {
     drain_die "notification key must be one lowercase SHA-256 digest" 3
   fi
   printf '%s\n' "${key}"
+}
+
+iso_from_epoch() {
+  local epoch="$1"
+  date -u -r "${epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ
+}
+
+retry_delay_for_attempt() {
+  local attempts="$1"
+  local delay="${RETRY_BASE_SECONDS}"
+  local index=1
+  while [ "${index}" -lt "${attempts}" ] && [ "${delay}" -lt "${RETRY_MAX_SECONDS}" ]; do
+    delay=$((delay * 2))
+    [ "${delay}" -le "${RETRY_MAX_SECONDS}" ] || delay="${RETRY_MAX_SECONDS}"
+    index=$((index + 1))
+  done
+  printf '%s\n' "${delay}"
 }
 
 initialize_outcome_metadata() {
@@ -120,10 +152,10 @@ load_notifications_locked() {
     if type == "object"
       and (.notifications | type == "array")
       and all(.notifications[];
-        type == "object"
-        and (keys | sort) == [
-          "attempts","delivered_at","event_id","iid","mr_url","origin",
-          "project","reason","status"
+      type == "object"
+      and (keys | sort) == [
+          "attempts","delivered_at","event_id","iid","mr_url","next_attempt_at",
+          "origin","project","reason","status"
         ]
         and (.event_id | printable)
         and (.origin | valid_origin)
@@ -141,6 +173,7 @@ load_notifications_locked() {
         )
         and (.attempts | type == "number" and . == floor and . >= 0)
         and ((.delivered_at == null) or (.delivered_at | printable))
+        and ((.next_attempt_at == null) or (.next_attempt_at | printable))
       )
     then .
     else error("invalid executor batch notifications")
@@ -159,12 +192,134 @@ publish_notifications_locked() {
   mv "${candidate}" "${EXECUTOR_BATCH_NOTIFICATIONS_FILE}"
 }
 
+load_delivered_notification_archive_file() {
+  local archive_file="$1"
+
+  jq -ce '
+    def printable:
+      type == "string"
+      and length > 0
+      and (explode | all(. >= 32 and . != 127));
+    def valid_origin:
+      . == null
+      or (type == "object"
+        and ((keys - [
+          "channel","conversation","reply_agent","source_agent",
+          "source_session","user"
+        ]) | length == 0)
+        and all(to_entries[]; .value | printable));
+    if type == "object"
+      and (keys | sort) == [
+        "attempts","delivered_at","event_id","iid","mr_url","origin",
+        "project","reason","status","version"
+      ]
+      and .version == 1
+      and (.event_id | printable)
+      and (.origin | valid_origin)
+      and (.project | printable)
+      and (
+        ((.status == "done" or .status == "failed"
+            or .status == "timeout" or .status == "skipped")
+          and (.iid | type == "number" and . == floor and . > 0)
+          and (.mr_url == null or (.mr_url | type == "string"))
+          and (.reason == null or (.reason | type == "string")))
+        or (.status == "no_matches"
+          and .iid == null
+          and .mr_url == null
+          and .reason == "无匹配 OPEN Issue")
+      )
+      and (.attempts | type == "number" and . == floor and . >= 0)
+      and (.delivered_at | printable)
+    then .
+    else error("invalid delivered notification archive")
+    end
+  ' "${archive_file}" 2>/dev/null \
+    || drain_die "delivered notification archive is invalid: ${archive_file}" 3
+}
+
+compact_delivered_notification() {
+  local notification_item="$1"
+
+  jq -ce '
+    if type == "object" and .delivered_at != null then {
+      version:1,
+      event_id:.event_id,
+      origin:.origin,
+      project:.project,
+      iid:.iid,
+      status:.status,
+      mr_url:.mr_url,
+      reason:.reason,
+      attempts:.attempts,
+      delivered_at:.delivered_at
+    }
+    else error("cannot archive an undelivered notification")
+    end
+  ' <<<"${notification_item}" 2>/dev/null \
+    || drain_die "cannot compact delivered notification" 3
+}
+
+archive_delivered_notification_locked() {
+  local notification_item="$1"
+  local compact_item event_id archive_key archive_file candidate validated existing
+
+  compact_item="$(compact_delivered_notification "${notification_item}")"
+  event_id="$(jq -r '.event_id' <<<"${compact_item}")"
+  archive_key="$(printf '%s' "${event_id}" | executor_batch_sha256)"
+  [[ "${archive_key}" =~ ^[0-9a-f]{64}$ ]] \
+    || drain_die "delivered notification archive key is invalid" 3
+  archive_file="${EXECUTOR_BATCH_DELIVERED_NOTIFICATIONS_DIR}/${archive_key}.json"
+
+  if [ -e "${archive_file}" ]; then
+    [ -f "${archive_file}" ] \
+      || drain_die "delivered notification archive path is not a regular file: ${archive_file}" 3
+    existing="$(load_delivered_notification_archive_file "${archive_file}")"
+    if [ "$(jq -cS . <<<"${existing}")" != "$(jq -cS . <<<"${compact_item}")" ]; then
+      drain_die "delivered notification archive conflicts with hot state: ${event_id}" 3
+    fi
+    return 0
+  fi
+
+  candidate="$(mktemp "${EXECUTOR_BATCH_DELIVERED_NOTIFICATIONS_DIR}/.${archive_key}.json.XXXXXX")"
+  printf '%s\n' "${compact_item}" >"${candidate}"
+  validated="$(load_delivered_notification_archive_file "${candidate}")"
+  [ "$(jq -cS . <<<"${validated}")" = "$(jq -cS . <<<"${compact_item}")" ] \
+    || drain_die "delivered notification archive changed during validation: ${event_id}" 3
+  mv "${candidate}" "${archive_file}"
+}
+
+compact_delivered_notifications_locked() {
+  local notifications_json="$1"
+  local notification_item next_notifications
+
+  while IFS= read -r notification_item; do
+    [ -n "${notification_item}" ] || continue
+    archive_delivered_notification_locked "${notification_item}"
+  done < <(jq -c '.notifications[] | select(.delivered_at != null)' <<<"${notifications_json}")
+
+  next_notifications="$(jq -c '
+    .notifications |= map(select(.delivered_at == null))
+  ' <<<"${notifications_json}")"
+  if [ "$(jq -cS . <<<"${next_notifications}")" != "$(jq -cS . <<<"${notifications_json}")" ]; then
+    publish_notifications_locked "${next_notifications}"
+  fi
+  printf '%s' "${next_notifications}"
+}
+
 exec 9>"${LOCK_FILE}"
 flock 9
 notifications_json="$(load_notifications_locked)"
 SCANNED_COUNT="$(jq -r '.notifications | length' <<<"${notifications_json}")"
-pending_event_ids="$(jq -r '.notifications[] | select(.delivered_at == null) | .event_id' \
-  <<<"${notifications_json}")"
+notifications_json="$(compact_delivered_notifications_locked "${notifications_json}")"
+NOW_ISO="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+pending_event_ids="$(jq -r \
+  --arg now "${NOW_ISO}" \
+  --argjson budget "${NOTIFICATION_BUDGET}" '
+  [.notifications[]
+    | select(.delivered_at == null)
+    | select(.next_attempt_at == null or .next_attempt_at <= $now)
+  ][: $budget][] | .event_id
+' <<<"${notifications_json}")"
 flock -u 9
 
 ATTEMPTED_COUNT=0
@@ -189,8 +344,20 @@ while IFS= read -r event_id; do
   match_count="$(jq -r --arg event_id "${event_id}" \
     '[.notifications[] | select(.event_id == $event_id)] | length' \
     <<<"${notifications_json}")"
-  [ "${match_count}" -eq 1 ] \
-    || drain_die "notification event_id is missing or duplicated: ${event_id}" 3
+  if [ "${match_count}" -eq 0 ]; then
+    delivered_notification="$(
+      load_executor_delivered_notification_by_event_id_locked "${event_id}"
+    )"
+    if [ "${delivered_notification}" != null ]; then
+      flock -u 9
+      flock -u "${event_lock_fd}"
+      exec {event_lock_fd}>&-
+      continue
+    fi
+    drain_die "notification event_id is missing: ${event_id}" 3
+  elif [ "${match_count}" -ne 1 ]; then
+    drain_die "notification event_id is duplicated: ${event_id}" 3
+  fi
 
   if [ "$(jq -r --arg event_id "${event_id}" \
     '.notifications[] | select(.event_id == $event_id) | .delivered_at != null' \
@@ -252,7 +419,9 @@ while IFS= read -r event_id; do
 
   next_notifications="$(jq -c --arg event_id "${event_id}" '
     .notifications |= map(
-      if .event_id == $event_id then .attempts += 1 else . end
+      if .event_id == $event_id
+      then .attempts += 1 | .next_attempt_at = null
+      else . end
     )
   ' <<<"${notifications_json}")"
   publish_notifications_locked "${next_notifications}"
@@ -278,11 +447,10 @@ while IFS= read -r event_id; do
 
   set +e
   env \
-    -u GITLAB_TOKEN \
-    -u GLAB_TOKEN \
-    -u GITLAB_PRIVATE_TOKEN \
-    -u PRIVATE_TOKEN \
-    -u WIKI_GITLAB_TOKEN \
+    -u CALLBACK_ENVELOPE_JSON \
+    -u callback_envelope \
+    -u WORKER_RESULT_JSON \
+    -u worker_result_json \
     EVENT="${notify_event}" \
     STATUS="${notify_status}" \
     PROJECT="${project}" \
@@ -314,6 +482,23 @@ while IFS= read -r event_id; do
   if [ "${notify_succeeded}" -ne 1 ]; then
     FAILED_COUNT=$((FAILED_COUNT + 1))
     echo "drain_executor_batch_notifications.sh: notify not delivered rc=${notify_rc}; retained ${event_id}" >&2
+    attempts="$(jq -r '.attempts' <<<"${notification_item}")"
+    retry_delay="$(retry_delay_for_attempt "${attempts}")"
+    retry_epoch=$(( $(date -u +%s) + retry_delay ))
+    next_attempt_at="$(iso_from_epoch "${retry_epoch}")"
+    flock 9
+    notifications_json="$(load_notifications_locked)"
+    next_notifications="$(jq -c \
+      --arg event_id "${event_id}" \
+      --arg next_attempt_at "${next_attempt_at}" '
+      .notifications |= map(
+        if .event_id == $event_id and .delivered_at == null
+        then .next_attempt_at = $next_attempt_at
+        else . end
+      )
+    ' <<<"${notifications_json}")"
+    publish_notifications_locked "${next_notifications}"
+    flock -u 9
     flock -u "${event_lock_fd}"
     exec {event_lock_fd}>&-
     continue
@@ -332,7 +517,7 @@ while IFS= read -r event_id; do
     --arg delivered_at "${delivered_at}" '
     .notifications |= map(
       if .event_id == $event_id and .delivered_at == null
-      then .delivered_at = $delivered_at
+      then .delivered_at = $delivered_at | .next_attempt_at = null
       else .
       end
     )

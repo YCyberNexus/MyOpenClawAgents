@@ -8,6 +8,9 @@ set -euo pipefail
 
 DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}"
 TARGET_BRANCH="${TARGET_BRANCH:-}"
+EXECUTOR_AGENT="${EXECUTOR_AGENT:-}"
+CALLBACK_NONCE="${CALLBACK_NONCE:-}"
+ALLOW_LEGACY_PRE_UPGRADE="${ALLOW_LEGACY_PRE_UPGRADE:-false}"
 
 [ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
   || { echo "DISPATCHER_CALLBACK_TARGET must not be empty" >&2; exit 2; }
@@ -20,6 +23,28 @@ case "${DISPATCHER_CALLBACK_TARGET}" in
 esac
 if LC_ALL=C printf '%s' "${DISPATCHER_CALLBACK_TARGET}" | grep -q '[[:cntrl:]]'; then
   echo "DISPATCHER_CALLBACK_TARGET must not contain control characters" >&2
+  exit 2
+fi
+
+if [ -n "${CALLBACK_NONCE}" ]; then
+  [ -n "${EXECUTOR_AGENT}" ] \
+    || { echo "EXECUTOR_AGENT must not be empty for authenticated callbacks" >&2; exit 2; }
+  if ! [[ "${CALLBACK_NONCE}" =~ ^[0-9a-f]{64}$ ]]; then
+    echo "CALLBACK_NONCE must be 64 lowercase hexadecimal characters" >&2
+    exit 2
+  fi
+  case "${EXECUTOR_AGENT}" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      echo "EXECUTOR_AGENT must not contain control characters" >&2
+      exit 2
+      ;;
+  esac
+  if LC_ALL=C printf '%s' "${EXECUTOR_AGENT}" | grep -q '[[:cntrl:]]'; then
+    echo "EXECUTOR_AGENT must not contain control characters" >&2
+    exit 2
+  fi
+elif [ "${ALLOW_LEGACY_PRE_UPGRADE}" != true ]; then
+  echo "CALLBACK_NONCE is required for new RUN_SINGLE_ISSUE requests" >&2
   exit 2
 fi
 
@@ -72,6 +97,11 @@ iid=${IID}
 correlation_id=${CORRELATION_ID}
 dispatcher_callback_target=${DISPATCHER_CALLBACK_TARGET}
 EOF
+
+if [ -n "${CALLBACK_NONCE}" ]; then
+  printf 'executor_agent=%s\n' "${EXECUTOR_AGENT}"
+  printf 'callback_nonce=%s\n' "${CALLBACK_NONCE}"
+fi
 
 if [ -n "${TARGET_BRANCH}" ]; then
   printf 'branch=%s\n' "${TARGET_BRANCH}"

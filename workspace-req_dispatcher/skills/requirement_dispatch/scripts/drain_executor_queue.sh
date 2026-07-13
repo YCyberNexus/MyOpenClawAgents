@@ -5,6 +5,22 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
+# shellcheck source=_executor_batch_outbox_lib.sh
+source "${SCRIPT_DIR}/_executor_batch_outbox_lib.sh"
+
+# Callback secrets are loaded from the claimed durable intent, never inherited
+# from the process environment.
+unset CALLBACK_NONCE CALLBACK_ENVELOPE_JSON callback_envelope
+
+redact_callback_nonce() {
+  local value="$1"
+  local nonce="$2"
+  jq -nr --arg value "${value}" --arg nonce "${nonce}" '
+    if $nonce == "" then $value
+    else $value | gsub($nonce; "[REDACTED_CALLBACK_NONCE]")
+    end
+  '
+}
 
 # The legacy single-Issue bridge cannot complete without a durable callback
 # route. Reject a broken deployment pin before initializing state, consuming a
@@ -35,10 +51,22 @@ write_executor_pending_locked() {
   local active_json="$1"
   local spawned_at="$2"
   local tmp_pending
+  local callback_nonce callback_auth_mode callback_nonce_sha256
+
+  callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${active_json}")"
+  if [ -n "${callback_nonce}" ]; then
+    callback_auth_mode=nonce_v1
+    callback_nonce_sha256="$(executor_callback_nonce_sha256 "${callback_nonce}")"
+  else
+    callback_auth_mode=legacy_pre_upgrade
+    callback_nonce_sha256=""
+  fi
 
   tmp_pending="$(mktemp "${DISPATCHER_DIR}/pending.XXXXXX")"
   jq \
     --argjson active "${active_json}" \
+    --arg callback_auth_mode "${callback_auth_mode}" \
+    --arg callback_nonce_sha256 "${callback_nonce_sha256}" \
     --argjson ts "${spawned_at}" '
     .pending[$active.run_id] = {
       run_id: $active.run_id,
@@ -47,6 +75,8 @@ write_executor_pending_locked() {
       project: ($active.project // null),
       iid: ($active.iid // null),
       correlation_id: ($active.correlation_id // null),
+      callback_auth_mode: $callback_auth_mode,
+      callback_nonce_sha256: (if $callback_nonce_sha256 == "" then null else $callback_nonce_sha256 end),
       child_session_key: ($active.child_session_key // null),
       spawned_at: $ts,
       req_digest: ($active.req_digest // "")
@@ -70,15 +100,22 @@ claim_or_status() {
       return 0
     fi
 
+    callback_nonce="$(jq -r '.queue[0].callback_nonce // ""' <<<"${state}")"
+    if [ -z "${callback_nonce}" ]; then
+      callback_nonce="$(generate_executor_callback_nonce)"
+    fi
+
     tmp="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
     jq \
       --arg cid "${NEW_CORRELATION_ID}" \
+      --arg callback_nonce "${callback_nonce}" \
       --argjson now "${NOW}" '
       (.queue[0]) as $item
       | .queue = (.queue[1:] // [])
       | .active = ($item + {
           correlation_id: $cid,
           run_id: ("executor-" + $item.queue_id),
+          callback_nonce: $callback_nonce,
           launch_state: "launching",
           launch_attempts: 1,
           launch_started_at: $now,
@@ -98,34 +135,41 @@ claim_or_status() {
   fi
 
   active="$(jq -c '.active' <<<"${state}")"
+  public_active="$(jq -c 'del(.callback_nonce, .launch_error)' <<<"${active}")"
   launch_state="$(jq -r '.launch_state // "launched"' <<<"${active}")"
   launch_started_at="$(jq -r '.launch_started_at // 0' <<<"${active}")"
   next_retry_after="$(jq -r '.next_retry_after // 0' <<<"${active}")"
 
   if [ "${launch_state}" = "launched" ]; then
     flock -u 9
-    jq -nc --argjson active "${active}" --argjson queued_count "${queued_count}" \
+    jq -nc --argjson active "${public_active}" --argjson queued_count "${queued_count}" \
       '{status:"busy", reason:"active_executor_pending", active:$active, queued_count:$queued_count}'
     return 0
   fi
 
   if [ "${launch_state}" = "launching" ] && [ $((NOW - launch_started_at)) -lt "${LAUNCH_RECLAIM_SECONDS}" ]; then
     flock -u 9
-    jq -nc --argjson active "${active}" --argjson queued_count "${queued_count}" \
+    jq -nc --argjson active "${public_active}" --argjson queued_count "${queued_count}" \
       '{status:"busy", reason:"launch_in_progress", active:$active, queued_count:$queued_count}'
     return 0
   fi
 
   if [ "${launch_state}" = "launch_failed" ] && [ "${NOW}" -lt "${next_retry_after}" ]; then
     flock -u 9
-    jq -nc --argjson active "${active}" --argjson queued_count "${queued_count}" \
+    jq -nc --argjson active "${public_active}" --argjson queued_count "${queued_count}" \
       '{status:"waiting_retry", active:$active, queued_count:$queued_count}'
     return 0
   fi
 
+  callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${active}")"
+  if [ -z "${callback_nonce}" ]; then
+    callback_nonce="$(generate_executor_callback_nonce)"
+  fi
+
   tmp="$(mktemp "${DISPATCHER_DIR}/executor_queue.XXXXXX")"
-  jq --argjson now "${NOW}" '
+  jq --arg callback_nonce "${callback_nonce}" --argjson now "${NOW}" '
     .active = (.active + {
+      callback_nonce: $callback_nonce,
       launch_state: "launching",
       launch_attempts: ((.active.launch_attempts // 0) + 1),
       launch_started_at: $now,
@@ -158,12 +202,21 @@ correlation_id="$(jq -r '.correlation_id' <<<"${active}")"
 run_id="$(jq -r '.run_id' <<<"${active}")"
 req_digest="$(jq -r '.req_digest // ""' <<<"${active}")"
 target_branch="$(jq -r '.target_branch // ""' <<<"${active}")"
+callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${active}")"
+if [ -n "${callback_nonce}" ]; then
+  allow_legacy_pre_upgrade=false
+else
+  allow_legacy_pre_upgrade=true
+fi
 origin_json="$(jq -c 'if .origin == null then empty else .origin end' <<<"${active}" || true)"
 
 payload="$(
   PROJECT="${project}" \
   IID="${iid}" \
   CORRELATION_ID="${correlation_id}" \
+  EXECUTOR_AGENT="${executor_agent}" \
+  CALLBACK_NONCE="${callback_nonce}" \
+  ALLOW_LEGACY_PRE_UPGRADE="${allow_legacy_pre_upgrade}" \
   DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}" \
   TARGET_BRANCH="${target_branch}" \
   bash "${SCRIPT_DIR}/build_executor_payload.sh"
@@ -190,11 +243,6 @@ while [ "${attempt}" -le "${SPAWN_MAX_ATTEMPTS}" ]; do
   set +e
   envelope="$(
     env \
-    -u GITLAB_TOKEN \
-    -u GLAB_TOKEN \
-    -u GITLAB_PRIVATE_TOKEN \
-    -u PRIVATE_TOKEN \
-    -u WIKI_GITLAB_TOKEN \
     OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}" \
     TARGET_AGENT="${executor_agent}" \
     RUN_ID="${run_id}" \
@@ -211,7 +259,9 @@ while [ "${attempt}" -le "${SPAWN_MAX_ATTEMPTS}" ]; do
   worker_status=""
   accepted_executor="false"
   driven_acceptance_json=null
-  if [ "${run_rc}" -eq 0 ]; then
+  if [ -n "${callback_nonce}" ] && [[ "${envelope}" == *"${callback_nonce}"* ]]; then
+    last_error_text="executor response contains callback authentication material"
+  elif [ "${run_rc}" -eq 0 ]; then
     envelope_status="$(jq -r '.status // "failed"' <<<"${envelope}" 2>/dev/null || printf 'failed')"
     if [ "${envelope_status}" = "success" ]; then
       worker_status="$(jq -r '.worker_result_json.status // ""' <<<"${envelope}" 2>/dev/null || true)"
@@ -356,6 +406,7 @@ if [ "${accepted_executor}" = "true" ]; then
   fi
 
   current_active="$(jq -c '.active // null' "${EXECUTOR_QUEUE_FILE}")"
+  public_current_active="$(jq -c 'if . == null then null else del(.callback_nonce, .launch_error) end' <<<"${current_active}")"
   flock -u 9
   jq -nc \
     --arg status "active_changed_after_launch" \
@@ -366,7 +417,7 @@ if [ "${accepted_executor}" = "true" ]; then
     --arg correlation_id "${correlation_id}" \
     --arg active_matches "${active_matches}" \
     --arg pending_present "${pending_present}" \
-    --argjson active "${current_active}" \
+    --argjson active "${public_current_active}" \
     --argjson queued_count "${queued_count}" \
     '{status:$status, queue_id:$queue_id, project:$project, iid:$iid,
       run_id:$run_id, correlation_id:$correlation_id,
@@ -376,6 +427,7 @@ if [ "${accepted_executor}" = "true" ]; then
 fi
 
 error_text="${last_error_text:-${envelope}}"
+error_text="$(redact_callback_nonce "${error_text}" "${callback_nonce}")"
 failed_at="$(date -u +%s)"
 next_retry_after=$((failed_at + LAUNCH_RETRY_BACKOFF_SECONDS))
 

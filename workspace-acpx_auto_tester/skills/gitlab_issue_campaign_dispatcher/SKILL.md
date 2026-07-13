@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-10.3] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (task=<rendered prompt>, label=#<iid>-att-<NNN>, runtime=subagent, mode=run, cleanup=keep, context=isolated, IDENTICAL task retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked-cc/blocked-dispatcher skip-and-retry (with best-effort partial-work force-push after acpx failures for blocked-cc), terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue; timeout-shaped dead-subagent terminations — empty/unparseable/status-less worker_result_json or stuck-pending eviction arriving after the run outlived acpx_timeout_seconds−60s since spawned_at — are synthesized as timeout too, never as retryable blocked), v2 split-side label model (blocked-cc=CC/subagent-side failures, blocked-dispatcher=dispatcher-synthesized failures including prep/launch_failed/scope-evict/stuck-non-timeout/reply-downgrade/label-sync-fail; failed-cc / failed-dispatcher mirror same split; timeout is unsplit; completion = label pr only, done is transient before pr is added and removed when pr lands; model:{tier} is an orthogonal persistent monotone dimension driven by trigger field model_tiers), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, optional Phase 6 test-result回报 (trigger result_note_enabled, default off, carry-forward: after a terminal done/failed/timeout drains, post_result_note.sh reads the issue's git_issuer-written req_origin marker note and — only if present — posts a structured req_result note for an external 114-side relay to deliver to the original requester; pure glab G1b+G9, best-effort/non-fatal, blocked excluded, no-op when no req_origin), persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
+description: "[SKILL_VERSION=2026-07-13.1] Run a recurring scheduled GitLab issue campaign as a thin LLM orchestrator over three dispatcher-side shell wrappers (dispatch_prepare_tick.sh, dispatch_record_spawn.sh, dispatch_followup.sh). The wrappers own every deterministic step — trigger parsing, state persistence under flock, reconcile, eligibility, per-IID prep, label transitions, executor-prompt rendering, Phase 6 callback handling — and emit single-line JSON envelopes the LLM reads. The LLM only performs the runtime-tool-only operations: anonymous `sessions_spawn` (no name parameter, label=#<iid>-att-<NNN>, timeoutSeconds=30, runTimeoutSeconds=<envelope.run_timeout_seconds>, cleanup=keep, IDENTICAL payload retried up to 3 times with 2-second backoff per §No-Fallback) and best-effort `subagents kill --target <child_session_key>` when followup output or scheduled cleanup_actions request it. Subagents receive the rendered fixed-format executor prompt from a per-IID payload file (the wrapper writes it to ${LOG_DIR}/spawn_payload.txt) and run only the technical workflow described in references/executor_prompt.md. The subagent does NOT load this SKILL and does NOT write state files. Supports quota carryover, backlog-first scheduling, blocked-cc/blocked-dispatcher skip-and-retry (with best-effort partial-work force-push after acpx failures for blocked-cc), terminal timeout parking (acpx wall-clock cap → label=timeout, partial work force-pushed, no MR, no auto-retry; reviewer strips timeout, adds retry, or applies continue to re-enqueue; timeout-shaped dead-subagent terminations — empty/unparseable/status-less worker_result_json or stuck-pending eviction arriving after the run outlived acpx_timeout_seconds−60s since spawned_at — are synthesized as timeout too, never as retryable blocked), v2 split-side label model (blocked-cc=CC/subagent-side failures, blocked-dispatcher=dispatcher-synthesized failures including prep/launch_failed/scope-evict/stuck-non-timeout/reply-downgrade/label-sync-fail; failed-cc / failed-dispatcher mirror same split; timeout is unsplit; completion = label pr only, done is transient before pr is added and removed when pr lands; model:{tier} is an orthogonal persistent monotone dimension driven by trigger field model_tiers), optional per-batch UI-account allocation from the test-team-owned account pool file (relative path under ${REPO_PATH}, opt in via trigger field ui_accounts_relpath with carry-forward persistence — no default; when unconfigured the entire pool flow is skipped and the rendered Claude Code prompt omits its UI accounts section; the relpath is resolved under the project checkout root so the pool may live under any repo subdirectory, not only the data dir) with max_accounts_per_issue capping (default 14) held until callback drains, optional Phase 6 test-result回报 (trigger result_note_enabled, default off, carry-forward: after a terminal done/failed/timeout drains, post_result_note.sh reads the issue's git_issuer-written req_origin marker note and — only if present — posts a structured req_result note for an external 114-side relay to deliver to the original requester; pure glab G1b+G9, best-effort/non-fatal, blocked excluded, no-op when no req_origin), persistent disk state, stuck-pending detection, trigger-scope eviction for pending IIDs outside issue_iids∩[issue_min_iid,issue_max_iid], optional IID whitelist (issue_iids) and live-label inclusion filter (require_labels with or/and combinator) layered on top of the [issue_min_iid,issue_max_iid] range, and compact orchestrator chat output."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, subagents
 ---
 
@@ -45,7 +45,7 @@ agents itself, bypassing `acpx` entirely), and the whole
 | Audience | the OUTER subagent (the runtime-spawned model) | the INNER Claude Code session that `acpx claude exec -f ${LOG_DIR}/prompt.txt` starts |
 | Tells it to | run Steps 0–10: `bash run_acpx_attempt.sh` → stage → push → verify → wiki → labels → MR → pr → summarize → emit compact JSON | implement the GitLab issue using `hulat/agents/*.md` and write spec output under `${OUTPUT_DIR}` |
 | Shape | starts with sentinel `# ACPX_AUTO_TESTER_EXECUTOR_PROMPT_V1`, contains `<config>` / `<issue>` / `<env_contract>` / `<instructions>` XML-style blocks | starts with "You are working on GitLab issue #<iid>. Implement the change ...", markdown headers |
-| Sent how | `sessions_spawn(task=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", runtime="subagent", mode="run", cleanup="keep", context="isolated")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
+| Sent how | `sessions_spawn(payload=<contents of spawn_payload.txt>, label="#<iid>-att-<NNN>", timeoutSeconds=30, runTimeoutSeconds=<run_timeout_seconds>, cleanup="keep")` — anonymous, no session name | NEVER sent over `sessions_spawn`; only read by `acpx` from disk via its `-f` flag inside `run_acpx_attempt.sh` |
 | File on disk | persisted at `${LOG_DIR}/spawn_payload.txt` by the wrapper | persisted at `${LOG_DIR}/prompt.txt` by `build_prompt.sh`, force-added into the MR diff by `stage_and_guard.sh` |
 
 **HARD RULE: `${LOG_DIR}/prompt.txt` is NEVER the spawn payload.** The
@@ -70,13 +70,9 @@ reduced to a small fixed shape.
 ### Path A — `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 
 ```
-1. Bash(timeout=1800):
-   cd "${SKILL_DIR}" && bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'  → envelope
+1. cd "${SKILL_DIR}" && bash scripts/dispatch_prepare_tick.sh <<'TRIGGER_EOF'  → envelope
    <verbatim multi-line trigger_text — every key=value line, no surrounding quotes>
    TRIGGER_EOF
-   # This Bash tool call MUST set timeout=1800. Do not use timeout=300: blue-zone
-   # GitLab label transitions and per-IID preparation can legitimately exceed
-   # five minutes before the wrapper emits its single ready envelope.
    # The `cd` and the `bash` MUST be in the SAME Bash tool call, joined by `&&`.
    # `cd` does NOT persist across exec calls (§Working Directory + SOUL.md
    # §Per-Exec Env Contract); issuing them as two separate tool calls leaves
@@ -106,12 +102,11 @@ reduced to a small fixed shape.
        attempts += 1
        try:
          ack = sessions_spawn(
-                 task=payload,
+                 payload=payload,
                  label=entry.child_label,
-                 runtime="subagent",
-                 mode="run",
-                 cleanup="keep",
-                 context="isolated")
+                 timeoutSeconds=30,
+                 runTimeoutSeconds=envelope.run_timeout_seconds,
+                 cleanup="keep")
          # ack is valid iff both runId AND childSessionKey are non-empty.
          if ack.runId is empty or ack.childSessionKey is empty: ack = null
        except: ack = null
@@ -270,8 +265,8 @@ the wrappers cannot enforce:
 1. **`sessions_spawn` retry contract.** Up to 3 total attempts per IID
    with a fixed 2-second backoff between attempts. Every attempt
    re-issues the IDENTICAL payload (same contents from `payload_path`,
-   same `label`, same `runtime="subagent"`, same `mode="run"`, same
-   `cleanup="keep"`, same `context="isolated"`). Do NOT mutate the payload between attempts;
+   same `label`, same `timeoutSeconds=30`, same `runTimeoutSeconds`,
+   same `cleanup="keep"`). Do NOT mutate the payload between attempts;
    do NOT add a session-name parameter; do NOT switch to a different
    spawn mode; do NOT call any other LLM tool inline. A launch failure
    is anything where the ack does not carry both `runId` AND
@@ -283,8 +278,8 @@ the wrappers cannot enforce:
    parameter".**
 2. **Strictly serial `sessions_spawn` calls.** Never batch multiple
    spawns in a single parallel tool-call block. The local loopback
-   gateway serializes spawn handling per channel with a finite forwarding
-   ceiling; parallel batching
+   gateway serializes spawn handling per channel with a ~10s forwarding
+   ceiling that `timeoutSeconds=30` cannot override; parallel batching
    causes the 2nd+ spawn to return `gateway timeout after 10000ms` with
    an orphaned `childSessionKey`. Issue spawn-1, wait for its ack,
    record it, THEN issue spawn-2.

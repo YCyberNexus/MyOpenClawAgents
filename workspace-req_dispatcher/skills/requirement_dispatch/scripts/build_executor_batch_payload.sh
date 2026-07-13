@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
-# Build the token-free RUN_DRIVEN_ISSUE_BATCH trigger sent to req_executor.
+# Build the canonical RUN_DRIVEN_ISSUE_BATCH trigger sent to req_executor.
 set -euo pipefail
 
 : "${BATCH_ID:?BATCH_ID required}"
 : "${CORRELATION_ID:?CORRELATION_ID required}"
 : "${PROJECT:?PROJECT required}"
 : "${SELECTOR_JSON:?SELECTOR_JSON required}"
+: "${EXECUTOR_AGENT:?EXECUTOR_AGENT required}"
+: "${CALLBACK_NONCE:?CALLBACK_NONCE required}"
 
 FORCE_RERUN_PR="${FORCE_RERUN_PR:-false}"
 DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}"
@@ -49,12 +51,36 @@ validate_scalar_value BATCH_ID "${BATCH_ID}"
 validate_scalar_value CORRELATION_ID "${CORRELATION_ID}"
 validate_scalar_value PROJECT "${PROJECT}"
 validate_scalar_value SELECTOR_JSON "${SELECTOR_JSON}"
+validate_scalar_value EXECUTOR_AGENT "${EXECUTOR_AGENT}"
+validate_scalar_value CALLBACK_NONCE "${CALLBACK_NONCE}"
 validate_scalar_value FORCE_RERUN_PR "${FORCE_RERUN_PR}"
 validate_scalar_value DISPATCHER_CALLBACK_TARGET "${DISPATCHER_CALLBACK_TARGET}"
 validate_scalar_value TARGET_BRANCH "${TARGET_BRANCH}"
 
 if ! [[ "${PROJECT}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; then
   echo "PROJECT must be <group>/<project>, got: ${PROJECT}" >&2
+  exit 2
+fi
+IFS='/' read -r -a PROJECT_SEGMENTS <<<"${PROJECT}"
+for project_segment in "${PROJECT_SEGMENTS[@]}"; do
+  case "${project_segment}" in
+    .|..)
+      echo "PROJECT must not contain dot segments" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if ! [[ "${EXECUTOR_AGENT}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
+  echo "EXECUTOR_AGENT must be a safe agent identity" >&2
+  exit 2
+fi
+if ! [[ "${DISPATCHER_CALLBACK_TARGET}" =~ ^agent:req_dispatcher:[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+  echo "DISPATCHER_CALLBACK_TARGET must pin agent:req_dispatcher:<safe-session>" >&2
+  exit 2
+fi
+if ! [[ "${CALLBACK_NONCE}" =~ ^[0-9a-f]{64}$ ]]; then
+  echo "CALLBACK_NONCE must be 64 lowercase hexadecimal characters" >&2
   exit 2
 fi
 
@@ -114,6 +140,7 @@ RUN_DRIVEN_ISSUE_BATCH
 batch_id=${BATCH_ID}
 correlation_id=${CORRELATION_ID}
 project=${PROJECT}
+executor_agent=${EXECUTOR_AGENT}
 selector_type=${SELECTOR_TYPE}
 EOF
 
@@ -133,6 +160,7 @@ esac
 
 printf 'force_rerun_pr=%s\n' "${FORCE_RERUN_PR}"
 printf 'dispatcher_callback_target=%s\n' "${DISPATCHER_CALLBACK_TARGET}"
+printf 'callback_nonce=%s\n' "${CALLBACK_NONCE}"
 
 if [ -n "${TARGET_BRANCH}" ]; then
   printf 'branch=%s\n' "${TARGET_BRANCH}"
