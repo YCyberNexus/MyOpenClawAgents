@@ -14,8 +14,8 @@ git_issuer 准备与调用 wrapper；所有执行动作进入下面的 batch wra
 
 ## Dispatcher 顶层 trigger
 
-路由第一优先级是首行精确 `RUN_DRIVEN_BATCH_RESULT`；它必须直接进入下面的固定 I3 handler，
-不得落入自然语言动作判断。
+路由第一优先级是首行精确 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`；兼容旧首行
+`RUN_DRIVEN_BATCH_RESULT`。两者都必须直接进入下面的固定 I3 handler，不得落入自然语言动作判断。
 
 ### 自然语言执行
 
@@ -65,17 +65,21 @@ bash scripts/run_executor_batch_tick.sh
 executor outbox 发送的真实 message 是：
 
 ```text
-RUN_DRIVEN_BATCH_RESULT
+RUN_DRIVEN_BATCH_RESULT_ACK_ONLY
 callback_envelope={"callback_nonce":"<64 个小写 hex>","executor_agent":"req_executor","worker_result_json":{"event_id":"<id>","batch_id":"<batch>","snapshot_index":0,"project":"group/subgroup/project","iid":42,"status":"done","mr_url":null,"reason":null}}
+ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。
 ```
 
 ```bash
-WORKER_RESULT_JSON='<完整 RUN_DRIVEN_BATCH_RESULT message>' \
-bash scripts/handle_executor_batch_event.sh
+bash -c 'source scripts/source_dispatcher_env.sh; WORKER_RESULT_JSON="$(cat)" bash scripts/handle_executor_batch_event.sh' <<'CALLBACK_EOF'
+<完整 callback marker message>
+CALLBACK_EOF
 ```
 
 handler 也接受把严格三字段 `callback_envelope` 对象直接放入 `CALLBACK_ENVELOPE_JSON`，但不得由
-LLM 手工解包真实 transport。transport 必须只有精确首行和唯一一行 `callback_envelope=`；外层
+LLM 手工解包真实 transport，也不得把 callback、nonce 或中间命令写入 `/tmp`、workspace 或
+其他临时文件。新 transport 必须恰好包含精确首行、唯一一行 `callback_envelope=`
+和上述逐字匹配的固定第三行；旧 marker 两行格式继续兼容。外层
 必须恰好是 `callback_nonce,executor_agent,worker_result_json`，内层 public I3 仍必须恰好八字段。
 额外行、重复字段、非 object、缺字段或多字段都非零 fail closed，且不得进入 durable apply、
 bridge、通知或网络调用。纯八字段 I3 只兼容已经明确标记 `legacy_pre_upgrade` 的部署前 mirror；
@@ -86,7 +90,8 @@ mirror project、envelope executor_agent 等于路由后 executor。nonce 明文
 acceptance、compact mirror、event ledger、用户通知或日志。
 
 stdout 必须只有一个严格 accepted/duplicate ack JSON；bridge、通知和网络 stdout 均被隔离，
-通知失败只写 stderr/state。
+通知失败只写 stderr/state。最终 assistant 内容必须是该 stdout JSON 原样，禁止前后缀、Markdown、
+解释、总结或第二个对象。旧 marker 只保留输入兼容，不放宽 schema、nonce 或 ack 校验。
 
 ## I1：RUN_DRIVEN_ISSUE_BATCH
 

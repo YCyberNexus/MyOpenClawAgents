@@ -16,12 +16,13 @@ cat >"${FAKE_BIN}/git" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "$*" >>"${GIT_LOG:?}"
-[ "$#" -eq 5 ] && [ "$1" = -C ] && [ "$3" = remote ] \
-  && [ "$4" = get-url ] && [ "$5" = origin ] || exit 97
+[ "$#" -eq 5 ] && [ "$1" = -C ] && [ "$3" = config ] \
+  && [ "$4" = --get-all ] || exit 97
 [ "$2" = "${EXPECTED_LEGACY_PATH:?}" ] || exit 96
-case "${FAKE_GIT_MODE:-}" in
-  origin) printf '%s\n' "${FAKE_GIT_ORIGIN:?}" ;;
-  fail) exit 23 ;;
+case "$5:${FAKE_GIT_MODE:-}" in
+  remote.origin.url:origin) printf '%s\n' "${FAKE_GIT_ORIGIN:?}" ;;
+  remote.origin.url:fail) exit 23 ;;
+  remote.origin.pushurl:*) exit 1 ;;
   *) exit 98 ;;
 esac
 EOF
@@ -34,6 +35,7 @@ run_resolver() {
     REPO_PARENT_PATH="${repo_parent}" \
     GITLAB_API_PROTOCOL=http \
     GITLAB_HOST=gitlab-b.pxsemic.tech:30000 \
+    GITLAB_TOKEN=masked-token \
     FAKE_GIT_MODE="${git_mode}" FAKE_GIT_ORIGIN="${git_origin}" \
     EXPECTED_LEGACY_PATH="${repo_parent}/${project_full##*/}" \
     GIT_LOG="${GIT_LOG}" PATH="${FAKE_BIN}:${PATH}" \
@@ -137,6 +139,18 @@ CONFIG_DIR="${TEST_ROOT}/dispatch-config"
 DRIVEN_BATCH="${TEST_ROOT}/run_driven_issue_batch.sh"
 CAPTURE_FILE="${TEST_ROOT}/driven-trigger.txt"
 mkdir -p "${CONFIG_DIR}"
+cat >"${CONFIG_DIR}/gitlab.env" <<'EOF'
+GITLAB_HOST=tracked-blue.example:30000
+GITLAB_API_PROTOCOL=http
+GITLAB_TOKEN=tracked-token-must-not-reach-local
+EOF
+cat >"${CONFIG_DIR}/campaign_defaults.local.env" <<'EOF'
+GITLAB_HOST=localhost:8081
+GITLAB_API_PROTOCOL=http
+GITLAB_TOKEN=local-single-token
+REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true
+REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS=localhost:8081
+EOF
 cat >"${DRIVEN_BATCH}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

@@ -13,6 +13,21 @@ fail() {
 if grep -Fq 'sessions_spawn' "${SKILL_DIR}/SKILL.md"; then
   fail "req_dispatcher runtime skill must not call sessions_spawn"
 fi
+grep -Fq 'RUN_DRIVEN_BATCH_RESULT_ACK_ONLY' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must route the ack-only callback marker"
+grep -Fq 'ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。' \
+  "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must include the exact third-line callback instruction"
+grep -Fq '最终 assistant 内容必须严格等于' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must require an exact handler stdout final response"
+grep -Fq '禁止添加任何前后缀、Markdown' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must forbid callback ack prose and Markdown"
+grep -Fq "<<'CALLBACK_EOF'" "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must require the fixed callback stdin heredoc"
+grep -Fq '不得把 callback 或 nonce' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must forbid temporary callback files"
+grep -Fq '旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must preserve the old callback marker"
 grep -Fq 'openclaw agent --timeout' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the req_dispatcher CLI timeout"
 grep -Fq 'agents.defaults.subagents.runTimeoutSeconds' "${WORKSPACE_DIR}/config/README.md" \

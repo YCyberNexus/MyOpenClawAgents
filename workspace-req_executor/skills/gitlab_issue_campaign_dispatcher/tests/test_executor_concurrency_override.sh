@@ -64,6 +64,7 @@ printf '%s' "${request}" | \
   EXECUTOR_RUNNING_LEASE_SECONDS=333 \
   GITLAB_HOST=gitlab.process.test \
   GITLAB_API_PROTOCOL=http \
+  GITLAB_TOKEN=topup-process-token \
   EXPECTED_REPO_PARENT="${TEST_ROOT}/repos/group" \
   EXPECTED_SCHEDULER_ROOT="${TEST_ROOT}/process-topup-scheduler" \
   EXPECTED_MAX_CONCURRENCY=5 \
@@ -240,6 +241,7 @@ tick_output="$(EXECUTOR_SCHEDULER_ROOT="${OVERRIDE_ROOT}" \
   DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:custom-session \
   GITLAB_HOST=gitlab.tick.process.test \
   GITLAB_API_PROTOCOL=http \
+  GITLAB_TOKEN=tick-process-token \
   FAKE_OUTBOX_FAILED=105 \
   DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=172800 \
   TEST_ROOT="${TEST_ROOT}" OVERRIDE_ROOT="${OVERRIDE_ROOT}" \
@@ -276,6 +278,8 @@ jq -cnS --arg job_id "${job_id}" '{
   batch_id:"override-batch",snapshot_index:0,attempt_number:1,
   child_label:"reqx-iid42-gen1-0123456789abcdef0123456789abcdef01234567",
   runtime_label_version:1,payload_path:"/private/payload",
+  expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+  expected_task_bytes:42,
   claim_generation:1,claim_token:"private-override-claim",
   stage:"action_emitted",outcome:null,ack:null,created_at:1,updated_at:1
 }' >"${OVERRIDE_ROOT}/launch_actions/${job_digest}.json"
@@ -291,11 +295,14 @@ jq -cn --arg job_id "${job_id}" '{
 record_output="$(jq -cn --arg job_id "${job_id}" '{
   job_id:$job_id,claim_generation:1,project:"group/repo",iid:42,
   attempt_number:1,status:"spawned",run_id:"override-run",
+  expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+  expected_task_bytes:42,
   child_session_key:"agent:req_executor:subagent:override"
 }' | EXECUTOR_SCHEDULER_ROOT="${OVERRIDE_ROOT}" EXECUTOR_MAX_CONCURRENCY=5 \
   EXECUTOR_RUNNING_LEASE_SECONDS=9876 \
   GITLAB_HOST=gitlab.record.process.test \
   GITLAB_API_PROTOCOL=http \
+  GITLAB_TOKEN=record-process-token \
   EXECUTOR_AGENT=custom_executor \
   DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:custom-session \
   DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=172800 \
@@ -392,7 +399,10 @@ done
 [ -z "${message_file}" ] || message="$(cat)"
 [ "${agent}" = req_dispatcher ]
 [ "${target}" = agent:req_dispatcher:custom-session ]
+ACK_ONLY_INSTRUCTION='ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。'
+[[ "${message}" == RUN_DRIVEN_BATCH_RESULT_ACK_ONLY$'\n'callback_envelope=*$'\n'"${ACK_ONLY_INSTRUCTION}" ]]
 envelope="${message#*callback_envelope=}"
+envelope="${envelope%%$'\n'*}"
 jq -e --arg nonce "${AUTH_NONCE:?}" '
   .executor_agent == "custom_executor"
   and .callback_nonce == $nonce
@@ -404,6 +414,7 @@ chmod +x "${AUTH_OPENCLAW}"
 auth_drain="$(CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_SCHEDULER_ROOT="${AUTH_ROOT}" \
   EXECUTOR_AGENT=custom_executor \
   DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:custom-session \
+  OPENCLAW_AGENT_HELP_OVERRIDE=$'  --session-key <key>\n  --message-file <path>' \
   OPENCLAW_BIN="${AUTH_OPENCLAW}" AUTH_NONCE="${AUTH_NONCE}" \
   NOW_EPOCH=2000000000 bash "${DRAIN_SCRIPT}")"
 jq -e '.attempted == 1 and .delivered == 1 and .failed == 0' \

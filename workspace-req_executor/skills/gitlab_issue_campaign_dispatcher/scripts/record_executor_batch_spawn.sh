@@ -42,20 +42,38 @@ if ! INPUT_JSON="$(jq -ce '
       and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
     and (.iid | type == "number" and . == floor and . > 0)
     and (.attempt_number | type == "number" and . == floor and . > 0);
-  if type != "object" or (common | not) then error("invalid common fields")
+  def task_identity:
+    (.expected_task_sha256 | type == "string"
+      and test("^[0-9a-f]{64}$"))
+    and (.expected_task_bytes | type == "number"
+      and . == floor and . > 0);
+  def has_task_identity:
+    has("expected_task_sha256") and has("expected_task_bytes");
+  if type != "object" or (common | not)
+      or (has_task_identity and (task_identity | not))
+      or (has("expected_task_sha256") != has("expected_task_bytes"))
+    then error("invalid common fields")
   elif .status == "spawned" then
-    if (keys | sort) == [
+    if ((keys | sort) == [
         "attempt_number","child_session_key","claim_generation","iid",
         "job_id","project","run_id","status"
-      ]
+      ] or (keys | sort) == [
+        "attempt_number","child_session_key","claim_generation",
+        "expected_task_bytes","expected_task_sha256","iid",
+        "job_id","project","run_id","status"
+      ])
       and (.run_id | clean_string)
       and (.child_session_key | clean_string)
     then . else error("invalid spawned result") end
   elif .status == "launch_failed" then
-    if (keys | sort) == [
+    if ((keys | sort) == [
         "attempt_number","claim_generation","iid","job_id","launch_attempts",
         "launch_error","project","status"
-      ]
+      ] or (keys | sort) == [
+        "attempt_number","claim_generation","expected_task_bytes",
+        "expected_task_sha256","iid","job_id","launch_attempts",
+        "launch_error","project","status"
+      ])
       and (.launch_attempts | type == "number" and . == floor and . > 0 and . <= 3)
       and (.launch_error | type == "string" and length > 0 and length <= 1024
         and (explode | all(. >= 32 and . != 127)))
@@ -65,11 +83,6 @@ if ! INPUT_JSON="$(jq -ce '
   die "stdin must be one strict spawned or launch_failed result object"
 fi
 
-GITLAB_TOKEN_PROCESS_OVERRIDE="${GITLAB_TOKEN:-}"
-GITLAB_HOST_PROCESS_SET="${GITLAB_HOST+x}"
-GITLAB_HOST_PROCESS_OVERRIDE="${GITLAB_HOST:-}"
-GITLAB_PROTOCOL_PROCESS_SET="${GITLAB_API_PROTOCOL+x}"
-GITLAB_PROTOCOL_PROCESS_OVERRIDE="${GITLAB_API_PROTOCOL:-}"
 REPO_PARENT_PROCESS_OVERRIDE="${REPO_PARENT_PATH:-}"
 SCHEDULER_ROOT_PROCESS_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 SCHEDULER_ROOT_PROCESS_OVERRIDE="${EXECUTOR_SCHEDULER_ROOT:-}"
@@ -85,20 +98,19 @@ LOCK_COMPAT_PROCESS_SET="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS+x}"
 LOCK_COMPAT_PROCESS_OVERRIDE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
 [ -f "${CONFIG_DIR}/gitlab.env" ] || die "missing config/gitlab.env"
 [ -f "${CONFIG_DIR}/campaign_defaults.env" ] || die "missing config/campaign_defaults.env"
+# Resolve host/protocol/token atomically before campaign defaults are sourced.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/gitlab_env_resolver.sh"
+GITLAB_HOST_RESOLVED="${GITLAB_HOST}"
+GITLAB_PROTOCOL_RESOLVED="${GITLAB_API_PROTOCOL}"
+GITLAB_TOKEN_RESOLVED="${GITLAB_TOKEN}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/gitlab.env"
-GITLAB_TOKEN_PIN="${GITLAB_TOKEN:-}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/campaign_defaults.env"
 if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   # shellcheck disable=SC1091
   source "${CONFIG_DIR}/campaign_defaults.local.env"
-fi
-if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
-  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
-fi
-if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
-  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
 fi
 if [ "${SCHEDULER_ROOT_PROCESS_SET}" = x ]; then
   EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT_PROCESS_OVERRIDE}"
@@ -118,7 +130,9 @@ fi
 if [ "${LOCK_COMPAT_PROCESS_SET}" = x ]; then
   DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_PROCESS_OVERRIDE}"
 fi
-GITLAB_TOKEN_EFF="${GITLAB_TOKEN_PROCESS_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"
+GITLAB_HOST="${GITLAB_HOST_RESOLVED}"
+GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_RESOLVED}"
+GITLAB_TOKEN_EFF="${GITLAB_TOKEN_RESOLVED}"
 REPO_PARENT_BASE="${REPO_PARENT_PROCESS_OVERRIDE:-${REPO_PARENT_PATH:-/data}}"
 [ -n "${GITLAB_TOKEN_EFF}" ] || die "executor GitLab credential is unavailable"
 : "${GITLAB_HOST:?record_executor_batch_spawn.sh: GITLAB_HOST missing}"
@@ -126,12 +140,8 @@ REPO_PARENT_BASE="${REPO_PARENT_PROCESS_OVERRIDE:-${REPO_PARENT_PATH:-/data}}"
 
 # shellcheck disable=SC1090
 source "${SCHEDULER_ENV_CMD}" >/dev/null
-if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
-  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
-fi
-if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
-  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
-fi
+GITLAB_HOST="${GITLAB_HOST_RESOLVED}"
+GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_RESOLVED}"
 if [ "${RUNNING_LEASE_PROCESS_SET}" = x ]; then
   EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_PROCESS_OVERRIDE}"
 fi
@@ -142,6 +152,8 @@ PROJECT_FULL="$(jq -r '.project' <<<"${INPUT_JSON}")"
 IID="$(jq -r '.iid' <<<"${INPUT_JSON}")"
 ATTEMPT_NUMBER="$(jq -r '.attempt_number' <<<"${INPUT_JSON}")"
 RESULT_STATUS="$(jq -r '.status' <<<"${INPUT_JSON}")"
+EXPECTED_TASK_SHA256_INPUT="$(jq -r '.expected_task_sha256 // empty' <<<"${INPUT_JSON}")"
+EXPECTED_TASK_BYTES_INPUT="$(jq -r '.expected_task_bytes // empty' <<<"${INPUT_JSON}")"
 
 if [ "${RESULT_STATUS}" = spawned ]; then
   ACK_JSON="$(jq -c '{run_id,child_session_key}' <<<"${INPUT_JSON}")"
@@ -186,12 +198,17 @@ if [ "${ACTION_JSON}" = null ]; then
   }
   flock -u "${CLAIM_LOCK_FD}"
   exec {CLAIM_LOCK_FD}>&-
+  [ -n "${EXPECTED_TASK_SHA256_INPUT}" ] \
+    && [ -n "${EXPECTED_TASK_BYTES_INPUT}" ] \
+    || die "task identity is required when recovering an uncoordinated spawn result"
   NOW_EPOCH_VALUE="$(date +%s)"
   ACTION_JSON="$(jq -cnS \
     --arg job_id "${JOB_ID}" \
     --arg project "${PROJECT_FULL}" \
     --argjson iid "${IID}" \
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --arg expected_task_sha256 "${EXPECTED_TASK_SHA256_INPUT}" \
+    --argjson expected_task_bytes "${EXPECTED_TASK_BYTES_INPUT}" \
     --argjson claim_generation "${CLAIM_GENERATION}" \
     --arg claim_token "${CLAIM_TOKEN}" \
     --arg outcome "${RESULT_STATUS}" \
@@ -202,6 +219,8 @@ if [ "${ACTION_JSON}" = null ]; then
       project:$project,
       iid:$iid,
       attempt_number:$attempt_number,
+      expected_task_sha256:$expected_task_sha256,
+      expected_task_bytes:$expected_task_bytes,
       claim_generation:$claim_generation,
       claim_token:$claim_token,
       stage:"ack_received",
@@ -212,12 +231,27 @@ if [ "${ACTION_JSON}" = null ]; then
     }')"
   dlc_write "${ACTION_JSON}"
 else
+  ACTION_TASK_SHA256="$(jq -r '.expected_task_sha256' <<<"${ACTION_JSON}")"
+  ACTION_TASK_BYTES="$(jq -r '.expected_task_bytes' <<<"${ACTION_JSON}")"
+  if [ -n "${EXPECTED_TASK_SHA256_INPUT}" ]; then
+    [ "${EXPECTED_TASK_SHA256_INPUT}" = "${ACTION_TASK_SHA256}" ] \
+      && [ "${EXPECTED_TASK_BYTES_INPUT}" = "${ACTION_TASK_BYTES}" ] \
+      || die "spawn result task identity conflicts with the durable launch action"
+  else
+    # Compatibility for the fixed reconciliation wrapper: its runtime evidence
+    # names the durable action, so recover the task identity from that already
+    # persisted action instead of from model/chat memory.
+    EXPECTED_TASK_SHA256_INPUT="${ACTION_TASK_SHA256}"
+    EXPECTED_TASK_BYTES_INPUT="${ACTION_TASK_BYTES}"
+  fi
   if ! jq -e \
       --arg job_id "${JOB_ID}" \
       --arg project "${PROJECT_FULL}" \
       --argjson iid "${IID}" \
       --argjson attempt_number "${ATTEMPT_NUMBER}" \
       --argjson claim_generation "${CLAIM_GENERATION}" \
+      --arg expected_task_sha256 "${EXPECTED_TASK_SHA256_INPUT}" \
+      --argjson expected_task_bytes "${EXPECTED_TASK_BYTES_INPUT}" \
       --arg outcome "${RESULT_STATUS}" \
       --argjson ack "${ACK_JSON}" '
       .job_id == $job_id
@@ -225,6 +259,8 @@ else
       and .iid == $iid
       and .attempt_number == $attempt_number
       and .claim_generation == $claim_generation
+      and .expected_task_sha256 == $expected_task_sha256
+      and .expected_task_bytes == $expected_task_bytes
       and (if (.stage == "topup_prepared" or .stage == "preparing_claimed"
           or .stage == "bound" or .stage == "action_emitted")
         then (.outcome == null or .outcome == $outcome)
@@ -288,6 +324,8 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
       DRIVEN_JOB_ID="${JOB_ID}" \
       DRIVEN_CLAIM_GENERATION="${CLAIM_GENERATION}" \
       DRIVEN_CLAIM_TOKEN="${CLAIM_TOKEN}" \
+      EXPECTED_TASK_SHA256="${EXPECTED_TASK_SHA256_INPUT}" \
+      EXPECTED_TASK_BYTES="${EXPECTED_TASK_BYTES_INPUT}" \
       RUN_ID="$(jq -r '.run_id' <<<"${ACK_JSON}")" \
       CHILD_SESSION_KEY="$(jq -r '.child_session_key' <<<"${ACK_JSON}")" \
       bash "${PROJECT_RECORD_CMD}" 2>/dev/null)"
@@ -301,6 +339,8 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
       DRIVEN_JOB_ID="${JOB_ID}" \
       DRIVEN_CLAIM_GENERATION="${CLAIM_GENERATION}" \
       DRIVEN_CLAIM_TOKEN="${CLAIM_TOKEN}" \
+      EXPECTED_TASK_SHA256="${EXPECTED_TASK_SHA256_INPUT}" \
+      EXPECTED_TASK_BYTES="${EXPECTED_TASK_BYTES_INPUT}" \
       LAUNCH_ATTEMPTS="$(jq -r '.launch_attempts' <<<"${ACK_JSON}")" \
       LAUNCH_ERROR="$(jq -r '.launch_error' <<<"${ACK_JSON}")" \
       bash "${PROJECT_RECORD_CMD}" 2>/dev/null)"

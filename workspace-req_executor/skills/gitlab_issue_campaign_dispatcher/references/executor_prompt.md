@@ -1,22 +1,36 @@
 # Executor Prompt Template (Subagent Task)
 
-The dispatcher extracts the fenced "Rendered Prompt" block below, renders it into a single string, and ships that string as the entire anonymous `sessions_spawn` payload for the issue. The subagent **does NOT load any SKILL, SOUL.md, or AGENTS.md**. Everything it needs is in the rendered prompt below.
+The dispatcher extracts the fenced "Rendered Prompt" block below and writes
+the rendered string to a private mode-600 `executor_payload.txt`. The anonymous
+`sessions_spawn` task is a separate small, secret-free bootstrap containing a
+private manifest path plus hashes, sizes, and identity. The subagent validates
+that manifest and this payload before reading it. The subagent **does NOT load
+any SKILL, SOUL.md, or AGENTS.md**. Everything it needs after bootstrap
+validation is in the rendered prompt below.
 
 The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
 
-> **HARD — do not confuse this with `${LOG_DIR}/prompt.txt`.** The rendered block below is the OUTER subagent's spawn payload (run Steps 0–9, including the `bash run_acpx_attempt.sh` invocation). The file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is a completely different prompt — it is the INNER Claude Code prompt that `acpx claude exec -f` reads from disk inside `run_acpx_attempt.sh`. NEVER pass `${LOG_DIR}/prompt.txt` (or `build_prompt.sh`'s stdout) to `sessions_spawn`; that would make the OUTER subagent skip `run_acpx_attempt.sh` and bypass the stage/push/MR pipeline. See SKILL.md §Two prompts you MUST NOT confuse for the full comparison.
+> **HARD — do not confuse the three layers.** The rendered block below is the
+> private OUTER executor payload that runs Steps 0–9, including
+> `bash run_acpx_attempt.sh`; it is read only after bootstrap verification. The
+> file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is the
+> INNER Claude Code prompt read by `acpx claude exec -f`. Neither file is sent
+> directly to `sessions_spawn`; only `${LOG_DIR}/spawn_payload.txt`, the
+> secret-free bootstrap, is sent. See SKILL.md §Three task layers you MUST NOT
+> confuse for the full comparison.
 
 ---
 
 ## Template Variables
 
-The dispatcher substitutes these before passing the rendered string to `sessions_spawn`. Every uppercase brace placeholder in the rendered block MUST be filled in; nothing in the rendered prompt should still look like a template.
+The dispatcher substitutes these before writing the private executor payload.
+Every uppercase brace placeholder in the rendered block MUST be filled in;
+nothing in the rendered prompt should still look like a template.
 
 | Placeholder              | Source                                                                                  |
 | ------------------------ | --------------------------------------------------------------------------------------- |
 | `{PROJECT}`              | trigger                                                                                 |
 | `{GROUP}`                | trigger                                                                                 |
-| `{GITLAB_TOKEN}`         | trigger                                                                                 |
 | `{ISSUE_IID}`            | this batch member                                                                       |
 | `{ATTEMPT_NUMBER}`       | dispatcher's `allocate_attempt.sh` for this IID                                         |
 | `{ATTEMPT_NUMBER_PADDED}`| `printf '%03d'` of `{ATTEMPT_NUMBER}`                                                   |
@@ -41,17 +55,23 @@ The dispatcher substitutes these before passing the rendered string to `sessions
 | `{ACPX_TIMEOUT_MINUTES}` | `floor({ACPX_TIMEOUT_SECONDS} / 60)`; used in the constraints block's hard wall-clock soft cap. Always derived from `{ACPX_TIMEOUT_SECONDS}` so the two stay in lockstep. |
 `{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
 
-`{GITLAB_TOKEN}` is substituted directly into the rendered prompt and each executor script invocation.
+GitLab credentials are never rendered into this payload. Every fixed executor
+script resolves its credential from the private process/deployment environment;
+the subagent must not inspect, print, copy, or pass a token explicitly.
 
-`{ISSUE_BODY}` is for human context only. The dispatcher has already written the full `prompt.txt` to `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* (not this snippet) to acpx. Truncate the snippet here at ~4 KB if necessary; do not inflate spawn payloads.
+`{ISSUE_BODY}` is for human context only. The dispatcher has already written the full `prompt.txt` to `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* (not this snippet) to acpx. Truncate the snippet here at ~4 KB if necessary; do not inflate the private executor payload.
 
 ---
 
 ## Rendered Prompt
 
-Everything between the fenced lines below is what the dispatcher writes into `sessions_spawn`. Render placeholders, do not include the surrounding documentation.
+Everything between the fenced lines below is what the dispatcher writes to the
+private `executor_payload.txt`. Render placeholders; do not include the
+surrounding documentation.
 
-The very first line is a **payload sentinel** the dispatcher's Phase 5 step 0 checks via fixed-string grep before each `sessions_spawn` call (see SKILL.md). Keep it verbatim — do not edit, translate, or move it. If the sentinel is missing from the rendered string the orchestrator hands to `sessions_spawn`, that is a strong signal the orchestrator is about to ship the wrong prompt (e.g. `${LOG_DIR}/prompt.txt`), and the spawn MUST be aborted.
+The very first line is an **executor-payload sentinel** checked before the
+manifest and secret-free bootstrap are published. Keep it verbatim. If it is
+missing, the wrapper must abort this IID instead of creating a spawn task.
 
 The **last line inside the fenced block** is a paired closer sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1_END`. `dispatch_prepare_tick.sh` uses it (NOT the surrounding triple-backtick fence) as the awk terminator that bounds the rendered prompt. This means it is safe to add nested ```code``` examples inside the fenced block — the extractor will not be tricked into truncating at an inner fence. Do not delete, translate, or move the closer sentinel; if it is missing the wrapper aborts with `prep_blocked "executor_prompt.md missing end-sentinel ..."`. The closer sentinel itself is consumed by the extractor and never appears in the rendered payload.
 
@@ -70,7 +90,6 @@ PROJECT={PROJECT}
 GROUP={GROUP}
 GITLAB_HOST={GITLAB_HOST}
 GITLAB_API_PROTOCOL={GITLAB_API_PROTOCOL}
-GITLAB_TOKEN={GITLAB_TOKEN}
 ISSUE_IID={ISSUE_IID}
 ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
@@ -100,7 +119,7 @@ Body (first ~4KB; full prompt is at {LOG_DIR}/prompt.txt):
 <env_contract>
 Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix the minimum env vars on every script invocation. The minimum for any {SCRIPTS_DIR}/*.sh exec is:
 
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
   ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
   REPO_PATH={REPO_PATH} \
 
@@ -118,7 +137,7 @@ Step 0 — SETUP
   If either path is missing → FAIL status=blocked block_reason="worktree or output directory missing". Do NOT issue a bare `cd {WORKTREE_DIR}` as a standalone Bash tool call expecting it to persist — `cd` does NOT survive across exec calls (see <env_contract>). Step 1's `bash {SCRIPTS_DIR}/run_acpx_attempt.sh` is invoked by absolute path and does its own internal `cd {WORKTREE_DIR}` before running acpx, so the subagent does not need to set cwd itself.
 
 Step 1 — EXECUTE acpx (one-shot, long-running)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
@@ -187,7 +206,7 @@ Step 1 — EXECUTE acpx (one-shot, long-running)
   - if acpx fails, preserve all of {LOG_DIR}; do NOT delete partial logs
 
 Step 2 — STAGE
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -198,7 +217,7 @@ Step 2 — STAGE
   any other non-zero exit     → FAIL status=blocked block_reason="stage step failed: <last stderr line>".
 
 Step 3 — COMMIT + force-push (Strategy A)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -208,7 +227,7 @@ Step 3 — COMMIT + force-push (Strategy A)
   Do NOT retry with --force outside this script. Do NOT rebase + re-push. Do NOT push to a different branch name.
 
 Step 4 — POST-PUSH verify
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
@@ -216,11 +235,11 @@ Step 4 — POST-PUSH verify
   any non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
 
 Step 5 — TRANSITION doing → done
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add done
@@ -228,7 +247,7 @@ Step 5 — TRANSITION doing → done
   CAPTURE labels_removed includes "doing"; labels_added includes "done".
 
 Step 6 — CREATE / rotate the MR
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} WORKTREE_DIR={WORKTREE_DIR} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -253,7 +272,7 @@ Step 6 — CREATE / rotate the MR
   Do NOT call `glab mr merge`. Do NOT close the issue. GitLab auto-closes via `Closes #{ISSUE_IID}` in the MR body.
 
 Step 7 — ADD `pr` label
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/set_issue_label.sh add pr
@@ -266,7 +285,7 @@ Step 8 — SUMMARIZE
     SUMMARY_POST_TO_ISSUE=<true|false> \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed,timeout}> \
-    PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
@@ -312,11 +331,11 @@ When any step instructs "FAIL with status=X, block_reason=Y":
   1. Stop the algorithm at this step. Do NOT continue to later steps. Step 1 acpx non-timeout failures do not use this flow; they use <blocked_push_flow> so any committable generated files can still be pushed.
   2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
   3. Immediately sync the live issue label to blocked before summarizing. Each invocation MUST be a separate Bash exec, in the exact form used at Step 5 / B4 / T4 (full `bash {SCRIPTS_DIR}/set_issue_label.sh ...` absolute path + inline env vars):
-     - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+     - PROJECT={PROJECT} GROUP={GROUP} \
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
          bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-     - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+     - PROJECT={PROJECT} GROUP={GROUP} \
          ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
          REPO_PATH={REPO_PATH} \
         bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
@@ -341,7 +360,7 @@ post-push verification fails; append diagnostics to BLOCK_REASON instead of
 reclassifying.
 
 B1 — STAGE (same script as Step 2 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -354,7 +373,7 @@ B1 — STAGE (same script as Step 2 of the normal flow)
                     to BLOCK_REASON. Jump to B4.
 
 B2 — COMMIT + force-push (same script as Step 3 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -364,7 +383,7 @@ B2 — COMMIT + force-push (same script as Step 3 of the normal flow)
   failed: <last stderr line>" to BLOCK_REASON, jump to B4.
 
 B3 — POST-PUSH verify (best-effort; same script as Step 4)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
@@ -373,11 +392,11 @@ B3 — POST-PUSH verify (best-effort; same script as Step 4)
 
 B4 — LABEL doing → blocked
   Each invocation MUST be a separate Bash exec.
-  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  - PROJECT={PROJECT} GROUP={GROUP} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
       bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  - PROJECT={PROJECT} GROUP={GROUP} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
       bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
@@ -392,7 +411,7 @@ B5 — SUMMARIZE (local-only; SAME script as Step 8)
     SUMMARY_POST_TO_ISSUE=false \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
     BLOCK_REASON=<BLOCK_REASON> \
-    PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
@@ -440,7 +459,7 @@ These stick through the rest of the flow regardless of which
 sub-steps succeed.
 
 T1 — STAGE (same script as Step 2 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/stage_and_guard.sh
@@ -453,7 +472,7 @@ T1 — STAGE (same script as Step 2 of the normal flow)
                     to BLOCK_REASON. Jump to T4.
 
 T2 — COMMIT + force-push (same script as Step 3 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     REPO_PATH={REPO_PATH} \
     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
@@ -465,7 +484,7 @@ T2 — COMMIT + force-push (same script as Step 3 of the normal flow)
   re-classify the issue as blocked).
 
 T3 — POST-PUSH verify (best-effort; same script as Step 4)
-  PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
     REPO_PATH={REPO_PATH} \
     bash {SCRIPTS_DIR}/post_push_verify.sh
@@ -474,11 +493,11 @@ T3 — POST-PUSH verify (best-effort; same script as Step 4)
 
 T4 — LABEL doing → timeout
   Each invocation MUST be a separate Bash exec.
-  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  - PROJECT={PROJECT} GROUP={GROUP} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
       bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-  - PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+  - PROJECT={PROJECT} GROUP={GROUP} \
       ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
       REPO_PATH={REPO_PATH} \
       bash {SCRIPTS_DIR}/set_issue_label.sh add timeout
@@ -493,7 +512,7 @@ T5 — SUMMARIZE (local-only; SAME script as Step 8)
     SUMMARY_POST_TO_ISSUE=false \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
     BLOCK_REASON=<BLOCK_REASON> \
-    PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
+    PROJECT={PROJECT} GROUP={GROUP} \
     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
     ISSUE_MODE={ISSUE_MODE} \
     REPO_PATH={REPO_PATH} \
@@ -533,7 +552,30 @@ HARD rules for the timeout flow:
 
 - The placeholder `{ISSUE_TITLE_QUOTED}` is the shell-quoted form of the issue title (single quotes around it; embedded `'` replaced with `'\''`). The plain `{ISSUE_TITLE}` is for the `<issue>` block only — do not inject it raw into a shell command.
 - `{ISSUE_BODY}` is for the `<issue>` block only. Truncate to ≤ 4 KB. The full body is already on disk at `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* to acpx.
-- The dispatcher MUST verify all placeholders have been substituted before calling `sessions_spawn`. A literal `{` followed by an uppercase identifier in the rendered string is a missed substitution; abort the IID with `block_reason="prompt template render incomplete: <placeholder>"`.
-- The dispatcher passes the rendered string as the entire spawn payload. There are no additional env-var injections at the OpenClaw layer — the subagent reads everything from this prompt.
-- **`sessions_spawn` shape (anonymous + `task=<rendered prompt>` + cosmetic `label=` + `runtime="subagent"` + `mode="run"` + `cleanup="keep"` + `context="isolated"` + serial-only + 3-attempt launch retry) is the contract in [`SKILL.md`](../SKILL.md) §The orchestrator loop and §No-Fallback.** Do NOT pass `name=` / `session_name=` / `mode="session"` (triggers `thread_required` on some channels). Always pass the wrapper-provided `child_label` verbatim: scheduled entries use `#<iid>-att-<NNN>`, while driven scheduler grants use `reqx-iid<IID>-gen<generation>-<project/job digest>` so cross-project same-IID reconciliation remains unique. The label is a separate cosmetic field. Validate the launch ack carries both `runId` and `childSessionKey` before recording into `pending_subagents[iid]`; if launch validation fails, retry the identical spawn task up to 3 total attempts with 2-second fixed backoff before synthesizing a blocked reply. Matched callbacks identify the IID by the `iid` field of the compact JSON, NOT by the runtime session-key label. The rendered prompt's `iid` field MUST therefore be correct.
-- **Async-callback delivery.** The subagent's compact JSON reply is delivered to the orchestrator via `RUN_CHILD_COMPLETION_CALLBACK`, not the synchronous return of `sessions_spawn`. The subagent just emits the compact JSON line on its last turn (Step 9) and stops; the runtime forwards it inside `worker_result_json`. Phase 6 reads that reply and owns all terminal state-file writes per [`state_schema.md`](state_schema.md) §Compact Subagent Reply + §Phase 6 Write Mapping.
+- The dispatcher MUST verify all placeholders have been substituted before
+  hashing and publishing `executor_payload.txt`. A literal `{` followed by an
+  uppercase identifier is a missed substitution; abort the IID with
+  `block_reason="prompt template render incomplete: <placeholder>"`.
+- The runtime receives only the separate secret-free bootstrap. The verified
+  executor payload invokes fixed scripts, which resolve credentials privately;
+  no token is rendered into either task layer.
+- **`sessions_spawn` shape (anonymous + `task=<secret-free bootstrap>` +
+  cosmetic `label=` + `runtime="subagent"` + `mode="run"` + `cleanup="keep"`
+  + serial-only + 3-attempt launch retry) is the common OpenClaw
+  2026.4.9/2026.6.11 contract
+  in [`SKILL.md`](../SKILL.md) §The orchestrator loop and §No-Fallback.** Do NOT
+  pass `name=` / `session_name=` / `mode="session"`. Always pass the
+  wrapper-provided `child_label` verbatim. Validate the launch ack carries both
+  `runId` and `childSessionKey`, and record the same
+  `expected_task_sha256`/`expected_task_bytes`; retry only the identical
+  bootstrap bytes. Matched callbacks identify the IID by the compact JSON's
+  `iid`, not by the runtime label. The verified executor payload's IID must
+  therefore be correct.
+- **Native asynchronous completion.** The subagent's compact JSON reply arrives
+  inside a protected OpenClaw `task_completion` event, never as the synchronous
+  return of `sessions_spawn` and never as a newly synthesized
+  `RUN_CHILD_COMPLETION_CALLBACK`. The subagent emits the compact JSON line on
+  its last turn (Step 9) and stops. The parent passes the complete event to
+  `ingest_subagent_completion.sh`, which authenticates runtime identity before
+  Phase 6 owns all terminal state writes. A bounded, non-truncated
+  `sessions_history` lookup is only an on-demand recovery path.

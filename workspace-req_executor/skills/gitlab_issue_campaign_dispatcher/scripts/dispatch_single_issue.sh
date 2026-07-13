@@ -13,7 +13,6 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # overridable so smoke tests can point at a throwaway config tree without
 # touching the real pins (the production deployment never sets this).
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
-GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
 GROUP_ENV_OVERRIDE="${GROUP:-}"
 EXECUTOR_AGENT_ENV_OVERRIDE="${EXECUTOR_AGENT:-}"
 CALLBACK_TARGET_ENV_OVERRIDE="${DISPATCHER_CALLBACK_TARGET:-}"
@@ -27,6 +26,11 @@ RUNNING_LEASE_ENV_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
 RUNNING_LEASE_ENV_OVERRIDE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
 LOCK_COMPAT_ENV_SET="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS+x}"
 LOCK_COMPAT_ENV_OVERRIDE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
+
+# Resolve host/protocol/token as one source layer. Source-only mode performs no
+# network auth but still enforces the local-test blue-zone deny fence.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/gitlab_env_resolver.sh"
 
 # ─── 1. Parse the I1 trigger from stdin ────────────────────────────
 # Same line discipline as dispatch_prepare_tick.sh: tolerate CRLF, skip blank /
@@ -89,9 +93,9 @@ normalize_issue_url() {
 
 parse_issue_url() {
   local url="$1"
+  local url_scheme=""
   local after_scheme=""
   local url_host=""
-  local url_host_lc=""
   local url_path=""
   local project_raw=""
   local issue_part=""
@@ -103,16 +107,18 @@ parse_issue_url() {
     http://*|https://*) ;;
     *) return 1 ;;
   esac
+  if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
+    PARSE_ISSUE_URL_ERROR="issue_url cannot be verified without an effective GitLab scheme and authority"
+    return 1
+  fi
+  url_scheme="${url%%://*}"
   after_scheme="${url#*://}"
   url_host="${after_scheme%%/*}"
-  url_host_lc="$(printf '%s' "${url_host}" | tr '[:upper:]' '[:lower:]')"
-  case "${url_host_lc}" in
-    *gitlab*) ;;
-    *)
-      PARSE_ISSUE_URL_ERROR="GitLab host must contain gitlab"
-      return 1
-      ;;
-  esac
+  if [ "${url_scheme}" != "${GITLAB_API_PROTOCOL}" ] \
+      || [ "${url_host}" != "${GITLAB_HOST}" ]; then
+    PARSE_ISSUE_URL_ERROR="GitLab host/scheme in issue_url must exactly match the effective target authority"
+    return 1
+  fi
   url_path="${after_scheme#*/}"
   case "${url_path}" in
     */-/issues/*) ;;

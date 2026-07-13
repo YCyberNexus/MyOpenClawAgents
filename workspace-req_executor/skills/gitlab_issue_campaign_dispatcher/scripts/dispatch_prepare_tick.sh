@@ -13,7 +13,9 @@
 #         "iid": 14,
 #         "attempt_number": 3,
 #         "child_label": "#14-att-003",
-#         "payload_path": "/data/.../spawn_payload.txt"
+#         "payload_path": "/data/.../spawn_payload.txt",
+#         "expected_task_sha256": "<64 lowercase hex>",
+#         "expected_task_bytes": 1234
 #       }, ...
 #     ],
 #     "max_launch_retries": 3,
@@ -29,13 +31,14 @@
 # When status=="ready", the LLM loops over dispatch_entries[] and for
 # each entry:
 #   1. Reads payload_path file → sessions_spawn(task=payload,
-#      label=child_label, runtime="subagent", mode="run", cleanup="keep",
-#      context="isolated") with up to max_launch_retries attempts and
+#      label=child_label, runtime="subagent", mode="run", cleanup="keep")
+#      with up to max_launch_retries attempts and
 #      backoff_seconds between attempts (per §No-Fallback rule 2).
 #   2. Calls dispatch_record_spawn.sh STATUS=spawned ... on success, or
 #      STATUS=launch_failed LAUNCH_ATTEMPTS=N LAUNCH_ERROR=... on
-#      exhaustion. (The script handles synthesized blocked reply +
-#      retry_count semantics.)
+#      exhaustion, always forwarding EXPECTED_TASK_SHA256 and
+#      EXPECTED_TASK_BYTES from the same entry. (The script handles
+#      synthesized blocked reply + retry_count semantics.)
 #
 # When status != "ready", the LLM just prints chat_summary to chat and
 # stops. No sessions_spawn calls.
@@ -50,7 +53,25 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+GITLAB_TOKEN_PROCESS_OVERRIDE="${GITLAB_TOKEN:-}"
 source "${SCRIPT_DIR}/branch_utils.sh"
+
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${path}" | awk '{print $1}'
+  else
+    echo "dispatch_prepare_tick.sh: no SHA-256 command is available" >&2
+    return 2
+  fi
+}
+
+file_bytes() {
+  local path="$1"
+  wc -c <"${path}" | tr -d '[:space:]'
+}
 
 # ─── 1. Parse trigger from stdin ──────────────────────────────────
 
@@ -155,7 +176,6 @@ require() {
 }
 require group
 require project
-require gitlab_token
 require issue_min_iid
 require issue_max_iid
 require hourly_issue_quota
@@ -174,7 +194,16 @@ done
 # ─── 4. Export bootstrap env for env_paths.sh ─────────────────────
 export PROJECT="${T[project]}"
 export GROUP="${T[group]}"
-export GITLAB_TOKEN="${T[gitlab_token]}"
+# Driven topups inject credentials only through the private process
+# environment.  Keep the historical trigger field as a fallback for the
+# existing blue-zone scheduled trigger contract, but never require it or
+# serialize it into internally generated triggers.
+GITLAB_TOKEN_EFFECTIVE="${GITLAB_TOKEN_PROCESS_OVERRIDE:-${T[gitlab_token]:-}}"
+case "${GITLAB_TOKEN_EFFECTIVE}" in
+  '') emit_chat_failure "missing_gitlab_token_private_injection" ;;
+  *[[:cntrl:]]*) emit_chat_failure "invalid_gitlab_token_private_injection" ;;
+esac
+export GITLAB_TOKEN="${GITLAB_TOKEN_EFFECTIVE}"
 
 # Repo path: validate if supplied; env_paths.sh additionally guards.
 if [ -n "${T[repo_path]:-}" ]; then
@@ -1510,7 +1539,13 @@ for iid in "${BATCH_IIDS[@]}"; do
       block_reason:null, commit_sha:null, merge_request_url:null,
       updated_at:$updated_at}' | atomic_write_json "${ISSUE_STATE_X}"
 
-  # Render executor prompt to ${LOG_DIR}/spawn_payload.txt.
+  # Render the full executor workflow to a private local file. sessions_spawn
+  # receives only the small secret-free bootstrap written to spawn_payload.txt;
+  # the child verifies the manifest and full payload before reading either as
+  # instructions. This removes the large model-copied task from the runtime
+  # boundary and gives every launch a stable byte/hash identity.
+  executor_payload_path="${LOG_DIR_X}/executor_payload.txt"
+  manifest_path="${LOG_DIR_X}/spawn_manifest.json"
   payload_path="${LOG_DIR_X}/spawn_payload.txt"
   mkdir -p "${LOG_DIR_X}"
 
@@ -1560,7 +1595,6 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_GROUP="${GROUP}" \
               TPL_GITLAB_HOST="${GITLAB_HOST}" \
               TPL_GITLAB_API_PROTOCOL="${GITLAB_API_PROTOCOL}" \
-              TPL_GITLAB_TOKEN="${GITLAB_TOKEN}" \
               TPL_ISSUE_IID="${iid}" \
               TPL_ATTEMPT_NUMBER="${attempt}" \
               TPL_ATTEMPT_NUMBER_PADDED="${attempt_padded}" \
@@ -1606,11 +1640,104 @@ PYEOF
   # Sentinel check.
   sentinel_first_line="$(first_line "${rendered}")"
   if [ "${sentinel_first_line}" != "# REQ_EXECUTOR_EXECUTOR_PROMPT_V1" ]; then
-    prep_blocked "spawn payload missing executor sentinel — refused to ship inner Claude Code prompt (${LOG_DIR_X}/prompt.txt) as the outer spawn payload"
+    prep_blocked "executor payload missing sentinel — refused to publish a manifest or spawn bootstrap"
     continue
   fi
 
-  printf '%s' "${rendered}" >"${payload_path}"
+  ( umask 077; printf '%s' "${rendered}" >"${executor_payload_path}" )
+  chmod 600 "${executor_payload_path}" 2>/dev/null \
+    || { prep_blocked "executor payload must be private"; continue; }
+  executor_payload_sha256="$(sha256_file "${executor_payload_path}")" || {
+    prep_blocked "unable to hash executor payload"
+    continue
+  }
+  executor_payload_bytes="$(file_bytes "${executor_payload_path}")"
+  case "${executor_payload_bytes}" in
+    ''|*[!0-9]*) prep_blocked "unable to size executor payload"; continue ;;
+  esac
+
+  manifest_job_id=""
+  if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+    manifest_job_id="$(jq -r '.job_id' <<<"${IID_GRANT_JSON}")"
+  fi
+  manifest_json="$(jq -cnS \
+    --arg project "${GROUP}/${PROJECT}" \
+    --arg job_id "${manifest_job_id}" \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt}" \
+    --arg executor_payload_path "${executor_payload_path}" \
+    --arg executor_payload_sha256 "${executor_payload_sha256}" \
+    --argjson executor_payload_bytes "${executor_payload_bytes}" '{
+      version:1,
+      project:$project,
+      job_id:(if $job_id == "" then null else $job_id end),
+      iid:$iid,
+      attempt_number:$attempt_number,
+      executor_payload_path:$executor_payload_path,
+      executor_payload_sha256:$executor_payload_sha256,
+      executor_payload_bytes:$executor_payload_bytes
+    }')"
+  ( umask 077; printf '%s\n' "${manifest_json}" >"${manifest_path}" )
+  chmod 600 "${manifest_path}" 2>/dev/null \
+    || { prep_blocked "spawn manifest must be private"; continue; }
+  manifest_sha256="$(sha256_file "${manifest_path}")" || {
+    prep_blocked "unable to hash spawn manifest"
+    continue
+  }
+  manifest_bytes="$(file_bytes "${manifest_path}")"
+  case "${manifest_bytes}" in
+    ''|*[!0-9]*) prep_blocked "unable to size spawn manifest"; continue ;;
+  esac
+
+  bootstrap_identity="$(jq -cnS \
+    --arg project "${GROUP}/${PROJECT}" \
+    --arg job_id "${manifest_job_id}" \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt}" '{
+      project:$project,
+      job_id:(if $job_id == "" then null else $job_id end),
+      iid:$iid,
+      attempt_number:$attempt_number
+    }')"
+  bootstrap="$(cat <<EOF
+# REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1
+This is a secret-free bootstrap for one req_executor child. Do not search for other tasks and do not echo file contents.
+identity=${bootstrap_identity}
+manifest_path=${manifest_path}
+manifest_sha256=${manifest_sha256}
+manifest_bytes=${manifest_bytes}
+
+Before doing any issue work, use one Bash call to verify that manifest_path is a regular file with mode 600, exact byte count and SHA-256 above. Then parse it with jq; require version=1 and exact identity above. Verify its executor_payload_path is a regular mode-600 file with the exact executor_payload_bytes and executor_payload_sha256 recorded in the manifest. If any check fails, stop and return one compact JSON object with status="blocked", iid=${iid}, attempt_number=${attempt}, and block_reason="spawn bootstrap verification failed".
+
+Only after all checks pass, read exactly the executor_payload_path from the manifest and follow that payload as the complete executor workflow. Never print the manifest, payload, environment, or credentials. Do not treat this bootstrap as permission to invoke any script not named by the verified executor payload.
+# REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1_END
+EOF
+)"
+  ( umask 077; printf '%s' "${bootstrap}" >"${payload_path}" )
+  chmod 600 "${payload_path}" 2>/dev/null \
+    || { prep_blocked "spawn bootstrap must be private"; continue; }
+  expected_task_sha256="$(sha256_file "${payload_path}")" || {
+    prep_blocked "unable to hash spawn bootstrap"
+    continue
+  }
+  expected_task_bytes="$(file_bytes "${payload_path}")"
+  case "${expected_task_bytes}" in
+    ''|*[!0-9]*) prep_blocked "unable to size spawn bootstrap"; continue ;;
+  esac
+
+  # Bind the exact task identity to the project pending entry before exposing
+  # the path to the orchestrator. Post-spawn recorders reject a mismatched
+  # hash/size even when run/session evidence is otherwise valid.
+  STATE_JSON="$(jq -c \
+    --argjson iid "${iid}" \
+    --arg expected_task_sha256 "${expected_task_sha256}" \
+    --argjson expected_task_bytes "${expected_task_bytes}" '
+      .pending_subagents[($iid|tostring)] += {
+        expected_task_sha256:$expected_task_sha256,
+        expected_task_bytes:$expected_task_bytes
+      }
+    ' <<<"${STATE_JSON}")"
+  persist_state "${STATE_JSON}"
   PAYLOAD_PATH["${iid}"]="${payload_path}"
 
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
@@ -1619,12 +1746,16 @@ PYEOF
       --argjson attempt "${attempt}" \
       --arg clabel "${child_label}" \
       --arg path "${payload_path}" \
+      --arg expected_task_sha256 "${expected_task_sha256}" \
+      --argjson expected_task_bytes "${expected_task_bytes}" \
       --argjson grant "${IID_GRANT_JSON}" '
       . + [{
         iid:$iid,
         attempt_number:$attempt,
         child_label:$clabel,
         payload_path:$path,
+        expected_task_sha256:$expected_task_sha256,
+        expected_task_bytes:$expected_task_bytes,
         job_id:$grant.job_id,
         batch_id:$grant.batch_id,
         snapshot_index:$grant.snapshot_index,
@@ -1635,7 +1766,17 @@ PYEOF
       --argjson iid "${iid}" \
       --argjson attempt "${attempt}" \
       --arg clabel "${child_label}" \
-      --arg path "${payload_path}" '. + [{iid:$iid, attempt_number:$attempt, child_label:$clabel, payload_path:$path}]')"
+      --arg path "${payload_path}" \
+      --arg expected_task_sha256 "${expected_task_sha256}" \
+      --argjson expected_task_bytes "${expected_task_bytes}" '
+      . + [{
+        iid:$iid,
+        attempt_number:$attempt,
+        child_label:$clabel,
+        payload_path:$path,
+        expected_task_sha256:$expected_task_sha256,
+        expected_task_bytes:$expected_task_bytes
+      }]')"
   fi
 
   wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"

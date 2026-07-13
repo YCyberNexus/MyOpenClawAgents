@@ -2,6 +2,10 @@
 # Resolve a driven issue's final clone path without creating or modifying it.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/git_network_guard.sh"
+GIT_NETWORK_GUARD_CONTEXT=resolve_driven_repo_path
+
 fail() {
   echo "resolve_driven_repo_path.sh: $*" >&2
   exit 2
@@ -48,37 +52,12 @@ esac
 PROJECT_SLUG="${PROJECT_FULL##*/}"
 LEGACY_PATH="${REPO_PARENT_NORMALIZED}/${PROJECT_SLUG}"
 NESTED_PATH="${REPO_PARENT_NORMALIZED}/${PROJECT_FULL}"
-EXPECTED_ORIGIN="${GITLAB_API_PROTOCOL}://${GITLAB_HOST}/${PROJECT_FULL}.git"
-
-normalize_origin() {
-  local origin="$1"
-  local prefix="${GITLAB_API_PROTOCOL}://"
-  local remainder=""
-  local authority=""
-
-  case "${origin}" in
-    "${prefix}"*)
-      remainder="${origin#"${prefix}"}"
-      authority="${remainder%%/*}"
-      case "${authority}" in
-        *@*) remainder="${remainder#*@}" ;;
-      esac
-      printf '%s%s' "${prefix}" "${remainder}"
-      ;;
-    *)
-      printf '%s' "${origin}"
-      ;;
-  esac
-}
 
 if [ -d "${LEGACY_PATH}/.git" ]; then
-  if legacy_origin="$(git -C "${LEGACY_PATH}" \
-      remote get-url origin 2>/dev/null)"; then
-    normalized_origin="$(normalize_origin "${legacy_origin}")"
-    if [ "${normalized_origin}" = "${EXPECTED_ORIGIN}" ]; then
-      printf '%s\n' "${LEGACY_PATH}"
-      exit 0
-    fi
+  if git_network_guard_assert_origin_only "${LEGACY_PATH}" \
+      >/dev/null 2>&1; then
+    printf '%s\n' "${LEGACY_PATH}"
+    exit 0
   fi
 fi
 

@@ -14,9 +14,11 @@ WORK_BRANCH_ACTUAL="$(
     REPO_PARENT_PATH="${REPO_PARENT}" \
     ISSUE_IID="42" \
     ATTEMPT_NUMBER="7" \
-    GITLAB_HOST="gitlab-b.pxsemic.tech:30000" \
-    GITLAB_API_PROTOCOL="http" \
+    GITLAB_HOST="local-gitlab.invalid:9443" \
+    GITLAB_API_PROTOCOL="https" \
     GITLAB_TOKEN="test-token" \
+    REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
+    REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="local-gitlab.invalid:9443" \
     bash -c 'source "$1"; printf "%s\n%s\n" "${WORK_BRANCH}" "${LOCAL_ATTEMPT_BRANCH}"' _ "${SKILL_DIR}/scripts/env_paths.sh"
 )"
 

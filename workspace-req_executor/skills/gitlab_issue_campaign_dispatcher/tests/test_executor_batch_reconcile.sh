@@ -78,6 +78,8 @@ EOF
     version:1,job_id:"A:snapshot-0",project:"group/repo",iid:42,
     batch_id:"A",snapshot_index:0,attempt_number:1,
     child_label:"#42-att-001",payload_path:"/private/payload/path",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
     claim_generation:1,claim_token:"private-claim-must-not-leak",
     stage:"action_emitted",outcome:null,ack:null,created_at:1,updated_at:1
   }' >"$(action_path)"
@@ -159,6 +161,26 @@ set -e
 [ -z "$(cat "${CALL_LOG}")" ] || fail "invalid reconciliation reached a recorder"
 case "${bad_output}" in
   *private-claim*|*/private/payload*) fail "validation error leaked private state" ;;
+esac
+
+# Pre-upgrade large-payload actions have no exact bootstrap identity. They are
+# intentionally rejected instead of being silently migrated; operators must
+# explicitly re-enqueue the item through the normal scheduler wrappers.
+write_fixture
+jq 'del(.expected_task_sha256,.expected_task_bytes)' "$(action_path)" \
+  >"${TEST_ROOT}/legacy-action.json"
+mv "${TEST_ROOT}/legacy-action.json" "$(action_path)"
+cp "$(action_path)" "${TEST_ROOT}/legacy-action-before.json"
+set +e
+legacy_output="$(run_reconcile "${not_found_input}" 2>&1)"
+legacy_rc=$?
+set -e
+[ "${legacy_rc}" -ne 0 ] \
+  || fail "legacy action without exact task identity was silently migrated"
+cmp -s "$(action_path)" "${TEST_ROOT}/legacy-action-before.json" \
+  || fail "rejected legacy action was mutated instead of requiring re-enqueue"
+case "${legacy_output}" in
+  *private-claim*|*/private/payload*) fail "legacy rejection leaked private state" ;;
 esac
 
 echo "ok emitted spawn reconciliation requires explicit runtime evidence"

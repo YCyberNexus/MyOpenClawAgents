@@ -208,6 +208,8 @@ write_emitted_action() {
     version:1,job_id:$job_id,project:"group/repo",iid:42,
     batch_id:"A",snapshot_index:0,attempt_number:$attempt,
     child_label:"#42-att-001",payload_path:"/private/payload",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
     claim_generation:$generation,claim_token:$token,
     stage:"action_emitted",outcome:null,ack:null,
     created_at:1,updated_at:1
@@ -232,6 +234,8 @@ spawn_input() {
     project:"group/repo",
     iid:42,
     attempt_number:$attempt,
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
     status:"spawned",
     run_id:("run-" + ($attempt|tostring)),
     child_session_key:("agent:req_executor:subagent:" + ($attempt|tostring))
@@ -249,6 +253,8 @@ launch_failed_input() {
     project:"group/repo",
     iid:42,
     attempt_number:$attempt,
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
     status:"launch_failed",
     launch_attempts:3,
     launch_error:("transport-failed-" + ($attempt|tostring))
@@ -353,6 +359,8 @@ write_project_pending() {
         batch_id:"A",
         snapshot_index:0,
         memberships_source:"scheduler_active_job",
+        expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+        expected_task_bytes:42,
         claim_generation:$generation,
         claim_token:$token,
         placeholder:true
@@ -383,6 +391,8 @@ run_project_record_direct() {
   DRIVEN_JOB_ID="${job_id}" \
   DRIVEN_CLAIM_GENERATION="${generation}" \
   DRIVEN_CLAIM_TOKEN="${token}" \
+  EXPECTED_TASK_SHA256=0000000000000000000000000000000000000000000000000000000000000042 \
+  EXPECTED_TASK_BYTES=42 \
   RUN_ID="${run_id}" CHILD_SESSION_KEY="${child_session_key}" \
   LAUNCH_ATTEMPTS=3 LAUNCH_ERROR="${launch_error}" \
     bash "${PROJECT_RECORD_SCRIPT}"

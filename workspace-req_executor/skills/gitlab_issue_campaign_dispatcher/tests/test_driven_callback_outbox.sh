@@ -8,6 +8,7 @@ DRAIN_OUTBOX="${SKILL_DIR}/scripts/drain_driven_outbox.sh"
 BIND_CLAIM="${SKILL_DIR}/scripts/bind_driven_claim.sh"
 RECORD_LAUNCH="${SKILL_DIR}/scripts/record_driven_batch_launch.sh"
 RESERVE_ITEMS="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh"
+export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>\n  --session-id <id>\n  --message-file <path>'
 
 fail() {
   echo "test_driven_callback_outbox.sh: $*" >&2
@@ -24,6 +25,7 @@ TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-driven-callback.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
+export CONFIG_DIR
 mkdir -p "${CONFIG_DIR}"
 printf '%s\n' \
   'REPO_PARENT_PATH=/data' \
@@ -846,6 +848,7 @@ if [ -n "${message_file}" ]; then
   message="$(cat)"
 fi
 envelope="${message#*callback_envelope=}"
+envelope="${envelope%%$'\n'*}"
 event_id="$(jq -er '.worker_result_json.event_id' <<<"${envelope}")"
 printf '%s\n' "${event_id}" >>"${LEASE_SEND_LOG:?}"
 [ "${event_id}" = "${LEASE_EVENT_ID:?}" ] || exit 94
@@ -1018,6 +1021,8 @@ if [ -n "${message_file}" ]; then
   [ "${message_file}" = /dev/stdin ]
   message="$(cat)"
 fi
+ACK_ONLY_INSTRUCTION='ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。'
+[[ "${message}" == RUN_DRIVEN_BATCH_RESULT_ACK_ONLY$'\n'callback_envelope=*$'\n'"${ACK_ONLY_INSTRUCTION}" ]]
 
 exec 8>"${EXPECT_SCHEDULER_LOCK:?}"
 if ! flock -n 8; then
@@ -1028,6 +1033,7 @@ flock -u 8
 exec 8>&-
 
 envelope="${message#*callback_envelope=}"
+envelope="${envelope%%$'\n'*}"
 jq -e '
   (keys | sort) == ["callback_nonce","executor_agent","worker_result_json"]
   and (.callback_nonce | test("^[0-9a-f]{64}$"))
@@ -1078,15 +1084,37 @@ if [ "${call_count}" -eq 2 ]; then
 fi
 if [ "${call_count}" -eq 2 ] \
     && [ "${event_id}" = "batch-A:snapshot-0:terminal-1" ]; then
-  jq -nc '{status:"unexpected_extra_object"}'
+  printf '%s\n' '```json'
   jq -nc --arg event_id "${event_id}" \
     '{status:"duplicate",event_id:$event_id}'
+  printf '%s\n' '```' '```json'
+  jq -nc --arg event_id "${event_id}" \
+    '{status:"duplicate",event_id:$event_id}'
+  printf '%s\n' '```'
+  exit 0
+fi
+if [ "${call_count}" -eq 2 ] \
+    && [ "${event_id}" = "batch-B:snapshot-0:terminal-1" ]; then
+  printf '%s\n' '回调已处理，结果如下：' '```json'
+  jq -nc --arg event_id "${event_id}" \
+    '{status:"duplicate",event_id:$event_id}'
+  printf '%s\n' '```'
+  exit 0
+fi
+if [ "${call_count}" -eq 2 ] \
+    && [ "${event_id}" = "batch-R:snapshot-0:terminal-1" ]; then
+  printf '%s\n' '```json'
+  jq -nc --arg event_id "${event_id}" \
+    '{status:"duplicate",event_id:$event_id}'
+  printf '%s\n' '```'
   exit 0
 fi
 if [ "${call_count}" -eq 3 ] \
     && [ "${event_id}" = "batch-A:snapshot-0:terminal-1" ]; then
+  printf '%s\n' '```'
   jq -nc --arg event_id "${event_id}" \
     '{status:"duplicate",event_id:$event_id}'
+  printf '%s\n' '```'
   exit 0
 fi
 jq -nc --arg event_id "${event_id}" '{status:"accepted",event_id:$event_id}'
@@ -1163,7 +1191,6 @@ DRAIN_PID_B=$!
 wait "${DRAIN_PID_A}"
 wait "${DRAIN_PID_B}"
 
-OUTBOX_B="${SCHEDULER_ROOT}/callback_archive/${EVENT_B}.json"
 OUTBOX_R="${SCHEDULER_ROOT}/callback_archive/${EVENT_R}.json"
 
 jq -e '
@@ -1171,18 +1198,23 @@ jq -e '
   and .delivered_at == null
   and (.last_error | type == "string" and length > 0)
 ' "${OUTBOX_A}" >/dev/null \
-  || fail "multi-object ack stream was accepted from its final valid object"
-for outbox_file in "${OUTBOX_B}" "${OUTBOX_R}"; do
-  jq -e '
-    .attempts == 2
-    and (.delivered_at | type == "number" and . >= 0)
-    and .last_error == null
-  ' "${outbox_file}" >/dev/null \
-    || fail "accepted or duplicate matching ack did not atomically mark delivery"
-done
+  || fail "double-fenced ack stream was accepted from one valid fenced object"
+jq -e '
+  .attempts == 2
+  and .delivered_at == null
+  and .last_error == "malformed_or_ambiguous_ack"
+' "${OUTBOX_B}" >/dev/null \
+  || fail "prose-prefixed fenced strict ack was accepted"
+jq -e '
+  .attempts == 2
+  and (.delivered_at | type == "number" and . >= 0)
+  and .last_error == null
+' "${OUTBOX_R}" >/dev/null \
+  || fail "exact single json-fenced matching ack did not atomically mark delivery"
 
-# Once the multi-object stream is rejected, a later single-object duplicate for
-# the same event remains a valid idempotent acknowledgement.
+# Once double-fenced and prose-prefixed fenced streams are rejected, a later
+# exact single plain fence and a whole-response strict JSON acknowledgement for
+# the same events remain valid and idempotent.
 CONFIG_DIR="${CONFIG_DIR}" \
 OPENCLAW_BIN="${FAKE_OPENCLAW}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
@@ -1191,12 +1223,15 @@ EXPECT_SCHEDULER_LOCK="${SCHEDULER_ROOT}/scheduler.lock" \
 NOW_EPOCH=2000000090 \
 bash "${DRAIN_OUTBOX}" >/dev/null
 OUTBOX_A="${SCHEDULER_ROOT}/callback_archive/${EVENT_A}.json"
-jq -e '
-  .attempts == 3
-  and (.delivered_at | type == "number" and . >= 0)
-  and .last_error == null
-' "${OUTBOX_A}" >/dev/null \
-  || fail "single matching duplicate did not complete delivery after stream rejection"
+OUTBOX_B="${SCHEDULER_ROOT}/callback_archive/${EVENT_B}.json"
+for outbox_file in "${OUTBOX_A}" "${OUTBOX_B}"; do
+  jq -e '
+    .attempts == 3
+    and (.delivered_at | type == "number" and . >= 0)
+    and .last_error == null
+  ' "${outbox_file}" >/dev/null \
+    || fail "strict matching ack did not complete delivery after stream rejection"
+done
 [ -f "${OUTBOX_A}" ] && [ -f "${OUTBOX_B}" ] && [ -f "${OUTBOX_R}" ] \
   || fail "drain did not retain durable outbox evidence in cold archive"
 jq -se \
@@ -1205,7 +1240,7 @@ jq -se \
   --arg event_r "${EVENT_R}" '
   def bodies($event): [.[] | select(.event_id == $event) | (.body | @json)];
   ((bodies($event_a) | length) == 3 and (bodies($event_a) | unique | length) == 1)
-  and ((bodies($event_b) | length) == 2 and (bodies($event_b) | unique | length) == 1)
+  and ((bodies($event_b) | length) == 3 and (bodies($event_b) | unique | length) == 1)
   and ((bodies($event_r) | length) == 2 and (bodies($event_r) | unique | length) == 1)
 ' "${OPENCLAW_LOG}" >/dev/null \
   || fail "drain changed the public event body across retries or duplicated a concurrent send"
@@ -1257,6 +1292,7 @@ if [ -n "${message_file}" ]; then
   message="$(cat)"
 fi
 envelope="${message#*callback_envelope=}"
+envelope="${envelope%%$'\n'*}"
 event_id="$(jq -r '.worker_result_json.event_id' <<<"${envelope}")"
 printf '%s\n' "${event_id}" >>"${ROLLING_SEND_LOG:?}"
 if [ "${event_id}" = "${ROLLING_FIRST_EVENT:?}" ]; then
@@ -1510,9 +1546,11 @@ if [ -n "${message_file}" ]; then
   message="$(cat)"
 fi
 [ "${target}" = "agent:req_dispatcher:legacy-session" ]
-[[ "${message}" == RUN_DRIVEN_BATCH_RESULT$'\n'worker_result_json=* ]]
+ACK_ONLY_INSTRUCTION='ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。'
+[[ "${message}" == RUN_DRIVEN_BATCH_RESULT_ACK_ONLY$'\n'worker_result_json=*$'\n'"${ACK_ONLY_INSTRUCTION}" ]]
 [[ "${message}" != *callback_envelope=* ]]
 body="${message#*worker_result_json=}"
+body="${body%%$'\n'*}"
 jq -e '(keys | sort) == [
   "batch_id","event_id","iid","mr_url","project","reason","snapshot_index","status"
 ]' <<<"${body}" >/dev/null
@@ -1584,6 +1622,7 @@ cp \
   "${SKILL_DIR}/scripts/dispatch_followup.sh" \
   "${SKILL_DIR}/scripts/_dispatch_lib.sh" \
   "${SKILL_DIR}/scripts/env_paths.sh" \
+  "${SKILL_DIR}/scripts/git_network_guard.sh" \
   "${SKILL_DIR}/scripts/drain_driven_handoff_intents.sh" \
   "${FOLLOWUP_SCRIPTS}/"
 
@@ -1818,6 +1857,8 @@ FOLLOWUP_OUTPUT="$(
   REPO_PARENT_PATH="${FOLLOWUP_PARENT}" \
   IID=42 \
   ATTEMPT_NUMBER=1 \
+  CALLBACK_RUN_ID=run-42 \
+  CALLBACK_CHILD_SESSION_KEY=agent:req_executor:subagent:42 \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
   EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
   EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \

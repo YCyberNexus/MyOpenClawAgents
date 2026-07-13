@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # dispatch_followup.sh — Phase 6 wrapper for the callback path
-# (RUN_CHILD_COMPLETION_CALLBACK).
+# (native task_completion ingestion and legacy RUN_CHILD_COMPLETION_CALLBACK).
 #
 # Replaces the SKILL.md prose for the callback wake-up. The orchestrator
 # LLM calls this once per callback with:
 #   - the subagent's compact JSON on stdin (worker_result_json payload)
-#   - IID and (optionally) ATTEMPT_NUMBER / RUN_ID via env
+#   - IID, ATTEMPT_NUMBER, CALLBACK_RUN_ID and
+#     CALLBACK_CHILD_SESSION_KEY via env for an ordinary current callback
+#   - CALLBACK_LABEL when the pending entry persists a child label
 #   - the standard dispatcher env (PROJECT, GROUP, GITLAB_TOKEN, plus
 #     optional REPO_PARENT_PATH)
 #
@@ -89,6 +91,37 @@ if ! flock -n 9; then
   exit 0
 fi
 
+# Load and authenticate against the pending entry before any GitLab read.  The
+# ingester performs an earlier lookup, but this lock-held check is the durable
+# authorization boundary and closes the lookup-to-mutation race.
+STATE_JSON="$(load_state)"
+PENDING_ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" '.pending_subagents[($iid|tostring)] // null')"
+if [ "${PENDING_ENTRY}" != "null" ]; then
+  AUTH_PENDING_ATTEMPT="$(jq -r '.attempt_number' <<<"${PENDING_ENTRY}")"
+  if [ "${TIMEOUT_RECONCILE}" = 1 ]; then
+    # Internal timeout reconciliation has its own job/generation/token digest
+    # fence below and is not a runtime completion callback.
+    ATTEMPT_NUMBER="${ATTEMPT_NUMBER:-${AUTH_PENDING_ATTEMPT}}"
+  else
+    if ! CALLBACK_AUTH_MODE="$(completion_authenticate_pending \
+        "${PENDING_ENTRY}" "${ATTEMPT_NUMBER:-}" \
+        "${CALLBACK_RUN_ID:-}" "${CALLBACK_CHILD_SESSION_KEY:-}" \
+        "${CALLBACK_LABEL:-}")"; then
+      wrapper_log followup "callback rejected iid=${IID}: completion identity mismatch"
+      jq -nc --argjson iid "${IID}" '{
+        callback_status:"rejected",
+        iid:$iid,
+        reason:"completion_identity_mismatch",
+        chat_summary:("rejected callback identity for #" + ($iid|tostring))
+      }'
+      exit 3
+    fi
+    if [ "${CALLBACK_AUTH_MODE}" = legacy ] && [ -z "${ATTEMPT_NUMBER:-}" ]; then
+      ATTEMPT_NUMBER="${AUTH_PENDING_ATTEMPT}"
+    fi
+  fi
+fi
+
 wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
 
 # Phase 6 step 0 — narrow reconcile (best-effort; failure does NOT abort).
@@ -98,24 +131,20 @@ wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
 # Capture the narrow reconcile's evidence path so the completion guard below can
 # consult fresh GitLab live labels before any regressing terminal write.
 RECON_EVIDENCE_PATH=""
-set +e
-RECON_OUT="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
-        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-        MIN_IID="${IID}" MAX_IID="${IID}" \
-        bash "${SCRIPT_DIR}/reconcile.sh" 2>/dev/null)"
-RECON_RC=$?
-set -e
-if [ "${RECON_RC}" -ne 0 ]; then
-  wrapper_log followup "narrow reconcile failed for iid=${IID}; proceeding with cached labels"
-else
-  RECON_EVIDENCE_PATH="$(printf '%s' "${RECON_OUT}" | grep -E '^/.+/reconcile-[0-9TZ]+\.json$' | tail -n 1 || true)"
+if [ "${PENDING_ENTRY}" != "null" ]; then
+  set +e
+  RECON_OUT="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+          REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+          MIN_IID="${IID}" MAX_IID="${IID}" \
+          bash "${SCRIPT_DIR}/reconcile.sh" 2>/dev/null)"
+  RECON_RC=$?
+  set -e
+  if [ "${RECON_RC}" -ne 0 ]; then
+    wrapper_log followup "narrow reconcile failed for iid=${IID}; proceeding with cached labels"
+  else
+    RECON_EVIDENCE_PATH="$(printf '%s' "${RECON_OUT}" | grep -E '^/.+/reconcile-[0-9TZ]+\.json$' | tail -n 1 || true)"
+  fi
 fi
-
-# Load campaign state.
-STATE_JSON="$(load_state)"
-
-# Lookup the pending entry.
-PENDING_ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" '.pending_subagents[($iid|tostring)] // null')"
 if [ "${PENDING_ENTRY}" = "null" ]; then
   # Phase 6 may already have atomically drained pending while retaining a
   # claim-bound durable intent. Match only this callback's IID+attempt, then

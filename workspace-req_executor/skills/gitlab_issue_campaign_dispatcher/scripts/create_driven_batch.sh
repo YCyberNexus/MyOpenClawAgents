@@ -4,10 +4,16 @@
 set -euo pipefail
 
 CREATE_BATCH_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CREATE_BATCH_SKILL_DIR="$(cd "${CREATE_BATCH_SCRIPT_DIR}/.." && pwd)"
+CONFIG_DIR="${CONFIG_DIR:-$(cd "${CREATE_BATCH_SKILL_DIR}/../.." && pwd)/config}"
 GITLAB_HOST_PROCESS_SET="${GITLAB_HOST+x}"
 GITLAB_HOST_PROCESS_OVERRIDE="${GITLAB_HOST:-}"
 GITLAB_PROTOCOL_PROCESS_SET="${GITLAB_API_PROTOCOL+x}"
 GITLAB_PROTOCOL_PROCESS_OVERRIDE="${GITLAB_API_PROTOCOL:-}"
+GITLAB_LOCAL_TEST_MODE_PROCESS_SET="${REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE+x}"
+GITLAB_LOCAL_TEST_MODE_PROCESS_OVERRIDE="${REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE:-}"
+GITLAB_ALLOWED_HOSTS_PROCESS_SET="${REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS+x}"
+GITLAB_ALLOWED_HOSTS_PROCESS_OVERRIDE="${REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS:-}"
 
 batch_die() {
   echo "create_driven_batch.sh: $1" >&2
@@ -189,18 +195,27 @@ esac
 # scheduler_env.sh loads the deployment-pinned agent and callback route before
 # the request is frozen. Process/local overrides remain deployment controls;
 # untrusted trigger fields must match them exactly.
+# Resolve the complete GitLab tuple first; scheduler config may contain the
+# ignored local tuple and must not be allowed to mix it with tracked values.
+# shellcheck disable=SC1091
+source "${CREATE_BATCH_SCRIPT_DIR}/gitlab_env_resolver.sh"
+GITLAB_HOST_EFFECTIVE="${GITLAB_HOST}"
+GITLAB_PROTOCOL_EFFECTIVE="${GITLAB_API_PROTOCOL}"
+GITLAB_TOKEN_EFFECTIVE="${GITLAB_TOKEN}"
 # shellcheck disable=SC1091
 source "${CREATE_BATCH_SCRIPT_DIR}/scheduler_env.sh" >/dev/null
-if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
-  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
+GITLAB_HOST="${GITLAB_HOST_EFFECTIVE}"
+GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_EFFECTIVE}"
+GITLAB_TOKEN="${GITLAB_TOKEN_EFFECTIVE}"
+export GITLAB_HOST GITLAB_API_PROTOCOL GITLAB_TOKEN
+if [ "${GITLAB_LOCAL_TEST_MODE_PROCESS_SET}" = x ]; then
+  REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE="${GITLAB_LOCAL_TEST_MODE_PROCESS_OVERRIDE}"
 fi
-if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
-  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
+if [ "${GITLAB_ALLOWED_HOSTS_PROCESS_SET}" = x ]; then
+  REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="${GITLAB_ALLOWED_HOSTS_PROCESS_OVERRIDE}"
 fi
-GITLAB_HOST_EFFECTIVE_SET="${GITLAB_HOST+x}"
-GITLAB_HOST_EFFECTIVE="${GITLAB_HOST:-}"
-GITLAB_PROTOCOL_EFFECTIVE_SET="${GITLAB_API_PROTOCOL+x}"
-GITLAB_PROTOCOL_EFFECTIVE="${GITLAB_API_PROTOCOL:-}"
+GITLAB_HOST_EFFECTIVE_SET=x
+GITLAB_PROTOCOL_EFFECTIVE_SET=x
 [ "${EXECUTOR_AGENT_INPUT}" = "${EXECUTOR_AGENT}" ] \
   || batch_die "executor_agent does not match the pinned executor"
 PINNED_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET}"
@@ -374,18 +389,23 @@ intake_fail() {
 
 printf '%s\n' "${REQUEST_JSON}" >"${INTAKE_DIR}/request.json"
 
-# glab_auth.sh loads the tracked credential pin. Restore the effective
-# process/local host and protocol afterwards so
-# workstation overrides keep their deployment precedence for intake API calls.
+# Run auth in a subprocess so sourcing the ignored local config cannot overwrite
+# scheduler variables in this intake transaction.
 INTAKE_FAILURE_REASON=gitlab_auth_failed
-# shellcheck disable=SC1091
-source "${CREATE_BATCH_SCRIPT_DIR}/glab_auth.sh" >/dev/null
-if [ "${GITLAB_HOST_EFFECTIVE_SET}" = x ]; then
-  export GITLAB_HOST="${GITLAB_HOST_EFFECTIVE}"
+if ! AUTHENTICATED_HOST="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+  GITLAB_HOST="${GITLAB_HOST_EFFECTIVE}" \
+  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_EFFECTIVE}" \
+  GITLAB_TOKEN="${GITLAB_TOKEN_EFFECTIVE}" \
+  GLAB_BIN="${GLAB_BIN:-glab}" \
+  GLAB_CONFIG_DIR="${GLAB_CONFIG_DIR:-}" \
+    bash "${CREATE_BATCH_SCRIPT_DIR}/glab_auth.sh"
+)"; then
+  intake_fail gitlab_auth_failed "GitLab authentication failed"
 fi
-if [ "${GITLAB_PROTOCOL_EFFECTIVE_SET}" = x ]; then
-  export GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_EFFECTIVE}"
-fi
+[ "${AUTHENTICATED_HOST}" = "${GITLAB_HOST_EFFECTIVE}" ] \
+  || intake_fail gitlab_auth_target_changed \
+    "GitLab auth changed the effective host"
 
 ALL_ISSUES='[]'
 PREVIOUS_FULL_SCAN=''

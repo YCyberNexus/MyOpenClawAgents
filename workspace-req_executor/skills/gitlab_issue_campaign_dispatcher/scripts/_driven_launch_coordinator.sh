@@ -149,6 +149,10 @@ dlc_read() {
       and (.project | type == "string" and length > 0)
       and (.iid | type == "number" and . == floor and . > 0)
       and (.attempt_number | type == "number" and . == floor and . > 0)
+      and (.expected_task_sha256 | type == "string"
+        and test("^[0-9a-f]{64}$"))
+      and (.expected_task_bytes | type == "number"
+        and . == floor and . > 0)
       and ((has("runtime_label_version") | not)
         or (.runtime_label_version == 1
           and (.child_label | type == "string" and length > 0

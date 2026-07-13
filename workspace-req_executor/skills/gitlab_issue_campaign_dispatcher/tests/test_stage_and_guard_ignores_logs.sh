@@ -34,9 +34,11 @@ printf 'inner result\n' >"${LOG_DIR}/claude_result.txt"
 result="$(
   PROJECT="${PROJECT_NAME}" \
   GROUP="claw_gitlab" \
-  GITLAB_HOST="gitlab-b.pxsemic.tech:30000" \
-  GITLAB_API_PROTOCOL="http" \
+  GITLAB_HOST="local-gitlab.invalid:9443" \
+  GITLAB_API_PROTOCOL="https" \
   GITLAB_TOKEN="test-token" \
+  REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
+  REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="local-gitlab.invalid:9443" \
   REPO_PARENT_PATH="${REPO_PARENT}" \
   ISSUE_IID=7 \
   ATTEMPT_NUMBER=1 \

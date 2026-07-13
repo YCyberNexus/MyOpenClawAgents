@@ -21,13 +21,29 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `execute_issue`：只调 `submit_executor_batch.sh`；支持 single/range/open_unfinished/open_label。
 - `create_and_execute`：git_issuer 严格成功后，把返回 Issue URL 交同一个 batch wrapper。
 - `clarify_or_reject`：不调用下游。
-- I3：只调 `handle_executor_batch_event.sh`；新 batch/single 必须使用带 nonce 与 executor 身份的
-  严格 `callback_envelope`，返回唯一 accepted/duplicate ack。
+- I3：首行 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 直接进入路径 D，只调
+  `handle_executor_batch_event.sh`；新 batch/single 必须使用带 nonce 与 executor 身份的严格
+  `callback_envelope`。旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容同一 handler。
 - 周期恢复：只调 `run_executor_batch_tick.sh`。
 - 旧 I2/FIFO：仅兼容部署前遗留 active/queue，排空后不再接收新项。
 
 LLM 不得直接调用 `route_project.sh`、`build_executor_batch_payload.sh`、receipt/mirror/event/
 notification 内部脚本，也不得手写 state。
+
+路径 D 成功时，最终 assistant 内容必须逐字等于 `handle_executor_batch_event.sh` 的唯一 stdout
+JSON；禁止添加任何前后缀、Markdown 代码块、解释、中文总结或其他对象。handler 非零时不得
+伪造 ack。此规则同时适用于新旧 callback marker。
+新 marker 的第三行必须精确为：
+`ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。`。
+该行是 transport 的强指令，不得忽略、改写或作为普通需求回复。不得把 callback 或 nonce
+写入 `/tmp`、workspace 或其他临时文件；必须通过 stdin heredoc 原样传入：
+
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+bash -c 'source scripts/source_dispatcher_env.sh; WORKER_RESULT_JSON="$(cat)" bash scripts/handle_executor_batch_event.sh' <<'CALLBACK_EOF'
+<完整 callback marker 原文>
+CALLBACK_EOF
+```
 
 ## Durable batch contract
 

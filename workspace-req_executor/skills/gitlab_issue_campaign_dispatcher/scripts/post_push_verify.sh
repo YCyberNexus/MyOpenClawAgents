@@ -22,11 +22,13 @@ set -euo pipefail
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env_paths.sh"
+source "${SCRIPT_DIR}/git_network_guard.sh"
+GIT_NETWORK_GUARD_CONTEXT=post_push_verify
 
 : "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" "${BRANCH:?}" "${ISSUE_IID:?}"
 
 cd "${WORKTREE_DIR}"
-git fetch origin "${WORK_BRANCH}" >&2
-git fetch origin "${BRANCH}" >&2
+git_network_guard_run "${WORKTREE_DIR}" fetch origin "${WORK_BRANCH}" >&2
+git_network_guard_run "${WORKTREE_DIR}" fetch origin "${BRANCH}" >&2
 
 echo "REMOTE_CLEAN"

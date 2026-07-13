@@ -70,11 +70,17 @@ RUN_EXECUTOR_BATCH_TICK
 每个 Issue 的终态逐项发送，不发送一条代替明细的聚合结果。callback transport 固定为：
 
 ```text
-RUN_DRIVEN_BATCH_RESULT
+RUN_DRIVEN_BATCH_RESULT_ACK_ONLY
 callback_envelope={"callback_nonce":"<64 hex>","executor_agent":"req_executor","worker_result_json":<strict 8-field I3 JSON>}
+ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。
 ```
 
 dispatcher 对同一 `event_id` 返回 `accepted` 或 `duplicate` 都表示该 I3 已确认；executor 只有收到匹配 event ID 的 ack 才把对应 outbox item 标记为 delivered。发送失败保留相同 event ID 重试，不重复生成 Issue 结果。
+ack stdout 必须整体是唯一严格 JSON，或整体恰为单个 `json`/无语言 Markdown 围栏且 body 为
+唯一严格 JSON。围栏外字符、中文总结、解释、双围栏、前后缀或多个 JSON 都按
+`malformed_or_ambiguous_ack` 保留 outbox 并重试。dispatcher 仍接受旧
+`RUN_DRIVEN_BATCH_RESULT` 输入 marker，但新 outbox 不再发送它。新 marker 缺失、伪造或追加
+第三行也会在 durable apply 前失败关闭。
 
 callback `openclaw` 子进程继承 executor 当前环境，包括按既定优先级选中的 `GITLAB_TOKEN`；`callback_envelope` 的字段集合仍按上述 I3 业务 schema 生成。
 
@@ -84,7 +90,7 @@ callback `openclaw` 子进程继承 executor 当前环境，包括按既定优�
 
 - 本地 `REPO_PARENT_PATH`、`EXECUTOR_SCHEDULER_ROOT`、`EXECUTOR_MAX_CONCURRENCY`、`EXECUTOR_RUNNING_LEASE_SECONDS`、`EXECUTOR_AGENT` 或 `DISPATCHER_CALLBACK_TARGET` 只能通过进程环境或 ignored `config/campaign_defaults.local.env` 覆盖；显式 scheduler 进程环境优先，并须在 intake、tick、import、delivery 使用同一组值。tracked 配置继续保留蓝区 GitLab host/protocol、token 注入、callback 和 `/data` 默认，不写本机路径或测试 endpoint。
 - 升级时先排空 req_dispatcher 的旧 FIFO。旧 active/queue 非空期间，新 batch 只保持 `waiting_for_legacy_drain`，不与旧 single active 重叠；清空后由 `RUN_EXECUTOR_BATCH_TICK` 推进新 scheduler。
-- 认证回调上线前已经存在于 executor 私有 scheduler 根、且同时缺少 `executor_agent` 与 `callback_nonce` 的旧 request/outbox，会在读取时一次性显式标记为 `legacy_pre_upgrade`，仍用 `RUN_DRIVEN_BATCH_RESULT` 加 `worker_result_json=<严格八字段 I3>` 完成旧 mirror。新 I1 始终强制 nonce、executor 与固定 target；触发输入不能请求或伪造 `legacy_pre_upgrade`。
+- 认证回调上线前已经存在于 executor 私有 scheduler 根、且同时缺少 `executor_agent` 与 `callback_nonce` 的旧 request/outbox，会在读取时一次性显式标记为 `legacy_pre_upgrade`，并用 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 加 `worker_result_json=<严格八字段 I3>` 完成旧 mirror。dispatcher 仍接受旧 marker 以兼容已发出的在途消息。新 I1 始终强制 nonce、executor 与固定 target；触发输入不能请求或伪造 `legacy_pre_upgrade`。
 - 新旧锁目录滚动升级默认保留 86400 秒兼容窗口（起点持久化在 scheduler 根的 `lock_layout_v2.json`）。窗口内新进程同时获取旧、新两条 callback/launch 锁；窗口后才在双锁保护下把旧锁移出热目录。只有确认所有旧 executor 进程已停止，才可用 `DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0` 提前结束窗口。
 - 回滚时先停止新的 batch 入口和周期 tick。可先排空，也可保留 scheduler state、batch snapshot、handoff 与 callback outbox 等 durable 记录等待恢复；不得删除运行时 state/outbox，也不得用新 batch ID 替代未完成批次。
 

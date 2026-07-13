@@ -33,6 +33,7 @@ cp \
   "${SKILL_DIR}/scripts/dispatch_followup.sh" \
   "${SKILL_DIR}/scripts/_dispatch_lib.sh" \
   "${SKILL_DIR}/scripts/env_paths.sh" \
+  "${SKILL_DIR}/scripts/git_network_guard.sh" \
   "${DRAIN_INTENTS}" \
   "${FOLLOWUP_SCRIPTS}/"
 
@@ -168,6 +169,8 @@ run_followup() {
   REPO_PARENT_PATH="${FOLLOWUP_PARENT}" \
   IID=42 \
   ATTEMPT_NUMBER="${attempt_number}" \
+  CALLBACK_RUN_ID="run-42-${attempt_number}" \
+  CALLBACK_CHILD_SESSION_KEY="agent:req_executor:subagent:42" \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
   DRIVEN_HANDOFF_TEST_FAULT="${fault}" \
   EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \

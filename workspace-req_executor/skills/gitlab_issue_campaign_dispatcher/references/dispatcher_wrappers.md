@@ -53,9 +53,17 @@ token-hash-bound tombstone. If no active job remains, only the exact same
 job/generation/token/action may replay successfully; a current active claim is
 always authoritative over an older tombstone.
 
-## `dispatch_followup.sh`
+## `ingest_subagent_completion.sh` and `dispatch_followup.sh`
 
-Consumes `RUN_CHILD_COMPLETION_CALLBACK` compact JSON, validates it, reconciles the IID, writes terminal state, updates labels, optionally reports results back to `req_dispatcher`, and emits cleanup instructions.
+`ingest_subagent_completion.sh` authenticates an OpenClaw native
+`task_completion` event, or one bounded non-truncated `sessions_history`
+recovery envelope, against the pending run/session/attempt identity. It then
+passes exactly one strict compact worker JSON object to `dispatch_followup.sh`.
+The followup rechecks the same identity while holding the campaign lock,
+reconciles the IID, writes terminal state, updates labels, optionally reports
+results back to `req_dispatcher`, and emits cleanup instructions. Direct legacy
+compact JSON is accepted only when the pending record explicitly carries
+`completion_auth:"legacy"`.
 
 ## Standard Env
 

@@ -18,7 +18,12 @@ fail() {
 }
 
 mkdir -p "${FIXTURE_SCRIPTS}" "${PROJECT_REPO}/.git" "${STATE_DIR}"
-for name in dispatch_prepare_tick.sh _dispatch_lib.sh branch_utils.sh env_paths.sh; do
+for name in \
+  dispatch_prepare_tick.sh \
+  _dispatch_lib.sh \
+  branch_utils.sh \
+  env_paths.sh \
+  git_network_guard.sh; do
   cp "${SKILL_DIR}/scripts/${name}" "${FIXTURE_SCRIPTS}/${name}"
 done
 

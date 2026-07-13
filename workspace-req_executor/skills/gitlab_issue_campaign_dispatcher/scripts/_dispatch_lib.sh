@@ -30,6 +30,11 @@
 #                                → compatibility wrapper that builds and writes
 #                                  a handoff without storing an intent
 #   iso_to_epoch <iso8601>       → epoch seconds (0 when unparseable)
+#   completion_extract_unique_worker_reply <final_assistant_text>
+#                                → extract the sole strict compact worker JSON
+#   completion_authenticate_pending <pending_json> <attempt> <run_id>
+#                                      <child_session_key> <label>
+#                                → print native_v1|legacy after exact identity check
 #   phase6_synthesize_reply <iid> <attempt_number> <status> <block_reason>
 #                                → emit a synthetic compact reply JSON (status=blocked|timeout)
 #   phase6_synthesize_blocked <iid> <attempt_number> <block_reason>
@@ -97,6 +102,158 @@ wrapper_log() {
   local ts="$(utc_now)"
   mkdir -p "${DISPATCHER_LOG_DIR}"
   printf '[%s] [%s] %s\n' "${ts}" "${phase}" "$*" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
+}
+
+# Extract exactly one current compact worker reply from the final assistant
+# text.  The worker contract requires a one-line object, so parsing candidate
+# lines avoids treating arbitrary prose, nested examples, or tool payloads as
+# a completion.  Two valid lines are ambiguous even when byte-identical.
+completion_extract_unique_worker_reply() {
+  local final_text="$1" candidates count
+
+  if ! candidates="$(printf '%s' "${final_text}" | jq -Rsc '
+    def is_worker_reply:
+      type == "object"
+      and (keys | sort) == ([
+        "attempt_number", "block_reason", "commit_sha", "iid",
+        "labels_added", "labels_removed", "local_branch", "log_dir",
+        "merge_request_url", "mode_actual", "mr_action", "status",
+        "summary_posted", "wiki_url", "work_branch"
+      ] | sort)
+      and (.iid | type == "number" and . == floor and . > 0)
+      and (.attempt_number | type == "number" and . == floor and . > 0)
+      and (.status as $status
+        | ($status | type) == "string"
+          and (["done","no_changes","blocked","failed","timeout"]
+            | index($status) != null))
+      and (.mode_actual | type == "string")
+      and (.work_branch | type == "string")
+      and (.local_branch | type == "string")
+      and (.commit_sha | type == "string")
+      and (.merge_request_url | type == "string")
+      and (.mr_action as $mr_action
+        | ($mr_action | type) == "string"
+          and (["created","rotated","none"] | index($mr_action) != null))
+      and (.wiki_url | type == "string")
+      and (.labels_added | type == "array" and all(.[]; type == "string"))
+      and (.labels_removed | type == "array" and all(.[]; type == "string"))
+      and (.summary_posted | type == "boolean")
+      and (.block_reason | type == "string")
+      and (.log_dir | type == "string")
+      and (if .status == "blocked" or .status == "failed" or .status == "timeout"
+        then (.block_reason | length) > 0
+        else true
+        end);
+
+    [
+      split("\n")[]
+      | sub("\r$"; "")
+      | gsub("^\\s+|\\s+$"; "")
+      | select(length > 0)
+      | (try fromjson catch null)
+      | select(is_worker_reply)
+    ]
+  ')"; then
+    echo "completion: unable to scan final assistant text" >&2
+    return 3
+  fi
+
+  count="$(jq -r 'length' <<<"${candidates}")"
+  if [ "${count}" -eq 0 ]; then
+    echo "completion: final assistant text has no strict compact worker JSON" >&2
+    return 3
+  fi
+  if [ "${count}" -ne 1 ]; then
+    echo "completion: final assistant text has ambiguous compact worker JSON" >&2
+    return 3
+  fi
+  jq -c '.[0]' <<<"${candidates}"
+}
+
+# Authenticate a callback against the pending entry while dispatch_followup
+# holds the campaign lock.  Existing/current entries are strict by default and
+# require the exact runtime ack identity.  A rolling-upgrade entry may opt into
+# the old callback surface only through the explicit marker
+# `completion_auth:"legacy"`; absence of identity is never inferred as legacy.
+completion_authenticate_pending() {
+  local pending_json="$1" callback_attempt="$2" callback_run_id="$3"
+  local callback_child_session_key="$4" callback_label="$5" auth_mode
+
+  if ! auth_mode="$(jq -er '
+    if type != "object" then error("pending is not an object")
+    elif (.completion_auth // "native_v1") == "native_v1" then "native_v1"
+    elif .completion_auth == "legacy" then "legacy"
+    else error("unknown completion_auth")
+    end
+  ' <<<"${pending_json}" 2>/dev/null)"; then
+    echo "completion: pending completion authentication mode is invalid" >&2
+    return 3
+  fi
+
+  case "${callback_run_id}${callback_child_session_key}${callback_label}" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      echo "completion: callback identity contains control characters" >&2
+      return 3
+      ;;
+  esac
+
+  if [ "${auth_mode}" = "native_v1" ]; then
+    if ! [[ "${callback_attempt}" =~ ^[1-9][0-9]*$ ]] \
+        || [ -z "${callback_run_id}" ] \
+        || [ -z "${callback_child_session_key}" ]; then
+      echo "completion: strict callback identity is incomplete" >&2
+      return 3
+    fi
+    if ! jq -e \
+        --argjson callback_attempt "${callback_attempt}" \
+        --arg callback_run_id "${callback_run_id}" \
+        --arg callback_child_session_key "${callback_child_session_key}" \
+        --arg callback_label "${callback_label}" '
+      (.attempt_number | type == "number" and . == floor and . > 0)
+      and (.run_id | type == "string" and length > 0)
+      and (.child_session_key | type == "string" and length > 0)
+      and .attempt_number == $callback_attempt
+      and .run_id == $callback_run_id
+      and .child_session_key == $callback_child_session_key
+      and ((.child_label // .label // "") as $expected_label
+        | $expected_label == ""
+          or ($callback_label != "" and $callback_label == $expected_label))
+    ' <<<"${pending_json}" >/dev/null; then
+      echo "completion: callback identity does not match pending state" >&2
+      return 3
+    fi
+    printf '%s\n' native_v1
+    return 0
+  fi
+
+  # Explicit legacy mode accepts omitted runtime identity, but rejects any
+  # supplied field that conflicts with durable pending evidence.
+  if [ -n "${callback_attempt}" ] && ! [[ "${callback_attempt}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "completion: legacy callback attempt is invalid" >&2
+    return 3
+  fi
+  if ! jq -e \
+      --arg callback_attempt "${callback_attempt}" \
+      --arg callback_run_id "${callback_run_id}" \
+      --arg callback_child_session_key "${callback_child_session_key}" \
+      --arg callback_label "${callback_label}" '
+    .completion_auth == "legacy"
+    and (.attempt_number | type == "number" and . == floor and . > 0)
+    and ($callback_attempt == ""
+      or (.attempt_number | tostring) == $callback_attempt)
+    and ($callback_run_id == ""
+      or ((.run_id // "") == "" or .run_id == $callback_run_id))
+    and ($callback_child_session_key == ""
+      or ((.child_session_key // "") == ""
+        or .child_session_key == $callback_child_session_key))
+    and ($callback_label == ""
+      or ((.child_label // .label // "") == ""
+        or (.child_label // .label) == $callback_label))
+  ' <<<"${pending_json}" >/dev/null; then
+    echo "completion: legacy callback conflicts with pending state" >&2
+    return 3
+  fi
+  printf '%s\n' legacy
 }
 
 # Build the project-local half of a scheduler-driven terminal callback without

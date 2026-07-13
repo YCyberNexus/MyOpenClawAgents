@@ -10,7 +10,7 @@
 
 req_dispatcher 对蓝区 git_issuer 的硬依赖是：
 
-1. **接受一段自由文本需求**作为输入。req_dispatcher 通过 `run_agent_turn.sh` 把需求原文作为 `openclaw agent --message` 的正文传入。
+1. **接受一段自由文本需求**作为输入。req_dispatcher 通过 `run_agent_turn.sh` 的安全 stdin 传输层发送需求原文；正文不会进入 `openclaw agent` 的命令行参数。
 2. **从 req_dispatcher 准备后的文本解析并校验目标 project/group**。新 payload 会显式包含 `repo=<group/project>`；git_issuer 仍应按自身配置校验项目，不能因为 req_dispatcher 提供了 repo 行就绕过项目白名单。
 3. **建好 GitLab issue 后，不应让只建单请求被 executor cron 自动捞起**。若 git_issuer 仍按旧配置添加执行器入口标签（如 `todo`/`new`），部署侧必须确保 req_executor cron 不会绕过 req_dispatcher 的新动作判定；显式执行由 req_dispatcher 的 `RUN_SINGLE_ISSUE` driven 路径负责。
 4. **最后一行输出终态 JSON**：成功/失败，成功时带 `project`、issue IID 与 URL，失败时带原因。

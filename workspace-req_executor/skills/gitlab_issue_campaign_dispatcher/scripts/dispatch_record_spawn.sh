@@ -17,7 +17,8 @@
 #                        for free via blocked_iids).
 #
 # Required env:
-#   PROJECT, GROUP, GITLAB_TOKEN, IID, ATTEMPT_NUMBER, STATUS
+#   PROJECT, GROUP, GITLAB_TOKEN, IID, ATTEMPT_NUMBER, STATUS,
+#   EXPECTED_TASK_SHA256, EXPECTED_TASK_BYTES
 #   When STATUS=spawned:        RUN_ID, CHILD_SESSION_KEY
 #   When STATUS=launch_failed:  LAUNCH_ATTEMPTS (default 3), LAUNCH_ERROR
 # Optional (forwarded when non-default deployment):
@@ -49,9 +50,16 @@ set -euo pipefail
 : "${IID:?dispatch_record_spawn.sh: IID must be set}"
 : "${ATTEMPT_NUMBER:?dispatch_record_spawn.sh: ATTEMPT_NUMBER must be set}"
 : "${STATUS:?dispatch_record_spawn.sh: STATUS must be set (spawned|launch_failed)}"
+: "${EXPECTED_TASK_SHA256:?dispatch_record_spawn.sh: EXPECTED_TASK_SHA256 must be set}"
+: "${EXPECTED_TASK_BYTES:?dispatch_record_spawn.sh: EXPECTED_TASK_BYTES must be set}"
 
 case "${IID}" in *[!0-9]*|"") echo "dispatch_record_spawn.sh: IID must be a positive integer" >&2; exit 2 ;; esac
 case "${ATTEMPT_NUMBER}" in *[!0-9]*|"") echo "dispatch_record_spawn.sh: ATTEMPT_NUMBER must be a positive integer" >&2; exit 2 ;; esac
+[[ "${EXPECTED_TASK_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+  || { echo "dispatch_record_spawn.sh: EXPECTED_TASK_SHA256 must be 64 lowercase hex" >&2; exit 2; }
+case "${EXPECTED_TASK_BYTES}" in
+  ''|*[!0-9]*|0) echo "dispatch_record_spawn.sh: EXPECTED_TASK_BYTES must be a positive integer" >&2; exit 2 ;;
+esac
 
 case "${STATUS}" in
   spawned)
@@ -164,7 +172,8 @@ if [ "${DRIVEN_MODE}" = true ]; then
       if type == "object"
         and (keys | sort) == [
           "ack","attempt_number","claim_generation","claim_token_sha256",
-          "iid","job_id","outcome","recorded_at","result","version"
+          "expected_task_bytes","expected_task_sha256","iid","job_id",
+          "outcome","recorded_at","result","version"
         ]
         and .version == 1
         and (.job_id | clean_string)
@@ -172,6 +181,10 @@ if [ "${DRIVEN_MODE}" = true ]; then
         and (.claim_token_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
         and (.iid | type == "number" and . == floor and . > 0)
         and (.attempt_number | type == "number" and . == floor and . > 0)
+        and (.expected_task_sha256 | type == "string"
+          and test("^[0-9a-f]{64}$"))
+        and (.expected_task_bytes | type == "number"
+          and . == floor and . > 0)
         and (.recorded_at | clean_string)
         and (
           (.outcome == "spawned"
@@ -215,11 +228,15 @@ if [ "${DRIVEN_MODE}" = true ]; then
         --arg job_id "${DRIVEN_JOB_ID_INPUT}" \
         --argjson generation "${DRIVEN_CLAIM_GENERATION_INPUT}" \
         --arg token "${DRIVEN_CLAIM_TOKEN_INPUT}" \
-        --argjson attempt "${ATTEMPT_NUMBER}" '
+        --argjson attempt "${ATTEMPT_NUMBER}" \
+        --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
+        --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" '
         .job_id == $job_id
         and .claim_generation == $generation
         and .claim_token == $token
         and .attempt_number == $attempt
+        and .expected_task_sha256 == $expected_task_sha256
+        and .expected_task_bytes == $expected_task_bytes
       ' <<<"${PENDING}" >/dev/null; then
       echo "dispatch_record_spawn.sh: driven launch identity does not match current pending entry" >&2
       exit 2
@@ -236,12 +253,16 @@ if [ "${DRIVEN_MODE}" = true ]; then
         --argjson generation "${DRIVEN_CLAIM_GENERATION_INPUT}" \
         --arg token_sha256 "${DRIVEN_CLAIM_TOKEN_SHA256}" \
         --argjson iid "${IID}" \
-        --argjson attempt "${ATTEMPT_NUMBER}" '
+        --argjson attempt "${ATTEMPT_NUMBER}" \
+        --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
+        --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" '
         .job_id == $job_id
         and .claim_generation == $generation
         and .claim_token_sha256 == $token_sha256
         and .iid == $iid
         and .attempt_number == $attempt
+        and .expected_task_sha256 == $expected_task_sha256
+        and .expected_task_bytes == $expected_task_bytes
       ' <<<"${DRIVEN_RECEIPT}" >/dev/null; then
       RECEIPT_IDENTITY_MATCH=true
     fi
@@ -271,6 +292,15 @@ else
     echo "dispatch_record_spawn.sh: attempt_number mismatch (pending=${PENDING_ATTEMPT} caller=${ATTEMPT_NUMBER})" >&2
     exit 2
   fi
+  if ! jq -e \
+      --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
+      --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" '
+      .expected_task_sha256 == $expected_task_sha256
+      and .expected_task_bytes == $expected_task_bytes
+    ' <<<"${PENDING}" >/dev/null; then
+    echo "dispatch_record_spawn.sh: task identity does not match current pending entry" >&2
+    exit 2
+  fi
 fi
 
 build_driven_receipt() {
@@ -281,6 +311,8 @@ build_driven_receipt() {
     --arg claim_token_sha256 "${DRIVEN_CLAIM_TOKEN_SHA256}" \
     --argjson iid "${IID}" \
     --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
+    --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" \
     --arg outcome "${STATUS}" \
     --argjson ack "${INCOMING_ACK_JSON}" \
     --arg recorded_at "${recorded_at}" \
@@ -291,6 +323,8 @@ build_driven_receipt() {
       claim_token_sha256:$claim_token_sha256,
       iid:$iid,
       attempt_number:$attempt_number,
+      expected_task_sha256:$expected_task_sha256,
+      expected_task_bytes:$expected_task_bytes,
       outcome:$outcome,
       ack:$ack,
       recorded_at:$recorded_at,

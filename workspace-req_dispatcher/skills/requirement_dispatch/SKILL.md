@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-13.4] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-13.5] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -22,9 +22,10 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 - 新执行请求只能调用 `submit_executor_batch.sh`。不得把
   `prepare_executor_issue_payload.sh -> route_project.sh -> build_executor_batch_payload.sh`
   拆成 LLM 步骤；这条链只在 wrapper 内部运行。
-- 周期恢复只能调用 `run_executor_batch_tick.sh`。认证的 `RUN_DRIVEN_BATCH_RESULT` transport，或
-  仅供明确 `legacy_pre_upgrade` mirror 使用的纯 I3，都只能调用
-  `handle_executor_batch_event.sh`，并把其唯一 stdout JSON 原样作为 ack。
+- 周期恢复只能调用 `run_executor_batch_tick.sh`。认证的
+  `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` transport、兼容的旧
+  `RUN_DRIVEN_BATCH_RESULT` transport，或仅供明确 `legacy_pre_upgrade` mirror 使用的纯 I3，
+  都只能调用 `handle_executor_batch_event.sh`，并把其唯一 stdout JSON 原样作为 ack。
 - `DISPATCHER_CALLBACK_TARGET` 为空时必须拒绝，不能分配 batch、落 intent 或触达 executor。
 - 下游或本地脚本非零时按 No-Fallback 停止；不得内联重写脚本逻辑或手改 state。
 
@@ -32,14 +33,16 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 
 固定 session 为 `agent:req_dispatcher:main`。每次唤醒只选一条：
 
-1. 首行是精确 `RUN_DRIVEN_BATCH_RESULT`：路径 D；不得进入自然语言动作判定。
-2. 收到严格三字段 `callback_envelope` 对象：路径 D。
-3. 收到兼容的纯 I3 JSON，且目标 mirror 明确标记 `legacy_pre_upgrade`：路径 D。
-4. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
-5. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
-6. 其余自然语言需求：路径 A。
+1. 首行是精确 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`：路径 D；不得进入自然语言动作判定。
+2. 首行是兼容的精确 `RUN_DRIVEN_BATCH_RESULT`：路径 D。
+3. 收到严格三字段 `callback_envelope` 对象：路径 D。
+4. 收到兼容的纯 I3 JSON，且目标 mirror 明确标记 `legacy_pre_upgrade`：路径 D。
+5. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
+6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
+7. 其余自然语言需求：路径 A。
 
-禁止把 `RUN_DRIVEN_BATCH_RESULT` 当自然语言或 I2，也禁止在一个回调 turn 中自行执行多个分支。
+禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
+turn 中自行执行多个分支。
 
 ## 路径 A：需求接入
 
@@ -184,17 +187,23 @@ stdout 固定为 `status=tick`，并含
 executor outbox 实际发送的完整 transport 为：
 
 ```text
-RUN_DRIVEN_BATCH_RESULT
+RUN_DRIVEN_BATCH_RESULT_ACK_ONLY
 callback_envelope={"callback_nonce":"<64 个小写 hex>","executor_agent":"<路由 agent>","worker_result_json":<严格八字段 I3 object>}
+ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。
 ```
 
-把收到的**完整原文**原样交给 handler，不得由 LLM 手工截取第二行：
+新 marker 必须恰好包含以上三行，第三行逐字匹配后才允许 durable apply。缺失、伪造或附加行
+全部 fail closed。旧 sender 的 `RUN_DRIVEN_BATCH_RESULT` 两行格式继续由同一 handler 接受；
+不得因此改变 envelope、nonce、project、executor 或八字段 I3 的任一校验。
+
+把收到的**完整原文**原样交给 handler，不得由 LLM 手工截取第二行，也不得把 callback、nonce
+或中间命令写入 `/tmp`、workspace 或其他临时文件。固定使用 stdin heredoc：
 
 ```bash
 cd "<SKILL_DIR 绝对路径>" && \
-source scripts/source_dispatcher_env.sh && \
-WORKER_RESULT_JSON='<完整 RUN_DRIVEN_BATCH_RESULT 原文>' \
-bash scripts/handle_executor_batch_event.sh
+bash -c 'source scripts/source_dispatcher_env.sh; WORKER_RESULT_JSON="$(cat)" bash scripts/handle_executor_batch_event.sh' <<'CALLBACK_EOF'
+<完整 callback marker 原文>
+CALLBACK_EOF
 ```
 
 handler 还接受把严格三字段对象放入 `CALLBACK_ENVELOPE_JSON`。transport 必须只有首行和唯一一行
@@ -209,6 +218,12 @@ handler 固定只完成严格 transport 解包与 `apply_executor_batch_event.sh
 ```json
 {"status":"accepted|duplicate","event_id":"<与输入完全相同>"}
 ```
+
+对新 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 以及兼容旧 marker，handler 成功后，当前 turn 的最终 assistant 内容必须严格等于该 handler 的唯一 stdout JSON。禁止任何前后缀、Markdown 代码块、
+解释、中文总结、第二个 JSON 或其他文本；不得改写、重排或重新序列化。handler 非零时不得伪造
+ack。executor 只接受整个响应恰为一个严格 ack JSON，或整个响应恰为单个 `json`/无语言
+Markdown 围栏且围栏 body 是唯一严格 ack JSON；任何围栏外字符、prose、双围栏、多个对象都
+必须重试。
 
 - `accepted` 与 `duplicate` 都是 executor outbox 的成功 ack。
 - duplicate 不会重复 terminal_count 或生成第二个通知 item，也不会在 ack 路径同步投递通知。

@@ -7,17 +7,24 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-notify-dispatcher.XXXXXX")"
 FAKE_BIN="${TEST_ROOT}/bin"
 OPENCLAW_LOG="${TEST_ROOT}/openclaw.args"
+OPENCLAW_STDIN_LOG="${TEST_ROOT}/openclaw.stdin"
 mkdir -p "${FAKE_BIN}"
 
 {
   printf '%s\n' '#!/usr/bin/env bash'
+  printf '%s\n' 'if [ "${1:-}" = agent ] && [ "${2:-}" = --help ]; then'
+  printf '%s\n' '  printf "%s\n" "  --session-key <key>" "  --session-id <id>" "  --message-file <path>"'
+  printf '%s\n' '  exit 0'
+  printf '%s\n' 'fi'
   printf '%s\n' 'printf "%s\n" "$*" >> "${OPENCLAW_LOG}"'
+  printf '%s\n' 'cat >"${OPENCLAW_STDIN_LOG}"'
   printf '%s\n' 'exit 0'
 } > "${FAKE_BIN}/openclaw"
 chmod +x "${FAKE_BIN}/openclaw"
 
 PATH="${FAKE_BIN}:${PATH}" \
 OPENCLAW_LOG="${OPENCLAW_LOG}" \
+OPENCLAW_STDIN_LOG="${OPENCLAW_STDIN_LOG}" \
 WORK_ROOT="${TEST_ROOT}/work" \
 DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
 CORRELATION_ID="reqd-99" \
@@ -39,15 +46,17 @@ if ! grep -q -- '--session-key agent:req_dispatcher:main' "${OPENCLAW_LOG}"; the
   exit 1
 fi
 
-if ! grep -q -- 'RUN_EXECUTOR_RESULT_CALLBACK' "${OPENCLAW_LOG}"; then
-  echo "expected callback message to include RUN_EXECUTOR_RESULT_CALLBACK" >&2
-  cat "${OPENCLAW_LOG}" >&2
+if grep -q -- 'RUN_EXECUTOR_RESULT_CALLBACK' "${OPENCLAW_LOG}" \
+    || ! grep -q -- '--message-file /dev/stdin' "${OPENCLAW_LOG}" \
+    || ! grep -q -- 'RUN_EXECUTOR_RESULT_CALLBACK' "${OPENCLAW_STDIN_LOG}"; then
+  echo "expected callback message only on stdin via --message-file" >&2
+  cat "${OPENCLAW_LOG}" "${OPENCLAW_STDIN_LOG}" >&2
   exit 1
 fi
 
-if ! grep -q -- '"correlation_id":"reqd-99"' "${OPENCLAW_LOG}"; then
+if ! grep -q -- '"correlation_id":"reqd-99"' "${OPENCLAW_STDIN_LOG}"; then
   echo "expected callback message to include I2 correlation_id" >&2
-  cat "${OPENCLAW_LOG}" >&2
+  cat "${OPENCLAW_STDIN_LOG}" >&2
   exit 1
 fi
 

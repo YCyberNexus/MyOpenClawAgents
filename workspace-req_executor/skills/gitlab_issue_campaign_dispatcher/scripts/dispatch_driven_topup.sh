@@ -5,11 +5,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SKILL_DIR}/../.." && pwd)/config}"
-GITLAB_TOKEN_ENV_OVERRIDE="${GITLAB_TOKEN:-}"
-GITLAB_HOST_ENV_SET="${GITLAB_HOST+x}"
-GITLAB_HOST_ENV_VALUE="${GITLAB_HOST:-}"
-GITLAB_PROTOCOL_ENV_SET="${GITLAB_API_PROTOCOL+x}"
-GITLAB_PROTOCOL_ENV_VALUE="${GITLAB_API_PROTOCOL:-}"
 REPO_PARENT_ENV_SET="${REPO_PARENT_PATH+x}"
 REPO_PARENT_ENV_VALUE="${REPO_PARENT_PATH:-}"
 SCHEDULER_ROOT_ENV_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
@@ -89,20 +84,20 @@ done < <(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[] | select(.branch != nu
   || die "missing config/gitlab.env at ${CONFIG_DIR}/gitlab.env"
 [ -f "${CONFIG_DIR}/campaign_defaults.env" ] \
   || die "missing config/campaign_defaults.env at ${CONFIG_DIR}/campaign_defaults.env"
+# Resolve the GitLab tuple before campaign defaults can mix tracked and local
+# fields. This source-only mode performs no network I/O.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/gitlab_env_resolver.sh"
+GITLAB_HOST_RESOLVED="${GITLAB_HOST}"
+GITLAB_PROTOCOL_RESOLVED="${GITLAB_API_PROTOCOL}"
+GITLAB_TOKEN_RESOLVED="${GITLAB_TOKEN}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/gitlab.env"
-GITLAB_TOKEN_PIN="${GITLAB_TOKEN:-}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/campaign_defaults.env"
 if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   # shellcheck disable=SC1091
   source "${CONFIG_DIR}/campaign_defaults.local.env"
-fi
-if [ "${GITLAB_HOST_ENV_SET}" = x ]; then
-  GITLAB_HOST="${GITLAB_HOST_ENV_VALUE}"
-fi
-if [ "${GITLAB_PROTOCOL_ENV_SET}" = x ]; then
-  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_ENV_VALUE}"
 fi
 if [ "${REPO_PARENT_ENV_SET}" = x ]; then
   REPO_PARENT_PATH="${REPO_PARENT_ENV_VALUE}"
@@ -126,7 +121,9 @@ if [ "${LOCK_COMPAT_ENV_SET}" = x ]; then
   DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_ENV_VALUE}"
 fi
 
-GITLAB_TOKEN_EFF="${GITLAB_TOKEN_ENV_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"
+GITLAB_HOST="${GITLAB_HOST_RESOLVED}"
+GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_RESOLVED}"
+GITLAB_TOKEN_EFF="${GITLAB_TOKEN_RESOLVED}"
 case "${GITLAB_TOKEN_EFF}" in
   '') die "GITLAB_TOKEN is required from process env or config/gitlab.env" ;;
   *[[:cntrl:]]*) die "GITLAB_TOKEN must not contain control characters" ;;
@@ -174,7 +171,6 @@ dispatch_mode=driven_topup
 driven_request_json=${REQUEST_JSON}
 project=${PROJECT_SLUG}
 group=${GROUP_EFF}
-gitlab_token=${GITLAB_TOKEN_EFF}
 issue_iids=${IID_CSV}
 issue_min_iid=${IID_MIN}
 issue_max_iid=${IID_MAX}

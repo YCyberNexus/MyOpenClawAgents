@@ -80,8 +80,8 @@ then
   exit 1
 fi
 
-if ! grep -q "issue_url must be a GitLab issue URL" "${TEST_ROOT}/missing-url.err"; then
-  echo "expected clear malformed issue_url error" >&2
+if ! grep -q "exactly match the effective target authority" "${TEST_ROOT}/missing-url.err"; then
+  echo "expected clear mismatching authority error" >&2
   cat "${TEST_ROOT}/missing-url.err" >&2
   exit 1
 fi
@@ -104,6 +104,38 @@ if ! grep -q "GitLab host" "${TEST_ROOT}/non-gitlab-host.err"; then
   cat "${TEST_ROOT}/non-gitlab-host.err" >&2
   exit 1
 fi
+
+authority_mismatches=(
+  'https://gitlab-b.pxsemic.tech:30000/claw_gitlab/req_executor_test/-/issues/42'
+  'http://gitlab-b.pxsemic.tech/claw_gitlab/req_executor_test/-/issues/42'
+  'http://gitlab-b.pxsemic.tech:30001/claw_gitlab/req_executor_test/-/issues/42'
+  'http://gitlab-b.pxsemic.tech.evil:30000/claw_gitlab/req_executor_test/-/issues/42'
+  'http://GitLab-b.pxsemic.tech:30000/claw_gitlab/req_executor_test/-/issues/42'
+  'http://user@gitlab-b.pxsemic.tech:30000/claw_gitlab/req_executor_test/-/issues/42'
+)
+authority_index=0
+for bad_url in "${authority_mismatches[@]}"; do
+  authority_index=$((authority_index + 1))
+  if CONFIG_DIR="${CONFIG_DIR}" \
+    DRIVEN_BATCH_CMD="${DRIVEN_BATCH}" CAPTURE_FILE="${CAPTURE_FILE}" \
+    bash "${SKILL_DIR}/scripts/dispatch_single_issue.sh" \
+      >/dev/null 2>"${TEST_ROOT}/authority-${authority_index}.err" <<EOF
+RUN_SINGLE_ISSUE
+issue_url=${bad_url}
+correlation_id=reqd-url-authority-${authority_index}
+dispatcher_callback_target=agent:req_dispatcher:main
+EOF
+  then
+    echo "expected mismatching issue_url scheme/authority to fail: ${bad_url}" >&2
+    exit 1
+  fi
+  grep -q 'exactly match the effective target authority' \
+    "${TEST_ROOT}/authority-${authority_index}.err" || {
+    echo "expected exact authority mismatch error" >&2
+    cat "${TEST_ROOT}/authority-${authority_index}.err" >&2
+    exit 1
+  }
+done
 
 if CONFIG_DIR="${CONFIG_DIR}" \
   DRIVEN_BATCH_CMD="${DRIVEN_BATCH}" CAPTURE_FILE="${CAPTURE_FILE}" \

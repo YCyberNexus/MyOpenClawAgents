@@ -40,7 +40,11 @@ set -euo pipefail
 # __source_env_paths_marker__ — bootstrap env from minimum trigger inputs.
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# env_paths.sh now resolves process/local/tracked GitLab values as one tuple;
+# do not source the broad local scheduler file here because that can overwrite
+# explicit path inputs before path derivation.
 source "${SCRIPT_DIR}/env_paths.sh"
+source "${SCRIPT_DIR}/git_network_guard.sh"
 source "${SCRIPT_DIR}/branch_utils.sh"
 
 : "${REPO_PATH:?}" "${WORK_ROOT:?}" \
@@ -49,7 +53,22 @@ source "${SCRIPT_DIR}/branch_utils.sh"
   "${GITLAB_API_PROTOCOL:?run scripts/glab_auth.sh first}"
 BRANCH="${BRANCH:-}"
 
+clone_die() {
+  echo "clone_or_pull: $1" >&2
+  exit "${2:-15}"
+}
+
+GIT_NETWORK_GUARD_CONTEXT=clone_or_pull
+git_network_guard_validate_target
+git_network_guard_enforce_local_test_host
+git_network_guard_reject_proxy_environment
+if ! [[ "${GITLAB_TOKEN}" =~ ^[A-Za-z0-9._~-]+$ ]]; then
+  clone_die "GITLAB_TOKEN contains characters that are unsafe in an authenticated URL"
+fi
+
 AUTHED_REMOTE_URL="${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git"
+git_network_guard_validate_origin_url "${AUTHED_REMOTE_URL}" \
+  || clone_die "constructed GitLab origin failed strict validation"
 
 mkdir -p "$(dirname "${REPO_PATH}")"
 
@@ -76,9 +95,11 @@ if [ ! -d "${REPO_PATH}/.git" ]; then
       exit 12
     fi
     if [ -n "${BRANCH}" ]; then
-      git clone -b "${BRANCH}" "${AUTHED_REMOTE_URL}" "${REPO_PATH}" >&2
+      git_network_guard_clone -b "${BRANCH}" \
+        "${AUTHED_REMOTE_URL}" "${REPO_PATH}" >&2
     else
-      git clone "${AUTHED_REMOTE_URL}" "${REPO_PATH}" >&2
+      git_network_guard_clone \
+        "${AUTHED_REMOTE_URL}" "${REPO_PATH}" >&2
     fi
   fi
   flock -u 7
@@ -103,8 +124,13 @@ exec 8>"${LOCK_DIR}/repo.lock"
 flock 8
 
 cd "${REPO_PATH}"
+# The existing origin may contain a credential from an older local run. Audit
+# its protocol/host/path without network access, then replace it with the
+# currently resolved credential before the first guarded fetch.
+git_network_guard_assert_repo_rewrite_context "${REPO_PATH}"
 git remote set-url origin "${AUTHED_REMOTE_URL}" >&2
-git fetch --prune origin >&2
+git_network_guard_harden_repo "${REPO_PATH}"
+git_network_guard_run "${REPO_PATH}" fetch --prune origin >&2
 if [ -z "${BRANCH}" ]; then
   BRANCH="$(resolve_origin_default_branch "${REPO_PATH}")" || {
     echo "clone_or_pull: unable to resolve origin/HEAD default branch" >&2

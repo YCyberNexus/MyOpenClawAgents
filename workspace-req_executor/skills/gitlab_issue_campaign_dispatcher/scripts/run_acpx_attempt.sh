@@ -81,10 +81,12 @@ fi
 # Mode-bit heal lives in the dispatcher: _dispatch_lib.sh::ensure_safety_bin_executable
 # runs once per scheduled tick. If this assertion ever trips, the heal didn't run for
 # this tick — investigate dispatch_prepare_tick.sh / deployment sync, not this script.
-if [ ! -x "${safety_bin}/rm" ]; then
-  echo "run_acpx_attempt.sh: rm safety wrapper missing or not executable: ${safety_bin}/rm" >&2
-  exit 2
-fi
+for safety_command in rm git glab; do
+  if [ ! -x "${safety_bin}/${safety_command}" ]; then
+    echo "run_acpx_attempt.sh: safety wrapper missing or not executable: ${safety_bin}/${safety_command}" >&2
+    exit 2
+  fi
+done
 
 # ACPx's built-in Claude adapter isolates user settings by default. The
 # OpenClaw runner needs the user's Claude Code auth/model provider config
@@ -143,9 +145,12 @@ cleanup() {
 
 set +e
 set -m
-ACPX_CLAUDE_INCLUDE_USER_SETTINGS="${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
-PATH="${safety_bin}:${PATH}" \
-TASK_OUTPUT_DIR="${OUTPUT_DIR}" \
+env -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
+  -u GLAB_TOKEN -u GITLAB_PRIVATE_TOKEN -u PRIVATE_TOKEN \
+  -u OAUTH_TOKEN -u CI_JOB_TOKEN -u JOB_TOKEN -u WIKI_GITLAB_TOKEN \
+  ACPX_CLAUDE_INCLUDE_USER_SETTINGS="${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
+  PATH="${safety_bin}:${PATH}" \
+  TASK_OUTPUT_DIR="${OUTPUT_DIR}" \
   timeout --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s" \
   acpx --auth-policy skip claude exec -f "${prompt_file}" \
   1>"${stdout_log}" 2>"${stderr_log}" &

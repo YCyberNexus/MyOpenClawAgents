@@ -35,6 +35,7 @@
 # 复用调用方（dispatch_followup.sh 已 source env_paths.sh）透传进来的 WORK_ROOT，
 # 缺失时退回 /tmp（见设计稿 Task A3）。
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─── 1. 校验必填 + status 取值（仿 post_result_note.sh） ──────────────
 : "${CORRELATION_ID:?notify_dispatcher: CORRELATION_ID required}"
@@ -110,19 +111,20 @@ if [ -z "${TARGET_AGENT}" ]; then
   exit 2
 fi
 
-if ! command -v openclaw >/dev/null 2>&1; then
+OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}"
+if ! command -v "${OPENCLAW_BIN}" >/dev/null 2>&1; then
   echo "notify_dispatcher: openclaw command not found; callback recorded only" >&2
   exit 0
 fi
 
 CALLBACK_MESSAGE="$(printf 'RUN_EXECUTOR_RESULT_CALLBACK\nworker_result_json=%s\n' "${ENVELOPE}")"
-openclaw_args=(agent --agent "${TARGET_AGENT}")
-if [ -n "${TARGET_SESSION_KEY}" ]; then
-  openclaw_args+=(--session-key "${TARGET_SESSION_KEY}")
-fi
-openclaw_args+=(--message "${CALLBACK_MESSAGE}" --timeout "${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}")
-
-if ! openclaw "${openclaw_args[@]}" >/dev/null; then
+if ! printf '%s' "${CALLBACK_MESSAGE}" | env \
+    OPENCLAW_BIN="${OPENCLAW_BIN}" \
+    OPENCLAW_TARGET_AGENT="${TARGET_AGENT}" \
+    OPENCLAW_TARGET_SESSION_KEY="${TARGET_SESSION_KEY}" \
+    OPENCLAW_AGENT_TIMEOUT_SECONDS="${DISPATCHER_CALLBACK_TIMEOUT_SECONDS}" \
+    OPENCLAW_RUN_ID="executor-result-${CORRELATION_ID}-${IID}-${STATUS}" \
+    "${SCRIPT_DIR}/openclaw_agent_transport.sh" >/dev/null; then
   echo "notify_dispatcher: openclaw callback failed; envelope remains recorded in ${CALLBACK_LOG}" >&2
   exit 0
 fi

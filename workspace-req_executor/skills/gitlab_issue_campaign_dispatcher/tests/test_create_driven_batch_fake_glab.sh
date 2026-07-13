@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>\n  --session-id <id>\n  --message-file <path>'
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 CREATE_BATCH="${SKILL_DIR}/scripts/create_driven_batch.sh"
@@ -19,6 +21,26 @@ BIN_DIR="${TEST_ROOT}/bin"
 FAKE_GLAB="${BIN_DIR}/glab"
 API_LOG="${TEST_ROOT}/glab-api.log"
 mkdir -p "${CONFIG_DIR}" "${BIN_DIR}"
+
+unset GITLAB_HOST GITLAB_API_PROTOCOL GITLAB_ADDRESS GITLAB_TOKEN
+unset REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS
+
+write_gitlab_fixture_config() {
+  local config_dir="$1"
+  cat >"${config_dir}/gitlab.env" <<'EOF'
+GITLAB_HOST=tracked-blue.invalid:30000
+GITLAB_API_PROTOCOL=http
+GITLAB_TOKEN=tracked-token-must-not-reach-local-test
+EOF
+  cat >"${config_dir}/campaign_defaults.local.env" <<'EOF'
+GITLAB_HOST=local-gitlab.invalid:9443
+GITLAB_API_PROTOCOL=https
+REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true
+REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS=local-gitlab.invalid:9443
+EOF
+}
+
+write_gitlab_fixture_config "${CONFIG_DIR}"
 
 cat >"${CONFIG_DIR}/campaign_defaults.env" <<EOF
 REPO_PARENT_PATH=/data
@@ -462,7 +484,6 @@ case "${FAKE_AGENT_OUTPUT_MODE:?}" in
     printf 'batch %s accepted\n' "${FAKE_BATCH_ID}"
     ;;
   public_acceptance)
-    printf '%s\n' "${rich_envelope}"
     printf '%s\n' "${acceptance}"
     ;;
   *)
@@ -601,6 +622,7 @@ HALF_CONFIG_DIR="${TEST_ROOT}/half-published-config"
 HALF_SCHEDULER_ROOT="${TEST_ROOT}/half-published-scheduler"
 HALF_BATCH_ROOT="${HALF_SCHEDULER_ROOT}/batches"
 mkdir -p "${HALF_CONFIG_DIR}"
+write_gitlab_fixture_config "${HALF_CONFIG_DIR}"
 cat >"${HALF_CONFIG_DIR}/campaign_defaults.env" <<EOF
 REPO_PARENT_PATH=/data
 EXECUTOR_SCHEDULER_ROOT=${HALF_SCHEDULER_ROOT}

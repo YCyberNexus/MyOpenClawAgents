@@ -9,6 +9,12 @@ FAKE_OPENCLAW="${TEST_ROOT}/openclaw"
 OPENCLAW_LOG="${TEST_ROOT}/openclaw.args"
 OPENCLAW_STDIN_LOG="${TEST_ROOT}/openclaw.stdin"
 SECRET_NONCE='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>  exact key\n  --session-id <id>  exact id\n  --message-file <path>  stdin-safe message'
+export OPENCLAW_STATE_DIR="${TEST_ROOT}/state"
+mkdir -p "${OPENCLAW_STATE_DIR}/agents/git_issuer/sessions"
+cat >"${OPENCLAW_STATE_DIR}/agents/git_issuer/sessions/sessions.json" <<'EOF'
+{"agent:git_issuer:legacy":{"sessionId":"12345"}}
+EOF
 
 cat >"${FAKE_OPENCLAW}" <<'EOF'
 #!/usr/bin/env bash
@@ -104,14 +110,22 @@ numeric_session="$(
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"
 
-if ! grep -q -- 'agent --agent git_issuer --session-key 12345' "${OPENCLAW_LOG}"; then
-  echo "expected explicit numeric TARGET_SESSION_ID to use --session-key" >&2
+if ! grep -q -- 'agent --session-id 12345' "${OPENCLAW_LOG}" \
+    || grep -q -- 'agent --agent git_issuer --session-id 12345' "${OPENCLAW_LOG}"; then
+  echo "expected actual TARGET_SESSION_ID to omit --agent and keep id semantics" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
 fi
 
 if [ "$(printf '%s' "${numeric_session}" | jq -r '.status')" != "success" ]; then
   echo "expected deprecated numeric session id call to succeed:" >&2
+  printf '%s\n' "${numeric_session}" >&2
+  exit 1
+fi
+
+if [ "$(printf '%s' "${numeric_session}" | jq -r '.target_session_id')" != "12345" ] \
+    || [ "$(printf '%s' "${numeric_session}" | jq -r '.child_session_key')" != "null" ]; then
+  echo "expected session id and session key to remain distinct in the envelope" >&2
   printf '%s\n' "${numeric_session}" >&2
   exit 1
 fi
@@ -193,6 +207,40 @@ fi
 if [ "$(printf '%s' "${executor_issue_scoped_session}" | jq -r '.child_session_key')" != "${expected_issue_session}" ]; then
   echo "expected issue-scoped session key in wrapper envelope:" >&2
   printf '%s\n' "${executor_issue_scoped_session}" >&2
+  exit 1
+fi
+
+: >"${OPENCLAW_LOG}"
+executor_batch_scoped_session="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-batch-session" \
+  TARGET_AGENT="req_executor" \
+  TARGET_SESSION_KEY="agent:req_executor:main" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  MESSAGE='RUN_DRIVEN_ISSUE_BATCH
+batch_id=reqd-batch-17
+correlation_id=reqd-17
+project=ai-infra/veqp_server_v3
+executor_agent=req_executor
+selector_type=single
+iid=17
+force_rerun_pr=false
+dispatcher_callback_target=agent:req_dispatcher:main
+callback_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+expected_batch_session="agent:req_executor:batch-reqd-batch-17"
+if ! grep -q -- "agent --agent req_executor --session-key ${expected_batch_session}" \
+    "${OPENCLAW_LOG}"; then
+  echo "expected RUN_DRIVEN_ISSUE_BATCH to use a batch-scoped session key" >&2
+  cat "${OPENCLAW_LOG}" >&2
+  exit 1
+fi
+if [ "$(printf '%s' "${executor_batch_scoped_session}" | jq -r '.child_session_key')" != \
+    "${expected_batch_session}" ]; then
+  echo "expected batch-scoped session key in wrapper envelope" >&2
   exit 1
 fi
 
@@ -363,6 +411,25 @@ for raw_file in "${raw_temp_root}"/req-dispatcher-run-agent-output.*; do
     exit 1
   fi
 done
+
+cat >"${FAKE_OPENCLAW}" <<'EOF'
+#!/usr/bin/env bash
+printf '%s\n' '{"status":"success","project":"first"}'
+printf '%s\n' '{"status":"success","project":"second"}'
+EOF
+chmod +x "${FAKE_OPENCLAW}"
+ambiguous="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  RUN_ID="run-git-ambiguous" \
+  TARGET_AGENT="git_issuer" \
+  MESSAGE="return two objects" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+if [ "$(printf '%s' "${ambiguous}" | jq -r '.worker_result_json')" != null ]; then
+  echo "expected multiple different JSON objects to be rejected as ambiguous" >&2
+  printf '%s\n' "${ambiguous}" >&2
+  exit 1
+fi
 
 cat >"${FAKE_OPENCLAW}" <<'EOF'
 #!/usr/bin/env bash

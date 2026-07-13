@@ -10,6 +10,18 @@ fail() {
   exit 1
 }
 
+sha256_file() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | awk '{print $1}'
+  else
+    shasum -a 256 "$1" | awk '{print $1}'
+  fi
+}
+
+file_mode() {
+  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+}
+
 [ -f "${DRIVEN_TOPUP}" ] || fail "dispatch_driven_topup.sh is missing"
 
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-driven-topup.XXXXXX")"
@@ -26,6 +38,7 @@ ALLOC_LOG="${TEST_ROOT}/allocate.log"
 PREP_LOG="${TEST_ROOT}/prepare.log"
 LABEL_LOG="${TEST_ROOT}/labels.log"
 GLAB_LOG="${TEST_ROOT}/glab.log"
+TRIGGER_CAPTURE="${TEST_ROOT}/internal-trigger.txt"
 
 mkdir -p "${FIXTURE_SCRIPTS}" "${FIXTURE_REFS}" "${CONFIG_DIR}" \
   "${BIN_DIR}" "${PROJECT_REPO}"
@@ -35,7 +48,8 @@ git -C "${PROJECT_REPO}" symbolic-ref \
 mkdir -p "${STATE_DIR}"
 
 for name in dispatch_driven_topup.sh dispatch_prepare_tick.sh _dispatch_lib.sh \
-  branch_utils.sh env_paths.sh \
+  branch_utils.sh env_paths.sh git_network_guard.sh glab_auth.sh \
+  gitlab_env_resolver.sh \
   resolve_driven_repo_path.sh; do
   cp "${SKILL_DIR}/scripts/${name}" "${FIXTURE_SCRIPTS}/${name}"
 done
@@ -116,6 +130,13 @@ EOF
 cat >"${FIXTURE_SCRIPTS}/build_prompt.sh" <<'EOF'
 #!/usr/bin/env bash
 exit 0
+EOF
+cat >"${FIXTURE_SCRIPTS}/capture_prepare_tick.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${GITLAB_TOKEN:-}" = "fake-token-direct" ] || exit 91
+cat >"${TEST_TRIGGER_CAPTURE}"
+jq -nc '{status:"no_eligible_iids",dispatch_entries:[],chat_summary:"capture_only"}'
 EOF
 cat >"${BIN_DIR}/glab" <<'EOF'
 #!/usr/bin/env bash
@@ -220,6 +241,19 @@ assert_token_rejected token_carriage_return $'token\rinjected'
 assert_token_rejected token_tab $'token\tinjected'
 assert_token_rejected token_delete $'token\x7finjected'
 
+printf '%s\n' "${VALIDATION_REQUEST}" | \
+  TEST_TRIGGER_CAPTURE="${TRIGGER_CAPTURE}" CONFIG_DIR="${CONFIG_DIR}" \
+  PREPARE_TICK_CMD="${FIXTURE_SCRIPTS}/capture_prepare_tick.sh" \
+  PATH="${BIN_DIR}:${PATH}" bash "${FIXTURE_SCRIPTS}/dispatch_driven_topup.sh" \
+  >"${TEST_ROOT}/capture-trigger.out"
+[ -s "${TRIGGER_CAPTURE}" ] || fail "internal topup trigger was not captured"
+if grep -Fq 'gitlab_token=' "${TRIGGER_CAPTURE}" || \
+   grep -Fq 'fake-token-direct' "${TRIGGER_CAPTURE}"; then
+  fail "internal driven topup trigger serialized the GitLab token"
+fi
+grep -Fq 'dispatch_mode=driven_topup' "${TRIGGER_CAPTURE}" \
+  || fail "captured internal trigger omitted driven_topup identity"
+
 prepare_trigger() {
   local request="$1"
   cat <<EOF
@@ -283,6 +317,8 @@ printf '%s' "${OUTPUT}" | jq -e '
     (.attempt_number == 1)
     and (.child_label | type == "string")
     and (.payload_path | type == "string")
+    and (.expected_task_sha256 | test("^[0-9a-f]{64}$"))
+    and (.expected_task_bytes | type == "number" and . > 0)
     and .memberships_source == "scheduler_active_job"))
   and [.skipped_entries[] | {iid,status,reason}] == [
     {iid:4,status:"skipped",reason:"closed"},
@@ -300,8 +336,56 @@ for iid in 2 3 6; do
   PAYLOAD_PATH="$(printf '%s' "${OUTPUT}" | jq -r --argjson iid "${iid}" \
     '.dispatch_entries[] | select(.iid == $iid) | .payload_path')"
   [ -f "${PAYLOAD_PATH}" ] || fail "driven topup payload_path for IID ${iid} does not exist"
-  grep -Fq 'GITLAB_TOKEN=fake-token-direct' "${PAYLOAD_PATH}" \
-    || fail "rendered sessions_spawn task for IID ${iid} omitted the GitLab token"
+  EXPECTED_TASK_SHA256="$(printf '%s' "${OUTPUT}" | jq -r --argjson iid "${iid}" \
+    '.dispatch_entries[] | select(.iid == $iid) | .expected_task_sha256')"
+  EXPECTED_TASK_BYTES="$(printf '%s' "${OUTPUT}" | jq -r --argjson iid "${iid}" \
+    '.dispatch_entries[] | select(.iid == $iid) | .expected_task_bytes')"
+  ACTUAL_TASK_SHA256="$(sha256_file "${PAYLOAD_PATH}")"
+  ACTUAL_TASK_BYTES="$(wc -c <"${PAYLOAD_PATH}" | tr -d '[:space:]')"
+  [ "${ACTUAL_TASK_SHA256}" = "${EXPECTED_TASK_SHA256}" ] \
+    || fail "spawn bootstrap SHA-256 mismatched dispatch identity for IID ${iid}"
+  [ "${ACTUAL_TASK_BYTES}" = "${EXPECTED_TASK_BYTES}" ] \
+    || fail "spawn bootstrap byte count mismatched dispatch identity for IID ${iid}"
+  [ "${ACTUAL_TASK_BYTES}" -lt 4096 ] \
+    || fail "sessions_spawn task for IID ${iid} is no longer a small bootstrap"
+  [ "$(file_mode "${PAYLOAD_PATH}")" = "600" ] \
+    || fail "spawn bootstrap for IID ${iid} is not mode 600"
+  grep -Fq '# REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1' "${PAYLOAD_PATH}" \
+    || fail "sessions_spawn task for IID ${iid} is not the small bootstrap"
+  if grep -Fq 'fake-token-direct' "${PAYLOAD_PATH}" || \
+     grep -Fq 'GITLAB_TOKEN=' "${PAYLOAD_PATH}"; then
+    fail "sessions_spawn task for IID ${iid} contains a GitLab credential"
+  fi
+  MANIFEST_PATH="$(sed -n 's/^manifest_path=//p' "${PAYLOAD_PATH}")"
+  [ -f "${MANIFEST_PATH}" ] || fail "spawn manifest for IID ${iid} does not exist"
+  MANIFEST_SHA256="$(sed -n 's/^manifest_sha256=//p' "${PAYLOAD_PATH}")"
+  MANIFEST_BYTES="$(sed -n 's/^manifest_bytes=//p' "${PAYLOAD_PATH}")"
+  [ "$(sha256_file "${MANIFEST_PATH}")" = "${MANIFEST_SHA256}" ] \
+    || fail "spawn manifest SHA-256 mismatched bootstrap for IID ${iid}"
+  [ "$(wc -c <"${MANIFEST_PATH}" | tr -d '[:space:]')" = "${MANIFEST_BYTES}" ] \
+    || fail "spawn manifest byte count mismatched bootstrap for IID ${iid}"
+  [ "$(file_mode "${MANIFEST_PATH}")" = "600" ] \
+    || fail "spawn manifest for IID ${iid} is not mode 600"
+  EXECUTOR_PAYLOAD_PATH="$(jq -r '.executor_payload_path' "${MANIFEST_PATH}")"
+  [ -f "${EXECUTOR_PAYLOAD_PATH}" ] || fail "private executor payload for IID ${iid} does not exist"
+  jq -e --argjson iid "${iid}" '
+    .version == 1
+    and .iid == $iid
+    and (.executor_payload_sha256 | test("^[0-9a-f]{64}$"))
+    and (.executor_payload_bytes | type == "number" and . > 0)
+  ' "${MANIFEST_PATH}" >/dev/null || fail "spawn manifest identity is invalid for IID ${iid}"
+  [ "$(sha256_file "${EXECUTOR_PAYLOAD_PATH}")" = \
+    "$(jq -r '.executor_payload_sha256' "${MANIFEST_PATH}")" ] \
+    || fail "private executor payload SHA-256 mismatched manifest for IID ${iid}"
+  [ "$(wc -c <"${EXECUTOR_PAYLOAD_PATH}" | tr -d '[:space:]')" = \
+    "$(jq -r '.executor_payload_bytes' "${MANIFEST_PATH}")" ] \
+    || fail "private executor payload byte count mismatched manifest for IID ${iid}"
+  [ "$(file_mode "${EXECUTOR_PAYLOAD_PATH}")" = "600" ] \
+    || fail "private executor payload for IID ${iid} is not mode 600"
+  if grep -Fq 'fake-token-direct' "${EXECUTOR_PAYLOAD_PATH}" || \
+     grep -Fq 'GITLAB_TOKEN=' "${EXECUTOR_PAYLOAD_PATH}"; then
+    fail "private executor payload for IID ${iid} contains a GitLab credential"
+  fi
 done
 
 jq -e '

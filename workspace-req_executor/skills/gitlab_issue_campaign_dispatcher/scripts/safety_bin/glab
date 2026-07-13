@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+echo "glab access is disabled inside req_executor inner acpx runs" >&2
+exit 126

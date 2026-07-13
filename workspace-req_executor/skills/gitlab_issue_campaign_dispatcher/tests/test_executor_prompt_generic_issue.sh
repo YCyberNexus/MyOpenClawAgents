@@ -57,17 +57,17 @@ if ! printf '%s\n' "${rendered_block}" | grep -Fq "run_acpx_attempt.sh"; then
   fail "outer executor prompt no longer delegates acpx execution to run_acpx_attempt.sh"
 fi
 
-if ! printf '%s\n' "${rendered_block}" | grep -Fq "{GITLAB_TOKEN}"; then
-  fail "outer executor prompt must render the GitLab token into subagent context"
+if printf '%s\n' "${rendered_block}" | grep -Fq "{GITLAB_TOKEN}"; then
+  fail "outer executor prompt must not render the GitLab token into subagent context"
 fi
 
-if ! printf '%s\n' "${rendered_block}" | grep -Eq '(^|[[:space:]])GITLAB_TOKEN='; then
-  fail "outer executor prompt must pass the GitLab token to executor scripts"
+if printf '%s\n' "${rendered_block}" | grep -Eq '(^|[[:space:]])GITLAB_TOKEN='; then
+  fail "outer executor prompt must not pass the GitLab token to executor scripts"
 fi
 
-if printf '%s\n' "${rendered_block}" | grep -Fq \
-    "GitLab credentials are loaded only by the trusted executor scripts"; then
-  fail "outer executor prompt still documents removed credential isolation"
+if ! grep -Fq "GitLab credentials are never rendered into this payload" \
+    "${PROMPT_TEMPLATE}"; then
+  fail "outer executor prompt must document private credential resolution"
 fi
 
 for removed_wiki_term in \

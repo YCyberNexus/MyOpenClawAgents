@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+deny() {
+  echo "git mutation/network access is disabled inside req_executor inner acpx runs" >&2
+  exit 126
+}
+
+[ "$#" -gt 0 ] || deny
+
+self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+clean_path=""
+old_ifs="${IFS}"
+IFS=:
+for entry in ${PATH:-}; do
+  [ -n "${entry}" ] || entry=.
+  [ "${entry}" = "${self_dir}" ] && continue
+  if [ -z "${clean_path}" ]; then
+    clean_path="${entry}"
+  else
+    clean_path="${clean_path}:${entry}"
+  fi
+done
+IFS="${old_ifs}"
+
+real_git="$(PATH="${clean_path}" command -v git 2>/dev/null || true)"
+[ -n "${real_git}" ] && [ "${real_git}" != "${BASH_SOURCE[0]}" ] || {
+  echo "real git executable is unavailable" >&2
+  exit 127
+}
+
+subcommand="$1"
+shift
+
+# Prevent apparently read-only commands from invoking external helpers or
+# writing an output file. GIT_OPTIONAL_LOCKS=0 also suppresses index refreshes
+# normally performed by commands such as `git status`.
+for arg in "$@"; do
+  case "${arg}" in
+    --output|--output=*|--ext-diff|--textconv|--filters|--filters=*|\
+    --open-files-in-pager|--open-files-in-pager=*|\
+    --exec-path|--exec-path=*|--config-env|--config-env=*|-c)
+      deny
+      ;;
+  esac
+done
+
+export GIT_OPTIONAL_LOCKS=0
+export GIT_PAGER=cat
+export PAGER=cat
+export GIT_EXTERNAL_DIFF=
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+unset GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG_GLOBAL GIT_CONFIG_SYSTEM
+unset GIT_CONFIG_COUNT
+
+git_common=(
+  -c core.fsmonitor=false
+  -c core.untrackedCache=false
+  -c core.pager=cat
+  -c diff.external=
+)
+
+case "${subcommand}" in
+  --version|version)
+    exec "${real_git}" "${subcommand}" "$@"
+    ;;
+  diff|log|show)
+    exec "${real_git}" "${git_common[@]}" --no-pager "${subcommand}" \
+      --no-ext-diff --no-textconv "$@"
+    ;;
+  status|ls-files|rev-parse|merge-base|cat-file|grep|blame|describe|name-rev|for-each-ref)
+    exec "${real_git}" "${git_common[@]}" --no-pager "${subcommand}" "$@"
+    ;;
+  branch)
+    # `git branch <name>` creates a ref, so permit only option-only listing
+    # forms. Patterns and positional refs are intentionally rejected.
+    for arg in "$@"; do
+      case "${arg}" in
+        --show-current|--list|--all|--remotes|--verbose|-v|-vv|--no-color) ;;
+        *) deny ;;
+      esac
+    done
+    exec "${real_git}" "${git_common[@]}" --no-pager branch "$@"
+    ;;
+  *)
+    deny
+    ;;
+esac

@@ -89,6 +89,10 @@ jq -cn "{status:\"drained\",scanned:0,attempted:0,delivered:0,failed:0}"
 '
 
 write_fake reserve_driven_batch_items.sh '
+if [ "${SERIAL_GATE_RESERVE_SENTINEL:-0}" = 1 ]; then
+  printf "%s\n" reserve-unexpected >>"${ORDER_LOG}"
+  exit 98
+fi
 count=0
 [ ! -s "${RESERVE_COUNT_FILE}" ] || count="$(cat "${RESERVE_COUNT_FILE}")"
 count=$((count + 1))
@@ -123,6 +127,8 @@ esac
 write_fake dispatch_driven_topup.sh '
 request="$(cat)"
 jobs="$(jq -r ".grants | map(.job_id) | join(\",\")" <<<"${request}")"
+sha42="$(printf "%064d" 42)"
+sha44="$(printf "%064d" 44)"
 printf "topup:%s\n" "${jobs}" >>"${ORDER_LOG}"
 case "${jobs}" in
   A:snapshot-0,A:snapshot-1)
@@ -131,6 +137,7 @@ case "${jobs}" in
       dispatch_entries:[{
         iid:42,attempt_number:1,child_label:\"#42-att-001\",
         payload_path:\"${TEST_ROOT}/payload-42.txt\",
+        expected_task_sha256:\"${sha42}\",expected_task_bytes:42,
         job_id:\"A:snapshot-0\",batch_id:\"A\",snapshot_index:0,
         memberships_source:\"scheduler_active_job\"
       }],
@@ -147,6 +154,7 @@ case "${jobs}" in
       dispatch_entries:[{
         iid:44,attempt_number:1,child_label:\"#44-att-001\",
         payload_path:\"${TEST_ROOT}/payload-44.txt\",
+        expected_task_sha256:\"${sha44}\",expected_task_bytes:44,
         job_id:\"A:snapshot-2\",batch_id:\"A\",snapshot_index:2,
         memberships_source:\"scheduler_active_job\"
       }],
@@ -184,6 +192,8 @@ jq -cn --arg job_id "${JOB_ID}" --argjson generation "${CLAIM_GENERATION}" \
 
 write_fake dispatch_record_spawn.sh '
 printf "project-record:%s:%s\n" "${STATUS}" "${IID}" >>"${ORDER_LOG}"
+[[ "${EXPECTED_TASK_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || exit 95
+[[ "${EXPECTED_TASK_BYTES:-}" =~ ^[1-9][0-9]*$ ]] || exit 95
 if [ "${STATUS}" = spawned ]; then
   jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" \
     "{status:\"spawned\",iid:\$iid,attempt_number:\$attempt,remaining_pending_count:1,chat_summary:\"recorded\"}"
@@ -213,8 +223,8 @@ jq -cn --argjson iid "${IID}" \
   "{callback_status:\"handled\",iid:\$iid,terminal_status:\"timeout\"}"
 '
 
-printf '%s' 'payload contains a private runtime credential' >"${TEST_ROOT}/payload-42.txt"
-printf '%s' 'second payload contains another private runtime credential' >"${TEST_ROOT}/payload-44.txt"
+printf '%s' 'secret-free spawn bootstrap for issue 42' >"${TEST_ROOT}/payload-42.txt"
+printf '%s' 'secret-free spawn bootstrap for issue 44' >"${TEST_ROOT}/payload-44.txt"
 
 run_tick() {
   : >"${ORDER_LOG}"
@@ -257,9 +267,7 @@ skip:A:snapshot-1
 reserve:2
 topup:A:snapshot-2
 record:preparing:A:snapshot-0
-bind:A:snapshot-0:1:private-claim-token
-record:preparing:A:snapshot-2
-bind:A:snapshot-2:1:private-claim-token-44'
+bind:A:snapshot-0:1:private-claim-token'
 [ "$(cat "${ORDER_LOG}")" = "${expected_order}" ] \
   || fail "tick order violated recovery/outbox/reserve/topup/claim contract: $(cat "${ORDER_LOG}")"
 [ ! -e "${SPAWN_SENTINEL}" ] || fail "shell tick wrapper called sessions_spawn"
@@ -273,27 +281,44 @@ jq -e '
   and .max_launch_retries == 3
   and .backoff_seconds == 2
   and .reconcile_actions == []
-  and (.spawn_grants | length) == 2
+  and (.spawn_grants | length) == 1
   and (.spawn_grants[0] | del(.child_label)) == {
     job_id:"A:snapshot-0",claim_generation:1,project:"group/repo",iid:42,
     attempt_number:1,
-    payload_path:"'"${TEST_ROOT}"'/payload-42.txt"
+    payload_path:"'"${TEST_ROOT}"'/payload-42.txt",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42
   }
   and (.spawn_grants[0].child_label
     | test("^reqx-iid42-gen1-[0-9a-f]{40}$"))
-  and (.spawn_grants[1] | del(.child_label)) == {
-    job_id:"A:snapshot-2",claim_generation:1,project:"group/repo",iid:44,
-    attempt_number:1,
-    payload_path:"'"${TEST_ROOT}"'/payload-44.txt"
-  }
-  and (.spawn_grants[1].child_label
-    | test("^reqx-iid44-gen1-[0-9a-f]{40}$"))
   and ([.operation_results[] | select(.operation == "synthetic_skip" and .job_id == "A:snapshot-1" and .status == "imported")] | length) == 1
   and ([.operation_results[] | select(.operation == "preparing" and .job_id == "A:snapshot-0" and .status == "ready")] | length) == 1
   and (tostring | contains("private-claim-token") | not)
-  and (tostring | contains("payload contains") | not)
+  and (tostring | contains("secret-free spawn bootstrap") | not)
 ' <<<"${tick_output}" >/dev/null \
   || fail "tick did not return the strict claim-token-free spawn grant envelope: ${tick_output}"
+jq -e '
+  .stage == "topup_prepared"
+  and .job_id == "A:snapshot-2"
+  and .expected_task_sha256 == "0000000000000000000000000000000000000000000000000000000000000044"
+  and .expected_task_bytes == 44
+' "${SCHEDULER_ROOT}/launch_actions/$(printf '%s' 'A:snapshot-2' | shasum -a 256 | awk '{print $1}').json" >/dev/null \
+  || fail "second coordinator action was not held before preparing"
+serial_gate_output="$(SERIAL_GATE_RESERVE_SENTINEL=1 run_tick)" \
+  || fail "durable emitted-action serial gate failed"
+jq -e '
+  .status == "idle"
+  and .spawn_grants == []
+  and .reconcile_actions == []
+  and ([.operation_results[] | select(
+    .operation == "spawn_ack"
+    and .job_id == "A:snapshot-0"
+    and .status == "pending")] | length) == 1
+' <<<"${serial_gate_output}" >/dev/null \
+  || fail "a prior unacknowledged spawn did not close the global launch gate"
+if grep -q '^reserve' "${ORDER_LOG}"; then
+  fail "global launch gate reached reservation before recording the prior spawn"
+fi
 archive_launch_actions initial
 
 # A duplicate preparing observer must never bind or return a spawn grant.
@@ -350,6 +375,8 @@ jq -cn '{
   dispatch_entries:[{
     iid:42,attempt_number:2,child_label:"#42-att-002",
     payload_path:"${TEST_ROOT}/payload-42.txt",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
     job_id:"A:snapshot-0",batch_id:"A",snapshot_index:0,
     memberships_source:"scheduler_active_job"
   }],
@@ -500,6 +527,8 @@ jq -cnS --arg job_id "${archive_job_id}" '{
   batch_id:"A",snapshot_index:0,attempt_number:1,
   child_label:"reqx-iid42-gen1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   payload_path:"/private/payload",runtime_label_version:1,
+  expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+  expected_task_bytes:42,
   claim_generation:1,claim_token:"archive-private-claim",
   stage:"completed",outcome:"spawned",
   ack:{run_id:"run-archive",child_session_key:"agent:req_executor:archive"},
@@ -550,6 +579,8 @@ record_output="$({
   jq -cn '{
     job_id:"A:snapshot-0",claim_generation:2,project:"group/repo",iid:42,
     attempt_number:2,status:"spawned",run_id:"run-42",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
     child_session_key:"agent:req_executor:subagent:42"
   }'
 } | CONFIG_DIR="${CONFIG_DIR}" \
@@ -623,6 +654,8 @@ jq -c --arg root "${TEST_ROOT}" '
       iid,attempt_number:1,
       child_label:("#" + (.iid|tostring) + "-att-001"),
       payload_path:(\$root + "/payload-" + (.iid|tostring) + ".txt"),
+      expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+      expected_task_bytes:42,
       job_id,batch_id,snapshot_index,
       memberships_source:"scheduler_active_job"
     }],
@@ -644,21 +677,16 @@ chmod +x "${FAKE_BIN}/record_driven_batch_launch.sh"
 
 order_output="$(run_tick)" || fail "cross-project order tick failed"
 jq -e '
-  [.spawn_grants[].job_id] == ["A:snapshot-0","B:snapshot-0","A:snapshot-2"]
+  [.spawn_grants[].job_id] == ["A:snapshot-0"]
   and (.spawn_grants | all(.claim_generation == 1))
   and (.spawn_grants[0].child_label
     | test("^reqx-iid42-gen1-[0-9a-f]{40}$"))
-  and (.spawn_grants[1].child_label
-    | test("^reqx-iid42-gen1-[0-9a-f]{40}$"))
-  and .spawn_grants[0].child_label != .spawn_grants[1].child_label
-  and ([.spawn_grants[].child_label] | length)
-    == ([.spawn_grants[].child_label] | unique | length)
   and (tostring | contains("private-") | not)
 ' <<<"${order_output}" >/dev/null \
-  || fail "project grouping reordered grants or reused a cross-project runtime label: ${order_output}"
+  || fail "project grouping did not preserve the first serial grant: ${order_output}"
 actual_record_order="$(grep '^record-order:' "${ORDER_LOG}" | sed 's/^record-order://')"
-expected_record_order=$'A:snapshot-0\nB:snapshot-0\nA:snapshot-2'
+expected_record_order='A:snapshot-0'
 [ "${actual_record_order}" = "${expected_record_order}" ] \
-  || fail "preparing/bind did not preserve A1,B10,A2 order: ${actual_record_order}"
+  || fail "serial preparing/bind did not preserve the first scheduler grant: ${actual_record_order}"
 
 echo "ok executor batch tick is recovery-first and returns strict spawn grants"

@@ -4,6 +4,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-callback-auth.XXXXXX")"
+export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>\n  --session-id <id>\n  --message-file <path>'
+POISON_MESSAGE_FILE="${TEST_ROOT}/poison-message.txt"
+printf '%s\n' 'poison-from-message-file' >"${POISON_MESSAGE_FILE}"
 
 sha256_text() {
   if command -v sha256sum >/dev/null 2>&1; then
@@ -86,6 +89,8 @@ submit_output="$(
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \
   BATCH_ARGV_LOG="${BATCH_ARGV_LOG}" \
   BATCH_STDIN_LOG="${BATCH_STDIN_LOG}" \
+  MESSAGE='poison-from-inherited-message' \
+  MESSAGE_FILE="${POISON_MESSAGE_FILE}" \
     "${BASH}" "${SKILL_DIR}/scripts/submit_executor_batch.sh"
 )"
 if ! jq -e '
@@ -108,7 +113,8 @@ if ! [[ "${generated_nonce}" =~ ^[0-9a-f]{64}$ ]] \
 fi
 if grep -q -- "${generated_nonce}" "${BATCH_ARGV_LOG}" \
   || ! grep -q -- '--message-file /dev/stdin' "${BATCH_ARGV_LOG}" \
-  || ! grep -qx "callback_nonce=${generated_nonce}" "${BATCH_STDIN_LOG}"; then
+  || ! grep -qx "callback_nonce=${generated_nonce}" "${BATCH_STDIN_LOG}" \
+  || grep -q 'poison-from-' "${BATCH_STDIN_LOG}"; then
   echo "batch outbound transport exposed nonce in argv or lost stdin payload" >&2
   exit 1
 fi
@@ -540,13 +546,16 @@ assert_rejected_unchanged wrong_project envelope \
 assert_rejected_unchanged extra_envelope_field envelope \
   "$(jq -c '.extra=true' <<<"${VALID_ENVELOPE}")"
 
-TRIGGER="$(printf 'RUN_DRIVEN_BATCH_RESULT\ncallback_envelope=%s\n' "${VALID_ENVELOPE}")"
+ACK_ONLY_INSTRUCTION='ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。'
+ACK_ONLY_TRIGGER="$(printf 'RUN_DRIVEN_BATCH_RESULT_ACK_ONLY\ncallback_envelope=%s\n%s\n' \
+  "${VALID_ENVELOPE}" "${ACK_ONLY_INSTRUCTION}")"
+LEGACY_MARKER_TRIGGER="$(printf 'RUN_DRIVEN_BATCH_RESULT\ncallback_envelope=%s\n' "${VALID_ENVELOPE}")"
 accepted_ack="$(
-  STATE_ROOT="${AUTH_ROOT}" \
-  CALLBACK_ENVELOPE_JSON="${VALID_ENVELOPE}" \
-  NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" \
-  TRANSPORT_LEAK_LOG="${TRANSPORT_LEAK_LOG}" \
-    "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
+  printf '%s\n' "${ACK_ONLY_TRIGGER}" | \
+    STATE_ROOT="${AUTH_ROOT}" \
+    NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" \
+    TRANSPORT_LEAK_LOG="${TRANSPORT_LEAK_LOG}" \
+      "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
 )"
 if ! jq -e '
   (keys | sort) == ["event_id","status"]
@@ -567,7 +576,7 @@ if [ -s "${TRANSPORT_LEAK_LOG}" ]; then
   exit 1
 fi
 direct_duplicate_ack="$(
-  printf '%s\n' "${TRIGGER}" | \
+  printf '%s\n' "${LEGACY_MARKER_TRIGGER}" | \
     STATE_ROOT="${AUTH_ROOT}" \
     NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" \
     TRANSPORT_LEAK_LOG="${TRANSPORT_LEAK_LOG}" \
@@ -602,9 +611,11 @@ LEGACY_EVENT="$(jq -cn '{
   reason:"pre-upgrade callback"
 }')"
 legacy_ack="$(
-  STATE_ROOT="${LEGACY_ROOT}" WORKER_RESULT_JSON="${LEGACY_EVENT}" \
-  NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" TRANSPORT_LEAK_LOG="${TRANSPORT_LEAK_LOG}" \
-    "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
+  printf 'RUN_DRIVEN_BATCH_RESULT_ACK_ONLY\nworker_result_json=%s\n%s\n' \
+    "${LEGACY_EVENT}" "${ACK_ONLY_INSTRUCTION}" | \
+    STATE_ROOT="${LEGACY_ROOT}" \
+    NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" TRANSPORT_LEAK_LOG="${TRANSPORT_LEAK_LOG}" \
+      "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
 )"
 if ! jq -e '.status == "accepted"' <<<"${legacy_ack}" >/dev/null \
   || ! jq -e '

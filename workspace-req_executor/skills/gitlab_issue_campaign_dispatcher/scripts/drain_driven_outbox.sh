@@ -14,6 +14,7 @@ BACKOFF_BASE_SECONDS="${DRIVEN_CALLBACK_BACKOFF_BASE_SECONDS:-30}"
 BACKOFF_MAX_SECONDS="${DRIVEN_CALLBACK_BACKOFF_MAX_SECONDS:-3600}"
 NOW_EPOCH_PROCESS_SET="${NOW_EPOCH+x}"
 DRAIN_NOW="${NOW_EPOCH:-$(date +%s)}"
+ACK_ONLY_INSTRUCTION='ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。'
 
 drain_die() {
   echo "drain_driven_outbox.sh: $1" >&2
@@ -314,16 +315,12 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
         executor_agent:$executor_agent,
         worker_result_json:$worker_result_json
       }')"
-    callback_message="$(printf 'RUN_DRIVEN_BATCH_RESULT\ncallback_envelope=%s\n' "${callback_envelope}")"
+    callback_message="$(printf 'RUN_DRIVEN_BATCH_RESULT_ACK_ONLY\ncallback_envelope=%s\n%s\n' \
+      "${callback_envelope}" "${ACK_ONLY_INSTRUCTION}")"
   else
-    callback_message="$(printf 'RUN_DRIVEN_BATCH_RESULT\nworker_result_json=%s\n' "${public_body}")"
+    callback_message="$(printf 'RUN_DRIVEN_BATCH_RESULT_ACK_ONLY\nworker_result_json=%s\n%s\n' \
+      "${public_body}" "${ACK_ONLY_INSTRUCTION}")"
   fi
-  openclaw_args=(agent --agent "${target_agent}")
-  if [ -n "${target_session_key}" ]; then
-    openclaw_args+=(--session-key "${target_session_key}")
-  fi
-  openclaw_args+=(--message-file /dev/stdin --timeout "${DELIVERY_TIMEOUT_SECONDS}")
-
   attempt_id="$(printf '%s' \
     "${event_id}:${attempt_started_at}:$$:${RANDOM}:$(jq -r '.attempts' <<<"${entry_json}")" \
     | scheduler_sha256_text)"
@@ -344,30 +341,44 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
 
   set +e
   ack_output="$(
-    printf '%s' "${callback_message}" | "${OPENCLAW_BIN}" "${openclaw_args[@]}"
+    printf '%s' "${callback_message}" | env \
+      OPENCLAW_BIN="${OPENCLAW_BIN}" \
+      OPENCLAW_TARGET_AGENT="${target_agent}" \
+      OPENCLAW_TARGET_SESSION_KEY="${target_session_key}" \
+      OPENCLAW_AGENT_TIMEOUT_SECONDS="${DELIVERY_TIMEOUT_SECONDS}" \
+      OPENCLAW_RUN_ID="driven-callback-${event_id}" \
+      "${SCRIPT_DIR}/openclaw_agent_transport.sh"
   )"
   delivery_rc=$?
   set -e
   if [ "${delivery_rc}" -ne 0 ]; then
     delivery_error="openclaw_exit_${delivery_rc}"
-  elif ! jq -se --arg event_id "${event_id}" '
-    length == 1
-    and (.[0]
-      | type == "object"
+  elif [ -n "${callback_nonce}" ] && [[ "${ack_output}" == *"${callback_nonce}"* ]]; then
+    delivery_error="callback_nonce_echo"
+  else
+    ack_candidate="${ack_output}"
+    json_fence_prefix=$'```json\n'
+    plain_fence_prefix=$'```\n'
+    fence_suffix=$'\n```'
+    if [[ "${ack_output}" == "${json_fence_prefix}"*"${fence_suffix}" ]]; then
+      ack_candidate="${ack_output#"${json_fence_prefix}"}"
+      ack_candidate="${ack_candidate%"${fence_suffix}"}"
+    elif [[ "${ack_output}" == "${plain_fence_prefix}"*"${fence_suffix}" ]]; then
+      ack_candidate="${ack_output#"${plain_fence_prefix}"}"
+      ack_candidate="${ack_candidate%"${fence_suffix}"}"
+    fi
+    if ! normalized_ack="$(printf '%s' "${ack_candidate}" | jq -cse --arg event_id "${event_id}" '
+    def valid_ack:
+      type == "object"
       and (keys | sort) == ["event_id","status"]
       and ((.status == "accepted") or (.status == "duplicate"))
-      and .event_id == $event_id)
-  ' <<<"${ack_output}" >/dev/null 2>&1; then
-    if ! jq -e . <<<"${ack_output}" >/dev/null 2>&1; then
-      delivery_error="malformed_or_empty_ack"
-    elif ! jq -e '
-        (.status == "accepted") or (.status == "duplicate")
-      ' <<<"${ack_output}" >/dev/null 2>&1; then
-      delivery_error="ack_not_accepted_or_duplicate"
-    elif [ "$(jq -r '.event_id // empty' <<<"${ack_output}")" != "${event_id}" ]; then
-      delivery_error="ack_event_id_mismatch"
-    else
-      delivery_error="ack_shape_mismatch"
+      and .event_id == $event_id;
+    if length == 1 and (.[0] | valid_ack)
+      then .[0]
+      else error("missing or ambiguous ack")
+    end
+  ' 2>/dev/null)"; then
+      delivery_error="malformed_or_ambiguous_ack"
     fi
   fi
 

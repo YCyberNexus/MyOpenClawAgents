@@ -40,6 +40,17 @@ printf '只输出 OK\n' >"${LOG_DIR}/prompt.txt"
   printf '  echo "missing ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1" >&2\n'
   printf '  exit 42\n'
   printf 'fi\n'
+  printf 'for credential_name in GITLAB_TOKEN GITLAB_ACCESS_TOKEN GITLAB_OAUTH_TOKEN GLAB_TOKEN GITLAB_PRIVATE_TOKEN PRIVATE_TOKEN OAUTH_TOKEN CI_JOB_TOKEN JOB_TOKEN WIKI_GITLAB_TOKEN; do\n'
+  printf '  [ -z "${!credential_name+x}" ] || { echo "credential leaked: ${credential_name}" >&2; exit 43; }\n'
+  printf 'done\n'
+  printf 'git status --short >/dev/null\n'
+  printf 'for denied_command in "git add -A" "git fetch origin" "git push origin HEAD" "git checkout -b forbidden" "git switch -c forbidden" "git reset --hard" "git clean -fd" "git worktree add /tmp/forbidden HEAD" "git branch forbidden" "git remote -v" "git grep --open-files-in-pager=cat pattern" "git cat-file --filters HEAD:file" "glab api /projects"; do\n'
+  printf '  set +e\n'
+  printf '  bash -c "${denied_command}" >/dev/null 2>&1\n'
+  printf '  denied_rc=$?\n'
+  printf '  set -e\n'
+  printf '  [ "${denied_rc}" -eq 126 ] || { echo "unsafe command was not blocked: ${denied_command} rc=${denied_rc}" >&2; exit 44; }\n'
+  printf 'done\n'
   printf 'echo OK\n'
 } >"${BIN_DIR}/acpx"
 
@@ -59,6 +70,15 @@ PATH="${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" \
 GROUP="claw_gitlab" \
 GITLAB_TOKEN="test-token" \
+GITLAB_ACCESS_TOKEN="test-access-token" \
+GITLAB_OAUTH_TOKEN="test-gitlab-oauth-token" \
+GLAB_TOKEN="test-glab-token" \
+GITLAB_PRIVATE_TOKEN="test-private-token" \
+PRIVATE_TOKEN="test-private-alias" \
+OAUTH_TOKEN="test-oauth-token" \
+CI_JOB_TOKEN="test-ci-job-token" \
+JOB_TOKEN="test-job-token" \
+WIKI_GITLAB_TOKEN="test-wiki-token" \
 ISSUE_IID=9 \
 ATTEMPT_NUMBER=1 \
 ACPX_TIMEOUT_SECONDS=60 \

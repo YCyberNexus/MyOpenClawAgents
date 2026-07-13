@@ -12,6 +12,22 @@ DRIVEN_BATCH="${TEST_ROOT}/run_driven_issue_batch.sh"
 CAPTURE_FILE="${TEST_ROOT}/driven-trigger.txt"
 mkdir -p "${CONFIG_DIR}"
 
+unset GITLAB_HOST GITLAB_API_PROTOCOL GITLAB_ADDRESS GITLAB_TOKEN
+unset REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS
+
+cat >"${CONFIG_DIR}/gitlab.env" <<'EOF'
+GITLAB_HOST=tracked-blue.invalid:30000
+GITLAB_API_PROTOCOL=http
+GITLAB_TOKEN=tracked-token-must-not-reach-local-test
+EOF
+cat >"${CONFIG_DIR}/campaign_defaults.local.env" <<'EOF'
+GITLAB_HOST=local-gitlab.invalid:9443
+GITLAB_API_PROTOCOL=https
+GITLAB_TOKEN=local-branch-fixture-token
+REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true
+REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS=local-gitlab.invalid:9443
+EOF
+
 cat >"${DRIVEN_BATCH}" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

@@ -93,7 +93,9 @@ set -euo pipefail
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env_paths.sh"
+source "${SCRIPT_DIR}/git_network_guard.sh"
 source "${SCRIPT_DIR}/branch_utils.sh"
+GIT_NETWORK_GUARD_CONTEXT=prepare_attempt
 
 : "${REPO_PATH:?}" "${WORK_ROOT:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
   "${ISSUE_ROOT:?}" \
@@ -117,7 +119,7 @@ flock 8
 # Refresh refs. clone_or_pull.sh has already fetched, but do it again
 # defensively in case this script is run standalone.
 cd "${REPO_PATH}"
-git fetch --prune origin >&2
+git_network_guard_run "${REPO_PATH}" fetch --prune origin >&2
 if [ -z "${BRANCH}" ]; then
   BRANCH="$(resolve_origin_default_branch "${REPO_PATH}")" || {
     echo "prepare_attempt: unable to resolve origin/HEAD default branch" >&2
@@ -133,7 +135,8 @@ BASE_REF="origin/${BRANCH}"
 ACTUAL_MODE="${ISSUE_MODE}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
   set +e
-  git ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
+  git_network_guard_run "${REPO_PATH}" \
+    ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
     >/dev/null
   ls_remote_status=$?
   set -e

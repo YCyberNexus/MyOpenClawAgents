@@ -1,6 +1,7 @@
 # Trigger Commands
 
-`req_executor` accepts five trigger commands:
+`req_executor` accepts four current trigger commands and one explicit legacy
+completion command:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 - `RUN_CHILD_COMPLETION_CALLBACK`
@@ -72,14 +73,22 @@ Optional fields:
 
 Unsupported fields are ignored by the shell parser only if they are not referenced by wrappers; operators should not send them. In particular, do not send runtime basename, data directory, or account-pool fields.
 
-Legacy `run_timeout_seconds` is explicitly rejected. OpenClaw 2026.6.11 does
-not accept a per-call subagent timeout; deployments may configure the optional
-global `agents.defaults.subagents.runTimeoutSeconds`. When positive, it should
-be at least `acpx_timeout_seconds + 120`.
+Legacy `run_timeout_seconds` is explicitly rejected. The common OpenClaw
+2026.4.9/2026.6.11 spawn contract deliberately omits version-specific per-call
+timeout fields; deployments may configure the optional global
+`agents.defaults.subagents.runTimeoutSeconds`. When positive, it should be at
+least `acpx_timeout_seconds + 120`.
 
-## Callback
+## Native completion and legacy callback
 
-`RUN_CHILD_COMPLETION_CALLBACK` is sent by the runtime when a subagent returns compact JSON. It carries the terminal worker result plus the same routing identity needed to locate state. Campaign scalars are loaded from the persisted `.req_executor/_dispatcher/campaign_state.json`; callback payloads do not override scheduled fields.
+New child completions arrive as protected OpenClaw `task_completion` events and
+are passed intact to `scripts/ingest_subagent_completion.sh`; the runtime does
+not synthesize `RUN_CHILD_COMPLETION_CALLBACK`. The ingester authenticates the
+run id, child session key, label, IID, attempt, and runtime provenance before
+calling `dispatch_followup.sh`. `RUN_CHILD_COMPLETION_CALLBACK` remains only for
+pre-upgrade pending records explicitly marked `completion_auth:"legacy"`.
+Campaign scalars are loaded from persisted state; completion inputs do not
+override them.
 
 ## Dispatcher-Driven Batch
 
@@ -117,10 +126,10 @@ matching issues are not added.
 `batch_id` is idempotent: the same canonical request replays the existing
 batch, while the same ID with different bytes fails closed. The external I1
 uses the selector and callback-routing fields shown above. The executor loads
-`GITLAB_TOKEN` from its process environment or deployment config using the
-standard precedence, then carries it as `gitlab_token` in its internal
-`RUN_SCHEDULED_ISSUE_CAMPAIGN` trigger and as `GITLAB_TOKEN` in the spawned task
-prompt.
+`GITLAB_TOKEN` from its private process environment or deployment config using
+the standard precedence. It passes the credential only to fixed outer scripts;
+internal scheduled triggers, spawn bootstraps, manifests, and executor payloads
+never serialize it.
 
 The fixed `run_driven_issue_batch.sh` response includes `status`, `batch_id`,
 `matched_count`, `snapshot_digest`, `scheduler_status`, `spawn_grants`,
@@ -229,9 +238,16 @@ Driven terminal results use durable I3 outbox events with stable `event_id`,
 returns an accepted/duplicate acknowledgement containing the same `event_id`.
 The callback `openclaw` subprocess inherits the executor process environment,
 including the effective `GITLAB_TOKEN` selected from process/config.
-The transport is `RUN_DRIVEN_BATCH_RESULT` plus one strict `callback_envelope`
+The transport is `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`, one strict `callback_envelope`
 containing only `callback_nonce`, `executor_agent`, and the public eight-field
-`worker_result_json`; the nonce never appears inside that public result.
+`worker_result_json`, and one fixed third-line `ack_instruction` that forbids
+temporary files; the nonce never appears inside that public result. The
+dispatcher still accepts the former `RUN_DRIVEN_BATCH_RESULT` marker for
+in-flight compatibility, but new outbox delivery never emits it. The complete
+ack stdout must be exactly one strict accepted/duplicate JSON object, or exactly
+one `json`/plain Markdown fence whose body is that sole strict object. Text
+outside a fence, prose, double fences, prefixes, suffixes, or multiple objects
+are retryable failures.
 
 ## Single-Issue Compatibility Shim
 
@@ -248,8 +264,9 @@ batch IDs when needed, converts the request into a single-selector
 `RUN_DRIVEN_ISSUE_BATCH`, and delegates to the same executor-wide scheduler.
 `dispatch_single_issue.sh` itself does not synthesize
 `RUN_SCHEDULED_ISSUE_CAMPAIGN`, create a private `max_concurrent_subagents=1`
-campaign, or write `dispatch_origin.json`. The downstream driven top-up carries
-the resolved token in its internal scheduled trigger and spawned task prompt.
+campaign, or write `dispatch_origin.json`. The downstream driven top-up keeps
+the resolved token private to fixed outer scripts; neither its internal
+scheduled trigger nor any spawned task text carries it.
 After processing its runtime actions, use the same
 `emit_driven_batch_acceptance.sh` call and exact five-field final reply described
 for dispatcher-driven batches; do not return its rich envelope or

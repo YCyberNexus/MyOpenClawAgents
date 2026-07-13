@@ -70,6 +70,8 @@ jq -cn --arg payload "${CASE_ROOT}/payload.txt" '{
   dispatch_entries:[{
     iid:42,attempt_number:1,child_label:"#42-att-001",
     payload_path:$payload,job_id:"A:snapshot-0",batch_id:"A",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:7,
     snapshot_index:0,memberships_source:"scheduler_active_job"
   }],
   skipped_entries:[]
@@ -273,7 +275,9 @@ assert_replay_once() {
       project:"group/repo",
       iid:42,
       attempt_number:1,
-      child_label:$child_label
+      child_label:$child_label,
+      expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+      expected_task_bytes:7
     }
     and (tostring | contains("private-coordinator-claim") | not)
   ' <<<"${reconcile_required}" >/dev/null \

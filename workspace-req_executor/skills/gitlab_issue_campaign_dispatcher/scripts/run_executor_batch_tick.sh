@@ -68,11 +68,6 @@ done
 validate_bash_script EXPIRE_RUNNING_CMD "${EXPIRE_RUNNING_CMD}"
 
 # Preserve process overrides before sourcing deployment pins.
-GITLAB_TOKEN_PROCESS_OVERRIDE="${GITLAB_TOKEN:-}"
-GITLAB_HOST_PROCESS_SET="${GITLAB_HOST+x}"
-GITLAB_HOST_PROCESS_OVERRIDE="${GITLAB_HOST:-}"
-GITLAB_PROTOCOL_PROCESS_SET="${GITLAB_API_PROTOCOL+x}"
-GITLAB_PROTOCOL_PROCESS_OVERRIDE="${GITLAB_API_PROTOCOL:-}"
 REPO_PARENT_PROCESS_OVERRIDE="${REPO_PARENT_PATH:-}"
 SCHEDULER_ROOT_PROCESS_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 SCHEDULER_ROOT_PROCESS_OVERRIDE="${EXECUTOR_SCHEDULER_ROOT:-}"
@@ -90,9 +85,16 @@ LOCK_COMPAT_PROCESS_OVERRIDE="${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS:-}"
   || tick_die "missing config/gitlab.env"
 [ -f "${CONFIG_DIR}/campaign_defaults.env" ] \
   || tick_die "missing config/campaign_defaults.env"
+# Resolve host/protocol/token as one layer before campaign defaults can
+# overwrite individual GitLab variables. This is network-free but enforces the
+# same local-test blue-zone deny fence as glab_auth.sh.
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/gitlab_env_resolver.sh"
+GITLAB_HOST_RESOLVED="${GITLAB_HOST}"
+GITLAB_PROTOCOL_RESOLVED="${GITLAB_API_PROTOCOL}"
+GITLAB_TOKEN_RESOLVED="${GITLAB_TOKEN}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/gitlab.env"
-GITLAB_TOKEN_PIN="${GITLAB_TOKEN:-}"
 # shellcheck disable=SC1091
 source "${CONFIG_DIR}/campaign_defaults.env"
 if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
@@ -100,12 +102,6 @@ if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   source "${CONFIG_DIR}/campaign_defaults.local.env"
 fi
 : "${EXECUTOR_RUNNING_LEASE_SECONDS:=21600}"
-if [ "${GITLAB_HOST_PROCESS_SET}" = x ]; then
-  GITLAB_HOST="${GITLAB_HOST_PROCESS_OVERRIDE}"
-fi
-if [ "${GITLAB_PROTOCOL_PROCESS_SET}" = x ]; then
-  GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_PROCESS_OVERRIDE}"
-fi
 if [ "${SCHEDULER_ROOT_PROCESS_SET}" = x ]; then
   EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT_PROCESS_OVERRIDE}"
 fi
@@ -124,7 +120,9 @@ fi
 if [ "${LOCK_COMPAT_PROCESS_SET}" = x ]; then
   DRIVEN_LEGACY_LOCK_COMPAT_SECONDS="${LOCK_COMPAT_PROCESS_OVERRIDE}"
 fi
-GITLAB_TOKEN_EFF="${GITLAB_TOKEN_PROCESS_OVERRIDE:-${GITLAB_TOKEN_PIN:-}}"
+GITLAB_HOST="${GITLAB_HOST_RESOLVED}"
+GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_RESOLVED}"
+GITLAB_TOKEN_EFF="${GITLAB_TOKEN_RESOLVED}"
 REPO_PARENT_BASE="${REPO_PARENT_PROCESS_OVERRIDE:-${REPO_PARENT_PATH:-/data}}"
 export REPO_PARENT_PATH="${REPO_PARENT_BASE}"
 [ -n "${GITLAB_TOKEN_EFF}" ] || tick_die "executor GitLab credential is unavailable"
@@ -141,6 +139,8 @@ source "${SCHEDULER_ENV_CMD}" >/dev/null
 # restore the already-resolved process/config repo parent afterwards so every
 # child wrapper observes the same effective clone root.
 export REPO_PARENT_PATH="${REPO_PARENT_BASE}"
+export GITLAB_HOST="${GITLAB_HOST_RESOLVED}"
+export GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_RESOLVED}"
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_driven_launch_coordinator.sh"
@@ -404,6 +404,8 @@ resume_durable_launch_actions() {
         project:$action.project,
         iid:$action.iid,
         attempt_number:$action.attempt_number,
+        expected_task_sha256:$action.expected_task_sha256,
+        expected_task_bytes:$action.expected_task_bytes,
         status:"spawned",
         run_id:$action.ack.run_id,
         child_session_key:$action.ack.child_session_key
@@ -421,6 +423,8 @@ resume_durable_launch_actions() {
         project:$action.project,
         iid:$action.iid,
         attempt_number:$action.attempt_number,
+        expected_task_sha256:$action.expected_task_sha256,
+        expected_task_bytes:$action.expected_task_bytes,
         status:"launch_failed",
         launch_attempts:$action.ack.launch_attempts,
         launch_error:$action.ack.launch_error
@@ -495,6 +499,121 @@ if ! flock -n -x "${EXECUTOR_TICK_LOCK_FD}"; then
     backoff_seconds:2,
     chat_summary:"another executor batch tick owns the topup transaction"
   }'
+  exit 0
+fi
+
+# A prior sessions_spawn action globally closes the launch gate until its
+# acknowledgement is durable (or explicit runtime reconciliation resolves the
+# ambiguity). Do this independent of the current reservation set: a preparing
+# job already occupies a scheduler slot and therefore may not be returned by
+# reserve_driven_batch_items.sh at all.
+SERIAL_LAUNCH_GATE_CLOSED=false
+declare -a SERIAL_GATE_ACTION_FILES=()
+shopt -s nullglob
+SERIAL_GATE_ACTION_FILES=("${DLC_ROOT}"/*.json)
+shopt -u nullglob
+if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
+  IFS=$'\n' SERIAL_GATE_ACTION_FILES=($(printf '%s\n' \
+    "${SERIAL_GATE_ACTION_FILES[@]}" | LC_ALL=C sort))
+  unset IFS
+  for serial_action_file in "${SERIAL_GATE_ACTION_FILES[@]}"; do
+  serial_job_id="$(jq -er '
+    if type == "object" and (.job_id | type == "string" and length > 0)
+    then .job_id else error("missing job_id") end
+  ' "${serial_action_file}")" || tick_die "durable launch action is invalid"
+  dlc_open "${serial_job_id}"
+  if [ "${DLC_ACTION_FILE}" != "${serial_action_file}" ]; then
+    dlc_close
+    tick_die "durable launch action path does not match job identity"
+  fi
+  serial_action="$(dlc_read)" || {
+    dlc_close
+    tick_die "durable launch action is invalid"
+  }
+  serial_stage="$(jq -r '.stage' <<<"${serial_action}")"
+  case "${serial_stage}" in
+    action_emitted)
+      exec {SERIAL_GATE_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+      flock -x "${SERIAL_GATE_STATE_LOCK_FD}"
+      serial_scheduler_job="$(jq -c --arg job_id "${serial_job_id}" \
+        '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
+      flock -u "${SERIAL_GATE_STATE_LOCK_FD}"
+      exec {SERIAL_GATE_STATE_LOCK_FD}>&-
+      if jq -e \
+          --argjson prior_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" '
+          type == "object"
+          and .status == "reserved"
+          and .claim_generation == $prior_generation
+          and .claim_token == null
+        ' <<<"${serial_scheduler_job}" >/dev/null; then
+        RECONCILE_ACTIONS="$(jq -c \
+          --arg job_id "${serial_job_id}" \
+          --argjson claim_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" \
+          --arg project "$(jq -r '.project' <<<"${serial_action}")" \
+          --argjson iid "$(jq -r '.iid' <<<"${serial_action}")" \
+          --argjson attempt_number "$(jq -r '.attempt_number' <<<"${serial_action}")" \
+          --arg child_label "$(jq -r '.child_label' <<<"${serial_action}")" \
+          --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${serial_action}")" \
+          --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${serial_action}")" '
+          . + [{
+            action:"reconcile_emitted_spawn",
+            job_id:$job_id,
+            claim_generation:$claim_generation,
+            project:$project,
+            iid:$iid,
+            attempt_number:$attempt_number,
+            child_label:$child_label,
+            expected_task_sha256:$expected_task_sha256,
+            expected_task_bytes:$expected_task_bytes
+          }]
+        ' <<<"${RECONCILE_ACTIONS}")"
+        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+          operation:"spawn_reconcile",job_id:$job_id,status:"required"
+        }')"
+      else
+        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+          operation:"spawn_ack",job_id:$job_id,status:"pending"
+        }')"
+      fi
+      SERIAL_LAUNCH_GATE_CLOSED=true
+      ;;
+    ack_received|project_recorded|scheduler_recorded)
+      append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+        operation:"launch_resume",job_id:$job_id,status:"pending"
+      }')"
+      HAD_FAILURE=true
+      SERIAL_LAUNCH_GATE_CLOSED=true
+      ;;
+  esac
+  dlc_close
+    [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ] && break
+  done
+fi
+
+if [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ]; then
+  if [ "$(jq -r 'length' <<<"${RECONCILE_ACTIONS}")" -gt 0 ]; then
+    SERIAL_GATE_STATUS=reconcile_required
+    SERIAL_GATE_SUMMARY="executor batch tick requires runtime reconciliation before retry"
+  elif [ "${HAD_FAILURE}" = true ]; then
+    SERIAL_GATE_STATUS=tick_failed
+    SERIAL_GATE_SUMMARY="executor batch tick has durable launch recording pending recovery"
+  else
+    SERIAL_GATE_STATUS=idle
+    SERIAL_GATE_SUMMARY="executor batch tick is waiting for the prior spawn acknowledgement"
+  fi
+  jq -cn \
+    --arg status "${SERIAL_GATE_STATUS}" \
+    --argjson operations "${OPERATIONS}" \
+    --argjson reconcile_actions "${RECONCILE_ACTIONS}" \
+    --arg chat_summary "${SERIAL_GATE_SUMMARY}" '{
+      status:$status,
+      spawn_grants:[],
+      reconcile_actions:$reconcile_actions,
+      operation_results:$operations,
+      max_launch_retries:3,
+      backoff_seconds:2,
+      chat_summary:$chat_summary
+    }'
   exit 0
 fi
 
@@ -593,6 +712,12 @@ topup_candidate_set() {
         if type == "object"
           and (.status | type == "string")
           and (.dispatch_entries | type == "array")
+          and (all(.dispatch_entries[];
+            (.payload_path | type == "string" and startswith("/"))
+            and (.expected_task_sha256 | type == "string"
+              and test("^[0-9a-f]{64}$"))
+            and (.expected_task_bytes | type == "number"
+              and . == floor and . > 0)))
           and ((.skipped_entries // []) | type == "array")
           and (if ((.skipped_entries // []) | length) > 0 then
             (.pending_iids | type == "array")
@@ -674,6 +799,8 @@ seed_topup_actions() {
         --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" \
         --arg child_label "$(jq -r '.child_label' <<<"${entry}")" \
         --arg payload_path "$(jq -r '.payload_path' <<<"${entry}")" \
+        --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${entry}")" \
+        --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${entry}")" \
         --argjson now "${now}" '{
         version:1,
         job_id:$job_id,
@@ -684,6 +811,8 @@ seed_topup_actions() {
         attempt_number:$attempt_number,
         child_label:$child_label,
         payload_path:$payload_path,
+        expected_task_sha256:$expected_task_sha256,
+        expected_task_bytes:$expected_task_bytes,
         claim_generation:0,
         claim_token:null,
         stage:"topup_prepared",
@@ -700,10 +829,14 @@ seed_topup_actions() {
           --argjson iid "${iid}" \
           --arg batch_id "$(jq -r '.batch_id' <<<"${grant}")" \
           --argjson snapshot_index "$(jq -r '.snapshot_index' <<<"${grant}")" \
-          --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" '
+          --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" \
+          --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${entry}")" \
+          --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${entry}")" '
           .job_id == $job_id and .project == $project and .iid == $iid
           and .batch_id == $batch_id and .snapshot_index == $snapshot_index
           and .attempt_number == $attempt_number
+          and .expected_task_sha256 == $expected_task_sha256
+          and .expected_task_bytes == $expected_task_bytes
         ' <<<"${action}" >/dev/null; then
         if jq -e \
             --arg job_id "${job_id}" \
@@ -721,10 +854,14 @@ seed_topup_actions() {
             --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" \
             --arg child_label "$(jq -r '.child_label' <<<"${entry}")" \
             --arg payload_path "$(jq -r '.payload_path' <<<"${entry}")" \
+            --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${entry}")" \
+            --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${entry}")" \
             --argjson now "${now}" '
             .attempt_number = $attempt_number
             | .child_label = $child_label
             | .payload_path = $payload_path
+            | .expected_task_sha256 = $expected_task_sha256
+            | .expected_task_bytes = $expected_task_bytes
             | .claim_generation = 0
             | .claim_token = null
             | .stage = "topup_prepared"
@@ -901,6 +1038,10 @@ while IFS= read -r grant; do
       and (.attempt_number | type == "number" and . == floor and . > 0)
       and (.child_label | type == "string" and length > 0)
       and (.payload_path | type == "string" and startswith("/"))
+      and (.expected_task_sha256 | type == "string"
+        and test("^[0-9a-f]{64}$"))
+      and (.expected_task_bytes | type == "number"
+        and . == floor and . > 0)
     ' <<<"${action}" >/dev/null; then
     append_operation "$(jq -cn --arg job_id "${job_id}" '{
       operation:"preparing",job_id:$job_id,status:"coordinator_conflict"
@@ -936,7 +1077,9 @@ while IFS= read -r grant; do
         --arg project "${project}" \
         --argjson iid "${iid}" \
         --argjson attempt_number "$(jq -r '.attempt_number' <<<"${action}")" \
-        --arg child_label "$(jq -r '.child_label' <<<"${action}")" '
+        --arg child_label "$(jq -r '.child_label' <<<"${action}")" \
+        --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${action}")" \
+        --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${action}")" '
         . + [{
           action:"reconcile_emitted_spawn",
           job_id:$job_id,
@@ -944,13 +1087,29 @@ while IFS= read -r grant; do
           project:$project,
           iid:$iid,
           attempt_number:$attempt_number,
-          child_label:$child_label
+          child_label:$child_label,
+          expected_task_sha256:$expected_task_sha256,
+          expected_task_bytes:$expected_task_bytes
         }]
       ' <<<"${RECONCILE_ACTIONS}")"
       append_operation "$(jq -cn --arg job_id "${job_id}" '{
         operation:"spawn_reconcile",job_id:$job_id,status:"required"
       }')"
     fi
+    # A runtime call may already exist and its acknowledgement is not yet
+    # durably recorded. Never expose a later grant in the same tick; explicit
+    # reconciliation must resolve this action first.
+    dlc_close
+    break
+  fi
+  if [ "${action_stage}" = ack_received ] \
+      || [ "${action_stage}" = project_recorded ] \
+      || [ "${action_stage}" = scheduler_recorded ]; then
+    # resume_durable_launch_actions owns these stages. If it could not finish,
+    # keep the global serial gate closed instead of launching another child.
+    HAD_FAILURE=true
+    dlc_close
+    break
   fi
   if [ "${action_stage}" = topup_prepared ]; then
     set +e
@@ -1123,7 +1282,9 @@ while IFS= read -r grant; do
       --argjson iid "${iid}" \
       --argjson attempt_number "$(jq -r '.attempt_number' <<<"${action}")" \
       --arg child_label "$(jq -r '.child_label' <<<"${action}")" \
-      --arg payload_path "$(jq -r '.payload_path' <<<"${action}")" '
+      --arg payload_path "$(jq -r '.payload_path' <<<"${action}")" \
+      --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${action}")" \
+      --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${action}")" '
       . + [{
         job_id:$job_id,
         claim_generation:$claim_generation,
@@ -1131,11 +1292,18 @@ while IFS= read -r grant; do
         iid:$iid,
         attempt_number:$attempt_number,
         child_label:$child_label,
-        payload_path:$payload_path
+        payload_path:$payload_path,
+        expected_task_sha256:$expected_task_sha256,
+        expected_task_bytes:$expected_task_bytes
       }]
     ' <<<"${SPAWN_GRANTS}")"
   fi
   dlc_close
+  if [ "$(jq -r 'length' <<<"${SPAWN_GRANTS}")" -gt 0 ]; then
+    # Exactly one grant is exposed per tick. Its recorder must finish before a
+    # later tick can advance the next coordinator action to action_emitted.
+    break
+  fi
 done < <(jq -c '.[]' <<<"${CANDIDATES}")
 
 if [ "$(jq -r 'length' <<<"${SPAWN_GRANTS}")" -gt 0 ]; then

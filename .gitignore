@@ -44,6 +44,9 @@ workspace-req_dispatcher/.claude/.review-baseline
 workspace-req_executor/.claude/.review-done-sha
 workspace-req_executor/.claude/.review-baseline
 
+# OpenClaw local workspace runtime state (generated on first local agent run)
+workspace-*/.openclaw/
+
 # Local GitLab runner secrets
 workspace-git_issuer/config/gitlab.env
 workspace-req_dispatcher/config/dispatcher.local.env

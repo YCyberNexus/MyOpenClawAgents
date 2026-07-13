@@ -22,11 +22,14 @@ set -euo pipefail
 # Each Bash exec is a fresh shell, so paths/glab/PROJECT_URI must be re-derived.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env_paths.sh"
+source "${SCRIPT_DIR}/git_network_guard.sh"
+GIT_NETWORK_GUARD_CONTEXT=commit_and_push
 
 : "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
   "${LOCAL_ATTEMPT_BRANCH:?}" "${WORK_BRANCH:?}" "${ISSUE_TITLE:?}"
 
 cd "${WORKTREE_DIR}"
+git_network_guard_assert_repo "${WORKTREE_DIR}"
 
 git commit -m \
   "fix(issue-${ISSUE_IID}): ${ISSUE_TITLE} (attempt ${ATTEMPT_NUMBER_PADDED})"
@@ -35,17 +38,18 @@ git commit -m \
 # Use --force-with-lease for an existing ref; use a normal push when the
 # remote ref does not exist yet (first attempt).
 set +e
-git ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
+git_network_guard_run "${WORKTREE_DIR}" \
+  ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
   >/dev/null
 ls_remote_status=$?
 set -e
 case "${ls_remote_status}" in
   0)
-    git push --force-with-lease origin \
+    git_network_guard_run "${WORKTREE_DIR}" push --force-with-lease origin \
       "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}" >&2
     ;;
   2)
-    git push origin \
+    git_network_guard_run "${WORKTREE_DIR}" push origin \
       "${LOCAL_ATTEMPT_BRANCH}:${WORK_BRANCH}" >&2
     ;;
   *) exit "${ls_remote_status}" ;;

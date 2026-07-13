@@ -171,6 +171,8 @@ EOF
 - Use the issue description and reviewer comments as the task prompt. Do not assume any project-specific testing framework or material directory unless the issue explicitly names one.
 - The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`.req_executor/_dispatcher/\` and \`.req_executor/issues/\`) and are not visible to you here.
 - Destructive deletion is forbidden. Do NOT call \`rm\`, \`/bin/rm\`, \`git rm\`, \`unlink\`, \`find -delete\`, or script file deletion through Python, Node, or another runtime. Do not delete files or directories for cleanup. If the issue seems to require deleting something, leave it in place and explain the blocker in your final summary.
+- Git ownership is split deliberately. You may use only read-only Git inspection such as \`git status\`, \`git diff\`, \`git log\`, \`git show\`, and \`git ls-files\`. Do NOT run \`git add\`, \`git commit\`, \`git push\`, \`git fetch\`, \`git pull\`, \`git reset\`, \`git checkout\`, \`git switch\`, \`git restore\`, \`git clean\`, \`git worktree\`, \`git branch\` mutations, or any other Git command that changes refs, the index, remotes, or working-tree state. The outer fixed executor pipeline owns stage, commit, push, and merge-request creation after you return.
+- Do NOT run \`glab\` in any form. GitLab reads and mutations are owned by the outer fixed executor scripts; do not inspect credentials, remotes, auth state, issues, merge requests, or labels yourself.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did$([ "${ISSUE_MODE}" = "continue" ] && echo " differently from the prior run").
 EOF

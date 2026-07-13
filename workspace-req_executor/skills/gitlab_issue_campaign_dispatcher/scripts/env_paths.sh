@@ -274,33 +274,188 @@ if [ -n "${ISSUE_IID:-}" ]; then
   fi
 fi
 
-# ─── 3. glab auth (idempotent — loads both HOST and PROTOCOL) ─────
-if [ -z "${GITLAB_HOST:-}" ] || [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
-  __ENV_PATHS_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  if [ -z "${GITLAB_TOKEN:-}" ]; then
-    __PIN_FILE="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)/config/gitlab.env"
-    if [ -f "${__PIN_FILE}" ]; then
-      __PIN_TOKEN="$(bash -c 'source "$1"; printf %s "${GITLAB_TOKEN:-}"' _ "${__PIN_FILE}")"
-      [ -n "${__PIN_TOKEN}" ] && export GITLAB_TOKEN="${__PIN_TOKEN}"
-    fi
-  fi
-  : "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set to bootstrap glab}"
-  GITLAB_HOST="$(bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh")"
-  if [ -z "${GITLAB_API_PROTOCOL:-}" ]; then
-    __PIN_FILE="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)/config/gitlab.env"
-    __GITLAB_TOKEN_BEFORE_PIN_SOURCE="${GITLAB_TOKEN:-}"
-    # shellcheck disable=SC1090
-    source "${__PIN_FILE}"
-    if [ -n "${__GITLAB_TOKEN_BEFORE_PIN_SOURCE}" ]; then
-      export GITLAB_TOKEN="${__GITLAB_TOKEN_BEFORE_PIN_SOURCE}"
-    fi
-  fi
-  export GITLAB_HOST GITLAB_API_PROTOCOL
-  unset __ENV_PATHS_SH_DIR
-  unset __PIN_FILE
-  unset __PIN_TOKEN
-  unset __GITLAB_TOKEN_BEFORE_PIN_SOURCE
+# ─── 3. GitLab tuple resolution + glab auth ────────────────────────
+# Resolve host/protocol as one target layer before authentication. A local
+# target may use an explicitly injected process token or its own ignored-file
+# token, but it must never inherit the tracked deployment token.
+__RESOLVED_REPO_PARENT_PATH="${REPO_PARENT_PATH}"
+__RESOLVED_REPO_PATH="${REPO_PATH}"
+__ENV_PATHS_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+__ENV_PATHS_WORKSPACE_ROOT="$(cd "${__ENV_PATHS_SH_DIR}/../../.." && pwd)"
+__ENV_PATHS_CONFIG_DIR="${CONFIG_DIR:-${__ENV_PATHS_WORKSPACE_ROOT}/config}"
+__PIN_FILE="${__ENV_PATHS_CONFIG_DIR}/gitlab.env"
+__LOCAL_FILE="${__ENV_PATHS_CONFIG_DIR}/campaign_defaults.local.env"
+
+__PROCESS_HOST_SET="${GITLAB_HOST+x}"
+__PROCESS_HOST="${GITLAB_HOST:-}"
+__PROCESS_PROTOCOL_SET="${GITLAB_API_PROTOCOL+x}"
+__PROCESS_PROTOCOL="${GITLAB_API_PROTOCOL:-}"
+__PROCESS_TOKEN_SET="${GITLAB_TOKEN+x}"
+__PROCESS_TOKEN="${GITLAB_TOKEN:-}"
+__PROCESS_LOCAL_MODE_SET="${REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE+x}"
+__PROCESS_LOCAL_MODE="${REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE:-}"
+__PROCESS_ALLOWED_HOSTS_SET="${REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS+x}"
+__PROCESS_ALLOWED_HOSTS="${REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS:-}"
+__PROCESS_GLAB_BIN_SET="${GLAB_BIN+x}"
+__PROCESS_GLAB_BIN="${GLAB_BIN:-}"
+__PROCESS_GLAB_CONFIG_DIR_SET="${GLAB_CONFIG_DIR+x}"
+__PROCESS_GLAB_CONFIG_DIR="${GLAB_CONFIG_DIR:-}"
+
+if [ -f "${__PIN_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${__PIN_FILE}"
+  __TRACKED_HOST_SET="${GITLAB_HOST+x}"
+  __TRACKED_HOST="${GITLAB_HOST:-}"
+  __TRACKED_PROTOCOL_SET="${GITLAB_API_PROTOCOL+x}"
+  __TRACKED_PROTOCOL="${GITLAB_API_PROTOCOL:-}"
+  __TRACKED_TOKEN_SET="${GITLAB_TOKEN+x}"
+  __TRACKED_TOKEN="${GITLAB_TOKEN:-}"
+else
+  __TRACKED_HOST_SET=""
+  __TRACKED_HOST=""
+  __TRACKED_PROTOCOL_SET=""
+  __TRACKED_PROTOCOL=""
+  __TRACKED_TOKEN_SET=""
+  __TRACKED_TOKEN=""
 fi
+
+unset GITLAB_HOST GITLAB_API_PROTOCOL GITLAB_TOKEN
+if [ -f "${__LOCAL_FILE}" ]; then
+  # shellcheck disable=SC1090
+  source "${__LOCAL_FILE}"
+fi
+__LOCAL_HOST_SET="${GITLAB_HOST+x}"
+__LOCAL_HOST="${GITLAB_HOST:-}"
+__LOCAL_PROTOCOL_SET="${GITLAB_API_PROTOCOL+x}"
+__LOCAL_PROTOCOL="${GITLAB_API_PROTOCOL:-}"
+__LOCAL_TOKEN_SET="${GITLAB_TOKEN+x}"
+__LOCAL_TOKEN="${GITLAB_TOKEN:-}"
+
+# The ignored file also carries scheduler defaults such as REPO_PARENT_PATH.
+# env_paths has already derived its path tuple from explicit caller inputs, so
+# restore those values after extracting only the intended GitLab settings.
+REPO_PARENT_PATH="${__RESOLVED_REPO_PARENT_PATH}"
+REPO_PATH="${__RESOLVED_REPO_PATH}"
+export REPO_PARENT_PATH REPO_PATH
+
+if [ "${__PROCESS_LOCAL_MODE_SET}" = x ]; then
+  REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE="${__PROCESS_LOCAL_MODE}"
+fi
+if [ "${__PROCESS_ALLOWED_HOSTS_SET}" = x ]; then
+  REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="${__PROCESS_ALLOWED_HOSTS}"
+fi
+if [ "${__PROCESS_GLAB_BIN_SET}" = x ]; then
+  GLAB_BIN="${__PROCESS_GLAB_BIN}"
+fi
+if [ "${__PROCESS_GLAB_CONFIG_DIR_SET}" = x ]; then
+  GLAB_CONFIG_DIR="${__PROCESS_GLAB_CONFIG_DIR}"
+fi
+if [ -n "${GLAB_CONFIG_DIR:-}" ]; then
+  case "${GLAB_CONFIG_DIR}" in
+    /*) ;;
+    *) echo "env_paths.sh: GLAB_CONFIG_DIR must be absolute" >&2; exit 11 ;;
+  esac
+  case "${GLAB_CONFIG_DIR}" in
+    *$'\n'*|*$'\r'*|*$'\t'*)
+      echo "env_paths.sh: GLAB_CONFIG_DIR contains control characters" >&2
+      exit 11
+      ;;
+  esac
+  export GLAB_CONFIG_DIR
+fi
+
+__PROCESS_TARGET_SET=false
+if [ "${__PROCESS_HOST_SET}" = x ] \
+    || [ "${__PROCESS_PROTOCOL_SET}" = x ]; then
+  __PROCESS_TARGET_SET=true
+fi
+__LOCAL_TARGET_SET=false
+if [ "${__LOCAL_HOST_SET}" = x ] \
+    || [ "${__LOCAL_PROTOCOL_SET}" = x ]; then
+  __LOCAL_TARGET_SET=true
+fi
+
+__GITLAB_AUTH_REQUIRED=true
+if [ "${__PROCESS_TARGET_SET}" = true ]; then
+  if [ "${__PROCESS_HOST_SET}" != x ] \
+      || [ "${__PROCESS_PROTOCOL_SET}" != x ]; then
+    echo "env_paths.sh: process GITLAB_HOST and GITLAB_API_PROTOCOL must be provided together" >&2
+    exit 11
+  fi
+  if [ "${__PROCESS_TOKEN_SET}" != x ]; then
+    echo "env_paths.sh: a process GitLab target requires process GITLAB_TOKEN" >&2
+    exit 11
+  fi
+  GITLAB_HOST="${__PROCESS_HOST}"
+  GITLAB_API_PROTOCOL="${__PROCESS_PROTOCOL}"
+  GITLAB_TOKEN="${__PROCESS_TOKEN}"
+  __GITLAB_AUTH_REQUIRED=false
+elif [ "${__LOCAL_TARGET_SET}" = true ]; then
+  if [ "${__LOCAL_HOST_SET}" != x ] \
+      || [ "${__LOCAL_PROTOCOL_SET}" != x ]; then
+    echo "env_paths.sh: local GitLab host and protocol must be provided together" >&2
+    exit 11
+  fi
+  GITLAB_HOST="${__LOCAL_HOST}"
+  GITLAB_API_PROTOCOL="${__LOCAL_PROTOCOL}"
+  if [ "${__PROCESS_TOKEN_SET}" = x ]; then
+    GITLAB_TOKEN="${__PROCESS_TOKEN}"
+  elif [ "${__LOCAL_TOKEN_SET}" = x ]; then
+    GITLAB_TOKEN="${__LOCAL_TOKEN}"
+  else
+    echo "env_paths.sh: a local GitLab target requires a process or local-file GITLAB_TOKEN" >&2
+    exit 11
+  fi
+elif [ "${__LOCAL_TOKEN_SET}" = x ]; then
+  echo "env_paths.sh: local GITLAB_TOKEN requires a local host and protocol" >&2
+  exit 11
+else
+  if [ "${__TRACKED_HOST_SET}" != x ] \
+      || [ "${__TRACKED_PROTOCOL_SET}" != x ]; then
+    echo "env_paths.sh: ${__PIN_FILE} must define GITLAB_HOST and GITLAB_API_PROTOCOL" >&2
+    exit 11
+  fi
+  GITLAB_HOST="${__TRACKED_HOST}"
+  GITLAB_API_PROTOCOL="${__TRACKED_PROTOCOL}"
+  if [ "${__PROCESS_TOKEN_SET}" = x ]; then
+    GITLAB_TOKEN="${__PROCESS_TOKEN}"
+  elif [ "${__TRACKED_TOKEN_SET}" = x ]; then
+    GITLAB_TOKEN="${__TRACKED_TOKEN}"
+  else
+    GITLAB_TOKEN=""
+  fi
+fi
+
+: "${GITLAB_HOST:?env_paths.sh: resolved GITLAB_HOST must be non-empty}"
+: "${GITLAB_API_PROTOCOL:?env_paths.sh: resolved GITLAB_API_PROTOCOL must be non-empty}"
+: "${GITLAB_TOKEN:?env_paths.sh: GITLAB_TOKEN must be set for the resolved target}"
+export GITLAB_HOST GITLAB_API_PROTOCOL GITLAB_TOKEN
+
+# Enforce the local-test host allowlist even when a complete process tuple is
+# supplied. Process-token operation may legitimately skip persistent glab auth,
+# but it must never skip the blue-zone deny fence.
+# shellcheck disable=SC1091
+source "${__ENV_PATHS_SH_DIR}/git_network_guard.sh"
+GIT_NETWORK_GUARD_CONTEXT=env_paths
+git_network_guard_enforce_local_test_host || exit $?
+
+if [ "${__GITLAB_AUTH_REQUIRED}" = true ]; then
+  bash "${__ENV_PATHS_SH_DIR}/glab_auth.sh" >/dev/null
+fi
+
+unset __ENV_PATHS_SH_DIR __ENV_PATHS_WORKSPACE_ROOT __ENV_PATHS_CONFIG_DIR
+unset __PIN_FILE __LOCAL_FILE
+unset __PROCESS_HOST_SET __PROCESS_HOST __PROCESS_PROTOCOL_SET __PROCESS_PROTOCOL
+unset __PROCESS_TOKEN_SET __PROCESS_TOKEN __PROCESS_LOCAL_MODE_SET __PROCESS_LOCAL_MODE
+unset __PROCESS_ALLOWED_HOSTS_SET __PROCESS_ALLOWED_HOSTS
+unset __PROCESS_GLAB_BIN_SET __PROCESS_GLAB_BIN
+unset __PROCESS_GLAB_CONFIG_DIR_SET __PROCESS_GLAB_CONFIG_DIR
+unset __TRACKED_HOST_SET __TRACKED_HOST __TRACKED_PROTOCOL_SET __TRACKED_PROTOCOL
+unset __TRACKED_TOKEN_SET __TRACKED_TOKEN
+unset __LOCAL_HOST_SET __LOCAL_HOST __LOCAL_PROTOCOL_SET __LOCAL_PROTOCOL
+unset __LOCAL_TOKEN_SET __LOCAL_TOKEN __PROCESS_TARGET_SET __LOCAL_TARGET_SET
+unset __GITLAB_AUTH_REQUIRED
+unset __RESOLVED_REPO_PARENT_PATH __RESOLVED_REPO_PATH
 
 # ─── 4. Project handle ────────────────────────────────────────────
 if [ -z "${PROJECT_FULL:-}" ]; then
