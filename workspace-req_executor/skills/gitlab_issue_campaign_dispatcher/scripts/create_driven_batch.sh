@@ -641,6 +641,7 @@ STATE_JSON="$(jq -cnS \
   --arg snapshot_digest "${SNAPSHOT_DIGEST}" \
   '{
     version: 1,
+    terminal_counts_version: 1,
     batch_id: $batch_id,
     status: $status,
     matched_count: ($matched_count | tonumber),

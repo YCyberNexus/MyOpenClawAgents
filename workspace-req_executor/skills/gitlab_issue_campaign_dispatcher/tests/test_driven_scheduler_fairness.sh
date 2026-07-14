@@ -51,6 +51,7 @@ create_batch_fixture() {
     --argjson matched_count "${matched_count}" \
     '{
       version:1,
+      terminal_counts_version:1,
       batch_id:$batch_id,
       status:"queued",
       matched_count:$matched_count,
@@ -222,6 +223,7 @@ jq -e --arg job_id "${a1_job_id}" \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${a1_claim_token}" \
   bash "${RECORD}" >/dev/null
 
@@ -267,6 +269,7 @@ jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
   >"${CRASH_BATCH_DIR}/snapshot.json"
 jq -cnS '{
   version:1,
+  terminal_counts_version:1,
   batch_id:"X",
   status:"queued",
   matched_count:1,
@@ -510,11 +513,16 @@ jq -e --arg job_id "${lease_job_id}" --arg token "${lease_claim2_token}" '
 ' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
 
 for stale_status in spawned launch_failed terminal; do
+  stale_terminal_status=""
+  if [ "${stale_status}" = terminal ]; then
+    stale_terminal_status=done
+  fi
   stale_scheduler_before="$(jq -cS . "${LEASE_ROOT}/scheduler_state.json")"
   stale_batch_before="$(jq -cS . "${LEASE_ROOT}/batches/L/state.json")"
   set +e
   stale_output="$(
     CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS="${stale_status}" \
+      TERMINAL_STATUS="${stale_terminal_status}" \
       CLAIM_TOKEN="${lease_claim1_token}" \
       DRIVEN_PREPARING_LEASE_SECONDS=10 NOW_EPOCH=114 \
       bash "${RECORD}" 2>&1
@@ -548,6 +556,7 @@ claim2_spawned_replay="$(
 )"
 jq -e '.job_status == "running"' <<<"${claim2_spawned_replay}" >/dev/null
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${lease_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${lease_claim2_token}" NOW_EPOCH=117 \
   bash "${RECORD}" >/dev/null
 jq -e --arg job_id "${lease_job_id}" '
@@ -715,6 +724,7 @@ for forbidden_legacy_status in spawned launch_failed; do
   }
 done
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID='N:snapshot-0' STATUS=terminal \
+  TERMINAL_STATUS=done \
   NOW_EPOCH=203 bash "${RECORD}" >/dev/null
 jq -e '.active_jobs | has("N:snapshot-0") | not' \
   "${MIGRATION_ROOT}/scheduler_state.json" >/dev/null
@@ -827,6 +837,7 @@ jq -e \
     $job_id + ":claim-1:terminal-1")
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${finalizing_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${finalizing_token}" \
   FINALIZATION_EVENT_ID="${finalizing_event}" \
   NOW_EPOCH=5001 DRIVEN_PREPARING_LEASE_SECONDS=10 \
@@ -881,6 +892,7 @@ jq -e '.grants == [] and .active_count == 1' \
   }
 env -u CLAIM_TOKEN \
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${reserved_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   FINALIZATION_EVENT_ID="${reserved_event}" NOW_EPOCH=3 \
   bash "${RECORD}" >/dev/null
 jq -e --arg job_id "${reserved_job_id}" \

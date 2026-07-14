@@ -6,6 +6,37 @@
 # normalized facts the orchestrator should route and enqueue.
 set -euo pipefail
 
+# POSIX awk may report byte offsets under the C locale while substr() applies
+# character offsets. Select an installed UTF-8 locale before parsing Chinese
+# directives so a service process with an empty locale cannot corrupt values.
+ensure_utf8_locale() {
+  local charmap=""
+  local candidate=""
+
+  if command -v locale >/dev/null 2>&1; then
+    charmap="$(locale charmap 2>/dev/null || true)"
+    case "${charmap}" in
+      UTF-8|UTF8|utf-8|utf8) return 0 ;;
+    esac
+
+    for candidate in C.UTF-8 C.utf8 en_US.UTF-8 en_US.utf8 zh_CN.UTF-8 zh_CN.utf8; do
+      charmap="$(LC_ALL="${candidate}" locale charmap 2>/dev/null || true)"
+      case "${charmap}" in
+        UTF-8|UTF8|utf-8|utf8)
+          export LC_ALL="${candidate}"
+          return 0
+          ;;
+      esac
+    done
+  fi
+
+  echo "prepare_executor_issue_payload: a UTF-8 locale is required" >&2
+  exit 2
+}
+
+ensure_utf8_locale
+unset -f ensure_utf8_locale
+
 MESSAGE="${MESSAGE:-}"
 MESSAGE_FILE="${MESSAGE_FILE:-}"
 
@@ -288,7 +319,7 @@ extract_project_candidates() {
     printf '%s\n' "${text}" | awk '
       function has_explicit_project_selector(suffix) {
         return suffix ~ /^[[:space:]]*(的[[:space:]]*)?[Ii][Ss][Ss][Uu][Ee][Ss]?([[:space:]#，,。;；:]|$)/ \
-          || suffix ~ /^[[:space:]]*中[[:space:]]*(所有|全部|未完成|待处理|label|标签)/
+          || suffix ~ /^[[:space:]]*中?[[:space:]]*(所有|全部|未完成|待处理|label|标签|带[[:space:]]*标签)/
       }
       function is_probable_local_file_path(value, suffix, count, parts, tail) {
         count = split(value, parts, "/")
@@ -299,12 +330,12 @@ extract_project_candidates() {
         return tail ~ /\.(c|cc|cpp|cxx|h|hpp|go|java|kt|kts|py|rb|rs|php|js|jsx|ts|tsx|vue|svelte|sh|bash|zsh|fish|ps1|sql|proto|graphql|json|jsonl|yaml|yml|toml|ini|conf|cfg|xml|html|htm|css|scss|less|md|mdx|rst|txt|csv|tsv|lock)$/
       }
       function strip_label_selector_value(line, prefix, rest) {
-        if (!match(line, /(label|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+        if (!match(line, /(([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])|带[[:space:]]*标签)[[:space:]]*/)) {
           return line
         }
         prefix = substr(line, 1, RSTART + RLENGTH - 1)
         rest = substr(line, RSTART + RLENGTH)
-        if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Ii]ssue|[Ii]ssues)([[:space:]，,。;；]|$)/)) {
+        if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Oo][Pp][Ee][Nn][[:space:]]+)?[Ii][Ss][Ss][Uu][Ee][Ss]?([[:space:]，,。;；]|$)/)) {
           return prefix substr(rest, RSTART)
         }
         sub(/^[^[:space:]，,。;；]+/, "", rest)
@@ -337,13 +368,13 @@ strip_label_selector_values() {
       for (segment_index = 1; segment_index <= segment_count; segment_index++) {
         remaining = segments[segment_index]
         cleaned = ""
-        while (match(remaining, /([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+        while (match(remaining, /(([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])|带[[:space:]]*标签)[[:space:]]*/)) {
           cleaned = cleaned substr(remaining, 1, RSTART - 1)
           rest = substr(remaining, RSTART + RLENGTH)
           if (match(rest, /^[^[:space:]，,。;；]+/)) {
             rest = substr(rest, RLENGTH + 1)
           }
-          if (match(rest, /^[[:space:]]+(的[[:space:]]*)?[Ii][Ss][Ss][Uu][Ee][Ss]?/)) {
+          if (match(rest, /^[[:space:]]+(的[[:space:]]*)?([Oo][Pp][Ee][Nn][[:space:]]+)?[Ii][Ss][Ss][Uu][Ee][Ss]?/)) {
             rest = " issue " substr(rest, RLENGTH + 1)
           }
           remaining = rest
@@ -406,12 +437,12 @@ extract_selector_iid_evidence() {
       if (number ~ /^[0-9]+$/) print number
     }
     function strip_label_selector_value(line, prefix, rest) {
-      if (!match(line, /(label|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+      if (!match(line, /(([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])|带[[:space:]]*标签)[[:space:]]*/)) {
         return line
       }
       prefix = substr(line, 1, RSTART + RLENGTH - 1)
       rest = substr(line, RSTART + RLENGTH)
-      if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Ii]ssue|[Ii]ssues)([[:space:]，,。;；]|$)/)) {
+      if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Oo][Pp][Ee][Nn][[:space:]]+)?[Ii][Ss][Ss][Uu][Ee][Ss]?([[:space:]，,。;；]|$)/)) {
         return prefix substr(rest, RSTART)
       }
       sub(/^[^[:space:]，,。;；]+/, "", rest)
@@ -479,7 +510,7 @@ has_unsupported_range_filter() {
     remaining="${remaining/"${matched}"/ }"
   done
 
-  [[ "${text}" =~ ([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|:|=|：) ]]
+  [[ "${text}" =~ (([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|:|=|：)|带[[:space:]]*标签) ]]
 }
 
 extract_open_label_evidence() {
@@ -494,12 +525,12 @@ extract_open_label_evidence() {
       segment_count = split($0, segments, /[，,。;；]/)
       for (segment_index = 1; segment_index <= segment_count; segment_index++) {
         remaining = segments[segment_index]
-        while (match(remaining, /([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+        while (match(remaining, /(([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])|带[[:space:]]*标签)[[:space:]]*/)) {
           rest = substr(remaining, RSTART + RLENGTH)
-          if (match(rest, /[[:space:]]+(的[[:space:]]*)?[Ii][Ss][Ss][Uu][Ee][Ss]?/)) {
+          if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Oo][Pp][Ee][Nn][[:space:]]+)?[Ii][Ss][Ss][Uu][Ee][Ss]?/)) {
             value = substr(rest, 1, RSTART - 1)
             remaining = substr(rest, RSTART + RLENGTH)
-          } else if (match(rest, /([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+          } else if (match(rest, /(([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])|带[[:space:]]*标签)[[:space:]]*/)) {
             value = substr(rest, 1, RSTART - 1)
             remaining = substr(rest, RSTART)
           } else {
@@ -563,13 +594,13 @@ has_explicit_rerun_action() {
       return value
     }
     function strip_label_selector_value(line, prefix, rest) {
-      if (!match(line, /(label|标签)[[:space:]]*(为|是|[:=：])[[:space:]]*/)) {
+      if (!match(line, /(([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：])|带[[:space:]]*标签)[[:space:]]*/)) {
         return line
       }
 
       prefix = substr(line, 1, RSTART + RLENGTH - 1)
       rest = substr(line, RSTART + RLENGTH)
-      if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Ii]ssue|[Ii]ssues)([[:space:]，,。;；]|$)/)) {
+      if (match(rest, /[[:space:]]+(的[[:space:]]*)?([Oo][Pp][Ee][Nn][[:space:]]+)?[Ii][Ss][Ss][Uu][Ee][Ss]?([[:space:]，,。;；]|$)/)) {
         return prefix substr(rest, RSTART)
       }
 
@@ -645,7 +676,7 @@ extract_target_branch() {
         emit_explicit(substr(line, RSTART + RLENGTH))
         exit
       }
-      if (match(line, /(目标分支|分支)[[:space:]]*[：:=][[:space:]]*/)) {
+      if (match(line, /(目标分支|分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)/)) {
         emit_explicit(substr(line, RSTART + RLENGTH))
         exit
       }
@@ -670,7 +701,7 @@ strip_target_branch_directive() {
   local matched=""
   local patterns=(
     '[[:space:]]*(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
-    '[[:space:]]*(目标分支|分支)[[:space:]]*[：:=][[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
+    '[[:space:]]*(目标分支|分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
     '[[:space:]]*(合并到|合到|merge[[:space:]]+to)[[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
     '[[:space:]]*(请)?[[:space:]]*(基于|从|以)[[:space:]]*["'\''`“”‘’]?[^[:space:]"'\''`“”‘’，,。;；]+["'\''`“”‘’]?[[:space:]]*(分支|branch)[[:space:]]*(开发|处理|执行|实现|修改|修复)?[[:space:]]*[，,;；]?'
   )

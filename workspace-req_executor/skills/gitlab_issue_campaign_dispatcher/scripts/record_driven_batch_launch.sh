@@ -9,6 +9,7 @@ PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
 CLAIM_TOKEN_INPUT="${CLAIM_TOKEN:-}"
 CLAIM_GENERATION_INPUT="${CLAIM_GENERATION:-}"
 FINALIZATION_EVENT_ID_INPUT="${FINALIZATION_EVENT_ID:-}"
+TERMINAL_STATUS_INPUT="${TERMINAL_STATUS:-}"
 
 record_die() {
   echo "record_driven_batch_launch.sh: $1" >&2
@@ -188,6 +189,14 @@ case "${STATUS}" in
   preparing|spawned|launch_failed|terminal) ;;
   *) record_die "STATUS/ACTION must be preparing, spawned, recovered_spawned, launch_failed, recovered_launch_failed, or terminal" ;;
 esac
+if [ "${STATUS}" = terminal ]; then
+  case "${TERMINAL_STATUS_INPUT}" in
+    done|failed|timeout|skipped) ;;
+    *) record_die "TERMINAL_STATUS must be done, failed, timeout, or skipped for STATUS=terminal" ;;
+  esac
+elif [ -n "${TERMINAL_STATUS_INPUT}" ]; then
+  record_die "TERMINAL_STATUS is only valid for STATUS=terminal"
+fi
 case "${RECORDED_AT}" in
   ''|*[!0-9]*) record_die "NOW_EPOCH must be a non-negative integer" ;;
 esac
@@ -599,8 +608,25 @@ while IFS=$'\t' read -r batch_id snapshot_index; do
         and .version == 1
         and .batch_id == $batch_id
         and (.memberships | type == "object")
+        and (.memberships | to_entries | all(
+          (.value | type == "object")
+          and (.value.status == "pending" or .value.status == "reserved"
+            or .value.status == "preparing" or .value.status == "running"
+            or .value.status == "attached" or .value.status == "retry_wait"
+            or .value.status == "terminal" or .value.status == "skipped")
+          and (if (.value | has("terminal_status"))
+            then .value.status == "terminal"
+              and (.value.terminal_status == "done"
+                or .value.terminal_status == "failed"
+                or .value.terminal_status == "timeout"
+                or .value.terminal_status == "skipped")
+            else true end)))
         and (.matched_count | type == "number" and . == floor and . >= 0)
         and (.terminal_count | type == "number" and . == floor and . >= 0)
+        and (.done_count | type == "number" and . == floor and . >= 0)
+        and (.failed_count | type == "number" and . == floor and . >= 0)
+        and (.timeout_count | type == "number" and . == floor and . >= 0)
+        and (.skipped_count | type == "number" and . == floor and . >= 0)
         and (.next_snapshot_index | type == "number" and . == floor and . >= 0)
       then .
       else error("invalid batch state")
@@ -637,11 +663,22 @@ while IFS=$'\t' read -r batch_id snapshot_index; do
     ' <<<"${batch_state}")"
   else
     batch_state="$(jq -c \
-      --arg index "${snapshot_index}" '
+      --arg index "${snapshot_index}" \
+      --arg terminal_status "${TERMINAL_STATUS_INPUT}" '
       .memberships[$index].status = "terminal"
+      | .memberships[$index].terminal_status = $terminal_status
       | del(.memberships[$index].blocked_by_job_id)
       | .terminal_count = ([.memberships[]
           | select(.status == "terminal" or .status == "skipped")] | length)
+      | .done_count = ([.memberships[]
+          | select(.status == "terminal" and .terminal_status == "done")] | length)
+      | .failed_count = ([.memberships[]
+          | select(.status == "terminal" and .terminal_status == "failed")] | length)
+      | .timeout_count = ([.memberships[]
+          | select(.status == "terminal" and .terminal_status == "timeout")] | length)
+      | .skipped_count = ([.memberships[]
+          | select(.status == "skipped"
+            or (.status == "terminal" and .terminal_status == "skipped"))] | length)
       | if .terminal_count == .matched_count
           and .next_snapshot_index == .matched_count
         then .status = "completed"
@@ -655,6 +692,31 @@ while IFS=$'\t' read -r batch_id snapshot_index; do
         end
     ' <<<"${batch_state}")"
   fi
+
+  batch_state="$(jq -ce '
+    def valid_terminal_status:
+      . == "done" or . == "failed" or . == "timeout" or . == "skipped";
+    .terminal_counts_version = 1
+    | if (.memberships | all(
+        if .status == "terminal" then (.terminal_status | valid_terminal_status)
+        else (has("terminal_status") | not)
+        end))
+      and .terminal_count == (.done_count + .failed_count
+        + .timeout_count + .skipped_count)
+      and (.terminal_count == ([.memberships[]
+        | select(.status == "terminal" or .status == "skipped")] | length))
+      and (.done_count == ([.memberships[]
+        | select(.status == "terminal" and .terminal_status == "done")] | length))
+      and (.failed_count == ([.memberships[]
+        | select(.status == "terminal" and .terminal_status == "failed")] | length))
+      and (.timeout_count == ([.memberships[]
+        | select(.status == "terminal" and .terminal_status == "timeout")] | length))
+      and (.skipped_count == ([.memberships[]
+        | select(.status == "skipped"
+          or (.status == "terminal" and .terminal_status == "skipped"))] | length))
+    then . else error("inconsistent terminal outcome counters") end
+  ' <<<"${batch_state}")" \
+    || record_die "job membership batch state has inconsistent terminal outcomes: ${batch_id}" 3
 
   BATCH_STATES["${batch_id}"]="${batch_state}"
   CHANGED_BATCHES["${batch_id}"]=1

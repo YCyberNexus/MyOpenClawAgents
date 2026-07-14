@@ -11,6 +11,7 @@ IMPORTED_AT="${NOW_EPOCH:-$(date +%s)}"
 PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
 MIGRATION_SCRIPT="${DRIVEN_MIGRATION_SCRIPT:-${SCRIPT_DIR}/reserve_driven_batch_items.sh}"
 RECORD_SCRIPT="${DRIVEN_RECORD_SCRIPT:-${SCRIPT_DIR}/record_driven_batch_launch.sh}"
+RECONCILE_COUNTS_SCRIPT="${DRIVEN_RECONCILE_COUNTS_SCRIPT:-${SCRIPT_DIR}/reconcile_driven_terminal_counts.sh}"
 MIGRATION_RECOVERY_LIMIT=3
 
 import_die() {
@@ -158,6 +159,15 @@ case "${MIGRATION_SCRIPT}" in
 esac
 [ -f "${MIGRATION_SCRIPT}" ] && [ -x "${MIGRATION_SCRIPT}" ] \
   || import_die "DRIVEN_MIGRATION_SCRIPT must be an executable regular file"
+case "${RECONCILE_COUNTS_SCRIPT}" in
+  /*) ;;
+  *) import_die "DRIVEN_RECONCILE_COUNTS_SCRIPT must be an absolute path" ;;
+esac
+case "${RECONCILE_COUNTS_SCRIPT}" in
+  *$'\n'*|*$'\r'*|*$'\t'*) import_die "DRIVEN_RECONCILE_COUNTS_SCRIPT contains control characters" ;;
+esac
+[ -f "${RECONCILE_COUNTS_SCRIPT}" ] && [ -x "${RECONCILE_COUNTS_SCRIPT}" ] \
+  || import_die "DRIVEN_RECONCILE_COUNTS_SCRIPT must be an executable regular file"
 [ -n "${HANDOFF_FILE}" ] || import_die "HANDOFF_FILE is required"
 [ -f "${HANDOFF_FILE}" ] || import_die "handoff file does not exist: ${HANDOFF_FILE}" 3
 
@@ -619,6 +629,21 @@ while IFS= read -r membership; do
   release_callback_event_locks
 done < <(jq -c '.memberships[]' <<<"${RECEIPT_JSON}")
 
+RECONCILE_SCOPE="$(jq -c '[.memberships[].batch_id] | unique | sort' <<<"${RECEIPT_JSON}")"
+RECONCILE_OUTPUT="$(
+  CONFIG_DIR="${CONFIG_DIR}" \
+  BATCH_IDS_JSON="${RECONCILE_SCOPE}" \
+  bash "${RECONCILE_COUNTS_SCRIPT}"
+)" || import_die "terminal outcome counter reconciliation failed" 3
+jq -e '
+  type == "object"
+  and .status == "reconciled"
+  and (.scanned | type == "number" and . == floor and . >= 1)
+  and (.repaired | type == "number" and . == floor and . >= 0)
+  and .unresolved == 0
+' <<<"${RECONCILE_OUTPUT}" >/dev/null \
+  || import_die "terminal outcome counter reconciliation is incomplete" 3
+
 OUTBOX_COUNT="$(jq -r '.memberships | length' <<<"${RECEIPT_JSON}")"
 CLAIM_TOKEN="$(jq -r '.claim_token // empty' <<<"${RECEIPT_JSON}")"
 LEGACY_RUNNING="$(jq -r '.legacy_running' <<<"${RECEIPT_JSON}")"
@@ -630,6 +655,7 @@ if [ "${TERMINAL_RECORD_NEEDED}" = true ]; then
       CONFIG_DIR="${CONFIG_DIR}" \
       JOB_ID="${JOB_ID}" \
       STATUS=terminal \
+      TERMINAL_STATUS="$(jq -r '.status' <<<"${RECEIPT_JSON}")" \
       CLAIM_TOKEN="${CLAIM_TOKEN}" \
       FINALIZATION_EVENT_ID="${HANDOFF_EVENT_ID}" \
       bash "${RECORD_SCRIPT}"
@@ -641,6 +667,7 @@ if [ "${TERMINAL_RECORD_NEEDED}" = true ]; then
       CONFIG_DIR="${CONFIG_DIR}" \
       JOB_ID="${JOB_ID}" \
       STATUS=terminal \
+      TERMINAL_STATUS="$(jq -r '.status' <<<"${RECEIPT_JSON}")" \
       FINALIZATION_EVENT_ID="${HANDOFF_EVENT_ID}" \
       bash "${RECORD_SCRIPT}"
     )"

@@ -76,11 +76,13 @@ redacted_message="$(sed -E 's/^callback_nonce=.*/callback_nonce=<redacted>/' <<<
 
 jq -nc \
   --arg agent "${target_agent}" \
+  --arg run_id "${OPENCLAW_RUN_ID:-}" \
   --arg trigger "${trigger}" \
   --arg message "${redacted_message}" \
   --argjson token_env_present "${token_env_present}" \
   --argjson persisted_before_call "${persisted_before_call}" '{
     agent:$agent,
+    run_id:$run_id,
     trigger:$trigger,
     message:$message,
     token_env_present:$token_env_present,
@@ -455,6 +457,9 @@ if ! jq -s -e --arg batch_id "${BATCH_ID}" --arg correlation_id "${CORRELATION_I
   [ .[] | select(.trigger == "RUN_DRIVEN_ISSUE_BATCH") ] as $calls
   | ($calls | length) == 2
   and $calls[0].message == $calls[1].message
+  and $calls[0].run_id == ("executor-batch-" + $batch_id + "-attempt-1")
+  and $calls[1].run_id == ("executor-batch-" + $batch_id + "-attempt-2")
+  and $calls[0].run_id != $calls[1].run_id
   and all($calls[];
     .token_env_present == true
     and .persisted_before_call == true

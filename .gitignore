@@ -46,6 +46,7 @@ workspace-req_executor/.claude/.review-baseline
 
 # OpenClaw local workspace runtime state (generated on first local agent run)
 workspace-*/.openclaw/
+workspace-*/memory/
 
 # Local GitLab runner secrets
 workspace-git_issuer/config/gitlab.env

@@ -12,6 +12,7 @@ SCHEDULER_ENV_CMD="${SCHEDULER_ENV_CMD:-${SCRIPT_DIR}/scheduler_env.sh}"
 RESOLVE_REPO_CMD="${RESOLVE_REPO_CMD:-${SCRIPT_DIR}/resolve_driven_repo_path.sh}"
 DRAIN_HANDOFF_CMD="${DRAIN_HANDOFF_CMD:-${SCRIPT_DIR}/drain_driven_handoff_intents.sh}"
 DRAIN_OUTBOX_CMD="${DRAIN_OUTBOX_CMD:-${SCRIPT_DIR}/drain_driven_outbox.sh}"
+RECONCILE_COUNTS_CMD="${RECONCILE_COUNTS_CMD:-${SCRIPT_DIR}/reconcile_driven_terminal_counts.sh}"
 RESERVE_CMD="${RESERVE_CMD:-${SCRIPT_DIR}/reserve_driven_batch_items.sh}"
 TOPUP_CMD="${TOPUP_CMD:-${SCRIPT_DIR}/dispatch_driven_topup.sh}"
 IMPORT_SKIP_CMD="${IMPORT_SKIP_CMD:-${SCRIPT_DIR}/import_driven_skipped.sh}"
@@ -19,6 +20,7 @@ RECORD_LAUNCH_CMD="${RECORD_LAUNCH_CMD:-${SCRIPT_DIR}/record_driven_batch_launch
 BIND_CLAIM_CMD="${BIND_CLAIM_CMD:-${SCRIPT_DIR}/bind_driven_claim.sh}"
 RESUME_SPAWN_CMD="${RESUME_SPAWN_CMD:-${SCRIPT_DIR}/record_executor_batch_spawn.sh}"
 EXPIRE_RUNNING_CMD="${EXPIRE_RUNNING_CMD:-${SCRIPT_DIR}/dispatch_followup.sh}"
+DEFER_DRIVEN_CALLBACK_DELIVERY="${DEFER_DRIVEN_CALLBACK_DELIVERY:-0}"
 
 tick_die() {
   echo "run_executor_batch_tick.sh: $*" >&2
@@ -56,6 +58,7 @@ for command_spec in \
   "RESOLVE_REPO_CMD:${RESOLVE_REPO_CMD}" \
   "DRAIN_HANDOFF_CMD:${DRAIN_HANDOFF_CMD}" \
   "DRAIN_OUTBOX_CMD:${DRAIN_OUTBOX_CMD}" \
+  "RECONCILE_COUNTS_CMD:${RECONCILE_COUNTS_CMD}" \
   "RESERVE_CMD:${RESERVE_CMD}" \
   "TOPUP_CMD:${TOPUP_CMD}" \
   "IMPORT_SKIP_CMD:${IMPORT_SKIP_CMD}" \
@@ -66,6 +69,10 @@ do
   validate_command "${command_spec%%:*}" "${command_spec#*:}"
 done
 validate_bash_script EXPIRE_RUNNING_CMD "${EXPIRE_RUNNING_CMD}"
+case "${DEFER_DRIVEN_CALLBACK_DELIVERY}" in
+  0|1) ;;
+  *) tick_die "DEFER_DRIVEN_CALLBACK_DELIVERY must be 0 or 1" ;;
+esac
 
 # Preserve process overrides before sourcing deployment pins.
 REPO_PARENT_PROCESS_OVERRIDE="${REPO_PARENT_PATH:-}"
@@ -155,6 +162,53 @@ append_operation() {
   OPERATIONS="$(jq -ce --argjson operation "${operation_json}" \
     '. + [$operation]' <<<"${OPERATIONS}")"
 }
+
+set +e
+RECONCILE_COUNTS_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RECONCILE_COUNTS_CMD}" 2>/dev/null)"
+RECONCILE_COUNTS_RC=$?
+set -e
+if [ "${RECONCILE_COUNTS_RC}" -eq 0 ] \
+    && RECONCILE_COUNTS_JSON="$(printf '%s' "${RECONCILE_COUNTS_OUTPUT}" | jq -ce '
+      if type == "object"
+        and (.status == "reconciled" or .status == "partial")
+        and ([.scanned,.repaired,.unresolved]
+          | all(type == "number" and . == floor and . >= 0))
+        and ((.status == "reconciled" and .unresolved == 0)
+          or (.status == "partial" and .unresolved > 0))
+      then . else error("invalid terminal count reconciliation envelope") end
+    ' 2>/dev/null)"; then
+  if [ "$(jq -r '.repaired + .unresolved' <<<"${RECONCILE_COUNTS_JSON}")" -gt 0 ]; then
+    append_operation "$(jq -cn --argjson result "${RECONCILE_COUNTS_JSON}" '{
+      operation:"terminal_count_reconcile",
+      status:$result.status,
+      scanned:$result.scanned,
+      repaired:$result.repaired,
+      unresolved:$result.unresolved
+    }')"
+  fi
+  if [ "$(jq -r '.unresolved' <<<"${RECONCILE_COUNTS_JSON}")" -gt 0 ]; then
+    HAD_FAILURE=true
+  fi
+else
+  append_operation "$(jq -cn '{operation:"terminal_count_reconcile",status:"failed"}')"
+  HAD_FAILURE=true
+fi
+
+# Terminal-count migration is a scheduler safety boundary. Never reserve or
+# expose a spawn grant when its recovery/reconciliation is incomplete.
+if [ "${HAD_FAILURE}" = true ]; then
+  jq -cn \
+    --argjson operation_results "${OPERATIONS}" '{
+      status:"tick_failed",
+      spawn_grants:[],
+      reconcile_actions:[],
+      operation_results:$operation_results,
+      max_launch_retries:3,
+      backoff_seconds:2,
+      chat_summary:"executor batch tick stopped before reservation because terminal count reconciliation failed"
+    }'
+  exit 0
+fi
 
 project_context() {
   local project="$1" group slug resolved repo_parent
@@ -327,25 +381,34 @@ while IFS= read -r project; do
 done < <(jq -r '.[]' <<<"${PROJECTS_JSON}")
 
 # Phase B: deliver all ready outbox entries before computing free slots.
-set +e
-OUTBOX_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${DRAIN_OUTBOX_CMD}" 2>/dev/null)"
-OUTBOX_RC=$?
-set -e
-if [ "${OUTBOX_RC}" -eq 0 ] && OUTBOX_JSON="$(printf '%s' "${OUTBOX_OUTPUT}" | jq -ce '
-    if type == "object"
-      and .status == "drained"
-      and ([.scanned,.attempted,.delivered,.failed]
-        | all(type == "number" and . == floor and . >= 0))
-    then . else error("invalid outbox envelope") end
-  ' 2>/dev/null)"; then
-  append_operation "$(jq -cn --argjson outbox "${OUTBOX_JSON}" '{
-    operation:"outbox_drain",status:$outbox.status,
-    scanned:$outbox.scanned,attempted:$outbox.attempted,
-    delivered:$outbox.delivered,failed:$outbox.failed
+# Synchronous I1 intake explicitly defers this network phase because its target
+# is the req_dispatcher main session that is waiting for the I1 acceptance.
+if [ "${DEFER_DRIVEN_CALLBACK_DELIVERY}" = 1 ]; then
+  append_operation "$(jq -cn '{
+    operation:"outbox_drain",status:"deferred",
+    scanned:0,attempted:0,delivered:0,failed:0
   }')"
 else
-  append_operation "$(jq -cn '{operation:"outbox_drain",status:"failed"}')"
-  HAD_FAILURE=true
+  set +e
+  OUTBOX_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${DRAIN_OUTBOX_CMD}" 2>/dev/null)"
+  OUTBOX_RC=$?
+  set -e
+  if [ "${OUTBOX_RC}" -eq 0 ] && OUTBOX_JSON="$(printf '%s' "${OUTBOX_OUTPUT}" | jq -ce '
+      if type == "object"
+        and .status == "drained"
+        and ([.scanned,.attempted,.delivered,.failed]
+          | all(type == "number" and . == floor and . >= 0))
+      then . else error("invalid outbox envelope") end
+    ' 2>/dev/null)"; then
+    append_operation "$(jq -cn --argjson outbox "${OUTBOX_JSON}" '{
+      operation:"outbox_drain",status:$outbox.status,
+      scanned:$outbox.scanned,attempted:$outbox.attempted,
+      delivered:$outbox.delivered,failed:$outbox.failed
+    }')"
+  else
+    append_operation "$(jq -cn '{operation:"outbox_drain",status:"failed"}')"
+    HAD_FAILURE=true
+  fi
 fi
 
 # Phase B2: runtime acknowledgements are already durable in launch_actions.

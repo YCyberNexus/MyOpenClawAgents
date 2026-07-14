@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-13.5] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-14.3] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -99,6 +99,13 @@ MESSAGE="<包含明确 project 与 selector 的原文>" \
 ORIGIN_JSON='<capture_origin 输出；无则 null>' \
 bash scripts/submit_executor_batch.sh
 ```
+
+这次 Bash/exec tool call 必须显式使用 `timeout:10800` 与 `yieldMs:120000`；这里的
+`timeout` 是 OpenClaw `exec` 工具字段，不得在 shell 命令前加 `timeout 120` 等外层截断。
+`submit_executor_batch.sh` 会同步等待 executor，短工具超时可能在 I1 已持久化、executor 已
+受理后杀死调用方。若 exec 返回 process session，只能继续 poll **同一个** session 直到退出；
+`SIGKILL`、overall timeout、连接中断或结果不明确时立即停止，留给周期 tick 重投原 durable
+intent。禁止再次调用 `submit_executor_batch.sh`，否则会分配第二个 batch ID。
 
 若上一步已经调用 `prepare_executor_issue_payload.sh`，只允许把它的**原样 stdout**作为
 `PREPARED_REQUEST_JSON` 交给同一 wrapper；不得手写或增删字段：
@@ -259,6 +266,8 @@ OpenClaw 每个 Bash exec 都是新 shell。每次调用都必须在同一 exec 
 ## No-Fallback
 
 - wrapper 非零：读取错误、分类、停止；不手改 JSON，不换临时命令重做。
+- `submit_executor_batch.sh` 的 exec/process 未得到确定终态时，不查看私有 outbox、不另加 shell
+  timeout、不再次提交原 MESSAGE；后续 `RUN_EXECUTOR_BATCH_TICK` 只会恢复同一 durable intent。
 - `retryable_failure`/`waiting_for_legacy_drain` 是 durable 正常分支，不得生成新 batch。
 - 不把下游 raw output 当 acceptance；只认严格 JSON object 与精确字段集合。
 - 不在 dispatcher 重试业务 Issue；这里只重投同一个 durable transport intent。

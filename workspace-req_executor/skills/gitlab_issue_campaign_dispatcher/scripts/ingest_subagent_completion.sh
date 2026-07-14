@@ -6,9 +6,13 @@
 #   1. an OpenClaw 2026.4.9 protected raw internal completion context. Its
 #      Result block is ignored; local registry, transcript, bootstrap, durable
 #      launch-action, and pending-state evidence authenticate the completion;
-#   2. a task_completion event (direct, under `event`, or the sole member of
+#   2. an `openclaw_4_9_terminal_reference` carrying only the exact child
+#      session key. It is a selector, not authentication: the same local
+#      registry, transcript, bootstrap, durable launch-action, and pending
+#      state must independently prove the terminal result;
+#   3. a task_completion event (direct, under `event`, or the sole member of
 #      `internalEvents`) with child runtime identity and final result text;
-#   3. a `sessions_history_terminal` envelope containing the exact terminal
+#   4. a `sessions_history_terminal` envelope containing the exact terminal
 #      run/session identity and a non-truncated history whose last message is
 #      the child's assistant reply.
 #
@@ -42,6 +46,7 @@ if [ "${INPUT_BYTES}" -eq 0 ] || [ "${INPUT_BYTES}" -gt 1048576 ]; then
 fi
 INPUT_IS_JSON=false
 INTERNAL_CONTEXT_MODE=false
+INTERNAL_REFERENCE_MODE=false
 if INPUT_JSON="$(printf '%s' "${RAW_INPUT}" | jq -ce '
   if type == "object" then . else error("completion input must be an object") end
  ' 2>/dev/null)"; then
@@ -49,6 +54,11 @@ if INPUT_JSON="$(printf '%s' "${RAW_INPUT}" | jq -ce '
 fi
 
 if [ "${INPUT_IS_JSON}" = true ]; then
+IS_49_REFERENCE=false
+if jq -e '.kind == "openclaw_4_9_terminal_reference"' \
+    <<<"${INPUT_JSON}" >/dev/null; then
+  IS_49_REFERENCE=true
+fi
 IS_HISTORY=false
 if jq -e '
   (.kind == "sessions_history_terminal")
@@ -57,7 +67,30 @@ if jq -e '
   IS_HISTORY=true
 fi
 
-if [ "${IS_HISTORY}" = true ]; then
+if [ "${IS_49_REFERENCE}" = true ]; then
+  INTERNAL_CONTEXT_MODE=true
+  INTERNAL_REFERENCE_MODE=true
+  if ! NORMALIZED="$(jq -ce '
+    if (keys | sort) != ["childSessionKey","kind"]
+        or .kind != "openclaw_4_9_terminal_reference"
+        or (.childSessionKey | type) != "string"
+        or (.childSessionKey
+          | test("^agent:req_executor:subagent:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$") | not)
+    then error("invalid 4.9 terminal reference")
+    else {
+      origin:"openclaw_4_9_terminal_reference",
+      child_session_key:.childSessionKey,
+      session_id:"",
+      run_id:"",
+      announce_id:"",
+      label:"",
+      runtime_status:"",
+      assistant_text:""
+    } end
+  ' <<<"${INPUT_JSON}" 2>/dev/null)"; then
+    reject_completion invalid_openclaw_4_9_terminal_reference
+  fi
+elif [ "${IS_HISTORY}" = true ]; then
   if ! NORMALIZED="$(jq -ce '
     def one_string($values; $required):
       [$values[] | select(. != null)] as $present
@@ -263,6 +296,7 @@ INTERNAL_SESSION_ID="$(jq -r '.session_id // ""' <<<"${NORMALIZED}")"
 RUN_ID="$(jq -r '.run_id' <<<"${NORMALIZED}")"
 ANNOUNCE_ID="$(jq -r '.announce_id' <<<"${NORMALIZED}")"
 CHILD_LABEL="$(jq -r '.label' <<<"${NORMALIZED}")"
+RUNTIME_STATUS="$(jq -r '.runtime_status' <<<"${NORMALIZED}")"
 ASSISTANT_TEXT="$(jq -r '.assistant_text' <<<"${NORMALIZED}")"
 
 case "${CHILD_SESSION_KEY}${INTERNAL_SESSION_ID}${RUN_ID}${ANNOUNCE_ID}${CHILD_LABEL}" in
@@ -270,6 +304,32 @@ case "${CHILD_SESSION_KEY}${INTERNAL_SESSION_ID}${RUN_ID}${ANNOUNCE_ID}${CHILD_L
 esac
 
 if [ "${INTERNAL_CONTEXT_MODE}" = true ]; then
+  # The protected 4.9 envelope carries a human-readable status label while
+  # sessions.json carries the durable machine terminal. Bind the two before
+  # trusting either the transcript shape or the durable launch route. In
+  # particular, a failed/timeout/killed run must never borrow a prior
+  # successful transcript (or vice versa).
+  INTERNAL_REGISTRY_STATUS=""
+  if [ "${INTERNAL_REFERENCE_MODE}" != true ]; then
+    case "${RUNTIME_STATUS}" in
+      "completed successfully"|"completed; ready for parent review")
+        INTERNAL_REGISTRY_STATUS=done
+        ;;
+      failed|failed:\ *)
+        INTERNAL_REGISTRY_STATUS=failed
+        ;;
+      "timed out"|timeout)
+        INTERNAL_REGISTRY_STATUS=timeout
+        ;;
+      killed)
+        INTERNAL_REGISTRY_STATUS=killed
+        ;;
+      *)
+        reject_completion invalid_openclaw_4_9_runtime_status
+        ;;
+    esac
+  fi
+
   OPENCLAW_STATE_ROOT="${OPENCLAW_STATE_DIR:-${HOME:?}/.openclaw}"
   case "${OPENCLAW_STATE_ROOT}" in
     /*) ;;
@@ -301,11 +361,53 @@ if [ "${INTERNAL_CONTEXT_MODE}" = true ]; then
     reject_completion invalid_openclaw_sessions_registry
   fi
 
+  if [ "${INTERNAL_REFERENCE_MODE}" = true ]; then
+    if ! REFERENCE_ENTRY="$(jq -ce \
+        --arg child_session_key "${CHILD_SESSION_KEY}" \
+        --arg sessions_dir "${OPENCLAW_SESSIONS_DIR_CANON}" '
+        def clean_string:
+          type == "string" and length > 0
+          and (explode | all(. >= 32 and . != 127));
+        if type != "object" then error("registry is not an object") else . end
+        | .[$child_session_key] as $entry
+        | if ($entry | type) != "object"
+            or ($entry.sessionId | type) != "string"
+            or ($entry.sessionId
+              | test("^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$") | not)
+            or ($entry.label | type) != "string"
+            or ($entry.label
+              | test("^reqx-iid[1-9][0-9]*-gen[1-9][0-9]*-[0-9a-f]{40}$") | not)
+            or (["done","failed","timeout","killed"] | index($entry.status)) == null
+            or $entry.sessionFile != ($sessions_dir + "/" + $entry.sessionId + ".jsonl")
+            or ($entry.endedAt | type != "number" or . != floor or . < 0)
+            or ($entry.spawnDepth | type != "number" or . != floor or . < 1)
+            or $entry.subagentRole != "leaf"
+            or ($entry.spawnedBy | clean_string | not)
+            or ($entry.spawnedBy | startswith("agent:req_executor:") | not)
+          then error("registry reference is not an exact terminal child")
+          else {
+            session_id:$entry.sessionId,
+            session_file:$entry.sessionFile,
+            label:$entry.label,
+            status:$entry.status
+          } end
+      ' "${OPENCLAW_REGISTRY_FILE}" 2>/dev/null)"; then
+      reject_completion invalid_openclaw_4_9_terminal_reference
+    fi
+    INTERNAL_SESSION_ID="$(jq -r '.session_id' <<<"${REFERENCE_ENTRY}")"
+    CHILD_LABEL="$(jq -r '.label' <<<"${REFERENCE_ENTRY}")"
+    INTERNAL_REGISTRY_STATUS="$(jq -r '.status' <<<"${REFERENCE_ENTRY}")"
+    case "${INTERNAL_SESSION_ID}${CHILD_LABEL}${INTERNAL_REGISTRY_STATUS}" in
+      *$'\n'*|*$'\r'*|*$'\t'*) reject_completion invalid_runtime_identity ;;
+    esac
+  fi
+
   EXPECTED_SESSION_FILE="${OPENCLAW_SESSIONS_DIR_CANON}/${INTERNAL_SESSION_ID}.jsonl"
   if ! REGISTRY_MATCH="$(jq -ce \
       --arg child_session_key "${CHILD_SESSION_KEY}" \
       --arg session_id "${INTERNAL_SESSION_ID}" \
       --arg child_label "${CHILD_LABEL}" \
+      --arg expected_registry_status "${INTERNAL_REGISTRY_STATUS}" \
       --arg expected_session_file "${EXPECTED_SESSION_FILE}" '
       def clean_string:
         type == "string" and length > 0
@@ -328,7 +430,7 @@ if [ "${INTERNAL_CONTEXT_MODE}" = true ]; then
           or .value.sessionId != $session_id
           or .value.sessionFile != $expected_session_file
           or .value.label != $child_label
-          or .value.status != "done"
+          or .value.status != $expected_registry_status
           or (.value.endedAt | type != "number" or . != floor or . < 0)
           or (.value.spawnDepth | type != "number" or . != floor or . < 1)
           or .value.subagentRole != "leaf"
@@ -355,7 +457,9 @@ if [ "${INTERNAL_CONTEXT_MODE}" = true ]; then
     reject_completion invalid_openclaw_session_file_size
   fi
 
-  if ! SESSION_TERMINAL_JSON="$(jq -sce --arg session_id "${INTERNAL_SESSION_ID}" '
+  if ! SESSION_TERMINAL_JSON="$(jq -sce \
+      --arg session_id "${INTERNAL_SESSION_ID}" \
+      --arg expected_registry_status "${INTERNAL_REGISTRY_STATUS}" '
       def clean_string:
         type == "string" and length > 0
         and length <= 512
@@ -367,52 +471,78 @@ if [ "${INTERNAL_CONTEXT_MODE}" = true ]; then
         error("session header does not match registry identity")
       elif ([.[] | select(.type == "session" and .id == $session_id)] | length) != 1 then
         error("session header is ambiguous")
-      elif ([.[] | select(
-          .type == "custom"
-          and .customType == "openclaw:bootstrap-context:full"
-        )] | length) != 1 then
-        error("full bootstrap identity is missing or ambiguous")
-      elif (.[-1].type != "custom")
-          or .[-1].customType != "openclaw:bootstrap-context:full"
-          or (.[-1].data | type) != "object"
-          or ((.[-1].data | keys | sort) != ["runId","sessionId","timestamp"])
-          or .[-1].data.sessionId != $session_id
-          or (.[-1].data.runId | clean_string | not)
-        then error("full bootstrap identity is invalid")
-      else {
-        bootstrap_run_id:.[-1].data.runId,
-        messages:[ .[] | select(.type == "message") ]
-      } end
-      | . as $terminal
-      | (if ($terminal.messages | length) == 0 then
-          error("session has no messages")
-        else $terminal.messages[-1] end) as $last
-      | (if ($last.message | type) != "object"
-            or $last.message.role != "assistant"
-            or $last.message.stopReason != "stop"
-          then error("last session message is not a terminal assistant")
-          elif ($last.message.content | type) == "string" then
-            $last.message.content
-          elif ($last.message.content | type) == "array" then
-            $last.message.content as $content
-            | if any($content[];
-                type != "object" or (.type != "thinking" and .type != "text"))
-              then error("terminal assistant content has unsupported parts")
-              else [$content[]
-                | select(.type == "text" and (.text | type) == "string")
-                | .text] end
-            | if length != 1 then error("terminal assistant text is ambiguous")
-              else .[0] end
-          else error("terminal assistant content is invalid") end) as $assistant_text
-      | if ($assistant_text | length) == 0
-          or ($assistant_text | length) > 1048576
-          or ($assistant_text | explode
-            | all(. == 10 or (. >= 32 and . != 127)) | not)
-        then error("terminal assistant text is unsafe")
+      elif $expected_registry_status == "done" then
+        if ([.[] | select(
+            .type == "custom"
+            and .customType == "openclaw:bootstrap-context:full"
+          )] | length) != 1 then
+          error("full bootstrap identity is missing or ambiguous")
+        elif (.[-1].type != "custom")
+            or .[-1].customType != "openclaw:bootstrap-context:full"
+            or (.[-1].data | type) != "object"
+            or ((.[-1].data | keys | sort) != ["runId","sessionId","timestamp"])
+            or .[-1].data.sessionId != $session_id
+            or (.[-1].data.runId | clean_string | not)
+          then error("full bootstrap identity is invalid")
         else {
-          bootstrap_run_id:$terminal.bootstrap_run_id,
-          assistant_text:$assistant_text
+          bootstrap_run_id:.[-1].data.runId,
+          messages:[ .[] | select(.type == "message") ]
         } end
+        | . as $terminal
+        | (if ($terminal.messages | length) == 0 then
+            error("session has no messages")
+          else $terminal.messages[-1] end) as $last
+        | (if ($last.message | type) != "object"
+              or $last.message.role != "assistant"
+              or $last.message.stopReason != "stop"
+            then error("last session message is not a terminal assistant")
+            elif ($last.message.content | type) == "string" then
+              $last.message.content
+            elif ($last.message.content | type) == "array" then
+              $last.message.content as $content
+              | if any($content[];
+                  type != "object" or (.type != "thinking" and .type != "text"))
+                then error("terminal assistant content has unsupported parts")
+                else [$content[]
+                  | select(.type == "text" and (.text | type) == "string")
+                  | .text] end
+              | if length != 1 then error("terminal assistant text is ambiguous")
+                else .[0] end
+            else error("terminal assistant content is invalid") end) as $assistant_text
+        | if ($assistant_text | length) == 0
+            or ($assistant_text | length) > 1048576
+            or ($assistant_text | explode
+              | all(. == 10 or (. >= 32 and . != 127)) | not)
+          then error("terminal assistant text is unsafe")
+          else {
+            bootstrap_run_id:$terminal.bootstrap_run_id,
+            assistant_text:$assistant_text
+          } end
+      else
+        # OpenClaw 4.9 writes no full-bootstrap row when the child turn fails,
+        # times out, or is killed. Authenticate that distinct terminal shape:
+        # the last JSONL row must itself be the errored/aborted assistant, and
+        # a success bootstrap must be completely absent. Its content and error
+        # text remain untrusted and are never forwarded as worker output.
+        .[-1] as $last
+        | if ([.[] | select(
+            .type == "custom"
+            and .customType == "openclaw:bootstrap-context:full"
+          )] | length) != 0 then
+          error("failed session unexpectedly carries a success bootstrap")
+        elif ($last.type != "message")
+            or ($last.message | type) != "object"
+            or $last.message.role != "assistant"
+            or (["error","aborted"] | index($last.message.stopReason)) == null
+            or ($last.message.errorMessage | type) != "string"
+            or ($last.message.errorMessage | length) == 0
+            or ($last.message.errorMessage | length) > 65536
+          then error("last session message is not a failed terminal assistant")
+        else {
+          bootstrap_run_id:"",
+          assistant_text:""
+        } end
+      end
     ' "${SESSION_FILE}" 2>/dev/null)"; then
     reject_completion invalid_openclaw_terminal_session_jsonl
   fi
@@ -678,7 +808,8 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
       if [ -z "${RUN_ID}" ] || [ "${#RUN_ID}" -gt 512 ]; then
         reject_completion invalid_durable_launch_run_identity
       fi
-      if [ "${RUN_ID}" != "${SESSION_BOOTSTRAP_RUN_ID}" ]; then
+      if [ "${INTERNAL_REGISTRY_STATUS}" = done ] \
+          && [ "${RUN_ID}" != "${SESSION_BOOTSTRAP_RUN_ID}" ]; then
         reject_completion openclaw_bootstrap_run_identity_mismatch
       fi
     fi
@@ -796,6 +927,43 @@ fi
 source "${SCRIPT_DIR}/env_paths.sh"
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_dispatch_lib.sh"
+
+# A 4.9 runtime failure has no trustworthy compact worker reply. Once its
+# protected status, exact registry entry, failed transcript shape, durable
+# launch action, and pending identity have all been bound, synthesize the sole
+# strict terminal worker line from those trusted identities. This makes
+# failed/timeout/killed callbacks release their pending slot without trusting
+# the internal event's untrusted Result block or transcript error prose.
+if [ "${INTERNAL_CONTEXT_MODE}" = true ] \
+    && [ "${INTERNAL_REGISTRY_STATUS}" != done ]; then
+  case "${INTERNAL_REGISTRY_STATUS}" in
+    timeout) SYNTHETIC_RUNTIME_STATUS=timeout ;;
+    failed|killed) SYNTHETIC_RUNTIME_STATUS=failed ;;
+    *) reject_completion invalid_openclaw_4_9_runtime_status ;;
+  esac
+  ASSISTANT_TEXT="$(jq -cnS \
+    --argjson iid "${ROUTED_IID}" \
+    --argjson attempt_number "${ROUTED_ATTEMPT_NUMBER}" \
+    --arg status "${SYNTHETIC_RUNTIME_STATUS}" \
+    --arg block_reason \
+      "OpenClaw subagent runtime ended with ${INTERNAL_REGISTRY_STATUS}" '{
+      iid:$iid,
+      attempt_number:$attempt_number,
+      status:$status,
+      mode_actual:"",
+      work_branch:"",
+      local_branch:"",
+      commit_sha:"",
+      merge_request_url:"",
+      mr_action:"none",
+      wiki_url:"",
+      labels_added:[],
+      labels_removed:[],
+      summary_posted:false,
+      block_reason:$block_reason,
+      log_dir:""
+    }')"
+fi
 
 if ! WORKER_JSON="$(completion_extract_unique_worker_reply "${ASSISTANT_TEXT}")"; then
   reject_completion invalid_or_ambiguous_worker_json

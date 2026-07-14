@@ -30,6 +30,10 @@ grep -Fq '旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容' "${WORKSPACE_DIR}/AG
   || fail "dispatcher agent rules must preserve the old callback marker"
 grep -Fq 'openclaw agent --timeout' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the req_dispatcher CLI timeout"
+grep -Fq '`timeout:10800` 与 `yieldMs:120000`' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must pin a long OpenClaw exec lifetime for synchronous executor intake"
+grep -Fq '禁止再次调用 `submit_executor_batch.sh`' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must not allocate a second batch after an ambiguous exec result"
 grep -Fq 'agents.defaults.subagents.runTimeoutSeconds' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must describe the optional downstream subagent timeout"
 grep -Fq '仅允许 `agent:req_dispatcher:<safe-session>`' "${WORKSPACE_DIR}/config/README.md" \
@@ -39,7 +43,7 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-13.4' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-14.3' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
 
 for historical in \

@@ -346,7 +346,7 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
       OPENCLAW_TARGET_AGENT="${target_agent}" \
       OPENCLAW_TARGET_SESSION_KEY="${target_session_key}" \
       OPENCLAW_AGENT_TIMEOUT_SECONDS="${DELIVERY_TIMEOUT_SECONDS}" \
-      OPENCLAW_RUN_ID="driven-callback-${event_id}" \
+      OPENCLAW_RUN_ID="driven-callback-${attempt_id}" \
       "${SCRIPT_DIR}/openclaw_agent_transport.sh"
   )"
   delivery_rc=$?

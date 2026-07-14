@@ -231,7 +231,7 @@ callback_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"
 
-expected_batch_session="agent:req_executor:batch-reqd-batch-17"
+expected_batch_session="agent:req_executor:batch-reqd-batch-17-a0fab1377f49a759b57f63318262ebe89fabfc990e8e93ceac2984561482b9d4"
 if ! grep -q -- "agent --agent req_executor --session-key ${expected_batch_session}" \
     "${OPENCLAW_LOG}"; then
   echo "expected RUN_DRIVEN_ISSUE_BATCH to use a batch-scoped session key" >&2
@@ -241,6 +241,133 @@ fi
 if [ "$(printf '%s' "${executor_batch_scoped_session}" | jq -r '.child_session_key')" != \
     "${expected_batch_session}" ]; then
   echo "expected batch-scoped session key in wrapper envelope" >&2
+  exit 1
+fi
+
+# 新 STATE_ROOT 会让 batch_id 从同一个值重新计数；不同持久化 nonce 必须隔离历史 session。
+: >"${OPENCLAW_LOG}"
+executor_restarted_state_session="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-batch-restarted-state" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  MESSAGE='RUN_DRIVEN_ISSUE_BATCH
+batch_id=reqd-batch-17
+correlation_id=reqd-17
+project=ai-infra/veqp_server_v3
+executor_agent=req_executor
+selector_type=single
+iid=17
+force_rerun_pr=false
+dispatcher_callback_target=agent:req_dispatcher:main
+callback_nonce=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+
+expected_restarted_state_session="agent:req_executor:batch-reqd-batch-17-52b6419d27bd7f547cee3b92f8c17a908b8a49601ecbec161e5030de1dfe9e0a"
+if [ "$(printf '%s' "${executor_restarted_state_session}" | jq -r '.child_session_key')" != \
+    "${expected_restarted_state_session}" ]; then
+  echo "expected a fresh nonce to isolate a restarted STATE_ROOT batch session" >&2
+  printf '%s\n' "${executor_restarted_state_session}" >&2
+  exit 1
+fi
+if [ "${expected_restarted_state_session}" = "${expected_batch_session}" ]; then
+  echo "expected identical batch ids with different nonces to use different sessions" >&2
+  exit 1
+fi
+
+# 同一持久化 outbox 重试会携带相同 nonce，因此必须保持同一 session key。
+: >"${OPENCLAW_LOG}"
+executor_batch_retry_session="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-batch-retry" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  MESSAGE='RUN_DRIVEN_ISSUE_BATCH
+batch_id=reqd-batch-17
+correlation_id=reqd-17
+project=ai-infra/veqp_server_v3
+executor_agent=req_executor
+selector_type=single
+iid=17
+force_rerun_pr=false
+dispatcher_callback_target=agent:req_dispatcher:main
+callback_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+if [ "$(printf '%s' "${executor_batch_retry_session}" | jq -r '.child_session_key')" != \
+    "${expected_batch_session}" ]; then
+  echo "expected a retry with the persisted nonce to reuse its batch session" >&2
+  exit 1
+fi
+
+# 合法 batch_id 最长可达 128 字符；生成的 OpenClaw session 名称部分不得超过 128。
+long_batch_id="$(printf '%0128d' 0 | tr '0' 'b')"
+long_batch_message="$(printf '%s\n' \
+  'RUN_DRIVEN_ISSUE_BATCH' \
+  "batch_id=${long_batch_id}" \
+  'correlation_id=reqd-long' \
+  'project=ai-infra/veqp_server_v3' \
+  'executor_agent=req_executor' \
+  'selector_type=single' \
+  'iid=17' \
+  'force_rerun_pr=false' \
+  'dispatcher_callback_target=agent:req_dispatcher:main' \
+  'callback_nonce=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb')"
+: >"${OPENCLAW_LOG}"
+executor_long_batch_session="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-long-batch-id" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  MESSAGE="${long_batch_message}" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+long_batch_session_key="$(printf '%s' "${executor_long_batch_session}" | jq -r '.child_session_key')"
+long_batch_session_name="${long_batch_session_key#agent:req_executor:}"
+expected_long_batch_fragment="$(printf '%057d' 0 | tr '0' 'b')"
+expected_long_batch_session="agent:req_executor:batch-${expected_long_batch_fragment}-a0fab1377f49a759b57f63318262ebe89fabfc990e8e93ceac2984561482b9d4"
+if [ "${#long_batch_session_name}" -gt 128 ]; then
+  echo "expected long batch session name to stay within 128 characters" >&2
+  printf '%s\n' "${long_batch_session_key}" >&2
+  exit 1
+fi
+if [ "${long_batch_session_key}" != "${expected_long_batch_session}" ]; then
+  echo "expected a 128-character batch id to use the bounded readable prefix" >&2
+  printf '%s\n' "${long_batch_session_key}" >&2
+  exit 1
+fi
+
+# 升级前无 callback_nonce 的持久化批次必须继续命中原来的 96 字符旧 session key。
+legacy_long_batch_message="$(printf '%s\n' \
+  'RUN_DRIVEN_ISSUE_BATCH' \
+  "batch_id=${long_batch_id}" \
+  'correlation_id=reqd-legacy-long' \
+  'project=ai-infra/veqp_server_v3' \
+  'executor_agent=req_executor' \
+  'selector_type=single' \
+  'iid=17' \
+  'force_rerun_pr=false' \
+  'dispatcher_callback_target=agent:req_dispatcher:main')"
+: >"${OPENCLAW_LOG}"
+executor_legacy_long_batch_session="$(
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_LOG="${OPENCLAW_LOG}" \
+  RUN_ID="run-executor-legacy-long-batch-id" \
+  TARGET_AGENT="req_executor" \
+  GIT_ISSUER_AGENT="git_issuer" \
+  MESSAGE="${legacy_long_batch_message}" \
+  bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
+)"
+legacy_long_batch_session_key="$(printf '%s' "${executor_legacy_long_batch_session}" | jq -r '.child_session_key')"
+expected_legacy_long_fragment="$(printf '%096d' 0 | tr '0' 'b')"
+expected_legacy_long_batch_session="agent:req_executor:batch-${expected_legacy_long_fragment}"
+if [ "${legacy_long_batch_session_key}" != "${expected_legacy_long_batch_session}" ]; then
+  echo "expected a legacy 128-character batch id to retain its original 96-character prefix" >&2
+  printf '%s\n' "${legacy_long_batch_session_key}" >&2
   exit 1
 fi
 

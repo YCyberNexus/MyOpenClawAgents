@@ -30,6 +30,11 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 LLM 不得直接调用 `route_project.sh`、`build_executor_batch_payload.sh`、receipt/mirror/event/
 notification 内部脚本，也不得手写 state。
 
+调用 `submit_executor_batch.sh` 时，OpenClaw exec 工具固定使用 `timeout:10800`、
+`yieldMs:120000`，不能在 shell 中套 `timeout`。若工具转为后台 process，只能 poll 原 session；
+被杀、断连或结果不明时停止，等待周期 tick 恢复已经持久化的同一 intent，不得读取 outbox 后
+重新调用 submit wrapper，否则会错误分配第二个 batch。
+
 路径 D 成功时，最终 assistant 内容必须逐字等于 `handle_executor_batch_event.sh` 的唯一 stdout
 JSON；禁止添加任何前后缀、Markdown 代码块、解释、中文总结或其他对象。handler 非零时不得
 伪造 ack。此规则同时适用于新旧 callback marker。

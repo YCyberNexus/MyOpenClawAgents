@@ -339,6 +339,7 @@ for batch_id in unfinished label range single; do
   jq -e \
     --arg batch_id "${batch_id}" \
     '.batch_id == $batch_id
+      and .terminal_counts_version == 1
       and .matched_count >= 1
       and (.request_digest | type == "string" and length == 64)
       and (.snapshot_digest | type == "string" and length == 64)
@@ -353,6 +354,7 @@ for filename in request.json snapshot.json state.json; do
 done
 jq -e '
   .batch_id == "zero"
+  and .terminal_counts_version == 1
   and .matched_count == 0
   and (.request_digest | type == "string" and length == 64)
   and (.snapshot_digest | type == "string" and length == 64)
@@ -1000,6 +1002,7 @@ fi
 jq -e '
   .executor_agent == "req_executor"
   and .callback_nonce == ("a" * 64)
+  and (has("terminal_counts_version") | not)
 ' "${BATCH_ROOT}/single/request.json" >/dev/null || {
   echo "authenticated callback fields were not privately persisted" >&2
   exit 1

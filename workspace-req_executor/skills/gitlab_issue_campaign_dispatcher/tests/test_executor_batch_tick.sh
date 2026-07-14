@@ -88,6 +88,18 @@ printf "%s\n" outbox >>"${ORDER_LOG}"
 jq -cn "{status:\"drained\",scanned:0,attempted:0,delivered:0,failed:0}"
 '
 
+write_fake reconcile_driven_terminal_counts.sh '
+printf "%s\n" reconcile >>"${ORDER_LOG}"
+case "${RECONCILE_TEST_MODE:-ok}" in
+  ok) jq -cn "{status:\"reconciled\",scanned:0,repaired:0,unresolved:0}" ;;
+  partial) jq -cn "{status:\"partial\",scanned:1,repaired:0,unresolved:1}" ;;
+  invalid_reconciled) jq -cn "{status:\"reconciled\",scanned:1,repaired:0,unresolved:1}" ;;
+  invalid_partial) jq -cn "{status:\"partial\",scanned:0,repaired:0,unresolved:0}" ;;
+  failed) exit 91 ;;
+  *) exit 92 ;;
+esac
+'
+
 write_fake reserve_driven_batch_items.sh '
 if [ "${SERIAL_GATE_RESERVE_SENTINEL:-0}" = 1 ]; then
   printf "%s\n" reserve-unexpected >>"${ORDER_LOG}"
@@ -239,6 +251,7 @@ run_tick() {
   RESOLVE_REPO_CMD="${FAKE_BIN}/resolve_driven_repo_path.sh" \
   DRAIN_HANDOFF_CMD="${FAKE_BIN}/drain_driven_handoff_intents.sh" \
   DRAIN_OUTBOX_CMD="${FAKE_BIN}/drain_driven_outbox.sh" \
+  RECONCILE_COUNTS_CMD="${FAKE_BIN}/reconcile_driven_terminal_counts.sh" \
   EXPIRE_RUNNING_CMD="${FAKE_BIN}/expire_running.sh" \
   RESERVE_CMD="${FAKE_BIN}/reserve_driven_batch_items.sh" \
   TOPUP_CMD="${FAKE_BIN}/dispatch_driven_topup.sh" \
@@ -259,6 +272,7 @@ archive_launch_actions() {
 tick_output="$(run_tick)" || fail "fixed executor batch tick failed"
 
 expected_order='scheduler_env
+reconcile
 intent:group/repo
 outbox
 reserve:1
@@ -304,6 +318,55 @@ jq -e '
   and .expected_task_bytes == 44
 ' "${SCHEDULER_ROOT}/launch_actions/$(printf '%s' 'A:snapshot-2' | shasum -a 256 | awk '{print $1}').json" >/dev/null \
   || fail "second coordinator action was not held before preparing"
+
+partial_reconcile_output="$(
+  RECONCILE_TEST_MODE=partial SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "partial terminal-count reconciliation did not return a fail-closed envelope"
+jq -e '
+  .status == "tick_failed"
+  and .spawn_grants == []
+  and .reconcile_actions == []
+  and ([.operation_results[] | select(
+    .operation == "terminal_count_reconcile"
+    and .status == "partial"
+    and .unresolved == 1)] | length) == 1
+' <<<"${partial_reconcile_output}" >/dev/null \
+  || fail "partial terminal-count reconciliation did not stop reservation"
+[ "$(cat "${ORDER_LOG}")" = $'scheduler_env\nreconcile' ] \
+  || fail "partial reconciliation continued into scheduler operations: $(cat "${ORDER_LOG}")"
+
+for invalid_reconcile_mode in invalid_reconciled invalid_partial; do
+  invalid_reconcile_output="$(
+    RECONCILE_TEST_MODE="${invalid_reconcile_mode}" \
+    SERIAL_GATE_RESERVE_SENTINEL=1 \
+    run_tick
+  )" || fail "contradictory reconciliation envelope crashed the tick"
+  jq -e '
+    .status == "tick_failed"
+    and .spawn_grants == []
+    and ([.operation_results[] | select(
+      .operation == "terminal_count_reconcile"
+      and .status == "failed")] | length) == 1
+  ' <<<"${invalid_reconcile_output}" >/dev/null \
+    || fail "contradictory reconciliation envelope was accepted: ${invalid_reconcile_mode}"
+  [ "$(cat "${ORDER_LOG}")" = $'scheduler_env\nreconcile' ] \
+    || fail "contradictory reconciliation reached scheduler operations: ${invalid_reconcile_mode}"
+done
+
+failed_reconcile_output="$(
+  RECONCILE_TEST_MODE=failed SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "failed terminal-count reconciliation did not return a fail-closed envelope"
+jq -e '
+  .status == "tick_failed"
+  and .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "terminal_count_reconcile"
+    and .status == "failed")] | length) == 1
+' <<<"${failed_reconcile_output}" >/dev/null \
+  || fail "failed terminal-count reconciliation did not stop reservation"
+[ "$(cat "${ORDER_LOG}")" = $'scheduler_env\nreconcile' ] \
+  || fail "failed reconciliation continued into scheduler operations: $(cat "${ORDER_LOG}")"
+
 serial_gate_output="$(SERIAL_GATE_RESERVE_SENTINEL=1 run_tick)" \
   || fail "durable emitted-action serial gate failed"
 jq -e '
@@ -319,6 +382,23 @@ jq -e '
 if grep -q '^reserve' "${ORDER_LOG}"; then
   fail "global launch gate reached reservation before recording the prior spawn"
 fi
+
+deferred_callback_output="$(
+  DEFER_DRIVEN_CALLBACK_DELIVERY=1 SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "callback-deferred intake tick failed"
+if grep -q '^outbox$' "${ORDER_LOG}"; then
+  fail "callback-deferred intake tick invoked the synchronous outbox transport"
+fi
+jq -e '
+  ([.operation_results[] | select(
+    .operation == "outbox_drain"
+    and .status == "deferred"
+    and .scanned == 0
+    and .attempted == 0
+    and .delivered == 0
+    and .failed == 0)] | length) == 1
+' <<<"${deferred_callback_output}" >/dev/null \
+  || fail "callback-deferred intake tick did not expose its deferred operation"
 archive_launch_actions initial
 
 # A duplicate preparing observer must never bind or return a spawn grant.

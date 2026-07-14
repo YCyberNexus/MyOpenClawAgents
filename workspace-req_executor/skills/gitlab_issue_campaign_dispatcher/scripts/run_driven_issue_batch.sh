@@ -88,7 +88,13 @@ if ! CREATE_JSON="$(printf '%s' "${CREATE_OUTPUT}" | jq -ce '
 fi
 
 set +e
-TICK_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${EXECUTOR_TICK_CMD}" 2>"${TICK_ERR}")"
+# I1 is invoked synchronously from req_dispatcher's main session. Delivering a
+# ready I3 callback from inside this same call would synchronously target that
+# occupied main session and deadlock the acceptance path. The intake tick may
+# still import handoffs and prepare work, but callback transport is deferred to
+# the ordinary req_executor heartbeat after the public acceptance returns.
+TICK_OUTPUT="$(DEFER_DRIVEN_CALLBACK_DELIVERY=1 \
+  CONFIG_DIR="${CONFIG_DIR}" bash "${EXECUTOR_TICK_CMD}" 2>"${TICK_ERR}")"
 TICK_RC=$?
 set -e
 if [ "${TICK_RC}" -ne 0 ] || ! TICK_JSON="$(printf '%s' "${TICK_OUTPUT}" | jq -ce '

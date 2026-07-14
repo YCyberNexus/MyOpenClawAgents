@@ -79,6 +79,8 @@ jq -cn "{scheduler_root:\"${SCHEDULER_ROOT}\",max_concurrency:3}"
 write_fake resolve.sh 'printf "%s\n" "${TEST_ROOT}/repos/group/repo"'
 write_fake drain_intents.sh \
   'jq -cn '\''{status:"drained",intent_count:0,results:[]}'\'''
+write_fake reconcile_counts.sh \
+  'jq -cn '\''{status:"reconciled",scanned:0,repaired:0,unresolved:0}'\'''
 cat >"${FAKE_BIN}/drain_outbox.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -169,6 +171,7 @@ run_tick() {
   RESOLVE_REPO_CMD="${FAKE_BIN}/resolve.sh" \
   DRAIN_HANDOFF_CMD="${FAKE_BIN}/drain_intents.sh" \
   DRAIN_OUTBOX_CMD="${FAKE_BIN}/drain_outbox.sh" \
+  RECONCILE_COUNTS_CMD="${FAKE_BIN}/reconcile_counts.sh" \
   RESERVE_CMD="${FAKE_BIN}/reserve.sh" \
   TOPUP_CMD="${FAKE_BIN}/topup.sh" \
   IMPORT_SKIP_CMD="${FAKE_BIN}/import_skip.sh" \

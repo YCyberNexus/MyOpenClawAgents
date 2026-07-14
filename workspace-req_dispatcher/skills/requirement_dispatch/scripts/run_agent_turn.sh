@@ -10,7 +10,9 @@
 # 未显式传 TARGET_SESSION_KEY/TARGET_SESSION_ID 时，普通下游调用默认
 # agent:<target>:main；RUN_SINGLE_ISSUE 自动按 project+iid 生成
 # agent:<target>:issue-<sanitized-project>-<iid>；RUN_DRIVEN_ISSUE_BATCH 使用
-# agent:<target>:batch-<sanitized-batch-id>，避免批次 intake 堆在陈旧的 executor main session。
+# agent:<target>:batch-<sanitized-batch-id>-<callback-nonce-sha256>。callback_nonce
+# 在 batch outbox 中持久化，因此同一批重试保持同一 session；即使新的 STATE_ROOT
+# 重新从 reqd-batch-1 计数，也不会复用历史 executor batch session。
 #
 # 目标 agent 的最后一行若是紧凑 JSON，本脚本会把它解析到 worker_result_json。
 # 若输出把 pretty JSON 放在 markdown 代码块里，也会兜底提取最后一个合法 JSON object。
@@ -41,10 +43,23 @@ extract_trigger_field() {
     }'
 }
 
+sha256_session_identity() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "run_agent_turn: no SHA-256 command is available for batch session identity" >&2
+    return 2
+  fi
+}
+
 derive_default_session_selector() {
   local target_agent="$1"
   local message="$2"
   local batch_id
+  local callback_nonce
+  local callback_nonce_sha256
   local safe_batch
   local project
   local iid
@@ -55,9 +70,26 @@ derive_default_session_selector() {
   if [ -n "${batch_id}" ]; then
     safe_batch="$(printf '%s' "${batch_id}" | tr -cs 'A-Za-z0-9._-' '-')"
     safe_batch="$(printf '%s' "${safe_batch}" | sed -E 's/^-+//; s/-+$//; s/-+/-/g')"
-    safe_batch="${safe_batch:0:96}"
     if [ -n "${safe_batch}" ]; then
-      printf 'agent:%s:batch-%s\n' "${target_agent}" "${safe_batch}"
+      callback_nonce="$(printf '%s\n' "${message}" | extract_trigger_field \
+        "RUN_DRIVEN_ISSUE_BATCH" "callback_nonce")"
+      if [ -n "${callback_nonce}" ]; then
+        if [[ ! "${callback_nonce}" =~ ^[0-9a-f]{64}$ ]]; then
+          echo "run_agent_turn: RUN_DRIVEN_ISSUE_BATCH callback_nonce must be 64 lowercase hexadecimal characters" >&2
+          return 2
+        fi
+        callback_nonce_sha256="$(printf '%s' "${callback_nonce}" | sha256_session_identity)" \
+          || return $?
+        # OpenClaw 的 session 名称部分按 128 字符安全上限控制：
+        # "batch-"(6) + 可读 batch 片段(57) + "-"(1) + SHA-256(64) = 128。
+        safe_batch="${safe_batch:0:57}"
+        printf 'agent:%s:batch-%s-%s\n' \
+          "${target_agent}" "${safe_batch}" "${callback_nonce_sha256}"
+      else
+        # 兼容升级前没有 callback_nonce 的持久化 outbox；新提交始终走上面的唯一键。
+        safe_batch="${safe_batch:0:96}"
+        printf 'agent:%s:batch-%s\n' "${target_agent}" "${safe_batch}"
+      fi
       return 0
     fi
   fi

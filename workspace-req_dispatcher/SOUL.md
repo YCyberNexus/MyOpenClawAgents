@@ -45,6 +45,9 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
 ## No-Fallback（HARD）
 
 - 脚本非零：读错误、分类、停止；不内联重写逻辑、不换临时命令、不手改 state。
+- 调用 `submit_executor_batch.sh` 的 OpenClaw exec 必须用 `timeout:10800`、
+  `yieldMs:120000`，不得用 shell `timeout` 截断。进入后台后只 poll 原 process；若被杀或结果
+  不明，停止并等 tick 恢复同一 outbox，绝不再次提交原 MESSAGE 生成新 batch。
 - `waiting_for_legacy_drain` 与 `retryable_failure` 是 durable 正常分支，不是生成新 ID 的理由。
 - 只认精确 JSON 字段集合；不从 raw output 猜 acceptance/I3。
 - 新 I3 只认严格 callback envelope，并在落账前核对 nonce 摘要、完整 project 与 executor；纯

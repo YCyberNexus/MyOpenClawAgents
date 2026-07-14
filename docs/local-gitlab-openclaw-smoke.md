@@ -39,6 +39,96 @@ puma['per_worker_max_memory_mb'] = 3072
 该配置用于避免 QEMU/Colima 下 Puma RSS 触发默认约 1.2GB 的内存 watchdog，
 导致短时间 502。
 
+## req agent heartbeat（OpenClaw 2026.4.9）
+
+`req_dispatcher` 和 `req_executor` 都是非默认 agent。2026.4.9 不允许给它们创建
+指向 `main` 的 cron，但允许 per-agent heartbeat 唤醒各自的 main session；两者不是
+同一套限制。只要存在显式 per-agent heartbeat，该版本就只调度带 heartbeat 块的 agent，
+不会再沿用默认 agent 的隐式周期。测试时用 1 分钟缩短观察时间，测试完成后改为 5 分钟：
+
+```bash
+DISPATCHER_INDEX="$(openclaw config get agents.list |
+  jq -er 'to_entries[] | select(.value.id == "req_dispatcher") | .key')"
+EXECUTOR_INDEX="$(openclaw config get agents.list |
+  jq -er 'to_entries[] | select(.value.id == "req_executor") | .key')"
+
+openclaw config set "agents.list[${DISPATCHER_INDEX}].heartbeat" \
+  '{"every":"1m","target":"none","prompt":"RUN_EXECUTOR_BATCH_TICK","lightContext":false,"isolatedSession":false}' \
+  --strict-json
+openclaw config set "agents.list[${EXECUTOR_INDEX}].heartbeat" \
+  '{"every":"1m","target":"none","prompt":"RUN_EXECUTOR_BATCH_TICK","lightContext":false,"isolatedSession":false}' \
+  --strict-json
+
+openclaw config validate
+openclaw gateway restart
+openclaw system heartbeat enable
+```
+
+如果本机没有安装 gateway service，而是从当前开发终端以前台方式启动，必须清除继承的
+代理变量；执行器的 Git 网络守卫会拒绝任何代理环境，避免 GitLab 传输被重定向：
+
+```bash
+env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u NO_PROXY \
+  -u http_proxy -u https_proxy -u all_proxy -u no_proxy \
+  -u WS_PROXY -u WSS_PROXY -u ws_proxy -u wss_proxy \
+  openclaw gateway run --compact
+```
+
+两个 workspace 的 `HEARTBEAT.md` 均写入一行非注释内容：
+
+```text
+RUN_EXECUTOR_BATCH_TICK
+```
+
+仅含空行或注释的 `HEARTBEAT.md` 会让该次 heartbeat 被跳过。`target:none` 只表示
+不向聊天渠道投递结果，agent turn 仍会真实执行；因此 `last-heartbeat` 显示
+`status=skipped, reason=target-none` 不能解释为 tick 未运行。用下面两类证据共同验收：
+
+```bash
+openclaw status --json |
+  jq '.heartbeat.agents[] | select(.agentId == "req_dispatcher" or .agentId == "req_executor")'
+openclaw system heartbeat last --json
+
+for agent in req_dispatcher req_executor; do
+  jq -r 'to_entries[] | select(.key == "agent:'"${agent}"':main") |
+    {session_key:.key,session_id:.value.sessionId,updated_at:.value.updatedAt}' \
+    "${HOME}/.openclaw/agents/${agent}/sessions/sessions.json"
+done
+```
+
+`req_executor` 的 tick 会先校验并迁移批次终态分类计数。迁移不完整、证据缺失或状态损坏时，
+tick 返回 `tick_failed` 且不发放 spawn grant。部署后的 24 小时滚动升级窗口内，每次 heartbeat
+都会覆盖全部历史批次，但用固定小批次的 `jq` 完成快速分类，避免历史路径超过系统参数上限；
+窗口结束后，5 分钟 heartbeat 只检查
+热批次和上次未解决的批次，并默认每 24 小时做一次全量审计。正常 reservation 只接受带
+`terminal_counts_version=1` 且各结果计数与 memberships 逐项一致的状态，因此旧进程迟到写回
+不会被直接消费，而会留到下一次 heartbeat 修复。
+
+`openclaw system heartbeat disable/enable` 只修改 gateway 进程内开关。2026.4.9 在
+disabled 定时器触发后可能不再安排下一次周期，因此暂停测试后恢复时应重启 gateway，
+不能只执行 `enable`。该版本的 `/new` 和 `sessions.reset` 会保留 `skillsSnapshot`；若刚改过
+agent workspace，应先确认没有活动任务，再删除对应 main session 的索引条目但保留
+transcript，随后执行一次 tick 让 OpenClaw 重建技能快照：
+
+```bash
+test "$(openclaw status --json | jq -r '.tasks.active')" = 0
+openclaw gateway call sessions.delete \
+  --params '{"key":"agent:req_executor:main","deleteTranscript":false,"emitLifecycleHooks":false}' \
+  --json
+openclaw agent --agent req_executor \
+  --message RUN_EXECUTOR_BATCH_TICK --timeout 600 --json
+```
+
+测试结束后保留的 5 分钟配置：
+
+```bash
+openclaw config set "agents.list[${DISPATCHER_INDEX}].heartbeat.every" '"5m"' --strict-json
+openclaw config set "agents.list[${EXECUTOR_INDEX}].heartbeat.every" '"5m"' --strict-json
+openclaw config validate
+openclaw gateway restart
+openclaw system heartbeat enable
+```
+
 ## git_issuer 创建 issue
 
 ```bash
@@ -71,6 +161,8 @@ STATE_ROOT=/Users/yuanchenxiang/openclaw-local-data/req_dispatcher
 WIKI_GITLAB_HOST=${GITLAB_HOST}
 WIKI_GITLAB_API_PROTOCOL=${GITLAB_API_PROTOCOL}
 WIKI_GITLAB_TOKEN=${AGENT_PAT}
+REQ_DISPATCHER_GITLAB_LOCAL_TEST_MODE=true
+REQ_DISPATCHER_GITLAB_ALLOWED_HOSTS=localhost:8081
 DEFAULT_EXECUTOR_AGENT=req_executor
 DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
 DOWNSTREAM_AGENT_TIMEOUT_SECONDS=120

@@ -19,7 +19,12 @@ sha256_file() {
 }
 
 file_mode() {
-  stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1"
+  local mode
+  if mode="$(stat -f '%Lp' "$1" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "$1"
+  fi
 }
 
 [ -f "${DRIVEN_TOPUP}" ] || fail "dispatch_driven_topup.sh is missing"
@@ -30,6 +35,7 @@ FIXTURE_SCRIPTS="${FIXTURE_SKILL}/scripts"
 FIXTURE_REFS="${FIXTURE_SKILL}/references"
 CONFIG_DIR="${TEST_ROOT}/config"
 BIN_DIR="${TEST_ROOT}/bin"
+MODE_BIN="${TEST_ROOT}/mode-bin"
 REPO_PARENT="${TEST_ROOT}/repos"
 PROJECT_REPO="${REPO_PARENT}/group/project"
 STATE_DIR="${PROJECT_REPO}/.req_executor/_dispatcher"
@@ -41,7 +47,27 @@ GLAB_LOG="${TEST_ROOT}/glab.log"
 TRIGGER_CAPTURE="${TEST_ROOT}/internal-trigger.txt"
 
 mkdir -p "${FIXTURE_SCRIPTS}" "${FIXTURE_REFS}" "${CONFIG_DIR}" \
-  "${BIN_DIR}" "${PROJECT_REPO}"
+  "${BIN_DIR}" "${MODE_BIN}" "${PROJECT_REPO}"
+cat >"${MODE_BIN}/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${FAKE_STAT_STYLE:-}" in
+  bsd)
+    [ "${1:-}" = -f ] && [ "${2:-}" = %Lp ] || exit 2
+    printf '600\n'
+    ;;
+  gnu)
+    if [ "${1:-}" = -f ]; then
+      printf 'filesystem-noise-that-must-stay-captured\n'
+      exit 1
+    fi
+    [ "${1:-}" = -c ] && [ "${2:-}" = %a ] || exit 2
+    printf '600\n'
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod +x "${MODE_BIN}/stat"
 git -C "${PROJECT_REPO}" init -q
 git -C "${PROJECT_REPO}" symbolic-ref \
   refs/remotes/origin/HEAD refs/remotes/origin/main
@@ -352,6 +378,27 @@ for iid in 2 3 6; do
     || fail "spawn bootstrap for IID ${iid} is not mode 600"
   grep -Fq '# REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1' "${PAYLOAD_PATH}" \
     || fail "sessions_spawn task for IID ${iid} is not the small bootstrap"
+  grep -Fq "top-level project, job_id, iid, and attempt_number fields (there is no nested identity object)" \
+    "${PAYLOAD_PATH}" \
+    || fail "spawn bootstrap for IID ${iid} leaves manifest identity nesting ambiguous"
+  MODE_HELPER="$(sed -n \
+    's/^.*portable helper inside that Bash call: \(mode_of() {.*; }\); require its output.*$/\1/p' \
+    "${PAYLOAD_PATH}")"
+  [ -n "${MODE_HELPER}" ] \
+    || fail "spawn bootstrap for IID ${iid} lacks an extractable mode helper"
+  unset -f mode_of 2>/dev/null || true
+  eval "${MODE_HELPER}"
+  [ "$(mode_of "${PAYLOAD_PATH}")" = "600" ] \
+    || fail "spawn bootstrap mode helper failed on the host stat implementation"
+  [ "$(FAKE_STAT_STYLE=bsd PATH="${MODE_BIN}:${PATH}" mode_of "${PAYLOAD_PATH}")" = "600" ] \
+    || fail "spawn bootstrap mode helper failed its BSD stat branch"
+  [ "$(FAKE_STAT_STYLE=gnu PATH="${MODE_BIN}:${PATH}" mode_of "${PAYLOAD_PATH}")" = "600" ] \
+    || fail "spawn bootstrap mode helper leaked GNU stat probe output"
+  grep -Fq 'require its output to equal the literal string 600' "${PAYLOAD_PATH}" \
+    || fail "spawn bootstrap for IID ${iid} leaves mode normalization ambiguous"
+  if grep -Fq '%#Lp' "${PAYLOAD_PATH}"; then
+    fail "spawn bootstrap for IID ${iid} permits prefixed BSD mode output"
+  fi
   if grep -Fq 'fake-token-direct' "${PAYLOAD_PATH}" || \
      grep -Fq 'GITLAB_TOKEN=' "${PAYLOAD_PATH}"; then
     fail "sessions_spawn task for IID ${iid} contains a GitLab credential"
@@ -368,9 +415,15 @@ for iid in 2 3 6; do
     || fail "spawn manifest for IID ${iid} is not mode 600"
   EXECUTOR_PAYLOAD_PATH="$(jq -r '.executor_payload_path' "${MANIFEST_PATH}")"
   [ -f "${EXECUTOR_PAYLOAD_PATH}" ] || fail "private executor payload for IID ${iid} does not exist"
-  jq -e --argjson iid "${iid}" '
+  EXPECTED_JOB_ID="$(printf '%s' "${GRANTS}" | jq -r --argjson iid "${iid}" \
+    '.[] | select(.iid == $iid) | .job_id')"
+  jq -e --argjson iid "${iid}" --arg expected_job_id "${EXPECTED_JOB_ID}" '
     .version == 1
+    and .project == "group/project"
+    and .job_id == $expected_job_id
     and .iid == $iid
+    and .attempt_number == 1
+    and (has("identity") | not)
     and (.executor_payload_sha256 | test("^[0-9a-f]{64}$"))
     and (.executor_payload_bytes | type == "number" and . > 0)
   ' "${MANIFEST_PATH}" >/dev/null || fail "spawn manifest identity is invalid for IID ${iid}"

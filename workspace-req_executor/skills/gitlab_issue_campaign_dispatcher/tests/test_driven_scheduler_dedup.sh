@@ -54,6 +54,7 @@ create_single_fixture() {
     --arg batch_id "${batch_id}" \
     '{
       version:1,
+      terminal_counts_version:1,
       batch_id:$batch_id,
       status:"queued",
       matched_count:1,
@@ -170,17 +171,28 @@ jq -e --arg job_id "${a_job_id}" '
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${CLAIM_TOKENS[${a_job_id}]}" \
   bash "${RECORD}" >/dev/null
 jq -e '
   .status == "completed"
   and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
   and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
 ' "${SCHEDULER_ROOT}/batches/A/state.json" >/dev/null
 jq -e '
   .status == "completed"
   and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
   and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
 ' "${SCHEDULER_ROOT}/batches/C/state.json" >/dev/null
 
 after_terminal="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
@@ -254,6 +266,7 @@ PATH="${RECORD_CRASH_BIN}:${PATH}" \
   CONFIG_DIR="${CONFIG_DIR}" \
   JOB_ID="${d_job_id}" \
   STATUS=terminal \
+  TERMINAL_STATUS=done \
   bash "${RECORD}" >"${TEST_ROOT}/record-crash.out" 2>"${TEST_ROOT}/record-crash.err"
 record_crash_status=$?
 set -e
@@ -279,6 +292,7 @@ jq -cnS '{
 jq -cnS '{version:1,project:"group/y",iids:[]}' >"${Y_BATCH_DIR}/snapshot.json"
 jq -cnS '{
   version:1,
+  terminal_counts_version:1,
   batch_id:"Y",
   status:"completed",
   matched_count:0,
@@ -308,7 +322,16 @@ jq -e '
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 [ -d "${Y_BATCH_DIR}" ] \
   || { echo "completed batch evidence was not retained for direct lookup" >&2; exit 1; }
-jq -e '.status == "completed" and .memberships["0"].status == "terminal"' \
+jq -e '
+  .status == "completed"
+  and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
+  and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
+' \
   "${SCHEDULER_ROOT}/batches/D/state.json" >/dev/null
 
 # Branch is not the only intent dimension: entry_mode and force_rerun_pr must
@@ -350,6 +373,7 @@ jq -e --arg job_id "${f_job_id}" '
 ' "${SCHEDULER_ROOT}/batches/H/state.json" >/dev/null
 
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${f_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   bash "${RECORD}" >/dev/null
 next_intent_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
 jq -e '
@@ -526,6 +550,7 @@ jq -cnS \
 set +e
 legacy_pending_terminal="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID='Z:snapshot-0' STATUS=terminal \
+    TERMINAL_STATUS=done \
     NOW_EPOCH=300 bash "${RECORD}" 2>&1
 )"
 legacy_pending_status=$?
@@ -579,6 +604,7 @@ CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=spawned \
   CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=303 \
   bash "${RECORD}" >/dev/null
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=304 \
   bash "${RECORD}" >/dev/null
 jq -e '.active_jobs | has("W:snapshot-0") | not' \
@@ -630,6 +656,7 @@ cp "${SCHEDULER_ROOT}/batches/Y/state.json" \
   "${TEST_ROOT}/fence-before-missing-marker.batch-y.json"
 set +e
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${fence_token}" FINALIZATION_EVENT_ID="${fence_event_id}" \
   NOW_EPOCH=403 bash "${RECORD}" \
   >"${TEST_ROOT}/fence-terminal-missing-marker.out" \
@@ -715,6 +742,7 @@ cmp -s "${SCHEDULER_ROOT}/batches/X/state.json" \
   }
 
 if CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${fence_token}" NOW_EPOCH=405 bash "${RECORD}" \
   >"${TEST_ROOT}/fence-terminal-no-event.out" \
   2>"${TEST_ROOT}/fence-terminal-no-event.err"; then
@@ -737,6 +765,7 @@ mv "${SCHEDULER_ROOT}/scheduler_state.bad-finalization-memberships.json" \
 cp "${SCHEDULER_ROOT}/scheduler_state.json" \
   "${TEST_ROOT}/fence-before-membership-mismatch.scheduler.json"
 if CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${fence_token}" FINALIZATION_EVENT_ID="${fence_event_id}" \
   NOW_EPOCH=406 bash "${RECORD}" \
   >"${TEST_ROOT}/fence-terminal-membership-mismatch.out" \
@@ -761,6 +790,7 @@ mv "${SCHEDULER_ROOT}/scheduler_state.restored-finalization.json" \
   "${SCHEDULER_ROOT}/scheduler_state.json"
 
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${fence_job_id}" STATUS=terminal \
+  TERMINAL_STATUS=done \
   CLAIM_TOKEN="${fence_token}" FINALIZATION_EVENT_ID="${fence_event_id}" \
   NOW_EPOCH=407 bash "${RECORD}" >/dev/null
 after_fence_terminal="$(

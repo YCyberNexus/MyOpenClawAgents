@@ -616,6 +616,33 @@ load_batch() {
           or .value.status == "terminal"
           or .value.status == "skipped")
       ))
+      and .terminal_counts_version == 1
+        and (.done_count | type == "number" and . == floor and . >= 0)
+        and (.failed_count | type == "number" and . == floor and . >= 0)
+        and (.timeout_count | type == "number" and . == floor and . >= 0)
+        and (.skipped_count | type == "number" and . == floor and . >= 0)
+        and (.memberships | all(
+          if .status == "terminal" then
+            (.terminal_status == "done"
+              or .terminal_status == "failed"
+              or .terminal_status == "timeout"
+              or .terminal_status == "skipped")
+          else
+            (has("terminal_status") | not)
+          end))
+        and (.terminal_count == ([.memberships[]
+          | select(.status == "terminal" or .status == "skipped")] | length))
+        and (.done_count == ([.memberships[]
+          | select(.status == "terminal" and .terminal_status == "done")] | length))
+        and (.failed_count == ([.memberships[]
+          | select(.status == "terminal" and .terminal_status == "failed")] | length))
+        and (.timeout_count == ([.memberships[]
+          | select(.status == "terminal" and .terminal_status == "timeout")] | length))
+        and (.skipped_count == ([.memberships[]
+          | select(.status == "skipped"
+            or (.status == "terminal" and .terminal_status == "skipped"))] | length))
+        and (.terminal_count == (.done_count + .failed_count
+          + .timeout_count + .skipped_count))
     then .
     else error("invalid state")
     end

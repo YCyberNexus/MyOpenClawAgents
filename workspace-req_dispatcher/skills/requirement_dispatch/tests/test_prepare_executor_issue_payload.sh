@@ -108,6 +108,17 @@ if [ "$(jq -r '.target_branch' <<<"${target_branch_equals_input}")" != "release/
   exit 1
 fi
 
+target_branch_without_colon_input="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，目标分支 release/2026.08。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if [ "$(jq -r '.target_branch' <<<"${target_branch_without_colon_input}")" != "release/2026.08" ]; then
+  echo "expected target branch wording without a colon to set target_branch release/2026.08" >&2
+  printf '%s\n' "${target_branch_without_colon_input}" >&2
+  exit 1
+fi
+
 merge_to_input="$(
   MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，合到 release/2026.09。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
@@ -545,6 +556,45 @@ label_json="$(
 if ! jq -e '.status == "success" and .selector == {type:"open_label",label:"pr"} and .iid == null and .force_rerun_pr == false' <<<"${label_json}" >/dev/null; then
   echo "expected label wording to produce an open_label selector without forcing rerun" >&2
   printf '%s\n' "${label_json}" >&2
+  exit 1
+fi
+
+for open_label_message in \
+  '处理 ai-infra/veqp_server_v3 中标签为 foo 的 OPEN Issue' \
+  '处理 ai-infra/veqp_server_v3 中带标签 foo 的 OPEN Issue'
+do
+  open_label_json="$(
+    MESSAGE="${open_label_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "success"
+    and .selector == {type:"open_label",label:"foo"}
+  ' <<<"${open_label_json}" >/dev/null; then
+    echo "expected OPEN issue wording to preserve only the label value: ${open_label_message}" >&2
+    printf '%s\n' "${open_label_json}" >&2
+    exit 1
+  fi
+done
+
+empty_locale_json="$(
+  env -i \
+    PATH="${PATH}" \
+    HOME="${HOME:-/tmp}" \
+    LANG= \
+    LC_ALL= \
+    LC_CTYPE= \
+    MESSAGE='处理 ai-infra/veqp_server_v3 中带标签 回归 的 OPEN Issue，目标分支 feature/utf8。' \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "ai-infra/veqp_server_v3"
+  and .selector == {type:"open_label",label:"回归"}
+  and .target_branch == "feature/utf8"
+' <<<"${empty_locale_json}" >/dev/null; then
+  echo "expected Chinese parsing to remain correct when the parent process has no locale" >&2
+  printf '%s\n' "${empty_locale_json}" >&2
   exit 1
 fi
 

@@ -185,6 +185,7 @@ create_batch_fixture() {
     --arg batch_id "${batch_id}" \
     --arg membership_status "${membership_status}" '{
       version:1,
+      terminal_counts_version:1,
       batch_id:$batch_id,
       status:"running",
       matched_count:1,
@@ -230,6 +231,7 @@ jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
   >"${SCHEDULER_ROOT}/batches/batch-C/snapshot.json"
 jq -cnS '{
   version:1,
+  terminal_counts_version:1,
   batch_id:"batch-C",
   status:"queued",
   matched_count:1,
@@ -537,9 +539,10 @@ fi
 jq -nc \
   --arg job_id "${JOB_ID:-}" \
   --arg status "${STATUS:-}" \
+  --arg terminal_status "${TERMINAL_STATUS:-}" \
   --arg claim_token "${CLAIM_TOKEN:-}" \
   --arg finalization_event_id "${FINALIZATION_EVENT_ID:-}" \
-  '{job_id:$job_id,status:$status,claim_token:$claim_token,
+  '{job_id:$job_id,status:$status,terminal_status:$terminal_status,claim_token:$claim_token,
     finalization_event_id:$finalization_event_id}' \
   >>"${RECORD_LOG:?}"
 
@@ -547,6 +550,7 @@ exec env \
   CONFIG_DIR="${CONFIG_DIR:?}" \
   JOB_ID="${JOB_ID:-}" \
   STATUS="${STATUS:-}" \
+  TERMINAL_STATUS="${TERMINAL_STATUS:-}" \
   CLAIM_TOKEN="${CLAIM_TOKEN:-}" \
   FINALIZATION_EVENT_ID="${FINALIZATION_EVENT_ID:-}" \
   bash "${ACTUAL_RECORD:?}"
@@ -726,19 +730,47 @@ jq -e --arg event_id "${EVENT_R}" \
 jq -e '.active_jobs | has("batch-A:snapshot-0") | not' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
   || fail "scheduler job was not recorded terminal"
-jq -e '.memberships["0"].status == "terminal"' \
+jq -e '
+  .status == "completed"
+  and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
+  and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
+' \
   "${SCHEDULER_ROOT}/batches/batch-A/state.json" >/dev/null \
   || fail "owner membership was not recorded terminal"
-jq -e '.memberships["0"].status == "terminal"' \
+jq -e '
+  .status == "completed"
+  and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
+  and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
+' \
   "${SCHEDULER_ROOT}/batches/batch-B/state.json" >/dev/null \
   || fail "attached membership was not recorded terminal"
-jq -e '.memberships["0"].status == "terminal"' \
+jq -e '
+  .status == "completed"
+  and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
+  and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
+' \
   "${SCHEDULER_ROOT}/batches/batch-R/state.json" >/dev/null \
   || fail "recovered membership was not recorded terminal"
 jq -e '
   length == 1
   and .[0].job_id == "batch-A:snapshot-0"
   and .[0].status == "terminal"
+  and .[0].terminal_status == "done"
   and .[0].claim_token == "claim-token-42"
   and .[0].finalization_event_id == "batch-A:snapshot-0:claim-1:terminal-1"
 ' --slurp "${RECORD_LOG}" >/dev/null \
@@ -1046,12 +1078,13 @@ body="$(jq -c '.worker_result_json' <<<"${envelope}")"
 event_id="$(jq -er '.event_id' <<<"${body}")"
 jq -nc \
   --arg event_id "${event_id}" \
+  --arg run_id "${OPENCLAW_RUN_ID:-}" \
   --arg target "${target}" \
   --argjson token_env_present "${token_env_present}" \
   --arg callback_nonce "$(jq -r '.callback_nonce' <<<"${envelope}")" \
   --arg executor_agent "$(jq -r '.executor_agent' <<<"${envelope}")" \
   --argjson body "${body}" \
-  '{event_id:$event_id,target:$target,token_env_present:$token_env_present,
+  '{event_id:$event_id,run_id:$run_id,target:$target,token_env_present:$token_env_present,
     callback_nonce:$callback_nonce,executor_agent:$executor_agent,body:$body}' \
   >>"${OPENCLAW_LOG:?}"
 call_count="$(jq -sr --arg event_id "${event_id}" \
@@ -1239,11 +1272,16 @@ jq -se \
   --arg event_b "${EVENT_B}" \
   --arg event_r "${EVENT_R}" '
   def bodies($event): [.[] | select(.event_id == $event) | (.body | @json)];
+  def run_ids($event): [.[] | select(.event_id == $event) | .run_id];
   ((bodies($event_a) | length) == 3 and (bodies($event_a) | unique | length) == 1)
   and ((bodies($event_b) | length) == 3 and (bodies($event_b) | unique | length) == 1)
   and ((bodies($event_r) | length) == 2 and (bodies($event_r) | unique | length) == 1)
+  and (all(.[]; .run_id | test("^driven-callback-[0-9a-f]{64}$")))
+  and ((run_ids($event_a) | unique | length) == 3)
+  and ((run_ids($event_b) | unique | length) == 3)
+  and ((run_ids($event_r) | unique | length) == 2)
 ' "${OPENCLAW_LOG}" >/dev/null \
-  || fail "drain changed the public event body across retries or duplicated a concurrent send"
+  || fail "drain changed the public event body, reused an OpenClaw idempotency key, or duplicated a concurrent send"
 
 cold_only_drain="$(CONFIG_DIR="${CONFIG_DIR}" \
   OPENCLAW_BIN="${FAKE_OPENCLAW}" OPENCLAW_LOG="${OPENCLAW_LOG}" \

@@ -268,13 +268,18 @@ else
   attempts="$(jq -r '.attempts' <<<"${entry_json}")"
   flock -u 9
   network_attempted=true
+  # OpenClaw 4.9 treats run_id as an idempotency key. Reusing one fixed run id
+  # for every durable delivery attempt returns the first failed turn forever,
+  # so retries must keep the batch session but use a distinct deterministic
+  # invocation id for each persisted attempt.
+  delivery_run_id="executor-batch-${batch_id}-attempt-${attempts}"
 
   set +e
   envelope="$(
     env \
       OPENCLAW_BIN="${OPENCLAW_BIN:-openclaw}" \
       TARGET_AGENT="${executor_agent}" \
-      RUN_ID="executor-batch-${batch_id}" \
+      RUN_ID="${delivery_run_id}" \
       DEFAULT_EXECUTOR_AGENT="${executor_agent}" \
       DOWNSTREAM_AGENT_TIMEOUT_SECONDS="${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}" \
       EXECUTOR_AGENT_TIMEOUT_SECONDS="${EXECUTOR_AGENT_TIMEOUT_SECONDS:-${DOWNSTREAM_AGENT_TIMEOUT_SECONDS:-600}}" \

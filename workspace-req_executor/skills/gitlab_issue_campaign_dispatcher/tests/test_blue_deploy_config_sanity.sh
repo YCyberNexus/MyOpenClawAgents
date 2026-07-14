@@ -67,4 +67,26 @@ do
   done
 done
 
+# run_executor_batch_tick.sh executes these wrappers directly after validating
+# their mode. A missing Git executable bit makes intake freeze a valid snapshot
+# but every recovery tick fail before any repository clone or spawn grant.
+for required_tick_command in \
+  scheduler_env.sh \
+  resolve_driven_repo_path.sh \
+  drain_driven_handoff_intents.sh \
+  drain_driven_outbox.sh \
+  reconcile_driven_terminal_counts.sh \
+  reserve_driven_batch_items.sh \
+  dispatch_driven_topup.sh \
+  import_driven_skipped.sh \
+  record_driven_batch_launch.sh \
+  bind_driven_claim.sh \
+  record_executor_batch_spawn.sh \
+  dispatch_record_spawn.sh
+do
+  command_path="${SKILL_DIR}/scripts/${required_tick_command}"
+  [ -f "${command_path}" ] && [ -x "${command_path}" ] \
+    || fail "executor tick command must be an executable regular file: ${required_tick_command}"
+done
+
 echo "ok blue deploy config sanity"
