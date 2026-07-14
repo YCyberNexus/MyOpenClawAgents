@@ -1967,6 +1967,64 @@ if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
     "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs-timeout"
 fi
 
+# A durable worker_result.json is authoritative only when the heartbeat passes
+# the same job/generation/token-digest fence as the native callback path. Phase
+# 6 must consume it normally, then explicitly request cleanup of the native
+# child whose outer model never emitted the final compact line.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
+durable_result_followup_out="$(printf '%s\n' '{
+  "iid":42,
+  "attempt_number":1,
+  "status":"done",
+  "mode_actual":"fresh",
+  "work_branch":"issue/42",
+  "local_branch":"issue/42-att001",
+  "commit_sha":"0123456789abcdef",
+  "merge_request_url":"https://gitlab.example/group/repo/-/merge_requests/9",
+  "mr_action":"created",
+  "wiki_url":"",
+  "labels_added":["pr"],
+  "labels_removed":["doing","done"],
+  "summary_posted":true,
+  "block_reason":"",
+  "log_dir":"/private/attempt-001"
+}' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_RESULT_RECONCILE=1 \
+  DRIVEN_RECONCILE_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_RECONCILE_CLAIM_GENERATION=1 \
+  DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=done EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "done"
+  and .cleanup == {
+    action:"kill",
+    target:"agent:req_executor:subagent:42",
+    reason:"durable_worker_result_recovered"
+  }
+' <<<"${durable_result_followup_out}" >/dev/null \
+  || fail "durable-result reconcile did not finish Phase 6 and request child cleanup"
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .completed_iids == [42]
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "durable-result reconcile did not durably drain project pending state"
+[ "$(wc -l <"${FOLLOWUP_IMPORT_LOG}" | tr -d ' ')" = 1 ] \
+  || fail "durable-result reconcile did not invoke the handoff importer once"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs-durable-result"
+fi
+
 cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 : >"${FOLLOWUP_IMPORT_LOG}"
 

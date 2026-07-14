@@ -66,6 +66,7 @@ mkdir -p "${LOG_DIR}"
 prompt_file="${LOG_DIR}/prompt.txt"
 stdout_log="${LOG_DIR}/claude_result.txt"
 stderr_log="${LOG_DIR}/acpx_raw.log"
+terminal_marker="${LOG_DIR}/acpx_terminal.json"
 safety_bin="${SCRIPT_DIR}/safety_bin"
 
 if [ ! -f "${prompt_file}" ]; then
@@ -127,12 +128,29 @@ cd "${WORKTREE_DIR}"
 # the executor prompt's routing rule: any return WITHOUT a clean `ACPX_EXIT=`
 # line is classified as `timeout`, never `blocked`.
 acpx_pgid=""
+write_terminal_marker() {
+  local exit_code="$1" completed_at_epoch terminal_marker_tmp
+  completed_at_epoch="$(date -u +%s)"
+  terminal_marker_tmp="${terminal_marker}.tmp.$$"
+  (
+    umask 077
+    printf '{"version":1,"iid":%s,"attempt_number":%s,"exit_code":%s,"completed_at_epoch":%s}\n' \
+      "${ISSUE_IID}" "${ATTEMPT_NUMBER}" "${exit_code}" \
+      "${completed_at_epoch}" >"${terminal_marker_tmp}"
+    chmod 600 "${terminal_marker_tmp}"
+    mv "${terminal_marker_tmp}" "${terminal_marker}"
+  )
+}
+
 cleanup() {
   trap - TERM INT HUP
   if [ -n "${acpx_pgid}" ]; then
     kill -s TERM "-${acpx_pgid}" 2>/dev/null || true
     sleep 2
     kill -s KILL "-${acpx_pgid}" 2>/dev/null || true
+  fi
+  if ! write_terminal_marker 124; then
+    echo "run_acpx_attempt.sh: warning: unable to persist ${terminal_marker}" >&2
   fi
   # Signalled abort: the script exits HERE, before the `ACPX_EXIT=<n>`
   # print below ever runs, so the subagent sees NO `ACPX_EXIT=` line. That
@@ -167,6 +185,17 @@ wait "${acpx_pgid}"
 acpx_exit=$?
 set -e
 trap - TERM INT HUP
+
+# Persist a machine-readable terminal marker before returning control to the
+# outer agent. OpenClaw can occasionally finish this long synchronous tool call
+# without scheduling the model's next turn. The executor heartbeat uses this
+# attempt-scoped marker to distinguish that post-acpx stall from an inner acpx
+# process that is still legitimately running.
+if ! write_terminal_marker "${acpx_exit}"; then
+  # The marker is a recovery aid, not the source of truth for this live tool
+  # result. Preserve the existing ACPX_EXIT contract if the disk write fails.
+  echo "run_acpx_attempt.sh: warning: unable to persist ${terminal_marker}" >&2
+fi
 
 # `timeout` returns 124 on SIGTERM kill, 137 on SIGKILL kill-after fire.
 if [ "${acpx_exit}" -eq 124 ] || [ "${acpx_exit}" -eq 137 ]; then

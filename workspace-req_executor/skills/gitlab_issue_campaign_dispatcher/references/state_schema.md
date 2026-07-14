@@ -150,14 +150,35 @@ legacy recovery.
 
 ## Compact Subagent Reply
 
-The subagent's final reply is compact JSON with:
+`run_executor_attempt.sh` atomically writes the exact compact result to:
+
+```text
+${LOG_DIR}/worker_result.json
+```
+
+The outer subagent normally echoes that same line as its final reply. The
+heartbeat may instead consume the file through claim-fenced result reconcile
+when OpenClaw does not schedule the final model turn. The object has exactly:
 
 - `iid`
 - `attempt_number`
-- `status`: `done`, `blocked`, `failed`, or `timeout`
-- optional `mr_url`
-- optional `wiki_url` legacy compatibility field; new req_executor replies keep it empty
-- optional `reason`
-- optional `summary`
+- `status`: `done`, `no_changes`, `blocked`, `failed`, or `timeout`
+- `mode_actual`, `work_branch`, `local_branch`
+- `commit_sha`, `merge_request_url`, `mr_action`
+- `wiki_url` (legacy compatibility; new replies keep it empty)
+- `labels_added`, `labels_removed`, `summary_posted`
+- `block_reason`, `log_dir`
+
+Immediately after the inner acpx process exits, `run_acpx_attempt.sh` also
+atomically writes:
+
+```text
+${LOG_DIR}/acpx_terminal.json
+```
+
+Its exact version-1 object contains `version`, `iid`, `attempt_number`,
+`exit_code`, and `completed_at_epoch`. This marker is not a terminal Issue
+result; it only proves that acpx itself is no longer running and starts the
+bounded post-acpx watchdog.
 
 `dispatch_followup.sh` validates the IID and attempt number against `pending_subagents` before mutating state.

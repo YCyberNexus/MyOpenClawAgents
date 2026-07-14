@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-14.14] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-14.15] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -57,7 +57,7 @@ the fixed executor boundary.
 | Layer | File | Contract |
 | -- | -- | -- |
 | Secret-free spawn bootstrap | `${LOG_DIR}/spawn_payload.txt` | This is the **only** content sent as `sessions_spawn(task=...)`. It contains only issue/job identity plus the absolute manifest path, SHA-256, byte count, and fail-closed validation instructions. |
-| Private outer executor payload | `${LOG_DIR}/executor_payload.txt`, described by mode-600 `${LOG_DIR}/spawn_manifest.json` | Rendered from [`references/executor_prompt.md`](references/executor_prompt.md). The manifest identity fields `project`, `job_id`, `iid`, and `attempt_number` are top-level fields; there is no nested `identity` object. After validating manifest identity, mode, SHA-256, and byte count, the OUTER subagent reads this file and runs Steps 0–9. Neither file contains a GitLab token. |
+| Private outer executor payload | `${LOG_DIR}/executor_payload.txt`, described by mode-600 `${LOG_DIR}/spawn_manifest.json` | Rendered from [`references/executor_prompt.md`](references/executor_prompt.md). The manifest identity fields `project`, `job_id`, `iid`, and `attempt_number` are top-level fields; there is no nested `identity` object. After validating manifest identity, mode, SHA-256, and byte count, the OUTER subagent makes one long `run_executor_attempt.sh` call and echoes its final compact JSON. Neither file contains a GitLab token. |
 | Inner Claude Code prompt | `${LOG_DIR}/prompt.txt` | Written by `build_prompt.sh`; only `acpx claude exec -f` reads it. It tells the INNER session what issue work to implement. |
 
 **HARD RULE: neither `${LOG_DIR}/prompt.txt` nor
@@ -231,7 +231,11 @@ Pass the complete I1 trigger verbatim to the fixed intake wrapper:
 1. cd "${SKILL_DIR}" && bash scripts/run_driven_issue_batch.sh <<'TRIGGER_EOF' → envelope
    <verbatim RUN_DRIVEN_ISSUE_BATCH trigger>
    TRIGGER_EOF
-2. Process envelope.reconcile_actions and envelope.spawn_grants using Path D.
+2. Process envelope.cleanup_actions with Path D step 2, then process
+   envelope.reconcile_actions and envelope.spawn_grants with Path D steps 3–5.
+   Path C MUST NOT call `sessions_yield` or end solely because cleanup_actions
+   was non-empty; after the best-effort kills, continue to the public
+   acceptance below. The killed completion can be handled on a later wake-up.
 3. If the envelope has no non-empty batch_id, or Path D cannot resolve an
    action unambiguously, print envelope.chat_summary and EXIT without a public
    acceptance.
@@ -281,7 +285,15 @@ input only and is rejected by req_dispatcher as a public receipt.
    # not prefix the command with PROJECT, GROUP, GITLAB_TOKEN, paths, scheduler
    # settings, host settings, or any other env assignment. The wrapper loads
    # deployment pins and ignored local overrides privately by itself.
-2. for each action in envelope.reconcile_actions (STRICT ARRAY ORDER):
+2. for each action in envelope.cleanup_actions (STRICT ARRAY ORDER):
+     require action.action == "kill"
+     try: subagents kill --target action.target
+     except: pass
+   if envelope.cleanup_actions is non-empty:
+     call sessions_yield once and END THIS TURN
+     # The kill completion or the next heartbeat owns any remaining recovery.
+     # A cleanup tick never contains a spawn grant.
+3. for each action in envelope.reconcile_actions (STRICT ARRAY ORDER):
      require action.action == "reconcile_emitted_spawn"
      call `subagents list` once and match the exact action.child_label
      if exactly one matching child has non-empty runId and childSessionKey:
@@ -296,12 +308,12 @@ input only and is rejected by req_dispatcher as a public receipt.
         "resolution":"not_found","evidence":"subagents_list_no_matching_label"}
      else:
        print chat_summary, EXIT  # ambiguous runtime evidence; never guess
-3. require envelope.spawn_grants length <= 1. If it contains one grant:
+4. require envelope.spawn_grants length <= 1. If it contains one grant:
      payload = Read(grant.payload_path)
      call sessions_spawn with the fixed parameters and retry contract below
      immediately pass the ack or final launch error as one strict JSON object to
        cd "${SKILL_DIR}" && bash scripts/record_executor_batch_spawn.sh
-4. Finish that recorder call before requesting another tick. If it recorded a
+5. Finish that recorder call before requesting another tick. If it recorded a
    successful spawn, call sessions_yield once and END THIS TURN so the native
    completion event becomes the next input. Otherwise print envelope.chat_summary
    and EXIT.
@@ -397,7 +409,10 @@ mutation, and the private claim token is never exposed outside scheduler state.
 1. cd "${SKILL_DIR}" && bash scripts/dispatch_single_issue.sh <<'TRIGGER_EOF' → envelope
    <verbatim RUN_SINGLE_ISSUE trigger>
    TRIGGER_EOF
-2. Process envelope.reconcile_actions and envelope.spawn_grants using Path D.
+2. Process envelope.cleanup_actions with Path D step 2, then process
+   envelope.reconcile_actions and envelope.spawn_grants with Path D steps 3–5.
+   As in Path C, cleanup alone must not suppress the synchronous public
+   acceptance.
 3. Apply Path C steps 3–5 using envelope.batch_id and the fixed
    emit_driven_batch_acceptance.sh wrapper. The final reply is the same exact
    five-field public acceptance, never envelope.chat_summary.
@@ -459,8 +474,8 @@ continue to use the former raw I3 transport without this field.
 A top-level wrapper call prints exactly one JSON envelope on stdout. On every
 wake-up your complete job is: issue the one chained
 `cd "${SKILL_DIR}" && bash scripts/<name>.sh` invocation, read the
-envelope, and act on `status`, `cleanup`, `dispatch_entries`,
-`reconcile_actions`, and `spawn_grants` exactly as the matching path
+envelope, and act on `status`, `cleanup`, `cleanup_actions`,
+`dispatch_entries`, `reconcile_actions`, and `spawn_grants` exactly as the matching path
 prescribes. That switch IS the entire decision tree —
 there is no "investigate", "debug", or "repair" branch anywhere in it.
 
@@ -543,7 +558,9 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Executor prompt rendering + sentinel check | `dispatch_prepare_tick.sh` step 20.8–20.9 |
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |
 | Phase 6 validation + label sync + state writes + classification + drain | `dispatch_followup.sh` + `_dispatch_lib.sh::phase6_process` |
-| Best-effort terminal cleanup decision (preserves all terminal child sessions for diagnosis; no `subagents kill` request is emitted) | `_dispatch_lib.sh::phase6_decide_cleanup`; LLM acts on `envelope.cleanup.action` |
+| Ordinary terminal cleanup decision (preserves native terminal child sessions for diagnosis) | `_dispatch_lib.sh::phase6_decide_cleanup`; LLM acts on `envelope.cleanup.action` |
+| One-call acpx through deterministic finalization and durable compact result | `run_executor_attempt.sh` + `run_acpx_attempt.sh` |
+| Claim-fenced durable-result recovery and post-acpx stale-child reclamation | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal result reconcile; LLM acts on `cleanup_actions[]` |
 | Driven batch intake, OPEN snapshot, and idempotency | `run_driven_issue_batch.sh` → `create_driven_batch.sh` |
 | Recovery-first handoff/outbox/coordinator replay and strict round-robin refill | `run_executor_batch_tick.sh` |
 | Claim-fenced immediate recovery for running jobs already `pr`/closed | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal completion reconcile |
@@ -684,17 +701,20 @@ matching reference file. Do NOT reconstruct from memory — these
 contracts are deliberately exhaustive and the agent's correctness
 depends on following them literally.
 
-## Subagent contract (unchanged)
+## Subagent contract
 
 The subagent receives the secret-free bootstrap as the entire
 `sessions_spawn` payload. It validates the private manifest and executor
-payload before running Steps 0–9 from the verified payload's `<instructions>`
-block. **It does NOT load this SKILL, NOT read
+payload before making the verified payload's single long
+`run_executor_attempt.sh` call. **It does NOT load this SKILL, NOT read
 SOUL.md / AGENTS.md, NOT call `sessions_spawn` / `sessions_history`,
-NOT write any state file.** Its compact JSON reply is the single artifact the
-orchestrator accepts only inside a protected native `task_completion` event
-(or bounded authenticated history recovery) through
-`ingest_subagent_completion.sh` → `dispatch_followup.sh`.
+and NOT directly write dispatcher terminal state.** The fixed wrapper writes
+only attempt-scoped recovery artifacts and prints the compact JSON. That reply
+is normally accepted inside a protected native `task_completion` event (or
+bounded authenticated history recovery) through
+`ingest_subagent_completion.sh` → `dispatch_followup.sh`; a claim-fenced tick
+may consume the identical durable worker result when the final model turn is
+not scheduled.
 
 The subagent invokes scripts at `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts/<name>.sh`
 by absolute path (the wrapper renders `{SCRIPTS_DIR}` into the prompt).

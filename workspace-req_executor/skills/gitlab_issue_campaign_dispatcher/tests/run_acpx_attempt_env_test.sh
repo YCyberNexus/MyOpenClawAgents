@@ -51,6 +51,7 @@ printf '只输出 OK\n' >"${LOG_DIR}/prompt.txt"
   printf '  set -e\n'
   printf '  [ "${denied_rc}" -eq 126 ] || { echo "unsafe command was not blocked: ${denied_command} rc=${denied_rc}" >&2; exit 44; }\n'
   printf 'done\n'
+  printf '[ "${ACPX_TEST_SLEEP:-0}" != "1" ] || sleep 30\n'
   printf 'echo OK\n'
 } >"${BIN_DIR}/acpx"
 
@@ -87,3 +88,40 @@ REPO_PARENT_PATH="${REPO_PARENT}" \
 
 grep -q '^ACPX_EXIT=0$' "${TEST_ROOT}/stdout"
 grep -q '^OK$' "${LOG_DIR}/claude_result.txt"
+jq -e '
+  (keys | sort) == [
+    "attempt_number","completed_at_epoch","exit_code","iid","version"
+  ]
+  and .version == 1
+  and .iid == 9
+  and .attempt_number == 1
+  and .exit_code == 0
+  and (.completed_at_epoch | type == "number" and . > 0)
+' "${LOG_DIR}/acpx_terminal.json" >/dev/null
+
+# A tool-side SIGTERM must kill the inner process group and still leave a
+# terminal marker before the wrapper exits 124. The all-in-one outer wrapper
+# can then persist a timeout result that the heartbeat safely recognizes.
+SIGNAL_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/attempt-002"
+mkdir -p "${SIGNAL_LOG_DIR}"
+printf '只输出 OK\n' >"${SIGNAL_LOG_DIR}/prompt.txt"
+PATH="${BIN_DIR}:${PATH}" \
+PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
+ISSUE_IID=9 ATTEMPT_NUMBER=2 ACPX_TIMEOUT_SECONDS=60 \
+REPO_PARENT_PATH="${REPO_PARENT}" ACPX_TEST_SLEEP=1 \
+  bash "${RUN_SCRIPT}" >"${TEST_ROOT}/signal-stdout" 2>"${TEST_ROOT}/signal-stderr" &
+signal_runner_pid=$!
+sleep 1
+kill -TERM "${signal_runner_pid}"
+set +e
+wait "${signal_runner_pid}"
+signal_rc=$?
+set -e
+[ "${signal_rc}" -eq 124 ]
+jq -e '
+  .version == 1
+  and .iid == 9
+  and .attempt_number == 2
+  and .exit_code == 124
+  and (.completed_at_epoch | type == "number" and . > 0)
+' "${SIGNAL_LOG_DIR}/acpx_terminal.json" >/dev/null

@@ -69,7 +69,25 @@ For scheduler-internal recovery, `dispatch_followup.sh` also accepts a
 token-digest claim fence. Completion-reconcile mode first repeats a narrow
 GitLab read under `campaign.lock`; only live `pr`/closed evidence may atomically
 drain pending and persist a claim-bound `skipped` handoff intent. Timeout mode
-keeps the existing running-lease plus project ACPX-deadline backstop.
+keeps the existing running-lease plus project ACPX-deadline backstop. Durable
+result mode accepts one non-empty compact worker result, rechecks the exact
+job/generation/token digest, runs ordinary Phase 6, and returns a kill cleanup
+for the stale native child only after state persistence.
+
+## `run_executor_attempt.sh` and post-acpx recovery
+
+The outer per-IID subagent invokes `run_executor_attempt.sh` once. It keeps
+`run_acpx_attempt.sh`, stage, commit/push, verification, labels, MR, and summary
+inside one bounded Bash process. It atomically persists mode-600
+`${LOG_DIR}/worker_result.json` before printing the same compact JSON.
+`run_acpx_attempt.sh` separately persists mode-600
+`${LOG_DIR}/acpx_terminal.json` immediately after the inner process exits.
+
+`run_executor_batch_tick.sh` checks those attempt-scoped files only for an
+exact currently pending job/generation. A worker result is sent through the
+claim-fenced durable-result followup mode and produces `cleanup_actions[]`.
+An acpx-only marker produces cleanup only after the post-acpx grace period, so
+a legitimately running inner acpx process is never reaped by this watchdog.
 
 ## `reap_driven_orphan_placeholders.sh`
 

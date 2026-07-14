@@ -27,9 +27,12 @@ The executor is deliberately thin:
 
 - read the target GitLab issue
 - render the issue content into a Claude Code prompt
-- run Claude Code in the prepared per-issue worktree through `run_acpx_attempt.sh`
-- stage and push the result
-- open or update the issue MR
+- run the complete acpx, stage, push, MR, label, and summary sequence through
+  one `run_executor_attempt.sh` call; only that wrapper invokes
+  `run_acpx_attempt.sh`
+- persist the exact compact result before the long tool call returns, so a
+  heartbeat can finish Phase 6 and reclaim a child whose final model turn was
+  never scheduled
 - report terminal results back to `req_dispatcher` for driven runs
 
 It is not tied to project-specific frameworks, material directories, UI account pools, or configurable runtime basenames. Project-specific context belongs in the issue body or in the repository itself.

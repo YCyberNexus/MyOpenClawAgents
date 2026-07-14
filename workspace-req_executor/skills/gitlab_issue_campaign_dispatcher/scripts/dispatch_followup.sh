@@ -57,6 +57,7 @@ sha256_text() {
 
 TIMEOUT_RECONCILE="${DRIVEN_TIMEOUT_RECONCILE:-0}"
 COMPLETED_RECONCILE="${DRIVEN_COMPLETED_RECONCILE:-0}"
+RESULT_RECONCILE="${DRIVEN_RESULT_RECONCILE:-0}"
 case "${TIMEOUT_RECONCILE}" in
   0|1) ;;
   *) echo "dispatch_followup.sh: DRIVEN_TIMEOUT_RECONCILE must be 0 or 1" >&2; exit 2 ;;
@@ -65,12 +66,17 @@ case "${COMPLETED_RECONCILE}" in
   0|1) ;;
   *) echo "dispatch_followup.sh: DRIVEN_COMPLETED_RECONCILE must be 0 or 1" >&2; exit 2 ;;
 esac
-if [ "${TIMEOUT_RECONCILE}" = 1 ] && [ "${COMPLETED_RECONCILE}" = 1 ]; then
-  echo "dispatch_followup.sh: timeout and completed reconcile modes are mutually exclusive" >&2
+case "${RESULT_RECONCILE}" in
+  0|1) ;;
+  *) echo "dispatch_followup.sh: DRIVEN_RESULT_RECONCILE must be 0 or 1" >&2; exit 2 ;;
+esac
+RECONCILE_MODE_COUNT=$((TIMEOUT_RECONCILE + COMPLETED_RECONCILE + RESULT_RECONCILE))
+if [ "${RECONCILE_MODE_COUNT}" -gt 1 ]; then
+  echo "dispatch_followup.sh: internal reconcile modes are mutually exclusive" >&2
   exit 2
 fi
 INTERNAL_CLAIM_RECONCILE=0
-if [ "${TIMEOUT_RECONCILE}" = 1 ] || [ "${COMPLETED_RECONCILE}" = 1 ]; then
+if [ "${RECONCILE_MODE_COUNT}" -eq 1 ]; then
   INTERNAL_CLAIM_RECONCILE=1
   RECONCILE_JOB_ID="${DRIVEN_RECONCILE_JOB_ID:-${DRIVEN_TIMEOUT_JOB_ID:-}}"
   RECONCILE_CLAIM_GENERATION="${DRIVEN_RECONCILE_CLAIM_GENERATION:-${DRIVEN_TIMEOUT_CLAIM_GENERATION:-}}"
@@ -310,6 +316,11 @@ fi
 # Read the compact reply from stdin. Empty stdin → synthesize a terminal
 # reply: timeout when the run consumed its time budget, blocked otherwise.
 RAW_REPLY="$(cat)"
+if [ "${RESULT_RECONCILE}" = 1 ] \
+    && [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
+  echo "dispatch_followup.sh: durable result reconcile requires worker JSON" >&2
+  exit 2
+fi
 if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
   if [ "${SYNTH_STATUS}" = "timeout" ]; then
     REPLY_JSON="$(phase6_synthesize_timeout "${IID}" "${PENDING_ATTEMPT}" \
@@ -467,6 +478,19 @@ PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "false")"
 NEW_STATE="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
 FINAL_STATUS="$(printf '%s' "${PHASE6_OUT}" | jq -r '.final_status')"
 CLEANUP="$(printf '%s' "${PHASE6_OUT}" | jq -c '.cleanup')"
+# A claim-fenced durable worker result means the fixed all-in-one wrapper
+# finished even if OpenClaw never scheduled the outer model's final reply. The
+# project result is now committed by Phase 6, so the still-live native child is
+# pure leaked capacity and should be stopped. Ordinary native completions remain
+# preserved for diagnosis by phase6_decide_cleanup.
+if [ "${RESULT_RECONCILE}" = 1 ]; then
+  RESULT_CHILD_SESSION_KEY="$(jq -r '.child_session_key // empty' <<<"${PENDING_ENTRY}")"
+  if [ -n "${RESULT_CHILD_SESSION_KEY}" ]; then
+    CLEANUP="$(jq -cn --arg target "${RESULT_CHILD_SESSION_KEY}" '{
+      action:"kill",target:$target,reason:"durable_worker_result_recovered"
+    }')"
+  fi
+fi
 REMAINING_COUNT="$(printf '%s' "${PHASE6_OUT}" | jq -r '.remaining_pending_count')"
 MR_URL="$(printf '%s' "${REPLY_JSON}" | jq -r '.merge_request_url // ""')"
 WIKI_URL=""

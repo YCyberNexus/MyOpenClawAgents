@@ -71,11 +71,28 @@ The gateway hot-applies valid `agents.*` changes. Run these commands as the
 same service account and with the same OpenClaw profile/config path used by the
 gateway; otherwise they may inspect a different `~/.openclaw/openclaw.json`.
 The value is global across all agents. When positive, choose at least the
-largest deployed `acpx_timeout_seconds + 120`; for a 36000-second acpx budget,
-use at least `36120`.
+largest deployed `acpx_timeout_seconds + 2400`; the additional budget covers
+the fixed stage/push/MR/label/summary caps inside `run_executor_attempt.sh`.
+For a 36000-second acpx budget, use at least `38400`.
 
 The absence of a timeout parameter in the `sessions_spawn` tool call is
 expected and does not mean the global timeout was dropped.
+
+## Post-acpx slot recovery
+
+`run_executor_attempt.sh` keeps acpx and all deterministic finalization in one
+long Bash call and writes `${LOG_DIR}/worker_result.json` atomically before it
+returns. The periodic executor tick processes that result under the exact
+job/generation/token-digest fence and emits `cleanup_actions[]` for the stale
+native child if OpenClaw never schedules the outer model's final turn.
+
+`run_acpx_attempt.sh` also writes exact-schema `${LOG_DIR}/acpx_terminal.json`
+as soon as the inner process exits. If no durable final result appears after
+the wrapper's bounded post-acpx budget, the tick reclaims the matching child.
+The watchdog defaults to `EXECUTOR_POST_ACPX_GRACE_SECONDS=2400`. This is a
+runtime/local-test override only: set it in the process environment or ignored
+`campaign_defaults.local.env`; do not add workstation values to tracked
+`campaign_defaults.env`. Values below 60 are rejected.
 
 If logs report that an outer `GITLAB_TOKEN` differs from the deployment pin,
 remember that the process environment wins by contract. Update or unset the

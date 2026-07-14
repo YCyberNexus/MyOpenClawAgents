@@ -227,6 +227,24 @@ exit 99
 '
 
 write_fake expire_running.sh '
+if [ "${DRIVEN_RESULT_RECONCILE:-0}" = 1 ]; then
+  worker_result="$(cat)"
+  printf "result:%s:%s:%s\n" \
+    "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
+    "${DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
+  jq -e --argjson iid "${IID}" \
+    ".iid == \$iid and .status == \"done\"" <<<"${worker_result}" >/dev/null
+  if [ "${RESULT_TEST_RELEASE:-0}" = 1 ]; then
+    jq --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
+      "del(.active_jobs[\$job_id])" "${SCHEDULER_ROOT}/scheduler_state.json" \
+      >"${SCHEDULER_ROOT}/scheduler_state.result.json"
+    mv "${SCHEDULER_ROOT}/scheduler_state.result.json" \
+      "${SCHEDULER_ROOT}/scheduler_state.json"
+  fi
+  jq -cn --argjson iid "${IID}" \
+    "{callback_status:\"handled\",iid:\$iid,terminal_status:\"done\",cleanup:{action:\"kill\",target:\"agent:req_executor:subagent:42\",reason:\"durable_worker_result_recovered\"}}"
+  exit 0
+fi
 if [ "${DRIVEN_COMPLETED_RECONCILE:-0}" = 1 ]; then
   printf "completed:%s:%s:%s\n" \
     "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
@@ -314,13 +332,15 @@ bind:A:snapshot-0:1:private-claim-token'
 
 jq -e '
   (keys | sort) == [
-    "backoff_seconds","chat_summary","max_launch_retries","operation_results",
-    "reconcile_actions","spawn_grants","status"
+    "backoff_seconds","chat_summary","cleanup_actions",
+    "max_launch_retries","operation_results","reconcile_actions",
+    "spawn_grants","status"
   ]
   and .status == "ready"
   and .max_launch_retries == 3
   and .backoff_seconds == 2
   and .reconcile_actions == []
+  and .cleanup_actions == []
   and (.spawn_grants | length) == 1
   and (.spawn_grants[0] | del(.child_label)) == {
     job_id:"A:snapshot-0",claim_generation:1,project:"group/repo",iid:42,
@@ -826,5 +846,109 @@ actual_record_order="$(grep '^record-order:' "${ORDER_LOG}" | sed 's/^record-ord
 expected_record_order='A:snapshot-0'
 [ "${actual_record_order}" = "${expected_record_order}" ] \
   || fail "serial preparing/bind did not preserve the first scheduler grant: ${actual_record_order}"
+
+# The all-in-one executor wrapper persists worker_result.json before its Bash
+# tool call returns. If OpenClaw never schedules the outer model's final turn,
+# the next heartbeat must process that exact result under the scheduler claim
+# fence and request cleanup of the still-live native subagent.
+cat >"${SCHEDULER_ROOT}/batches/A/request.json" <<'EOF'
+{"version":1,"batch_id":"A","project":"group/repo","dispatcher_callback_target":"agent:req_dispatcher:main"}
+EOF
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":3,
+    "claim_token":"durable-result-private-claim","finalization":null,
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+PROJECT_RUNTIME="${TEST_ROOT}/repos/group/repo/.req_executor"
+CAMPAIGN_DIR="${PROJECT_RUNTIME}/_dispatcher"
+RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-003"
+mkdir -p "${CAMPAIGN_DIR}" "${RESULT_LOG_DIR}"
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":3,"attempt_number":3,
+  "run_id":"run-42-result","child_session_key":"agent:req_executor:subagent:42"
+}}}
+EOF
+cat >"${RESULT_LOG_DIR}/worker_result.json" <<EOF
+{"iid":42,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42-att003","commit_sha":"0123456789abcdef","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/1","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${RESULT_LOG_DIR}"}
+EOF
+cat >"${RESULT_LOG_DIR}/acpx_terminal.json" <<'EOF'
+{"version":1,"iid":42,"attempt_number":3,"exit_code":0,"completed_at_epoch":100}
+EOF
+durable_result_output="$(
+  RESULT_TEST_RELEASE=1 SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "durable worker-result recovery tick failed"
+grep -Eq '^result:A:snapshot-0:3:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "durable worker result did not receive the exact hashed claim fence"
+if grep -q 'durable-result-private-claim' "${ORDER_LOG}" \
+    || grep -q 'durable-result-private-claim' <<<"${durable_result_output}"; then
+  fail "durable worker-result recovery exposed the private claim token"
+fi
+jq -e '
+  .status == "cleanup_required"
+  and .spawn_grants == []
+  and .reconcile_actions == []
+  and (.cleanup_actions | length) == 1
+  and .cleanup_actions[0].action == "kill"
+  and .cleanup_actions[0].target == "agent:req_executor:subagent:42"
+  and .cleanup_actions[0].reason == "durable_worker_result_recovered"
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    and .job_id == "A:snapshot-0" and .status == "handled")] | length) == 1
+' <<<"${durable_result_output}" >/dev/null \
+  || fail "durable worker result did not return one strict cleanup action"
+
+# If the wrapper died after acpx_terminal.json but before worker_result.json,
+# wait for a bounded grace period and then reclaim only the matching native
+# child. The marker is exact-schema and attempt-scoped, so an in-flight acpx
+# process cannot be mistaken for this post-acpx state.
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":4,
+    "claim_token":"post-acpx-private-claim","finalization":null,
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":4,"attempt_number":4,
+  "run_id":"run-42-marker","child_session_key":"agent:req_executor:subagent:42"
+}}}
+EOF
+MARKER_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-004"
+mkdir -p "${MARKER_LOG_DIR}"
+cat >"${MARKER_LOG_DIR}/acpx_terminal.json" <<'EOF'
+{"version":1,"iid":42,"attempt_number":4,"exit_code":0,"completed_at_epoch":100}
+EOF
+post_acpx_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+    SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "post-acpx watchdog tick failed"
+jq -e '
+  .status == "cleanup_required"
+  and .spawn_grants == []
+  and .reconcile_actions == []
+  and (.cleanup_actions | length) == 1
+  and .cleanup_actions[0].action == "kill"
+  and .cleanup_actions[0].target == "agent:req_executor:subagent:42"
+  and .cleanup_actions[0].reason == "post_acpx_finalization_grace_exceeded"
+  and .cleanup_actions[0].attempt_number == 4
+  and .cleanup_actions[0].claim_generation == 4
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_watchdog"
+    and .job_id == "A:snapshot-0" and .status == "kill_required")] | length) == 1
+  and (tostring | contains("post-acpx-private-claim") | not)
+' <<<"${post_acpx_output}" >/dev/null \
+  || fail "post-acpx marker did not return one exact cleanup action"
 
 echo "ok executor batch tick is recovery-first and returns strict spawn grants"

@@ -50,7 +50,7 @@ if [ "${CREATE_RC}" -ne 0 ]; then
     matched_count:0,
     snapshot_digest:null,
     scheduler_status:null,
-    spawn_grants:[],reconcile_actions:[],
+    spawn_grants:[],reconcile_actions:[],cleanup_actions:[],
     operation_results:[{operation:"create_batch",status:"failed"}],
     max_launch_retries:3,
     backoff_seconds:2,
@@ -78,7 +78,7 @@ if ! CREATE_JSON="$(printf '%s' "${CREATE_OUTPUT}" | jq -ce '
     matched_count:0,
     snapshot_digest:null,
     scheduler_status:null,
-    spawn_grants:[],reconcile_actions:[],
+    spawn_grants:[],reconcile_actions:[],cleanup_actions:[],
     operation_results:[{operation:"create_batch",status:"invalid_envelope"}],
     max_launch_retries:3,
     backoff_seconds:2,
@@ -100,19 +100,21 @@ set -e
 if [ "${TICK_RC}" -ne 0 ] || ! TICK_JSON="$(printf '%s' "${TICK_OUTPUT}" | jq -ce '
   if type == "object"
     and (keys | sort) == [
-      "backoff_seconds","chat_summary","max_launch_retries",
-      "operation_results","reconcile_actions","spawn_grants","status"
+      "backoff_seconds","chat_summary","cleanup_actions",
+      "max_launch_retries","operation_results","reconcile_actions",
+      "spawn_grants","status"
     ]
     and (.status == "ready" or .status == "idle" or .status == "tick_failed"
-      or .status == "reconcile_required")
+      or .status == "reconcile_required" or .status == "cleanup_required")
     and (.spawn_grants | type == "array")
     and (.reconcile_actions | type == "array")
+    and (.cleanup_actions | type == "array")
     and (.operation_results | type == "array")
     and .max_launch_retries == 3
     and .backoff_seconds == 2
   then . else error("invalid tick envelope") end
 ' 2>/dev/null)"; then
-  TICK_JSON='{"status":"tick_failed","spawn_grants":[],"reconcile_actions":[],"operation_results":[{"operation":"executor_tick","status":"failed"}],"max_launch_retries":3,"backoff_seconds":2,"chat_summary":"executor batch tick failed"}'
+  TICK_JSON='{"status":"tick_failed","spawn_grants":[],"reconcile_actions":[],"cleanup_actions":[],"operation_results":[{"operation":"executor_tick","status":"failed"}],"max_launch_retries":3,"backoff_seconds":2,"chat_summary":"executor batch tick failed"}'
 fi
 
 RESULT_STATUS=accepted
@@ -131,6 +133,7 @@ jq -cn \
     scheduler_status:$batch.scheduler_status,
     spawn_grants:$tick.spawn_grants,
     reconcile_actions:$tick.reconcile_actions,
+    cleanup_actions:$tick.cleanup_actions,
     operation_results:([{operation:"create_batch",status:"success"}]
       + $tick.operation_results),
     max_launch_retries:3,

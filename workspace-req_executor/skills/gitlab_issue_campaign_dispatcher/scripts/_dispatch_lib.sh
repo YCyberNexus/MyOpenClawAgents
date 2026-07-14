@@ -587,7 +587,7 @@ load_state() {
 
 derive_stuck_after_minutes() {
   local acpx_timeout_seconds="$1"
-  printf '%s\n' "$(( (acpx_timeout_seconds + 120 + 59) / 60 + 30 ))"
+  printf '%s\n' "$(( (acpx_timeout_seconds + 2400 + 59) / 60 + 30 ))"
 }
 
 # Decide whether a project campaign owner may enter while the caller holds the

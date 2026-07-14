@@ -391,7 +391,7 @@ case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurre
 case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
 [ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
 # stuck_after_minutes keeps the dispatcher backstop beyond the recommended
-# global OpenClaw subagent limit of acpx_timeout_seconds + 120 seconds.
+# global OpenClaw subagent limit of acpx_timeout_seconds + 2400 seconds.
 # Operators may still override explicitly for tighter or looser eviction.
 [ -z "${STUCK_AFTER}" ] && STUCK_AFTER="$(derive_stuck_after_minutes "${ACPX_TIMEOUT}")"
 case "${STUCK_AFTER}" in *[!0-9]*|"") emit_chat_failure "invalid_stuck_after_minutes: must be >= 5" ;; esac

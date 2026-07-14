@@ -25,10 +25,10 @@ load_state | jq -e 'has("run_timeout_seconds") | not' >/dev/null \
 fresh_init_state | jq -e 'has("run_timeout_seconds") | not' >/dev/null \
   || fail "fresh_init_state must not expose run_timeout_seconds"
 
-[ "$(derive_stuck_after_minutes 18000)" = "332" ] \
-  || fail "default acpx timeout must derive stuck_after_minutes=332"
-[ "$(derive_stuck_after_minutes 21600)" = "392" ] \
-  || fail "six-hour acpx timeout must derive stuck_after_minutes=392"
+[ "$(derive_stuck_after_minutes 18000)" = "370" ] \
+  || fail "default acpx timeout must derive stuck_after_minutes=370"
+[ "$(derive_stuck_after_minutes 21600)" = "430" ] \
+  || fail "six-hour acpx timeout must derive stuck_after_minutes=430"
 
 grep -Fq 'unsupported trigger field: run_timeout_seconds' \
   "${SKILL_DIR}/scripts/dispatch_prepare_tick.sh"

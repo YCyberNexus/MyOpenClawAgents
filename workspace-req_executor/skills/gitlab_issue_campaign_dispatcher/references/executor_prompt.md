@@ -1,89 +1,71 @@
 # Executor Prompt Template (Subagent Task)
 
-The dispatcher extracts the fenced "Rendered Prompt" block below and writes
-the rendered string to a private mode-600 `executor_payload.txt`. The anonymous
-`sessions_spawn` task is a separate small, secret-free bootstrap containing a
-private manifest path plus hashes, sizes, and identity. The subagent validates
-that manifest and this payload before reading it. The subagent **does NOT load
-any SKILL, SOUL.md, or AGENTS.md**. Everything it needs after bootstrap
-validation is in the rendered prompt below.
+The dispatcher extracts the sentinel-bounded rendered block below and writes it
+to private mode-600 `executor_payload.txt`. The anonymous `sessions_spawn` task
+is a separate secret-free bootstrap that validates the manifest before reading
+this payload. The outer subagent does not load workspace instruction files.
 
-The dispatcher has already completed all preparation. The subagent runs the technical workflow and **returns a single compact JSON line** that contains every fact the dispatcher needs for its Phase 6 follow-up bookkeeping. **The subagent does NOT write the terminal state files** — the dispatcher writes them in Phase 6 from the compact JSON.
+The complete technical attempt now runs through one fixed wrapper. This is a
+correctness boundary, not only a prompt simplification: a long synchronous acpx
+tool call can return without OpenClaw scheduling another model turn. Keeping
+acpx and all deterministic finalization in one Bash process removes that gap.
+The wrapper also persists its final compact result to
+`${LOG_DIR}/worker_result.json`, allowing the periodic executor tick to recover
+the result and release a stuck native subagent slot.
 
-> **HARD — do not confuse the three layers.** The rendered block below is the
-> private OUTER executor payload that runs Steps 0–9, including
-> `bash run_acpx_attempt.sh`; it is read only after bootstrap verification. The
-> file `${LOG_DIR}/prompt.txt`, produced by `scripts/build_prompt.sh`, is the
-> INNER Claude Code prompt read by `acpx claude exec -f`. Neither file is sent
-> directly to `sessions_spawn`; only `${LOG_DIR}/spawn_payload.txt`, the
-> secret-free bootstrap, is sent. See SKILL.md §Three task layers you MUST NOT
-> confuse for the full comparison.
-
----
+GitLab credentials are never rendered into this payload. Fixed scripts resolve
+credentials from the private process/deployment environment, and
+`run_acpx_attempt.sh` strips them from the inner acpx process.
 
 ## Template Variables
 
-The dispatcher substitutes these before writing the private executor payload.
-Every uppercase brace placeholder in the rendered block MUST be filled in;
-nothing in the rendered prompt should still look like a template.
+| Placeholder | Source |
+| --- | --- |
+| `{PROJECT}` | trigger project slug |
+| `{GROUP}` | trigger GitLab group |
+| `{ISSUE_IID}` | current IID |
+| `{ATTEMPT_NUMBER}` | allocated attempt number |
+| `{ATTEMPT_NUMBER_PADDED}` | zero-padded attempt number |
+| `{ISSUE_TITLE}` | live issue title for context only |
+| `{ISSUE_TITLE_QUOTED}` | shell-safe single-quoted issue title |
+| `{ISSUE_URL}` | pinned GitLab issue URL |
+| `{ISSUE_LABELS}` | live label snapshot |
+| `{ISSUE_BODY}` | first approximately 4 KB; full prompt is already on disk |
+| `{ISSUE_MODE}` | `fresh` or `continue` |
+| `{BRANCH}` | resolved merge-request target branch |
+| `{WORK_BRANCH}` | fixed issue branch |
+| `{LOCAL_ATTEMPT_BRANCH}` | attempt-local branch |
+| `{REPO_PATH}` | parent checkout |
+| `{WORKTREE_DIR}` | shared per-IID linked worktree |
+| `{OUTPUT_DIR}` | issue output directory inside the worktree |
+| `{LOG_DIR}` | attempt log directory inside the worktree |
+| `{ISSUE_ROOT}` | parent checkout's durable per-Issue state directory |
+| `{SCRIPTS_DIR}` | absolute dispatcher scripts directory |
+| `{GITLAB_HOST}` | deployment pin |
+| `{GITLAB_API_PROTOCOL}` | deployment pin |
+| `{ACPX_TIMEOUT_SECONDS}` | inner acpx wall-clock cap |
+| `{ACPX_TIMEOUT_MINUTES}` | floor of the acpx cap in minutes |
 
-| Placeholder              | Source                                                                                  |
-| ------------------------ | --------------------------------------------------------------------------------------- |
-| `{PROJECT}`              | trigger                                                                                 |
-| `{GROUP}`                | trigger                                                                                 |
-| `{ISSUE_IID}`            | this batch member                                                                       |
-| `{ATTEMPT_NUMBER}`       | dispatcher's `allocate_attempt.sh` for this IID                                         |
-| `{ATTEMPT_NUMBER_PADDED}`| `printf '%03d'` of `{ATTEMPT_NUMBER}`                                                   |
-| `{ISSUE_TITLE}`          | from the live issue (human-readable; for the `<issue>` block only)                      |
-| `{ISSUE_TITLE_QUOTED}`   | shell-safe single-quoted form of the title (for env-var passing on script invocations)  |
-| `{ISSUE_URL}`            | `{GITLAB_API_PROTOCOL}://{GITLAB_HOST}/{GROUP}/{PROJECT}/-/issues/{ISSUE_IID}`           |
-| `{ISSUE_LABELS}`         | comma-joined labels from the live issue (snapshot)                                      |
-| `{ISSUE_BODY}`           | issue body (already in `{LOG_DIR}/prompt.txt`; for the `<issue>` block only — keep ≤ 4 KB) |
-| `{ISSUE_MODE}`           | `fresh` or `continue`; what `prepare_attempt.sh` actually used (`mode_actual`)          |
-| `{BRANCH}`               | resolved integration / target branch; explicit trigger value or remote default from `origin/HEAD` |
-| `{WORK_BRANCH}`          | `issue/{ISSUE_IID}`                                                                     |
-| `{LOCAL_ATTEMPT_BRANCH}` | `{WORK_BRANCH}-att{ATTEMPT_NUMBER_PADDED}`                                              |
-| `{REPO_PATH}`            | parent checkout (shared object DB; defaults to `/data/{PROJECT}`; if trigger `repo_path=/data/team_repo`, this is `/data/team_repo/{PROJECT}`). NOT mutated by an attempt — `prepare_attempt.sh` only `git fetch`es here. |
-| `{WORKTREE_DIR}`         | SHARED per-issue linked git worktree under the repo's fixed `.req_executor/.worktrees/issue-{ISSUE_IID}/` runtime area (no `-att-<NNN>` suffix; one worktree per IID, reused across attempts); this is acpx's cwd (`run_acpx_attempt.sh` `cd`s here before invoking `acpx claude exec -f {LOG_DIR}/prompt.txt`). Claude Code uses the issue prompt and writes the issue's deliverables here. Continue-mode runs restore same-IID runtime output/logs for resume; fresh-mode runs quarantine same-IID runtime residue before recreating empty current output/log directories. |
-| `{OUTPUT_DIR}`           | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/output` (inside the shared per-issue worktree) |
-| `{LOG_DIR}`              | `{WORKTREE_DIR}/.req_executor/issue-{ISSUE_IID}/log/attempt-{ATTEMPT_NUMBER_PADDED}` (INSIDE the shared per-issue worktree; still attempt-scoped so successive attempts don't overwrite each other; log files stay local and are not committed into the MR diff) |
-| `{ISSUE_ROOT}`           | `{REPO_PATH}/.req_executor/issues/issue-{ISSUE_IID}` (parent's per-issue subtree)   |
-| `{SCRIPTS_DIR}`          | absolute path to `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts`          |
-| `{GITLAB_HOST}`          | from deployment pin (`<workspace>/config/gitlab.env`)                                   |
-| `{GITLAB_API_PROTOCOL}`  | from deployment pin                                                                     |
-| `{ACPX_TIMEOUT_SECONDS}` | optional trigger field `acpx_timeout_seconds`; defaults to `18000`. Subagent Step 1 bash command timeout for `run_acpx_attempt.sh`. |
-| `{ACPX_TIMEOUT_MINUTES}` | `floor({ACPX_TIMEOUT_SECONDS} / 60)`; used in the constraints block's hard wall-clock soft cap. Always derived from `{ACPX_TIMEOUT_SECONDS}` so the two stay in lockstep. |
-`{ISSUE_TITLE_QUOTED}` MUST be shell-quoted: wrap in single quotes; replace every embedded `'` with `'\''`.
-
-GitLab credentials are never rendered into this payload. Every fixed executor
-script resolves its credential from the private process/deployment environment;
-the subagent must not inspect, print, copy, or pass a token explicitly.
-
-`{ISSUE_BODY}` is for human context only. The dispatcher has already written the full `prompt.txt` to `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* (not this snippet) to acpx. Truncate the snippet here at ~4 KB if necessary; do not inflate the private executor payload.
-
----
+`{ISSUE_TITLE_QUOTED}` must be shell quoted. `{ISSUE_BODY}` is context only;
+the complete inner prompt is already at `{LOG_DIR}/prompt.txt`.
 
 ## Rendered Prompt
 
-Everything between the fenced lines below is what the dispatcher writes to the
-private `executor_payload.txt`. Render placeholders; do not include the
-surrounding documentation.
-
-The very first line is an **executor-payload sentinel** checked before the
-manifest and secret-free bootstrap are published. Keep it verbatim. If it is
-missing, the wrapper must abort this IID instead of creating a spawn task.
-
-The **last line inside the fenced block** is a paired closer sentinel `# REQ_EXECUTOR_EXECUTOR_PROMPT_V1_END`. `dispatch_prepare_tick.sh` uses it (NOT the surrounding triple-backtick fence) as the awk terminator that bounds the rendered prompt. This means it is safe to add nested ```code``` examples inside the fenced block — the extractor will not be tricked into truncating at an inner fence. Do not delete, translate, or move the closer sentinel; if it is missing the wrapper aborts with `prep_blocked "executor_prompt.md missing end-sentinel ..."`. The closer sentinel itself is consumed by the extractor and never appears in the rendered payload.
-
 ```
 # REQ_EXECUTOR_EXECUTOR_PROMPT_V1
-You are a focused per-issue executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
-The dispatcher has already prepared everything. Your job: run acpx → commit/push/MR/labels/summarize → return ONE compact JSON line. If acpx fails after producing files, still stage/commit/push anything committable before marking the issue blocked.
+You are the focused outer executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PROJECT}.
 
-DO NOT load any SKILL.md, SOUL.md, or AGENTS.md.
-DO NOT call sessions_spawn or sessions_history.
-DO NOT search the workspace for additional rules. Everything you need is below.
-DO NOT run `rm` in any Bash tool call. Do not delete files or directories yourself; only invoke the dispatcher scripts listed in these steps.
+The dispatcher already prepared the worktree, prompt, branches, and private
+runtime state. Run exactly one fixed wrapper. That wrapper owns setup, the
+one-shot run_acpx_attempt.sh invocation, staging, commit/push, post-push
+verification, label transitions, MR creation, summary, and durable compact
+result persistence. Do not perform any of those steps yourself.
+
+DO NOT load any SKILL.md, SOUL.md, AGENTS.md, or other workspace rules.
+DO NOT call sessions_spawn, sessions_history, subagents, or acpx directly.
+DO NOT run rm, git, glab, or any dispatcher helper individually.
+DO NOT rerun the wrapper, even if the tool times out, disconnects, or returns
+without a compact result. The executor heartbeat owns recovery.
 
 <config>
 PROJECT={PROJECT}
@@ -93,489 +75,77 @@ GITLAB_API_PROTOCOL={GITLAB_API_PROTOCOL}
 ISSUE_IID={ISSUE_IID}
 ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
-ISSUE_MODE={ISSUE_MODE}                     # fresh | continue
-BRANCH={BRANCH}                             # resolved target branch for the merge request
-WORK_BRANCH={WORK_BRANCH}                   # single remote branch for this issue (force-pushed each attempt)
+ISSUE_MODE={ISSUE_MODE}
+BRANCH={BRANCH}
+WORK_BRANCH={WORK_BRANCH}
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
-REPO_PATH={REPO_PATH}                       # parent checkout (shared object DB / `git fetch` target); NEVER mutated by an attempt
-WORKTREE_DIR={WORKTREE_DIR}                 # SHARED per-issue linked git worktree (one per IID, reused across attempts); acpx cwd. Continue mode restores same-IID runtime output/logs; fresh mode quarantines same-IID runtime residue before recreating empty current output/log directories. run_acpx_attempt.sh `cd`s here before invoking the one-shot `acpx claude exec -f` command.
-OUTPUT_DIR={OUTPUT_DIR}                     # primary result directory for this issue, INSIDE the worktree (force-added by stage_and_guard.sh; logs/ paths are still removed from the index)
-LOG_DIR={LOG_DIR}                           # this attempt's log dir; prompt.txt is here
+REPO_PATH={REPO_PATH}
+WORKTREE_DIR={WORKTREE_DIR}
+OUTPUT_DIR={OUTPUT_DIR}
+LOG_DIR={LOG_DIR}
 ISSUE_ROOT={ISSUE_ROOT}
-SCRIPTS={SCRIPTS_DIR}                       # absolute dispatcher scripts dir; invoke by absolute path
-ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} # bash command timeout for Step 1 run_acpx_attempt.sh (also drives the {ACPX_TIMEOUT_MINUTES} soft cap)
+SCRIPTS={SCRIPTS_DIR}
+ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
 </config>
 
 <issue>
-IID:    #{ISSUE_IID}
-Title:  {ISSUE_TITLE}
-URL:    {ISSUE_URL}
+IID: #{ISSUE_IID}
+Title: {ISSUE_TITLE}
+URL: {ISSUE_URL}
 Labels: {ISSUE_LABELS}
-Mode:   {ISSUE_MODE}
-Body (first ~4KB; full prompt is at {LOG_DIR}/prompt.txt):
+Mode: {ISSUE_MODE}
+Body (first approximately 4 KB; full inner prompt is at {LOG_DIR}/prompt.txt):
 {ISSUE_BODY}
 </issue>
 
-<env_contract>
-Every Bash tool call runs in a fresh shell — exports do NOT survive. Prefix the minimum env vars on every script invocation. The minimum for any {SCRIPTS_DIR}/*.sh exec is:
-
-  PROJECT={PROJECT} GROUP={GROUP} \
-  ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-  REPO_PATH={REPO_PATH} \
-
-`REPO_PATH` carries the parent checkout — the shared object database every per-issue worktree branches from. It is NOT the same as `WORKTREE_DIR` (which is your shared per-issue linked worktree for this IID, reused across attempts). Pass `REPO_PATH={REPO_PATH}` so `env_paths.sh` can re-derive `WORKTREE_DIR={WORKTREE_DIR}` from `ISSUE_IID` (the path no longer depends on `ATTEMPT_NUMBER`, though `LOG_DIR` still does). Some steps add per-step vars (listed in the step). Never rely on `cd` or exports from a previous Bash exec.
-</env_contract>
-
 <instructions>
-Follow steps 0-9 in order. Capture the variables marked CAPTURE — they go into the final JSON. If a step instructs FAIL, jump to the FAIL flow at the bottom; do not continue.
+1. Make one Bash tool call with a PTY. Use a tool command timeout of at least
+   `{ACPX_TIMEOUT_SECONDS} + 2400` seconds so the wrapper's internal acpx and
+   post-acpx caps fire first. Invoke exactly:
 
-Step 0 — SETUP
-  Confirm the shared per-issue worktree exists at the absolute path {WORKTREE_DIR}. Confirm `{OUTPUT_DIR}` exists. Do this with a single absolute-path check that survives the fresh-shell-per-exec contract, e.g.:
+   PROJECT={PROJECT} GROUP={GROUP} \
+     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+     REPO_PATH={REPO_PATH} \
+     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
+     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
+     ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
+     bash {SCRIPTS_DIR}/run_executor_attempt.sh
 
-    ls -d {WORKTREE_DIR} {OUTPUT_DIR}
+2. Wait for that same tool call to finish. Never start a second wrapper or
+   acpx process. The wrapper may print `ACPX_EXIT=<n>` before its final line.
 
-  If either path is missing → FAIL status=blocked block_reason="worktree or output directory missing". Do NOT issue a bare `cd {WORKTREE_DIR}` as a standalone Bash tool call expecting it to persist — `cd` does NOT survive across exec calls (see <env_contract>). Step 1's `bash {SCRIPTS_DIR}/run_acpx_attempt.sh` is invoked by absolute path and does its own internal `cd {WORKTREE_DIR}` before running acpx, so the subagent does not need to set cwd itself.
+3. If the tool's last non-empty stdout line is a compact JSON object, output
+   that exact line as your entire final answer. Do not rewrite, summarize, or
+   surround it with prose or a code fence. It has exactly the worker-result
+   fields required by the parent.
 
-Step 1 — EXECUTE acpx (one-shot, long-running)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
-    bash {SCRIPTS_DIR}/run_acpx_attempt.sh
-  CAPTURE: acpx_exit — but ONLY trust it when the script actually printed a
-  literal `ACPX_EXIT=<n>` line on stdout. That line is the script's proof that
-  acpx ran to completion (or was killed by the script's OWN `timeout` wrapper)
-  and that `<n>` is acpx's real exit code. If you do NOT see an `ACPX_EXIT=<n>`
-  line in the captured output, you do NOT have a real acpx exit code — do not
-  invent one from the Bash tool's own status (a tool-side timeout / killed
-  child can surface 124, 137, 143, 1, or nothing at all without acpx itself
-  having exited).
-  Exit-code routing (apply the FIRST matching rule, top to bottom):
-    - NO `ACPX_EXIT=<n>` line     → the acpx run did NOT cleanly terminate
-      in the captured output         under the script's control (tool-side
-                                     command timeout, tool disconnect,
-                                     truncated/streamed-away output, or the
-                                     Bash tool killed the process). Enter the
-                                     <timeout_flow>, NOT the BLOCKED_PUSH flow.
-                                     This is the single most important rule:
-                                     a missing `ACPX_EXIT=` line means acpx may
-                                     still be running in the background, and
-                                     marking the issue `blocked` while acpx is
-                                     alive is a known failure mode. Treat it
-                                     identically to acpx_exit=124. Do NOT
-                                     re-run acpx for the same attempt.
-    - `ACPX_EXIT=0`              → continue to Step 2.
-    - `ACPX_EXIT=124` or `=137`  → the script's `timeout` wrapper killed acpx
-                                     because it exceeded {ACPX_TIMEOUT_SECONDS}s
-                                     (124 = SIGTERM kill, 137 = SIGKILL
-                                     kill-after). The acpx process is already
-                                     gone. Enter the dedicated TIMEOUT flow
-                                     described in <timeout_flow> below — do NOT
-                                     enter the normal FAIL flow and do NOT mark
-                                     the issue blocked. The partial work in the
-                                     worktree still gets force-pushed to
-                                     {WORK_BRANCH}, but no MR / `pr` is opened.
-    - any other `ACPX_EXIT=<n>`  → a clean, script-reported acpx failure
-      (n ∉ {0, 124, 137})            (n is acpx's real exit code). Enter the
-                                     dedicated BLOCKED_PUSH flow described in
-                                     <blocked_push_flow> below with
-                                     status=blocked and
-                                     block_reason="acpx run failed (exit <n>); see {LOG_DIR}/acpx_raw.log".
-  Only a genuine `ACPX_EXIT=<n>` line with n ∉ {0,124,137} may route to
-  `blocked`. Do NOT inspect or tail acpx logs after such a failure; preserve
-  the logs and enter the BLOCKED_PUSH flow immediately.
-
-  {SCRIPTS_DIR}/run_acpx_attempt.sh owns the acpx argv and runs Claude Code
-  from {WORKTREE_DIR} with {LOG_DIR}/prompt.txt as the issue prompt. Do not
-  construct an acpx command yourself.
-
-  Tool-exec requirements for Step 1:
-  - Start the command with a PTY (`pty=true` / `tty=true`) on the FIRST attempt.
-  - Use a command timeout that covers the whole expected Claude Code run AND gives the script's internal `timeout` wrapper enough headroom to fire first. The deployment value is {ACPX_TIMEOUT_SECONDS} seconds (configurable via the `acpx_timeout_seconds` trigger field — see [`trigger_command.md`](./trigger_command.md)). Pass `{ACPX_TIMEOUT_SECONDS} + 120` seconds (i.e. ~2 minutes of extra grace) as the Bash tool's command timeout so the script can return its exit code 124/137 before the outer tool gives up.
-  - If the tool supports `yieldMs` / pollable sessions, use it so a long-running acpx process can be polled instead of restarted.
-  - NEVER re-run `acpx` just because the exec tool timed out or stopped streaming. If the original process is pollable, poll that same process until it exits (the script's own `timeout` will eventually kill acpx and return 124/137; you read the exit code from there).
-  - If the Bash tool itself returns without a captured `ACPX_EXIT=` line (tool-side command timeout, disconnect, or truncated output) — which should not normally happen because the script's `timeout` fires first and the deployment sets the Bash command timeout to {ACPX_TIMEOUT_SECONDS} + 120 — treat the situation identically to acpx_exit=124 and enter the TIMEOUT flow below (NOT the blocked flow). `run_acpx_attempt.sh` runs acpx in its own process group and installs a SIGTERM/INT/HUP trap that tears the acpx subtree down on a catchable shutdown signal, but a SIGKILL of the script cannot be trapped — so acpx MAY still be running in the background. That residual-orphan risk is exactly why a missing `ACPX_EXIT=` line MUST route to `timeout`, never `blocked`. Do NOT start another acpx for the same attempt.
-  - {SCRIPTS_DIR}/run_acpx_attempt.sh `cd`s into `{WORKTREE_DIR}` (the shared per-issue worktree) and invokes `acpx --auth-policy skip claude exec -f {LOG_DIR}/prompt.txt`. Current acpx releases expose `claude exec` as a one-shot command with no saved-session flag, so attempts of the same IID do NOT share Claude-Code session memory at the acpx level. Continue-mode continuity comes from the self-contained prompt, prior attempt summaries, reviewer comments, and restored same-IID runtime files. Fresh-mode runs deliberately quarantine same-IID runtime residue before the new acpx invocation.
-
-  HARD PROHIBITIONS for Step 1 (no exceptions):
-  - do not call `acpx` directly; only call {SCRIPTS_DIR}/run_acpx_attempt.sh
-  - no `--no-wait`, no streaming acpx mode, no `acpx claude command`
-  - do not add, remove, or rewrite acpx flags; run_acpx_attempt.sh owns the fixed `--auth-policy skip` invocation
-  - do not call `claude` directly without acpx
-  - do not substitute another LLM CLI (`openai` / `gemini` / `ollama` / etc.)
-  - if acpx fails, preserve all of {LOG_DIR}; do NOT delete partial logs
-
-Step 2 — STAGE
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/stage_and_guard.sh
-  CAPTURE: stage_status (one of: STAGED_OK, NO_CHANGES).
-  exit 0, stdout "STAGED_OK"  → continue to Step 3.
-  exit 0, stdout "NO_CHANGES" → FAIL status=blocked block_reason="Claude produced no staged changes".
-                                Do NOT push. Do NOT create an MR.
-  any other non-zero exit     → FAIL status=blocked block_reason="stage step failed: <last stderr line>".
-
-Step 3 — COMMIT + force-push (Strategy A)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-    bash {SCRIPTS_DIR}/commit_and_push.sh
-  CAPTURE: commit_sha (printed by the script).
-  Non-zero exit → FAIL status=blocked block_reason="git push failed: <last stderr line>".
-  Do NOT retry with --force outside this script. Do NOT rebase + re-push. Do NOT push to a different branch name.
-
-Step 4 — POST-PUSH verify
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/post_push_verify.sh
-  exit 0 → continue.
-  any non-zero exit → FAIL status=blocked block_reason="post-push verification failed: <last stderr line>".
-
-Step 5 — TRANSITION doing → done
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/set_issue_label.sh add done
-  Each invocation MUST be a separate Bash exec. Non-zero exit on either → FAIL status=blocked block_reason="label transition doing→done failed: <stderr>".
-  CAPTURE labels_removed includes "doing"; labels_added includes "done".
-
-Step 6 — CREATE / rotate the MR
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} WORKTREE_DIR={WORKTREE_DIR} \
-    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-    ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
-    bash {SCRIPTS_DIR}/create_mr.sh
-  CAPTURE: merge_request_url = first stdout line, mr_action = second stdout line (one of: created, rotated).
-  Non-zero exit → FAIL status=blocked block_reason="MR creation failed: <last stderr line>".
-
-  Rotation policy (both ISSUE_MODE values follow the same path; the
-  script `cd`s into {WORKTREE_DIR} first because glab `mr create` shells
-  out to `git` internally even with `--repo`):
-  - If one or more open MRs already point at {WORK_BRANCH}, close them
-    without merging (the integration branch is untouched; closed MR
-    objects remain as historical record) and then create a fresh MR
-    whose description references them as `Supersedes !<old_iid>`.
-    mr_action = "rotated".
-  - If no open MR exists, just create a new one. mr_action = "created".
-  - mr_action = "reused" no longer occurs — every new attempt produces
-    a fresh MR object so reviewers see attempts as separate MRs rather
-    than a force-pushed branch silently updating an old MR.
-
-  Do NOT call `glab mr merge`. Do NOT close the issue. GitLab auto-closes via `Closes #{ISSUE_IID}` in the MR body.
-
-Step 7 — ADD `pr` label
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/set_issue_label.sh add pr
-  Non-zero exit → FAIL status=blocked block_reason="add pr label failed: <stderr>".
-
-  After this step the live issue should carry `pr` only — `set_issue_label.sh add pr` removes `done` (pr replaces done). Set ATTEMPT_STATUS=done. CAPTURE labels_added includes "pr"; labels_removed includes "done".
-
-Step 8 — SUMMARIZE
-  ATTEMPT_STATUS=<status from above> \
-    SUMMARY_POST_TO_ISSUE=<true|false> \
-    COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
-    BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed,timeout}> \
-    PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    ISSUE_MODE={ISSUE_MODE} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/summarize_attempt.sh
-  CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
-  Run this on EVERY terminal path — done, no_changes, blocked, failed, timeout.
-  Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, no_changes, and timeout.
-  Failure paths MUST keep summaries local only: set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
-
-Step 9 — REPLY
-  Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
-
-  {"iid":{ISSUE_IID},"attempt_number":{ATTEMPT_NUMBER},"status":"<done|no_changes|blocked|failed|timeout>","mode_actual":"{ISSUE_MODE}","work_branch":"{WORK_BRANCH}","local_branch":"{LOCAL_ATTEMPT_BRANCH}","commit_sha":"<sha or empty>","merge_request_url":"<url or empty>","mr_action":"<created|rotated|none>","wiki_url":"","labels_added":["..."],"labels_removed":["..."],"summary_posted":<true|false>,"block_reason":"<string or empty>","log_dir":"{LOG_DIR}"}
-
-  Field rules:
-  - status = done           when Steps 0-7 all succeeded.
-  - status = no_changes     legacy only; new runs MUST convert Step 2 NO_CHANGES to blocked with block_reason="Claude produced no staged changes".
-  - status = blocked        when any FAIL flow or BLOCKED_PUSH flow was entered with a retryable reason. block_reason MUST be non-empty.
-  - status = failed         only when the dispatcher explicitly told you the retry budget is exhausted (it does not — leave this status to the dispatcher's Phase 6 promotion). For now, prefer `blocked` over `failed`.
-  - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137}, tool-side timeout, or the whole-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap from <constraints>). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap", or "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" for the whole-run cap). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
-  - labels_added / labels_removed: the actual transitions you performed. For done: ["pr"] added, ["doing","done"] removed (pr replaces done — done was a transient set in Step 5 then removed when pr is added). For blocked before `done`: ["blocked-cc"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked-cc" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
-  - mr_action = none when no MR step ran (no_changes / blocked before Step 6 / BLOCKED_PUSH / timeout).
-  - wiki_url is a legacy compatibility field and MUST be "".
-  - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
-  - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
-
-  This single JSON line is the ONLY artifact the dispatcher reads from your reply. Do NOT additionally write the terminal issue state or attempt state files yourself; the dispatcher (Phase 6) writes those files from this JSON.
+4. If the tool returns without a compact JSON last line, output no invented
+   result and do not call another tool. The heartbeat will inspect the durable
+   acpx marker/result files, classify the interruption, and reclaim the slot.
 </instructions>
 
 <constraints>
-- No-fallback. If any {SCRIPTS_DIR}/*.sh exits non-zero, classify and FAIL — never improvise, never re-run with different flags, never call a "simpler" command instead. Do NOT inspect a script's *internal* tooling (jq, python3, git, glab) and decide it is buggy: these scripts are deployment-pinned and version-tested against this runner. A non-zero exit or a surprising message means report the exact stderr and FAIL — not "diagnose, patch, retry".
-- acpx is script-owned. The only allowed acpx execution path is {SCRIPTS_DIR}/run_acpx_attempt.sh; do not type an acpx command in any tool call.
-- glab CLI only. No curl / wget / Python HTTP / python-gitlab / @gitbeaker.
-- Strategy A force-push lives inside {SCRIPTS_DIR}/commit_and_push.sh. No extra `git push --force` outside it. No rebase + re-push.
-- Do NOT close the issue. Do NOT call `glab mr merge`. Do NOT touch other issues.
-- Destructive deletion is forbidden. Do NOT call `rm`, `/bin/rm`, `git rm`, `unlink`, `find -delete`, or script file deletion through another runtime. If cleanup appears necessary, leave files in place and FAIL status=blocked with a clear reason.
-- Hard timeout: {ACPX_TIMEOUT_MINUTES} minutes wall-clock for the whole subagent run. If you cannot finish in time, enter <timeout_flow> with ATTEMPT_STATUS=timeout and BLOCK_REASON="executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" — NEVER reply status=blocked for running out of time. Timeouts park terminally (no auto-retry); a blocked reply would wrongly re-enter the retry pool.
-- Never paste full diffs, full claude_result.txt, or long issue bodies into chat.
+- The fixed wrapper is the only execution path. It is intentionally one long
+  synchronous Bash call so OpenClaw does not need another model turn between
+  acpx completion and post-acpx finalization.
+- `run_acpx_attempt.sh` remains the only owner of the exact
+  `acpx --auth-policy skip claude exec -f` invocation.
+- The wrapper applies bounded timeouts to every post-acpx Git/GitLab step and
+  atomically writes `{LOG_DIR}/worker_result.json` before printing it.
+- The whole outer run remains bounded by the deployment's global subagent
+  timeout; the periodic heartbeat additionally reclaims post-acpx stalls.
+- Never paste logs, diffs, prompt contents, or credentials into the reply.
 </constraints>
-
-<fail_flow>
-When any step instructs "FAIL with status=X, block_reason=Y":
-  1. Stop the algorithm at this step. Do NOT continue to later steps. Step 1 acpx non-timeout failures do not use this flow; they use <blocked_push_flow> so any committable generated files can still be pushed.
-  2. Set ATTEMPT_STATUS=X, BLOCK_REASON=Y.
-  3. Immediately sync the live issue label to blocked before summarizing. Each invocation MUST be a separate Bash exec, in the exact form used at Step 5 / B4 / T4 (full `bash {SCRIPTS_DIR}/set_issue_label.sh ...` absolute path + inline env vars):
-     - PROJECT={PROJECT} GROUP={GROUP} \
-         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-         REPO_PATH={REPO_PATH} \
-         bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-     - PROJECT={PROJECT} GROUP={GROUP} \
-         ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-         REPO_PATH={REPO_PATH} \
-        bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
-     - If either label-sync exec fails, keep status=X and append `; blocked label sync failed: <stderr>` to BLOCK_REASON. Do not continue to commit, push, MR, or pr.
-     - Record successful label operations in labels_removed / labels_added. Do not remove `done` if it was already added; a failure after Step 5 should leave the issue as `done` + `blocked-cc` and without `pr`.
-  4. Leave commit_sha / merge_request_url empty if those steps were not reached. Always leave wiki_url empty.
-  5. Run Step 8 (summarize) with ATTEMPT_STATUS / BLOCK_REASON and SUMMARY_POST_TO_ISSUE=false.
-  6. Output the compact JSON per Step 9 with status=X and block_reason=Y filled in.
-
-Always prefer `blocked` over `failed` — the dispatcher promotes `blocked → failed` in Phase 6 only when retry_count exceeds blocked_retry_limit.
-</fail_flow>
-
-<blocked_push_flow>
-Entered when Step 1 saw a non-timeout acpx failure after the shared worktree
-was prepared. The current attempt still ends as `blocked`, but any committable
-generated files should be force-pushed to {WORK_BRANCH} if the normal staging
-and push scripts can do so.
-
-Set ATTEMPT_STATUS=blocked and set BLOCK_REASON to the Step 1 failure reason
-before starting this flow. Keep that status even if stage, commit, push, or
-post-push verification fails; append diagnostics to BLOCK_REASON instead of
-reclassifying.
-
-B1 — STAGE (same script as Step 2 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/stage_and_guard.sh
-  CAPTURE: stage_status.
-  - "STAGED_OK"   → continue to B2.
-  - "NO_CHANGES"  → SKIP B2 + B3 (nothing to push). commit_sha stays "".
-                    Append "; no staged changes to push" to BLOCK_REASON.
-                    Jump to B4.
-  - non-zero exit → SKIP B2 + B3. Append "; stage step failed: <stderr>"
-                    to BLOCK_REASON. Jump to B4.
-
-B2 — COMMIT + force-push (same script as Step 3 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-    bash {SCRIPTS_DIR}/commit_and_push.sh
-  CAPTURE: commit_sha (script stdout).
-  Non-zero exit → leave commit_sha empty, append "; commit_and_push step
-  failed: <last stderr line>" to BLOCK_REASON, jump to B4.
-
-B3 — POST-PUSH verify (best-effort; same script as Step 4)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/post_push_verify.sh
-  Non-zero exit → append "; post-push verify failed: <last stderr line>"
-  to BLOCK_REASON. Do NOT abandon the blocked flow on this failure.
-
-B4 — LABEL doing → blocked
-  Each invocation MUST be a separate Bash exec.
-  - PROJECT={PROJECT} GROUP={GROUP} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-      REPO_PATH={REPO_PATH} \
-      bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-  - PROJECT={PROJECT} GROUP={GROUP} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-      REPO_PATH={REPO_PATH} \
-      bash {SCRIPTS_DIR}/set_issue_label.sh add blocked-cc
-  If either exec fails, append "; blocked label sync failed: <stderr>"
-  to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
-  the compact reply.
-  CAPTURE: record successful operations in labels_removed (include
-  "doing") and labels_added (include "blocked-cc").
-
-B5 — SUMMARIZE (local-only; SAME script as Step 8)
-  ATTEMPT_STATUS=blocked \
-    SUMMARY_POST_TO_ISSUE=false \
-    COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
-    BLOCK_REASON=<BLOCK_REASON> \
-    PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    ISSUE_MODE={ISSUE_MODE} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/summarize_attempt.sh
-  Always SUMMARY_POST_TO_ISSUE=false for blocked — evidence stays local
-  under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for blocked
-  attempts even when a partial commit was pushed.
-
-B6 — REPLY
-  Emit the compact JSON per Step 9 with:
-    status            = "blocked"
-    mr_action         = "none"
-    merge_request_url = ""
-    wiki_url          = ""
-    commit_sha        = <captured in B2; "" if B2 was skipped or failed>
-    labels_added      = ["blocked-cc"]   (plus any other successfully-added)
-    labels_removed    = ["doing"]        (plus any other successfully-removed)
-    summary_posted    = false
-    block_reason      = <BLOCK_REASON, non-empty>
-
-HARD rules for the blocked push flow:
-- Do NOT run Step 5 (doing → done), Step 6 (create_mr.sh), or Step 7
-  (add `pr`). The issue gets `blocked`, NOT
-  `done` + `pr`, and no MR is opened for a known-failing attempt.
-- Do NOT call `acpx` again. The failed run already produced the only
-  worktree contents eligible for this attempt's push.
-- Do NOT use any push command except {SCRIPTS_DIR}/commit_and_push.sh.
-</blocked_push_flow>
-
-<timeout_flow>
-Entered when Step 1 saw a clean `ACPX_EXIT=124` or `ACPX_EXIT=137` line (the
-script's `timeout` wrapper killed acpx because it exceeded
-{ACPX_TIMEOUT_SECONDS}s), OR when the Step 1 output carried NO `ACPX_EXIT=`
-line at all (tool-side command timeout, disconnect, or truncated output — acpx
-did not cleanly terminate under the script's control and may still be running),
-OR when the whole-subagent-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap
-from <constraints> is exceeded at any point in the algorithm.
-All three cases land here, NOT in the blocked flow — running out of time is
-always status=timeout, never status=blocked.
-
-Set ATTEMPT_STATUS=timeout up front, with BLOCK_REASON matching the entry:
-    acpx kill / missing ACPX_EXIT → "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap"
-    whole-run cap                 → "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap"
-These stick through the rest of the flow regardless of which
-sub-steps succeed.
-
-T1 — STAGE (same script as Step 2 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/stage_and_guard.sh
-  CAPTURE: stage_status.
-  - "STAGED_OK"   → continue to T2.
-  - "NO_CHANGES"  → SKIP T2 + T3 (nothing to push). commit_sha stays "".
-                    Append "; no staged changes to push" to BLOCK_REASON.
-                    Jump to T4.
-  - non-zero exit → SKIP T2 + T3. Append "; stage step failed: <stderr>"
-                    to BLOCK_REASON. Jump to T4.
-
-T2 — COMMIT + force-push (same script as Step 3 of the normal flow)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    REPO_PATH={REPO_PATH} \
-    ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-    bash {SCRIPTS_DIR}/commit_and_push.sh
-  CAPTURE: commit_sha (script stdout).
-  Non-zero exit → leave commit_sha empty, append "; commit_and_push step
-  failed: <last stderr line>" to BLOCK_REASON, jump to T4. The timeout
-  status itself is preserved either way (commit OR push failure does NOT
-  re-classify the issue as blocked).
-
-T3 — POST-PUSH verify (best-effort; same script as Step 4)
-  PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} BRANCH={BRANCH} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/post_push_verify.sh
-  Non-zero exit → append "; post-push verify failed: <last stderr line>"
-  to BLOCK_REASON. Do NOT abandon the timeout flow on this failure.
-
-T4 — LABEL doing → timeout
-  Each invocation MUST be a separate Bash exec.
-  - PROJECT={PROJECT} GROUP={GROUP} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-      REPO_PATH={REPO_PATH} \
-      bash {SCRIPTS_DIR}/set_issue_label.sh remove doing
-  - PROJECT={PROJECT} GROUP={GROUP} \
-      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-      REPO_PATH={REPO_PATH} \
-      bash {SCRIPTS_DIR}/set_issue_label.sh add timeout
-  If either exec fails, append "; timeout label sync failed: <stderr>"
-  to BLOCK_REASON. Phase 6 will re-apply the label set idempotently from
-  the compact reply.
-  CAPTURE: record successful operations in labels_removed (include
-  "doing") and labels_added (include "timeout").
-
-T5 — SUMMARIZE (local-only; SAME script as Step 8)
-  ATTEMPT_STATUS=timeout \
-    SUMMARY_POST_TO_ISSUE=false \
-    COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL="" \
-    BLOCK_REASON=<BLOCK_REASON> \
-    PROJECT={PROJECT} GROUP={GROUP} \
-    ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-    ISSUE_MODE={ISSUE_MODE} \
-    REPO_PATH={REPO_PATH} \
-    bash {SCRIPTS_DIR}/summarize_attempt.sh
-  Always SUMMARY_POST_TO_ISSUE=false for timeout — evidence stays local
-  under ${LOG_DIR} / ${ISSUE_ROOT}; we do NOT post a comment for timeouts.
-
-T6 — REPLY
-  Emit the compact JSON per Step 9 with:
-    status            = "timeout"
-    mr_action         = "none"
-    merge_request_url = ""
-    wiki_url          = ""
-    commit_sha        = <captured in T2; "" if T2 was skipped or failed>
-    labels_added      = ["timeout"]      (plus any other successfully-added)
-    labels_removed    = ["doing"]        (plus any other successfully-removed)
-    summary_posted    = false
-    block_reason      = <BLOCK_REASON, non-empty>
-
-HARD rules for the timeout flow:
-- Do NOT run Step 5 (doing → done), Step 6 (create_mr.sh), or Step 7
-  (add `pr`). The issue gets `timeout`, NOT
-  `done` + `pr`.
-- Do NOT prefer `blocked` over `timeout` here — `timeout` is its own
-  terminal status and is what the dispatcher's bookkeeping expects for
-  this signal. The dispatcher does NOT auto-retry timeouts; reviewers
-  must strip `timeout`, add `retry`, or apply `continue` to re-run.
-- Do NOT call `acpx` again. The script already killed acpx; restarting
-  it would burn another full timeout window for the same attempt.
-</timeout_flow>
 # REQ_EXECUTOR_EXECUTOR_PROMPT_V1_END
 ```
 
----
+## Rendering Notes
 
-## Rendering Notes (for the Dispatcher)
-
-- The placeholder `{ISSUE_TITLE_QUOTED}` is the shell-quoted form of the issue title (single quotes around it; embedded `'` replaced with `'\''`). The plain `{ISSUE_TITLE}` is for the `<issue>` block only — do not inject it raw into a shell command.
-- `{ISSUE_BODY}` is for the `<issue>` block only. Truncate to ≤ 4 KB. The full body is already on disk at `{LOG_DIR}/prompt.txt`; the subagent feeds *that file* to acpx.
-- The dispatcher MUST verify all placeholders have been substituted before
-  hashing and publishing `executor_payload.txt`. A literal `{` followed by an
-  uppercase identifier is a missed substitution; abort the IID with
-  `block_reason="prompt template render incomplete: <placeholder>"`.
-- The runtime receives only the separate secret-free bootstrap. The verified
-  executor payload invokes fixed scripts, which resolve credentials privately;
-  no token is rendered into either task layer.
-- **`sessions_spawn` shape (anonymous + `task=<secret-free bootstrap>` +
-  cosmetic `label=` + `runtime="subagent"` + `mode="run"` + `cleanup="keep"`
-  + serial-only + 3-attempt launch retry) is the common OpenClaw
-  2026.4.9/2026.6.11 contract
-  in [`SKILL.md`](../SKILL.md) §The orchestrator loop and §No-Fallback.** Do NOT
-  pass `name=` / `session_name=` / `mode="session"`. Always pass the
-  wrapper-provided `child_label` verbatim. Validate the launch ack carries both
-  `runId` and `childSessionKey`, and record the same
-  `expected_task_sha256`/`expected_task_bytes`; retry only the identical
-  bootstrap bytes. Matched callbacks identify the IID by the compact JSON's
-  `iid`, not by the runtime label. The verified executor payload's IID must
-  therefore be correct.
-- **Native asynchronous completion.** The subagent's compact JSON reply arrives
-  inside a protected OpenClaw `task_completion` event, never as the synchronous
-  return of `sessions_spawn` and never as a newly synthesized
-  `RUN_CHILD_COMPLETION_CALLBACK`. The subagent emits the compact JSON line on
-  its last turn (Step 9) and stops. The parent passes the complete event to
-  `ingest_subagent_completion.sh`, which authenticates runtime identity before
-  Phase 6 owns all terminal state writes. A bounded, non-truncated
-  `sessions_history` lookup is only an on-demand recovery path.
+- The dispatcher must substitute every uppercase placeholder before hashing and
+  publishing the payload. A missed placeholder aborts preparation.
+- The runtime receives only the secret-free bootstrap. The verified private
+  payload invokes the fixed wrapper and contains no GitLab token.
+- The subagent's normal completion is still a protected OpenClaw native event.
+  If the outer model fails to emit its final line, the heartbeat instead reads
+  the wrapper's durable result under the same claim fence, runs Phase 6, then
+  requests best-effort native child cleanup.

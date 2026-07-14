@@ -6,6 +6,7 @@ SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PROMPT_TEMPLATE="${SKILL_DIR}/references/executor_prompt.md"
 BUILD_PROMPT="${SKILL_DIR}/scripts/build_prompt.sh"
 RUN_SCRIPT="${SKILL_DIR}/scripts/run_acpx_attempt.sh"
+ATTEMPT_WRAPPER="${SKILL_DIR}/scripts/run_executor_attempt.sh"
 DISPATCH_SINGLE="${SKILL_DIR}/scripts/dispatch_single_issue.sh"
 DISPATCH_PREPARE="${SKILL_DIR}/scripts/dispatch_prepare_tick.sh"
 PREPARE_ATTEMPT="${SKILL_DIR}/scripts/prepare_attempt.sh"
@@ -55,6 +56,12 @@ done
 
 if ! printf '%s\n' "${rendered_block}" | grep -Fq "run_acpx_attempt.sh"; then
   fail "outer executor prompt no longer delegates acpx execution to run_acpx_attempt.sh"
+fi
+if ! printf '%s\n' "${rendered_block}" | grep -Fq "run_executor_attempt.sh"; then
+  fail "outer executor prompt no longer delegates the whole attempt to run_executor_attempt.sh"
+fi
+if [ ! -x "${ATTEMPT_WRAPPER}" ]; then
+  fail "run_executor_attempt.sh is missing or not executable"
 fi
 
 if printf '%s\n' "${rendered_block}" | grep -Fq "{GITLAB_TOKEN}"; then

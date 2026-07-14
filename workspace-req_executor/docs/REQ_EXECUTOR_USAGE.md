@@ -45,7 +45,7 @@ force_rerun_pr=true|false
 
 根据 selector 类型再提供 `iid`、`iids`、`iid_min/iid_max` 或 `label`，可选 `branch`。`iid_list` 的 `iids` 必须是至少两个升序去重的逗号分隔正整数，例如 `1,4,5`。I1 字段用于项目、selector 与回调路由；executor 按进程环境优先、tracked `config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，完成 OPEN Issue 查询，并在内部执行链和子任务 prompt 中直接传递该值。私有仓库网络 Git 操作使用普通 `git`，`origin` 为 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL，Git 子进程继承 executor 当前环境。Issue 列表使用 GraphQL cursor 完整扫描，重复 IID、异常游标或扫描预算耗尽都会失败关闭；只有连续两次规范化结果一致才冻结不可变 snapshot。
 
-`run_driven_issue_batch.sh` 与 `dispatch_single_issue.sh` 的 rich envelope 只用于 runtime 编排。按数组原序串行完成 `reconcile_actions`、`spawn_grants` 及逐条 `sessions_spawn` ack 后，Path C/E 必须调用固定 `emit_driven_batch_acceptance.sh`，并把它的唯一一行 JSON 原样返回。公开 acceptance 字段集合固定为：
+`run_driven_issue_batch.sh` 与 `dispatch_single_issue.sh` 的 rich envelope 只用于 runtime 编排。先处理 `cleanup_actions`，再按数组原序串行完成 `reconcile_actions`、`spawn_grants` 及逐条 `sessions_spawn` ack；之后 Path C/E 必须调用固定 `emit_driven_batch_acceptance.sh`，并把它的唯一一行 JSON 原样返回。公开 acceptance 字段集合固定为：
 
 ```text
 status,batch_id,matched_count,snapshot_digest,scheduler_status
@@ -63,7 +63,7 @@ status,batch_id,matched_count,snapshot_digest,scheduler_status
 RUN_EXECUTOR_BATCH_TICK
 ```
 
-建议每分钟在 executor main session 唤醒一次。tick 会先扫描项目 durable intent、导入 terminal handoff、投递 callback outbox，并恢复未完成的 post-spawn coordinator；随后用 scheduler active job 与未完成 launch coordinator 构造保护集，在项目锁内清除不受保护且没有任何运行标识的旧 placeholder。项目预检发现 running Issue 已有 `pr` 或已关闭时，tick 会立即按当前 claim fence 重新核验 GitLab 并生成 `skipped` handoff，不再等待运行租约；超过运行租约且确已越过项目 ACPX 截止时间的丢回调任务仍由 timeout 路径兜底。最后才按严格 round-robin 补满空槽。进程重启或聊天 turn 中断后，下一次 tick 从 durable state 继续。完成批次、已确认 outbox 和完成的 launch action 会退出热索引并保留在按 ID 可定位的冷记录中，周期成本只随活动工作量增长。
+建议每分钟在 executor main session 唤醒一次。tick 会先对账 durable terminal counts，再检查运行任务的 `${LOG_DIR}/worker_result.json`。若 OpenClaw 在长工具调用返回后没有调度外层模型的最终回复，tick 会在当前 claim fence 下直接完成 Phase 6，并通过 `cleanup_actions` 回收仍占用 slot 的 child；随后扫描项目 durable intent、导入 terminal handoff、投递 callback outbox，并恢复未完成的 post-spawn coordinator。`run_acpx_attempt.sh` 会在 acpx 结束时先写 `${LOG_DIR}/acpx_terminal.json`；若完整结果在默认 2400 秒宽限期后仍未出现，tick 仅回收身份完全匹配的 child。之后 tick 用 scheduler active job 与未完成 launch coordinator 构造保护集，在项目锁内清除不受保护且没有任何运行标识的旧 placeholder。项目预检发现 running Issue 已有 `pr` 或已关闭时，tick 会立即按当前 claim fence 重新核验 GitLab 并生成 `skipped` handoff，不再等待运行租约；超过运行租约且确已越过项目 ACPX 截止时间的丢回调任务仍由 timeout 路径兜底。最后才按严格 round-robin 补满空槽。进程重启或聊天 turn 中断后，下一次 tick 从 durable state 继续。完成批次、已确认 outbox 和完成的 launch action 会退出热索引并保留在按 ID 可定位的冷记录中，周期成本只随活动工作量增长。
 
 整个 topup/skip-finalize 事务由 agent 级 nonblocking tick 锁串行化；重叠唤醒立即返回 `idle`，不会使用旧的 pending 快照终结刚创建的新任务。
 
@@ -145,10 +145,13 @@ ${REPO_PATH}/.req_executor/
     .req_executor/issue-<iid>/log/attempt-NNN/
 ```
 
-`run_acpx_attempt.sh` runs from `${WORKTREE_DIR}` and invokes:
+The outer subagent calls `run_executor_attempt.sh` exactly once. That fixed
+wrapper owns the full attempt and persists `${LOG_DIR}/worker_result.json`.
+Inside it, `run_acpx_attempt.sh` runs from `${WORKTREE_DIR}` and invokes:
 
 ```bash
 acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"
 ```
 
-The acpx invocation logic is intentionally centralized in that script.
+The acpx invocation logic is intentionally centralized in that script. It
+also writes `${LOG_DIR}/acpx_terminal.json` before returning to the wrapper.

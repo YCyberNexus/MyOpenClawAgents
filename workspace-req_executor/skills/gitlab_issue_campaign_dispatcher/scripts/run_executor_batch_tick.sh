@@ -84,6 +84,8 @@ MAX_CONCURRENCY_PROCESS_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 MAX_CONCURRENCY_PROCESS_OVERRIDE="${EXECUTOR_MAX_CONCURRENCY:-}"
 RUNNING_LEASE_PROCESS_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
 RUNNING_LEASE_PROCESS_OVERRIDE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
+POST_ACPX_GRACE_PROCESS_SET="${EXECUTOR_POST_ACPX_GRACE_SECONDS+x}"
+POST_ACPX_GRACE_PROCESS_OVERRIDE="${EXECUTOR_POST_ACPX_GRACE_SECONDS:-}"
 EXECUTOR_AGENT_PROCESS_SET="${EXECUTOR_AGENT+x}"
 EXECUTOR_AGENT_PROCESS_OVERRIDE="${EXECUTOR_AGENT:-}"
 CALLBACK_TARGET_PROCESS_SET="${DISPATCHER_CALLBACK_TARGET+x}"
@@ -111,6 +113,7 @@ if [ -f "${CONFIG_DIR}/campaign_defaults.local.env" ]; then
   source "${CONFIG_DIR}/campaign_defaults.local.env"
 fi
 : "${EXECUTOR_RUNNING_LEASE_SECONDS:=21600}"
+: "${EXECUTOR_POST_ACPX_GRACE_SECONDS:=2400}"
 if [ "${SCHEDULER_ROOT_PROCESS_SET}" = x ]; then
   EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT_PROCESS_OVERRIDE}"
 fi
@@ -119,6 +122,9 @@ if [ "${MAX_CONCURRENCY_PROCESS_SET}" = x ]; then
 fi
 if [ "${RUNNING_LEASE_PROCESS_SET}" = x ]; then
   EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_PROCESS_OVERRIDE}"
+fi
+if [ "${POST_ACPX_GRACE_PROCESS_SET}" = x ]; then
+  EXECUTOR_POST_ACPX_GRACE_SECONDS="${POST_ACPX_GRACE_PROCESS_OVERRIDE}"
 fi
 if [ "${EXECUTOR_AGENT_PROCESS_SET}" = x ]; then
   EXECUTOR_AGENT="${EXECUTOR_AGENT_PROCESS_OVERRIDE}"
@@ -140,6 +146,12 @@ case "${GITLAB_TOKEN_EFF}" in
 esac
 : "${GITLAB_HOST:?run_executor_batch_tick.sh: GITLAB_HOST missing}"
 : "${GITLAB_API_PROTOCOL:?run_executor_batch_tick.sh: GITLAB_API_PROTOCOL missing}"
+case "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" in
+  ''|*[!0-9]*) tick_die "EXECUTOR_POST_ACPX_GRACE_SECONDS must be a positive integer" ;;
+esac
+if [ "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" -lt 60 ]; then
+  tick_die "EXECUTOR_POST_ACPX_GRACE_SECONDS must be >= 60"
+fi
 
 # scheduler_env exports all paths and validates the deployment concurrency pin.
 # shellcheck disable=SC1090
@@ -150,6 +162,15 @@ source "${SCHEDULER_ENV_CMD}" >/dev/null
 export REPO_PARENT_PATH="${REPO_PARENT_BASE}"
 export GITLAB_HOST="${GITLAB_HOST_RESOLVED}"
 export GITLAB_API_PROTOCOL="${GITLAB_PROTOCOL_RESOLVED}"
+if [ "${POST_ACPX_GRACE_PROCESS_SET}" = x ]; then
+  EXECUTOR_POST_ACPX_GRACE_SECONDS="${POST_ACPX_GRACE_PROCESS_OVERRIDE}"
+fi
+case "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" in
+  ''|*[!0-9]*) tick_die "EXECUTOR_POST_ACPX_GRACE_SECONDS must be a positive integer" ;;
+esac
+if [ "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" -lt 60 ]; then
+  tick_die "EXECUTOR_POST_ACPX_GRACE_SECONDS must be >= 60"
+fi
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_driven_launch_coordinator.sh"
@@ -157,6 +178,7 @@ source "${SCRIPT_DIR}/_driven_launch_coordinator.sh"
 OPERATIONS='[]'
 SPAWN_GRANTS='[]'
 RECONCILE_ACTIONS='[]'
+CLEANUP_ACTIONS='[]'
 HAD_FAILURE=false
 
 append_operation() {
@@ -204,6 +226,7 @@ if [ "${HAD_FAILURE}" = true ]; then
       status:"tick_failed",
       spawn_grants:[],
       reconcile_actions:[],
+      cleanup_actions:[],
       operation_results:$operation_results,
       max_launch_retries:3,
       backoff_seconds:2,
@@ -255,6 +278,229 @@ exec {SNAPSHOT_LOCK_FD}>&-
 
 PROJECTS_JSON="$(jq -c '[.active_jobs[].project] | unique' \
   <<<"${SCHEDULER_SNAPSHOT}")"
+
+# Recover the exact failure mode where the fixed outer wrapper completed acpx
+# (or even the whole attempt) but OpenClaw never scheduled the outer model's
+# next/final turn. A durable worker_result.json is processed immediately under
+# the scheduler claim fence. If only acpx_terminal.json exists and finalization
+# has exceeded its short grace period, request native child cleanup so the
+# OpenClaw subagent slot is not held until the multi-hour running lease expires.
+POST_ACPX_NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
+POST_ACPX_RUNNING_JOBS="$(jq -c '
+  [.active_jobs[]
+    | select(.status == "running"
+      and (.finalization // null) == null
+      and (.claim_generation | type == "number" and . == floor and . > 0)
+      and (.claim_token | type == "string" and length > 0))]
+  | sort_by(.reservation_seq // 0, .job_id)
+' <<<"${SCHEDULER_SNAPSHOT}")"
+while IFS= read -r post_job; do
+  [ -n "${post_job}" ] || continue
+  post_job_id="$(jq -r '.job_id' <<<"${post_job}")"
+  post_project="$(jq -r '.project' <<<"${post_job}")"
+  post_iid="$(jq -r '.iid' <<<"${post_job}")"
+  post_generation="$(jq -r '.claim_generation' <<<"${post_job}")"
+  if ! post_context="$(project_context "${post_project}")"; then
+    continue
+  fi
+  post_repo="$(jq -r '.repo_path' <<<"${post_context}")"
+  post_state_file="${post_repo}/.req_executor/_dispatcher/campaign_state.json"
+  [ -f "${post_state_file}" ] && [ ! -L "${post_state_file}" ] || continue
+  if ! post_pending="$(jq -ce \
+      --argjson iid "${post_iid}" \
+      --arg job_id "${post_job_id}" \
+      --argjson generation "${post_generation}" '
+      (.pending_subagents[($iid | tostring)] // null)
+      | select(type == "object"
+        and .job_id == $job_id
+        and .claim_generation == $generation
+        and (.attempt_number | type == "number" and . == floor and . > 0)
+        and (.run_id | type == "string" and length > 0)
+        and (.child_session_key | type == "string" and length > 0))
+    ' "${post_state_file}" 2>/dev/null)"; then
+    continue
+  fi
+  post_attempt="$(jq -r '.attempt_number' <<<"${post_pending}")"
+  post_run_id="$(jq -r '.run_id' <<<"${post_pending}")"
+  post_child_session_key="$(jq -r '.child_session_key' <<<"${post_pending}")"
+  printf -v post_attempt_padded '%03d' "${post_attempt}"
+  post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log/attempt-${post_attempt_padded}"
+  post_result_file="${post_log_dir}/worker_result.json"
+  post_marker_file="${post_log_dir}/acpx_terminal.json"
+
+  # A durable result is valid only after the fixed acpx wrapper has written its
+  # exact terminal marker for this attempt. This prevents a stray or partial
+  # result file from racing an inner acpx process that is still running.
+  post_marker_json=""
+  post_marker_bytes=""
+  if [ -f "${post_marker_file}" ] && [ ! -L "${post_marker_file}" ]; then
+    post_marker_bytes="$(wc -c <"${post_marker_file}" 2>/dev/null | tr -d ' ' || true)"
+  fi
+  if [[ "${post_marker_bytes}" =~ ^[0-9]+$ ]] \
+      && [ "${post_marker_bytes}" -gt 0 ] \
+      && [ "${post_marker_bytes}" -le 4096 ]; then
+    post_marker_json="$(jq -ce \
+      --argjson iid "${post_iid}" \
+      --argjson attempt "${post_attempt}" '
+      if type == "object"
+        and (keys | sort) == ["attempt_number","completed_at_epoch","exit_code","iid","version"]
+        and .version == 1 and .iid == $iid and .attempt_number == $attempt
+        and (.exit_code | type == "number" and . == floor and . >= 0 and . <= 255)
+        and (.completed_at_epoch | type == "number" and . == floor and . >= 0)
+      then . else error("invalid acpx terminal marker") end
+    ' "${post_marker_file}" 2>/dev/null || true)"
+  fi
+
+  post_result_json=""
+  post_result_bytes=""
+  if [ -n "${post_marker_json}" ] \
+      && [ -f "${post_result_file}" ] && [ ! -L "${post_result_file}" ]; then
+    post_result_bytes="$(wc -c <"${post_result_file}" 2>/dev/null | tr -d ' ' || true)"
+  fi
+  if [[ "${post_result_bytes}" =~ ^[0-9]+$ ]] \
+      && [ "${post_result_bytes}" -gt 0 ] \
+      && [ "${post_result_bytes}" -le 1048576 ]; then
+    post_result_json="$(jq -ce \
+      --argjson iid "${post_iid}" \
+      --argjson attempt "${post_attempt}" \
+      --arg work_branch "issue/${post_iid}" \
+      --arg local_branch "issue/${post_iid}-att${post_attempt_padded}" \
+      --arg log_dir "${post_log_dir}" \
+      --argjson acpx_exit "$(jq -r '.exit_code' <<<"${post_marker_json}")" '
+      if type == "object"
+        and (keys | sort) == ([
+          "attempt_number","block_reason","commit_sha","iid",
+          "labels_added","labels_removed","local_branch","log_dir",
+          "merge_request_url","mode_actual","mr_action","status",
+          "summary_posted","wiki_url","work_branch"
+        ] | sort)
+        and .iid == $iid
+        and .attempt_number == $attempt
+        and (.status as $status
+          | ["done","no_changes","blocked","failed","timeout"]
+          | index($status)) != null
+        and (.mode_actual == "fresh" or .mode_actual == "continue")
+        and .work_branch == $work_branch
+        and .local_branch == $local_branch
+        and (.commit_sha | type == "string"
+          and (length == 0 or test("^[0-9a-fA-F]{7,64}$")))
+        and (.merge_request_url | type == "string")
+        and (.mr_action == "created" or .mr_action == "rotated" or .mr_action == "none")
+        and .wiki_url == ""
+        and (.labels_added | type == "array" and all(.[]; type == "string"))
+        and (.labels_removed | type == "array" and all(.[]; type == "string"))
+        and (.summary_posted | type == "boolean")
+        and (.block_reason | type == "string")
+        and .log_dir == $log_dir
+        and (if .status == "blocked" or .status == "failed" or .status == "timeout"
+          then (.block_reason | length) > 0 else true end)
+        and (if .status == "done" then $acpx_exit == 0 else true end)
+      then . else error("invalid durable worker result") end
+    ' "${post_result_file}" 2>/dev/null || true)"
+  fi
+  if [ -n "${post_result_json}" ]; then
+    post_token_sha256="$(printf '%s' "$(jq -r '.claim_token' <<<"${post_job}")" | dlc_sha256)" \
+      || tick_die "unable to hash durable-result claim fence"
+    set +e
+    post_reconcile_output="$(printf '%s' "${post_result_json}" | \
+      PROJECT="$(jq -r '.slug' <<<"${post_context}")" \
+      GROUP="$(jq -r '.group' <<<"${post_context}")" \
+      GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+      REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${post_context}")" \
+      IID="${post_iid}" DRIVEN_RESULT_RECONCILE=1 \
+      DRIVEN_RECONCILE_JOB_ID="${post_job_id}" \
+      DRIVEN_RECONCILE_CLAIM_GENERATION="${post_generation}" \
+      DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${post_token_sha256}" \
+        bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
+    post_reconcile_rc=$?
+    set -e
+    if [ "${post_reconcile_rc}" -eq 0 ] \
+        && post_reconcile_json="$(jq -ce \
+          --argjson iid "${post_iid}" '
+          if type == "object" and .iid == $iid
+            and (.callback_status | type == "string" and length > 0)
+          then . else error("invalid durable result reconcile envelope") end
+        ' <<<"${post_reconcile_output}" 2>/dev/null)"; then
+      post_reconcile_status="$(jq -r '.callback_status' <<<"${post_reconcile_json}")"
+      append_operation "$(jq -cn \
+        --arg job_id "${post_job_id}" \
+        --arg status "${post_reconcile_status}" '{
+        operation:"durable_worker_result_reconcile",job_id:$job_id,status:$status
+      }')"
+      if [ "${post_reconcile_status}" = handled ] \
+          && jq -e '.cleanup.action == "kill"
+            and (.cleanup.target | type == "string" and length > 0)' \
+            <<<"${post_reconcile_json}" >/dev/null 2>&1; then
+        CLEANUP_ACTIONS="$(jq -c \
+          --argjson cleanup "$(jq -c '.cleanup' <<<"${post_reconcile_json}")" \
+          --arg job_id "${post_job_id}" \
+          --argjson iid "${post_iid}" \
+          --argjson attempt_number "${post_attempt}" \
+          --argjson claim_generation "${post_generation}" '
+          . + [$cleanup + {
+            job_id:$job_id,iid:$iid,attempt_number:$attempt_number,
+            claim_generation:$claim_generation
+          }]
+        ' <<<"${CLEANUP_ACTIONS}")"
+      fi
+    else
+      append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+        operation:"durable_worker_result_reconcile",job_id:$job_id,status:"failed"
+      }')"
+      HAD_FAILURE=true
+    fi
+    continue
+  fi
+
+  if [ -z "${post_marker_json}" ]; then
+    continue
+  fi
+  post_completed_at="$(jq -r '.completed_at_epoch' <<<"${post_marker_json}")"
+  if [ "${post_completed_at}" -gt "${POST_ACPX_NOW_EPOCH}" ] \
+      || [ $((POST_ACPX_NOW_EPOCH - post_completed_at)) \
+        -lt "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" ]; then
+    continue
+  fi
+  CLEANUP_ACTIONS="$(jq -c \
+    --arg target "${post_child_session_key}" \
+    --arg job_id "${post_job_id}" \
+    --arg run_id "${post_run_id}" \
+    --argjson iid "${post_iid}" \
+    --argjson attempt_number "${post_attempt}" \
+    --argjson claim_generation "${post_generation}" \
+    --argjson completed_at_epoch "${post_completed_at}" \
+    --argjson grace_seconds "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" '
+    . + [{
+      action:"kill",target:$target,
+      reason:"post_acpx_finalization_grace_exceeded",
+      job_id:$job_id,run_id:$run_id,iid:$iid,
+      attempt_number:$attempt_number,claim_generation:$claim_generation,
+      completed_at_epoch:$completed_at_epoch,grace_seconds:$grace_seconds
+    }]
+  ' <<<"${CLEANUP_ACTIONS}")"
+  append_operation "$(jq -cn \
+    --arg job_id "${post_job_id}" \
+    --argjson grace_seconds "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" '{
+    operation:"post_acpx_watchdog",job_id:$job_id,status:"kill_required",
+    grace_seconds:$grace_seconds
+  }')"
+done < <(jq -c '.[]' <<<"${POST_ACPX_RUNNING_JOBS}")
+
+if [ "$(jq -r 'length' <<<"${CLEANUP_ACTIONS}")" -gt 0 ]; then
+  jq -cn \
+    --argjson cleanup_actions "${CLEANUP_ACTIONS}" \
+    --argjson operation_results "${OPERATIONS}" '{
+    status:"cleanup_required",
+    spawn_grants:[],
+    reconcile_actions:[],
+    cleanup_actions:$cleanup_actions,
+    operation_results:$operation_results,
+    max_launch_retries:3,
+    backoff_seconds:2,
+    chat_summary:"executor batch tick recovered or reaped post-acpx subagent stalls"
+  }'
+  exit 0
+fi
 
 # A runtime callback can be lost permanently across gateway/process failures.
 # Reconcile only positive-generation jobs whose durable running lease expired,
@@ -559,6 +805,7 @@ if ! flock -n -x "${EXECUTOR_TICK_LOCK_FD}"; then
     status:"idle",
     spawn_grants:[],
     reconcile_actions:[],
+    cleanup_actions:[],
     operation_results:[{operation:"tick_lock",status:"held"}],
     max_launch_retries:3,
     backoff_seconds:2,
@@ -786,6 +1033,7 @@ if [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ]; then
       status:$status,
       spawn_grants:[],
       reconcile_actions:$reconcile_actions,
+      cleanup_actions:[],
       operation_results:$operations,
       max_launch_retries:3,
       backoff_seconds:2,
@@ -813,6 +1061,7 @@ if [ "${RESERVE_RC}" -ne 0 ] || ! RESERVE_JSON="$(printf '%s' "${RESERVE_OUTPUT}
   append_operation "$(jq -cn '{operation:"reservation",status:"failed"}')"
   jq -cn --argjson operations "${OPERATIONS}" '{
     status:"tick_failed",spawn_grants:[],reconcile_actions:[],
+    cleanup_actions:[],
     operation_results:$operations,
     max_launch_retries:3,backoff_seconds:2,
     chat_summary:"executor reservation failed"
@@ -1621,11 +1870,13 @@ jq -cn \
   --arg status "${TICK_STATUS}" \
   --argjson spawn_grants "${SPAWN_GRANTS}" \
   --argjson reconcile_actions "${RECONCILE_ACTIONS}" \
+  --argjson cleanup_actions "${CLEANUP_ACTIONS}" \
   --argjson operation_results "${OPERATIONS}" \
   --arg chat_summary "${CHAT_SUMMARY}" '{
     status:$status,
     spawn_grants:$spawn_grants,
     reconcile_actions:$reconcile_actions,
+    cleanup_actions:$cleanup_actions,
     operation_results:$operation_results,
     max_launch_retries:3,
     backoff_seconds:2,

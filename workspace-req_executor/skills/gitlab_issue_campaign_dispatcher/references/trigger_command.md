@@ -10,7 +10,12 @@ command:
 - `/slot <positive-integer>`
 - `RUN_SINGLE_ISSUE`
 
-The executor is task-agnostic. It reads the GitLab issue, renders the issue content into `${LOG_DIR}/prompt.txt`, and asks the outer subagent to run `scripts/run_acpx_attempt.sh` from the prepared worktree. That script owns the fixed `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` call.
+The executor is task-agnostic. It reads the GitLab issue, renders the issue
+content into `${LOG_DIR}/prompt.txt`, and asks the outer subagent to make one
+long `scripts/run_executor_attempt.sh` call. That wrapper owns deterministic
+finalization and invokes `scripts/run_acpx_attempt.sh`, which remains the sole
+owner of the fixed
+`acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` call.
 
 Runtime state uses the fixed in-repo directory `${REPO_PATH}/.req_executor/`. There is no trigger or config field for runtime basenames, project data directories, or account-pool paths.
 
@@ -76,9 +81,12 @@ Optional fields:
 - `branch`: target branch. When omitted, the wrapper resolves the repository's remote default branch from `origin/HEAD`.
 - `repo_path`: absolute clone parent. `env_paths.sh` derives the final repo root as `${repo_path}/${project}`. Defaults to `/data`.
 - `max_concurrent_subagents`: integer >= 1. Defaults to `1`.
-- `stuck_after_minutes`: integer >= 5. Defaults to `ceil((acpx_timeout_seconds + 120) / 60) + 30`.
+- `stuck_after_minutes`: integer >= 5. Defaults to `ceil((acpx_timeout_seconds + 2400) / 60) + 30`.
 - `acpx_timeout_seconds`: integer >= 60. Defaults to `18000`.
-- `kill_subagent_on_terminal`: legacy compatibility boolean. Defaults to `false`; terminal child sessions are preserved for diagnosis and no `subagents kill` cleanup is requested.
+- `kill_subagent_on_terminal`: legacy compatibility boolean. Defaults to
+  `false`; ordinary terminal callbacks preserve child sessions for diagnosis.
+  Claim-fenced durable-result and expired post-acpx recovery may still reclaim
+  the stale child that failed to emit a final model reply.
 - `kill_subagent_on_done`: legacy compatibility boolean, only parsed for validation when `kill_subagent_on_terminal` is omitted.
 - `result_note_enabled`: boolean. Defaults to `false`.
 - `issue_iids`: comma-separated IID whitelist layered on top of `[issue_min_iid, issue_max_iid]`.
@@ -95,7 +103,7 @@ Legacy `run_timeout_seconds` is explicitly rejected. The common OpenClaw
 2026.4.9/2026.6.11 spawn contract deliberately omits version-specific per-call
 timeout fields; deployments may configure the optional global
 `agents.defaults.subagents.runTimeoutSeconds`. When positive, it should be at
-least `acpx_timeout_seconds + 120`.
+least `acpx_timeout_seconds + 2400`.
 
 ## Native completion and legacy callback
 
@@ -153,13 +161,13 @@ never serialize it.
 
 The fixed `run_driven_issue_batch.sh` response includes `status`, `batch_id`,
 `matched_count`, `snapshot_digest`, `scheduler_status`, `spawn_grants`,
-`reconcile_actions`, `operation_results`, `max_launch_retries`,
+`reconcile_actions`, `cleanup_actions`, `operation_results`, `max_launch_retries`,
 `backoff_seconds`, and `chat_summary`. It never returns the frozen IID array or
 private claim tokens. `matched_count=0` is a completed batch and creates no
 spawn grant.
 
 That rich response is runtime work input, not the req_dispatcher receipt. After
-all `reconcile_actions` and `spawn_grants` are processed, call:
+all `cleanup_actions`, `reconcile_actions`, and `spawn_grants` are processed, call:
 
 ```bash
 cd "${SKILL_DIR}" && BATCH_ID="<verbatim envelope.batch_id>" \
@@ -184,18 +192,21 @@ five-field public acceptance contract.
 `scripts/run_executor_batch_tick.sh` once for each trigger. The wrapper always
 performs these phases in order:
 
-1. Reconcile expired positive-generation running claims against their exact
+1. Reconcile durable batch terminal counters before any new reservation.
+2. Recover exact durable worker results and emit post-acpx child cleanup under
+   the current job/generation/token-digest fence.
+3. Reconcile expired positive-generation running claims against their exact
    project claim fence and ACPX deadline; due claims synthesize `timeout` via
    the ordinary durable handoff path.
-2. Scan active/registered projects for durable Phase 6 handoff intents.
-3. Import handoffs and retry the callback outbox.
-4. Resume durable post-spawn coordinators in `ack_received`,
+4. Scan active/registered projects for durable Phase 6 handoff intents.
+5. Import handoffs and retry the callback outbox.
+6. Resume durable post-spawn coordinators in `ack_received`,
    `project_recorded`, or `scheduler_recorded` without requiring the original
    caller to resend an acknowledgement.
-5. Recover leases and reserve free executor-wide slots.
-6. Strictly round-robin runnable batches, top up project campaigns, and import
+7. Recover leases and reserve free executor-wide slots.
+8. Strictly round-robin runnable batches, top up project campaigns, and import
    claim-0 skips.
-7. Persist preparing claims and bind them before emitting safe spawn grants.
+9. Persist preparing claims and bind them before emitting safe spawn grants.
 
 Post-spawn recovery covers the exact commit/coordinator ambiguity windows. The
 project campaign state stores a job/generation/token-hash/exact-outcome receipt
@@ -223,12 +234,19 @@ delivered callbacks move to cold per-ID archives. Direct replay still resolves
 those records without making every periodic tick scan the full history.
 
 The response has exactly `status`, `spawn_grants`, `reconcile_actions`,
-`operation_results`, `max_launch_retries`, `backoff_seconds`, and
+`cleanup_actions`, `operation_results`, `max_launch_retries`, `backoff_seconds`, and
 `chat_summary`. Each `spawn_grants[]` item contains only `job_id`,
 `claim_generation`, `project`, `iid`, `attempt_number`, `child_label`, and an
 absolute `payload_path`. Read that file and call `sessions_spawn` serially. Feed
 the runtime result to `record_executor_batch_spawn.sh`; never call claim/bind or
 scheduler record helpers directly.
+
+Each `cleanup_actions[]` item has `action:"kill"` and an exact native child
+session `target`. Durable-result cleanup is emitted only after Phase 6 has
+committed the claim-fenced worker result. Marker-only cleanup is emitted only
+after exact IID/attempt matching and the post-acpx grace period. Process these
+actions before reconciliation or spawning; a cleanup tick contains no spawn
+grant.
 
 Driven `child_label` is generated only after the scheduler claim exists and has
 the fixed form `reqx-iid<IID>-gen<generation>-<40 lowercase hex>`. Its SHA-256
