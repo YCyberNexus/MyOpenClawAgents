@@ -106,6 +106,8 @@ ROOT_ENV_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 ROOT_ENV_VALUE="${EXECUTOR_SCHEDULER_ROOT:-}"
 CONCURRENCY_ENV_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 CONCURRENCY_ENV_VALUE="${EXECUTOR_MAX_CONCURRENCY:-}"
+ACPX_TIMEOUT_ENV_SET="${EXECUTOR_ACPX_TIMEOUT_SECONDS+x}"
+ACPX_TIMEOUT_ENV_VALUE="${EXECUTOR_ACPX_TIMEOUT_SECONDS:-}"
 RUNNING_LEASE_ENV_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
 RUNNING_LEASE_ENV_VALUE="${EXECUTOR_RUNNING_LEASE_SECONDS:-}"
 EXECUTOR_AGENT_ENV_SET="${EXECUTOR_AGENT+x}"
@@ -121,6 +123,7 @@ LOCAL_CONFIG="${CONFIG_DIR}/campaign_defaults.local.env"
 
 EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler
 EXECUTOR_MAX_CONCURRENCY=3
+EXECUTOR_ACPX_TIMEOUT_SECONDS=3600
 EXECUTOR_RUNNING_LEASE_SECONDS=21600
 EXECUTOR_AGENT=req_executor
 DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
@@ -137,6 +140,9 @@ if [ "${ROOT_ENV_SET}" = x ]; then
 fi
 if [ "${CONCURRENCY_ENV_SET}" = x ]; then
   EXECUTOR_MAX_CONCURRENCY="${CONCURRENCY_ENV_VALUE}"
+fi
+if [ "${ACPX_TIMEOUT_ENV_SET}" = x ]; then
+  EXECUTOR_ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_ENV_VALUE}"
 fi
 if [ "${RUNNING_LEASE_ENV_SET}" = x ]; then
   EXECUTOR_RUNNING_LEASE_SECONDS="${RUNNING_LEASE_ENV_VALUE}"
@@ -188,6 +194,13 @@ esac
 if [[ "${EXECUTOR_MAX_CONCURRENCY}" =~ ^0+$ ]]; then
   die "EXECUTOR_MAX_CONCURRENCY must be a positive integer"
 fi
+case "${EXECUTOR_ACPX_TIMEOUT_SECONDS}" in
+  ''|*[!0-9]*) die "EXECUTOR_ACPX_TIMEOUT_SECONDS must be an integer between 60 and 18000" ;;
+esac
+if [ "${EXECUTOR_ACPX_TIMEOUT_SECONDS}" -lt 60 ] \
+    || [ "${EXECUTOR_ACPX_TIMEOUT_SECONDS}" -gt 18000 ]; then
+  die "EXECUTOR_ACPX_TIMEOUT_SECONDS must be between 60 and 18000"
+fi
 case "${EXECUTOR_RUNNING_LEASE_SECONDS}" in
   ''|*[!0-9]*) die "EXECUTOR_RUNNING_LEASE_SECONDS must be a positive integer" ;;
 esac
@@ -215,6 +228,7 @@ LAUNCH_FAILED_RECEIPTS_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_failed_receipts"
 LOCK_LAYOUT_V2_MARKER="${EXECUTOR_SCHEDULER_ROOT}/lock_layout_v2.json"
 
 export EXECUTOR_SCHEDULER_ROOT EXECUTOR_MAX_CONCURRENCY
+export EXECUTOR_ACPX_TIMEOUT_SECONDS
 export EXECUTOR_RUNNING_LEASE_SECONDS
 export EXECUTOR_AGENT DISPATCHER_CALLBACK_TARGET
 export SCHEDULER_STATE_FILE SCHEDULER_LOCK_FILE BATCHES_ROOT CALLBACK_INBOX CALLBACK_OUTBOX CALLBACK_ARCHIVE CALLBACK_LOCKS
@@ -283,6 +297,9 @@ elif ! jq -e '
   and .version == 1
   and ((has("max_concurrency") | not)
     or (.max_concurrency | type == "number" and . == floor and . > 0))
+  and ((has("acpx_timeout_seconds") | not)
+    or (.acpx_timeout_seconds | type == "number" and . == floor
+      and . >= 60 and . <= 18000))
   and ((.round_robin_cursor == null) or (.round_robin_cursor | type == "string"))
   and (.active_jobs | type == "object")
   and (.batch_order | type == "array")
@@ -296,12 +313,18 @@ if [ -n "${RUNTIME_MAX_CONCURRENCY}" ]; then
   EXECUTOR_MAX_CONCURRENCY="${RUNTIME_MAX_CONCURRENCY}"
   export EXECUTOR_MAX_CONCURRENCY
 fi
+RUNTIME_ACPX_TIMEOUT_SECONDS="$(jq -r '.acpx_timeout_seconds // empty' "${SCHEDULER_STATE_FILE}")"
+if [ -n "${RUNTIME_ACPX_TIMEOUT_SECONDS}" ]; then
+  EXECUTOR_ACPX_TIMEOUT_SECONDS="${RUNTIME_ACPX_TIMEOUT_SECONDS}"
+  export EXECUTOR_ACPX_TIMEOUT_SECONDS
+fi
 flock -u "${SCHEDULER_LOCK_FD}"
 exec {SCHEDULER_LOCK_FD}>&-
 
 jq -cn \
   --arg scheduler_root "${EXECUTOR_SCHEDULER_ROOT}" \
   --arg max_concurrency "${EXECUTOR_MAX_CONCURRENCY}" \
+  --arg acpx_timeout_seconds "${EXECUTOR_ACPX_TIMEOUT_SECONDS}" \
   --arg running_lease_seconds "${EXECUTOR_RUNNING_LEASE_SECONDS}" \
   --arg scheduler_state_file "${SCHEDULER_STATE_FILE}" \
   --arg scheduler_lock_file "${SCHEDULER_LOCK_FILE}" \
@@ -316,6 +339,7 @@ jq -cn \
   '{
     scheduler_root: $scheduler_root,
     max_concurrency: ($max_concurrency | tonumber),
+    acpx_timeout_seconds: ($acpx_timeout_seconds | tonumber),
     running_lease_seconds: ($running_lease_seconds | tonumber),
     scheduler_state_file: $scheduler_state_file,
     scheduler_lock_file: $scheduler_lock_file,

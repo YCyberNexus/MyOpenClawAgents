@@ -279,6 +279,17 @@ if grep -Fq 'gitlab_token=' "${TRIGGER_CAPTURE}" || \
 fi
 grep -Fq 'dispatch_mode=driven_topup' "${TRIGGER_CAPTURE}" \
   || fail "captured internal trigger omitted driven_topup identity"
+grep -Fq 'acpx_timeout_seconds=3600' "${TRIGGER_CAPTURE}" \
+  || fail "driven topup did not use the one-hour default acpx timeout"
+
+printf '%s\n' "${VALIDATION_REQUEST}" | \
+  TEST_TRIGGER_CAPTURE="${TRIGGER_CAPTURE}" CONFIG_DIR="${CONFIG_DIR}" \
+  EXECUTOR_ACPX_TIMEOUT_SECONDS=7200 \
+  PREPARE_TICK_CMD="${FIXTURE_SCRIPTS}/capture_prepare_tick.sh" \
+  PATH="${BIN_DIR}:${PATH}" bash "${FIXTURE_SCRIPTS}/dispatch_driven_topup.sh" \
+  >"${TEST_ROOT}/capture-runtime-timeout-trigger.out"
+grep -Fq 'acpx_timeout_seconds=7200' "${TRIGGER_CAPTURE}" \
+  || fail "driven topup did not apply the persisted runtime acpx timeout"
 
 prepare_trigger() {
   local request="$1"

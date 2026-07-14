@@ -30,7 +30,7 @@ grep -Fq '旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容' "${WORKSPACE_DIR}/AG
   || fail "dispatcher agent rules must preserve the old callback marker"
 grep -Fq 'openclaw agent --timeout' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the req_dispatcher CLI timeout"
-grep -Fq '`timeout:10800` 与 `yieldMs:120000`' "${SKILL_DIR}/SKILL.md" \
+grep -Fq '`timeout:21900` 与 `yieldMs:120000`' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must pin a long OpenClaw exec lifetime for synchronous executor intake"
 grep -Fq '禁止再次调用 `submit_executor_batch.sh`' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must not allocate a second batch after an ambiguous exec result"
@@ -43,8 +43,23 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-14.5' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-14.8' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
+grep -Fq '/acpx-timeout <时长>' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must route runtime acpx timeout commands"
+grep -Fq 'STUCK_AFTER_MINUTES=390' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "dispatcher stuck eviction must outlive the executor timeout chain"
+grep -Fq 'EXECUTOR_AGENT_TIMEOUT_SECONDS=21600' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "executor agent turn must outlive the default acpx and finalization budget"
+grep -Fq 'EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS=22200' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "legacy queue reclaim must outlive the executor agent turn and exec wrapper"
+grep -Fq '`/acpx-timeout` 允许调回最大 18000 秒' "${WORKSPACE_DIR}/config/README.md" \
+  || fail "deployment docs must preserve the maximum runtime acpx timeout"
+grep -Fq '当前仍应设为 `20400`' "${WORKSPACE_DIR}/config/README.md" \
+  || fail "deployment docs must cover maximum acpx plus finalization in the global subagent timeout"
+grep -Fq 'openclaw config set agents.defaults.subagents.runTimeoutSeconds 20400 --strict-json' \
+  "${WORKSPACE_DIR}/config/README.md" \
+  || fail "deployment docs must provide the effective OpenClaw timeout fix"
 
 for historical in \
   "${WORKSPACE_DIR}/docs/superpowers/specs/2026-06-25-req_dispatcher-design.md" \

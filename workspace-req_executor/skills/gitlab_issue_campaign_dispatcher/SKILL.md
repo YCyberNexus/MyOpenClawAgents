@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-14.15] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-14.16] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot and /acpx-timeout control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -20,6 +20,9 @@ allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, sub
   `scripts/run_single_issue_batch.sh`.
 - A message whose first line starts with `/slot` → Path F → only wrapper is
   `scripts/set_executor_slots.sh`; the wrapper validates the complete message.
+- A message whose first line starts with `/acpx-timeout` → Path G → only
+  wrapper is `scripts/set_executor_acpx_timeout.sh`; the wrapper validates the
+  complete message and changes only future attempts.
 - Exact `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A → first wrapper is
   `scripts/dispatch_prepare_tick.sh`.
 
@@ -69,7 +72,7 @@ bytes through launch acknowledgement, reconciliation, and durable recording.
 
 ## The orchestrator loop (replaces Phases 1–6)
 
-There are **six trigger forms and six execution paths**, all
+There are **seven trigger forms and seven execution paths**, all
 reduced to fixed wrapper calls and strict JSON branches.
 
 > The legacy "Phase 1–6" numbering is **not** retired — the wrapper
@@ -442,6 +445,22 @@ state under the scheduler lock. Every batch session using the same
 cancel running or already-reserved jobs; reservation stays at capacity until
 the active count naturally falls below the new value. The LLM never edits
 `scheduler_state.json` or deployment config itself.
+
+### Path G — `/acpx-timeout <duration>` runtime control
+
+```
+1. cd "${SKILL_DIR}" && bash scripts/set_executor_acpx_timeout.sh <<'TIMEOUT_EOF' → result
+   <verbatim complete /acpx-timeout message>
+   TIMEOUT_EOF
+2. Return the wrapper's sole compact JSON object without prose or Markdown.
+```
+
+The wrapper accepts a duration from 60 seconds through 5 hours. A bare integer
+or `Ns` is seconds; `Nm` is minutes and `Nh` is hours. It persists the
+executor-wide `acpx_timeout_seconds` under the scheduler lock and mirrors the
+value into a recoverable pending scheduler transaction. The new value applies
+only to attempts launched after the update; active attempts keep the timeout
+pinned when they were spawned. The tracked initialization default is one hour.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
 the next tick imports it, releases the physical slot, fans out every attached

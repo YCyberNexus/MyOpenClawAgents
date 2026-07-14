@@ -384,12 +384,14 @@ ACPX_TIMEOUT="${T[acpx_timeout_seconds]:-}"
 
 # Defaults when trigger omits.
 [ -z "${MAX_CONCURRENT}" ] && MAX_CONCURRENT=1
-[ -z "${ACPX_TIMEOUT}"   ] && ACPX_TIMEOUT=18000
+[ -z "${ACPX_TIMEOUT}"   ] && ACPX_TIMEOUT=3600
 
 case "${MAX_CONCURRENT}" in *[!0-9]*|"") emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1" ;; esac
 [ "${MAX_CONCURRENT}" -ge 1 ] || emit_chat_failure "invalid_max_concurrent_subagents: must be >= 1"
-case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60" ;; esac
-[ "${ACPX_TIMEOUT}" -ge 60 ] || emit_chat_failure "invalid_acpx_timeout_seconds: must be >= 60"
+case "${ACPX_TIMEOUT}" in *[!0-9]*|"") emit_chat_failure "invalid_acpx_timeout_seconds: must be between 60 and 18000" ;; esac
+if [ "${ACPX_TIMEOUT}" -lt 60 ] || [ "${ACPX_TIMEOUT}" -gt 18000 ]; then
+  emit_chat_failure "invalid_acpx_timeout_seconds: must be between 60 and 18000"
+fi
 # stuck_after_minutes keeps the dispatcher backstop beyond the recommended
 # global OpenClaw subagent limit of acpx_timeout_seconds + 2400 seconds.
 # Operators may still override explicitly for tighter or looser eviction.
@@ -598,7 +600,7 @@ for piid in ${PENDING_KEYS}; do
   # (parked in timeout_iids, no auto-retry) instead of `blocked` (retryable).
   # Scope evictions and surviving placeholders are not time-based failures
   # and stay `blocked`. With the default stuck_after_minutes
-  # (ceil((acpx_timeout_seconds+120)/60)+30) every stuck eviction passes the budget
+  # (ceil((acpx_timeout_seconds+2400)/60)+30) every stuck eviction passes the budget
   # check; only an operator-shortened stuck_after_minutes can evict a run
   # early enough to stay `blocked`.
   EVICT_SYNTH="blocked"

@@ -291,7 +291,7 @@ ELAPSED_S=""
 # existed. A trigger override applied while this run was in flight must not
 # change which budget the run is judged against.
 ACPX_TIMEOUT_S="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.acpx_timeout_seconds // empty')"
-[ -n "${ACPX_TIMEOUT_S}" ] || ACPX_TIMEOUT_S="$(printf '%s' "${STATE_JSON}" | jq -r '.acpx_timeout_seconds // 18000')"
+[ -n "${ACPX_TIMEOUT_S}" ] || ACPX_TIMEOUT_S="$(printf '%s' "${STATE_JSON}" | jq -r '.acpx_timeout_seconds // 3600')"
 SP_EPOCH="$(iso_to_epoch "$(printf '%s' "${PENDING_ENTRY}" | jq -r '.spawned_at // ""')")"
 if [ "${SP_EPOCH}" -gt 0 ]; then
   CALLBACK_NOW_EPOCH="$(date -u +%s)"

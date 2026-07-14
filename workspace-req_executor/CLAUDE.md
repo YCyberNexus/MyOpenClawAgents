@@ -5,6 +5,9 @@
 `/slot <正整数>` 只调用 `set_executor_slots.sh`。该 wrapper 在 scheduler lock 下持久化所有
 batch session 共享的物理并发上限；不得由 LLM 修改配置文件或 scheduler JSON。
 
+`/acpx-timeout <时长>` 只调用 `set_executor_acpx_timeout.sh`。该 wrapper 持久化
+后续 attempt 使用的 acpx 上限；在途 attempt 保留启动时固定的超时。
+
 ## Wrapper Flow
 
 1. `dispatch_prepare_tick.sh` validates the trigger, reconciles GitLab labels, selects IIDs, prepares worktrees, builds prompts, and emits spawn entries.

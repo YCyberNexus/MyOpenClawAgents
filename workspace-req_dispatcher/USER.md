@@ -19,6 +19,15 @@
 session 各自设置。在线调低时不会取消已有任务；如果当前 active 数高于新上限，会停止发放新
 槽位并等待自然回落。
 
+acpx 超时默认为 1 小时，可在 1 分钟到 5 小时之间在线调整：
+
+```text
+/acpx-timeout 1h
+```
+
+也支持 `/acpx-timeout 90m` 或 `/acpx-timeout 3600`。新值只影响后续启动的
+attempt，已在运行的任务不会被中途改时。
+
 执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
 
 - 单 Issue：`处理 group/project 的 #42`；

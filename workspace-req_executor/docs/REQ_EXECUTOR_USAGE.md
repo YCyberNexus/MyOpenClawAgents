@@ -55,7 +55,7 @@ status,batch_id,matched_count,snapshot_digest,scheduler_status
 
 ## Durable scheduler、周期 tick 与 I3
 
-默认部署值为 `EXECUTOR_MAX_CONCURRENCY=3` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。未设置运行时值时以 3 初始化；之后可向 req_dispatcher 或 req_executor 发送 `/slot <正整数>`，由固定 wrapper 把新上限持久化到共享 scheduler state。所有 driven batch session 共同使用这个上限。在线调低到小于当前 active 数时不会取消任务，而是停止新 reservation，等待 active 数自然降到新上限。scheduler 持久保存不可变 snapshot、游标与 active jobs，并在多个 runnable batch 间严格 round-robin。单个批次包含 100+ Issue 时，wrapper 每次只返回本 tick 所需的有限 grant/reconcile action，不把完整 IID 列表展开到聊天上下文。
+默认部署值为 `EXECUTOR_MAX_CONCURRENCY=3`、`EXECUTOR_ACPX_TIMEOUT_SECONDS=3600` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。可向 req_dispatcher 或 req_executor 发送 `/slot <正整数>` 调整共享物理并发，或发送 `/acpx-timeout <时长>` 调整后续 attempt 的 acpx 上限。超时命令支持裸秒数、`Ns`、`Nm` 与 `Nh`，范围为 60 到 18000 秒，例如 `/acpx-timeout 1h`。新值仅影响后续启动的 attempt，在途任务保留启动时预算。两类运行时值都持久化到共享 scheduler state。在线调低 slot 到小于当前 active 数时不会取消任务，而是停止新 reservation，等待 active 数自然降到新上限。scheduler 持久保存不可变 snapshot、游标与 active jobs，并在多个 runnable batch 间严格 round-robin。单个批次包含 100+ Issue 时，wrapper 每次只返回本 tick 所需的有限 grant/reconcile action，不把完整 IID 列表展开到聊天上下文。
 
 部署周期触发固定为：
 
@@ -88,7 +88,7 @@ callback `openclaw` 子进程继承 executor 当前环境，包括按既定优�
 
 ## 本地覆盖、升级与回滚
 
-- 本地 `REPO_PARENT_PATH`、`EXECUTOR_SCHEDULER_ROOT`、初始 `EXECUTOR_MAX_CONCURRENCY`、`EXECUTOR_RUNNING_LEASE_SECONDS`、`EXECUTOR_AGENT` 或 `DISPATCHER_CALLBACK_TARGET` 只能通过进程环境或 ignored `config/campaign_defaults.local.env` 覆盖；显式 scheduler 进程环境优先，并须在 intake、tick、import、delivery 使用同一组值。`/slot` 写入的共享运行时上限优先于初始并发配置。tracked 配置继续保留蓝区 GitLab host/protocol、token 注入、callback 和 `/data` 默认，不写本机路径或测试 endpoint。
+- 本地 `REPO_PARENT_PATH`、`EXECUTOR_SCHEDULER_ROOT`、初始 `EXECUTOR_MAX_CONCURRENCY`、初始 `EXECUTOR_ACPX_TIMEOUT_SECONDS`、`EXECUTOR_RUNNING_LEASE_SECONDS`、`EXECUTOR_AGENT` 或 `DISPATCHER_CALLBACK_TARGET` 只能通过进程环境或 ignored `config/campaign_defaults.local.env` 覆盖；显式 scheduler 进程环境优先，并须在 intake、tick、import、delivery 使用同一组值。`/slot` 和 `/acpx-timeout` 写入的共享运行时值优先于初始配置。tracked 配置继续保留蓝区 GitLab host/protocol、token 注入、callback 和 `/data` 默认，不写本机路径或测试 endpoint。
 - 升级时先排空 req_dispatcher 的旧 FIFO。旧 active/queue 非空期间，新 batch 只保持 `waiting_for_legacy_drain`，不与旧 single active 重叠；清空后由 `RUN_EXECUTOR_BATCH_TICK` 推进新 scheduler。
 - 认证回调上线前已经存在于 executor 私有 scheduler 根、且同时缺少 `executor_agent` 与 `callback_nonce` 的旧 request/outbox，会在读取时一次性显式标记为 `legacy_pre_upgrade`，并用 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 加 `worker_result_json=<严格八字段 I3>` 完成旧 mirror。dispatcher 仍接受旧 marker 以兼容已发出的在途消息。新 I1 始终强制 nonce、executor 与固定 target；触发输入不能请求或伪造 `legacy_pre_upgrade`。
 - 新旧锁目录滚动升级默认保留 86400 秒兼容窗口（起点持久化在 scheduler 根的 `lock_layout_v2.json`）。窗口内新进程同时获取旧、新两条 callback/launch 锁；窗口后才在双锁保护下把旧锁移出热目录。只有确认所有旧 executor 进程已停止，才可用 `DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0` 提前结束窗口。

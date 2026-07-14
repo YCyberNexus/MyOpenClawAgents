@@ -85,11 +85,12 @@ ${EXECUTOR_SCHEDULER_ROOT}/scheduler_state.json
 ```
 
 In addition to `version`, `round_robin_cursor`, `batch_order`, and
-`active_jobs`, version 1 may contain positive-integer `max_concurrency`. It is
-written only by `set_executor_slots.sh` under `scheduler.lock` and overrides
-the deployment initialization default for all later batch sessions. A
-`pending_transaction.scheduler_state` carries the same value so transaction
-recovery cannot roll back a concurrent slot update.
+`active_jobs`, version 1 may contain positive-integer `max_concurrency` and
+`acpx_timeout_seconds` from 60 through 18000. They are written only by
+`set_executor_slots.sh` and `set_executor_acpx_timeout.sh` under
+`scheduler.lock` and override deployment initialization defaults for later
+batch sessions. A `pending_transaction.scheduler_state` carries the same
+values so transaction recovery cannot roll back a concurrent runtime update.
 
 Version 1 may also contain `launch_failed_receipts`. This optional object is
 keyed by `job_id`; each value has exactly:

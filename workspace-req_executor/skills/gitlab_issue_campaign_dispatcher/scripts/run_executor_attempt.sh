@@ -33,7 +33,7 @@ case "${ISSUE_MODE}" in
     ;;
 esac
 
-ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-18000}"
+ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-3600}"
 case "${ACPX_TIMEOUT_SECONDS}" in
   ''|*[!0-9]*)
     echo "run_executor_attempt.sh: ACPX_TIMEOUT_SECONDS must be a positive integer" >&2

@@ -6,4 +6,6 @@
 - Runtime state is fixed at `${REPO_PATH}/.req_executor/`.
 - `/slot <positive-integer>` updates the physical concurrency ceiling shared by
   every batch session under one executor scheduler root.
+- `/acpx-timeout <duration>` updates the acpx cap for future attempts. Examples:
+  `/acpx-timeout 1h`, `/acpx-timeout 90m`, `/acpx-timeout 3600`.
 - No project data directory, runtime basename, or UI account-pool fields are part of the current req_executor contract.

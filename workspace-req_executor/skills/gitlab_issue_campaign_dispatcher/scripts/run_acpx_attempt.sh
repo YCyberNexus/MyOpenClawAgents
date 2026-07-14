@@ -34,8 +34,8 @@ source "${SCRIPT_DIR}/env_paths.sh"
 : "${ISSUE_IID:?run_acpx_attempt.sh: ISSUE_IID must be set}"
 : "${ATTEMPT_NUMBER:?run_acpx_attempt.sh: ATTEMPT_NUMBER must be set}"
 
-# Wall-clock cap; defaults to 18000s (5h) to match acpx_timeout_seconds.
-ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-18000}"
+# Wall-clock cap; defaults to 3600s (1h) to match acpx_timeout_seconds.
+ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-3600}"
 case "${ACPX_TIMEOUT_SECONDS}" in
   ''|*[!0-9]*)
     echo "run_acpx_attempt.sh: ACPX_TIMEOUT_SECONDS must be a positive integer, got '${ACPX_TIMEOUT_SECONDS}'" >&2

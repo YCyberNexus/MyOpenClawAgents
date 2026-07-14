@@ -163,12 +163,12 @@ executor_default_timeout="$(
   TARGET_AGENT="req_executor" \
   GIT_ISSUER_AGENT="git_issuer" \
   DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
-  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="21600" \
   MESSAGE="run single issue with executor timeout" \
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"
 
-if ! grep -q -- '--timeout 10800' "${OPENCLAW_LOG}"; then
+if ! grep -q -- '--timeout 21600' "${OPENCLAW_LOG}"; then
   echo "expected EXECUTOR_AGENT_TIMEOUT_SECONDS to apply to executor target" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
@@ -188,7 +188,7 @@ executor_issue_scoped_session="$(
   TARGET_AGENT="req_executor" \
   GIT_ISSUER_AGENT="git_issuer" \
   DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
-  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="21600" \
   MESSAGE='RUN_SINGLE_ISSUE
 project=ai-infra/veqp_server_v3
 iid=11
@@ -380,7 +380,7 @@ executor_explicit_main_session="$(
   TARGET_SESSION_KEY="agent:req_executor:main" \
   GIT_ISSUER_AGENT="git_issuer" \
   DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
-  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="21600" \
   MESSAGE='RUN_SINGLE_ISSUE
 project=ai-infra/veqp_server_v3
 iid=11
@@ -415,13 +415,13 @@ executor_timeout_floor="$(
   TARGET_AGENT="req_executor" \
   GIT_ISSUER_AGENT="git_issuer" \
   DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
-  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="21600" \
   AGENT_TIMEOUT_SECONDS="120" \
   MESSAGE="run single issue with protected executor timeout" \
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"
 
-if ! grep -q -- '--timeout 10800' "${OPENCLAW_LOG}"; then
+if ! grep -q -- '--timeout 21600' "${OPENCLAW_LOG}"; then
   echo "expected EXECUTOR_AGENT_TIMEOUT_SECONDS to protect against shorter executor timeout" >&2
   cat "${OPENCLAW_LOG}" >&2
   exit 1
@@ -441,7 +441,7 @@ git_issuer_keeps_downstream_timeout="$(
   TARGET_AGENT="git_issuer" \
   GIT_ISSUER_AGENT="git_issuer" \
   DOWNSTREAM_AGENT_TIMEOUT_SECONDS="600" \
-  EXECUTOR_AGENT_TIMEOUT_SECONDS="10800" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="21600" \
   MESSAGE="create issue without executor timeout" \
   bash "${SKILL_DIR}/scripts/run_agent_turn.sh"
 )"

@@ -25,8 +25,8 @@ load_state | jq -e 'has("run_timeout_seconds") | not' >/dev/null \
 fresh_init_state | jq -e 'has("run_timeout_seconds") | not' >/dev/null \
   || fail "fresh_init_state must not expose run_timeout_seconds"
 
-[ "$(derive_stuck_after_minutes 18000)" = "370" ] \
-  || fail "default acpx timeout must derive stuck_after_minutes=370"
+[ "$(derive_stuck_after_minutes 3600)" = "130" ] \
+  || fail "default acpx timeout must derive stuck_after_minutes=130"
 [ "$(derive_stuck_after_minutes 21600)" = "430" ] \
   || fail "six-hour acpx timeout must derive stuck_after_minutes=430"
 

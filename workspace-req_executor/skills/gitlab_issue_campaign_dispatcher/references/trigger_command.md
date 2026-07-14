@@ -1,6 +1,6 @@
 # Trigger Commands
 
-`req_executor` accepts five current trigger forms and one compatibility
+`req_executor` accepts six current trigger forms and one compatibility
 command:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN`
@@ -8,6 +8,7 @@ command:
 - `RUN_DRIVEN_ISSUE_BATCH`
 - `RUN_EXECUTOR_BATCH_TICK`
 - `/slot <positive-integer>`
+- `/acpx-timeout <60..18000 seconds|Nm|Nh>`
 - `RUN_SINGLE_ISSUE`
 
 The executor is task-agnostic. It reads the GitLab issue, renders the issue
@@ -35,6 +36,21 @@ current active count is accepted without cancelling work: `draining=true`, no
 new physical jobs are reserved, and the active set drains naturally to the new
 ceiling. The tracked `EXECUTOR_MAX_CONCURRENCY=3` remains the initialization
 default when no runtime value has been set.
+
+## Runtime ACPX Timeout Control
+
+Exact form:
+
+```text
+/acpx-timeout <60..18000 seconds|Nm|Nh>
+```
+
+Call `scripts/set_executor_acpx_timeout.sh` with the complete message on stdin
+and return its sole compact JSON object. Bare integers and `Ns` are seconds;
+`Nm` is minutes and `Nh` is hours. The wrapper persists
+`acpx_timeout_seconds` in executor-wide scheduler state under the scheduler
+lock. The tracked initialization default is `3600` seconds. Updates apply only
+to future attempts; pending and running attempts keep their spawn-time value.
 
 ## Scheduled Tick
 
@@ -82,7 +98,7 @@ Optional fields:
 - `repo_path`: absolute clone parent. `env_paths.sh` derives the final repo root as `${repo_path}/${project}`. Defaults to `/data`.
 - `max_concurrent_subagents`: integer >= 1. Defaults to `1`.
 - `stuck_after_minutes`: integer >= 5. Defaults to `ceil((acpx_timeout_seconds + 2400) / 60) + 30`.
-- `acpx_timeout_seconds`: integer >= 60. Defaults to `18000`.
+- `acpx_timeout_seconds`: integer from 60 through 18000. Defaults to `3600`.
 - `kill_subagent_on_terminal`: legacy compatibility boolean. Defaults to
   `false`; ordinary terminal callbacks preserve child sessions for diagnosis.
   Claim-fenced durable-result and expired post-acpx recovery may still reclaim
@@ -221,7 +237,9 @@ token, or action evidence fails closed.
 
 The initial executor-wide concurrency is 3 unless deployment config overrides
 `EXECUTOR_MAX_CONCURRENCY`. `/slot` then persists the runtime ceiling in shared
-scheduler state. Multiple projects/batches share those slots. Grant
+scheduler state. `EXECUTOR_ACPX_TIMEOUT_SECONDS` similarly initializes the
+one-hour attempt cap, while `/acpx-timeout` persists later values for future
+attempts. Multiple projects/batches share those slots. Grant
 order is persisted scheduler order and must be consumed one item at a time;
 project grouping must not reorder it. Explicit process values for
 `EXECUTOR_SCHEDULER_ROOT` process values take precedence over config and are

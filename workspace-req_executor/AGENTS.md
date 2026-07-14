@@ -18,6 +18,8 @@ exactly one matching wrapper path:
 - `RUN_SINGLE_ISSUE` → Path E, `run_single_issue_batch.sh`.
 - first line beginning with `/slot` → Path F, `set_executor_slots.sh`; the
   wrapper validates the complete message and persists the shared ceiling.
+- first line beginning with `/acpx-timeout` → Path G,
+  `set_executor_acpx_timeout.sh`; the wrapper persists the cap for future attempts.
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A, `dispatch_prepare_tick.sh`.
 
 `RUN_DRIVEN_ISSUE_BATCH` is never a heartbeat tick. Never call
@@ -31,6 +33,8 @@ Core contract:
   scheduler settings into that command; the wrapper resolves them privately.
 - `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
   never edit deployment config or scheduler JSON in the orchestrator.
+- `/acpx-timeout` changes the future-attempt acpx cap only through
+  `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap.
 - A native completion turn calls its prescribed ingester once and exits on
   rejection; it never reads, edits, patches, or debugs wrapper scripts.
 - The outer subagent receives `references/executor_prompt.md`.

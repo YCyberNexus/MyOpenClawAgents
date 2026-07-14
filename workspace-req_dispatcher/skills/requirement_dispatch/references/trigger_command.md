@@ -37,6 +37,24 @@ wrapper 严格校验完整消息，把规范化命令发送到
 目标 executor 的共享物理槽位上限，不是当前 dispatcher 或某个 batch session 的私有并发。
 `draining=true` 表示缩容值低于当前 active 数；已有任务继续运行，新 reservation 暂停。
 
+### 运行时 acpx timeout 配置
+
+用户命令固定为：
+
+```text
+/acpx-timeout <60..18000 秒|Nm|Nh>
+```
+
+首行以 `/acpx-timeout` 开始时调用：
+
+```bash
+MESSAGE='<完整原文>' bash scripts/set_executor_acpx_timeout.sh
+```
+
+wrapper 把时长规范化为秒并发送到默认 executor 主 session，只接受严格
+`status,acpx_timeout_seconds,previous_acpx_timeout_seconds,active_count,applies_to`
+成功对象。新值仅影响后续 attempt，不改写在途任务的启动时预算。
+
 ### 自然语言执行
 
 ```bash

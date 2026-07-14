@@ -20,6 +20,8 @@ executor 物理调度状态。
 - I3：严格八字段回调只调 `handle_executor_batch_event.sh`。
 - slot 控制：`/slot <正整数>` 只调 `set_executor_slots.sh`，定向发送到默认 executor 主
   session；不直接修改 executor 配置或 scheduler state。
+- acpx timeout 控制：`/acpx-timeout <时长>` 只调
+  `set_executor_acpx_timeout.sh`，只影响后续 attempt。
 
 git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理。
 
@@ -46,11 +48,13 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
 11. 同步只回最小 ack；每项终态异步逐条通知，不播报进度，不额外发送批次汇总。
 12. `/slot` 只调整默认 executor 的共享物理并发上限；所有同 scheduler root 的 batch session
     共同生效，缩容不取消已有任务。
+13. `/acpx-timeout` 只调整默认 executor 后续 attempt 的 acpx 上限；在途
+    attempt 继续使用启动时的固定值。
 
 ## No-Fallback（HARD）
 
 - 脚本非零：读错误、分类、停止；不内联重写逻辑、不换临时命令、不手改 state。
-- 调用 `submit_executor_batch.sh` 的 OpenClaw exec 必须用 `timeout:10800`、
+- 调用 `submit_executor_batch.sh` 的 OpenClaw exec 必须用 `timeout:21900`、
   `yieldMs:120000`，不得用 shell `timeout` 截断。进入后台后只 poll 原 process；若被杀或结果
   不明，停止并等 tick 恢复同一 outbox，绝不再次提交原 MESSAGE 生成新 batch。
 - `waiting_for_legacy_drain` 与 `retryable_failure` 是 durable 正常分支，不是生成新 ID 的理由。

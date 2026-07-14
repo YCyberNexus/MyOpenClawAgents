@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-14.6] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-14.8] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /acpx-timeout 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -40,7 +40,8 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 5. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
 6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
 7. 首行以 `/slot` 开始：路径 E；由固定 wrapper 校验完整消息。
-8. 其余自然语言需求：路径 A。
+8. 首行以 `/acpx-timeout` 开始：路径 F；由固定 wrapper 校验完整消息。
+9. 其余自然语言需求：路径 A。
 
 禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
 turn 中自行执行多个分支。
@@ -60,6 +61,21 @@ wrapper 会严格校验命令，只把规范化后的 `/slot N` 发送到
 `status=success` 时按 `slot_count,previous_slot_count,active_count,available_slots,draining`
 回复用户；`draining=true` 表示在线缩容后已有任务数暂时高于新上限，任务不会被取消，但不会
 继续发放新物理槽位。`status=failed` 时读取 `reason` 后停止，不得改写 executor 配置或调度状态。
+
+## 路径 F：运行时 acpx timeout 配置
+
+收到 `/acpx-timeout <时长>` 时，只调用：
+
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+source scripts/source_dispatcher_env.sh && \
+MESSAGE="<完整原文>" bash scripts/set_executor_acpx_timeout.sh
+```
+
+wrapper 接受 60 秒到 5 小时；裸数字或 `Ns` 表示秒，`Nm` 表示分钟，
+`Nh` 表示小时。它只把规范化后的秒数发送到默认 executor 主 session，
+并只接受固定 wrapper 的严格 JSON。新值仅影响后续 attempt，不取消或改写
+在途任务已固定的 timeout。
 
 ## 路径 A：需求接入
 
@@ -118,7 +134,7 @@ ORIGIN_JSON='<capture_origin 输出；无则 null>' \
 bash scripts/submit_executor_batch.sh
 ```
 
-这次 Bash/exec tool call 必须显式使用 `timeout:10800` 与 `yieldMs:120000`；这里的
+这次 Bash/exec tool call 必须显式使用 `timeout:21900` 与 `yieldMs:120000`；这里的
 `timeout` 是 OpenClaw `exec` 工具字段，不得在 shell 命令前加 `timeout 120` 等外层截断。
 `submit_executor_batch.sh` 会同步等待 executor，短工具超时可能在 I1 已持久化、executor 已
 受理后杀死调用方。若 exec 返回 process session，只能继续 poll **同一个** session 直到退出；
