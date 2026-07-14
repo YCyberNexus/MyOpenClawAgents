@@ -21,6 +21,8 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `execute_issue`：只调 `submit_executor_batch.sh`；支持 single/iid_list/range/open_unfinished/open_label。
 - `create_and_execute`：git_issuer 严格成功后，把返回 Issue URL 交同一个 batch wrapper。
 - `clarify_or_reject`：不调用下游。
+- `/slot <正整数>`：只调 `set_executor_slots.sh`，由它把命令发送到默认 executor 主 session；
+  dispatcher 不直接修改调度状态。
 - I3：首行 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 直接进入路径 D，只调
   `handle_executor_batch_event.sh`；新 batch/single 必须使用带 nonce 与 executor 身份的严格
   `callback_envelope`。旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容同一 handler。
@@ -29,6 +31,7 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 
 LLM 不得直接调用 `route_project.sh`、`build_executor_batch_payload.sh`、receipt/mirror/event/
 notification 内部脚本，也不得手写 state。
+slot 调整同样只能调用顶层 `set_executor_slots.sh`，不得编辑 executor 配置或 scheduler JSON。
 
 调用 `submit_executor_batch.sh` 时，OpenClaw exec 工具固定使用 `timeout:10800`、
 `yieldMs:120000`，不能在 shell 中套 `timeout`。若工具转为后台 process，只能 poll 原 session；

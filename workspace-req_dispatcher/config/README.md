@@ -14,6 +14,7 @@
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
 | `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。只有用户明确要求处理 issue 时才使用；所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
+| `/slot` 目标 | 自动 | `/slot <正整数>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，调整该 executor 共享 scheduler 的物理并发上限；不按 project 路由表拆分。 |
 | `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
 | `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，默认配置为 `10800`（3 小时）。目标 agent 不等于 `GIT_ISSUER_AGENT` 时按 executor 处理；git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
 | `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` | 否 | executor queue active 卡在 `launching` 多久后可由下一次 drain 复用同一 `run_id` / `correlation_id` 重新启动，默认配置为 `11100`（3 小时 executor 外层超时 + 5 分钟余量）。用于恢复 OpenClaw 会话被用户或运行时中断，同时避免正常长 executor turn 尚未返回时重复启动。 |

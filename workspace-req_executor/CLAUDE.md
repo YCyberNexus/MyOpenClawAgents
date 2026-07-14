@@ -2,6 +2,9 @@
 
 `req_executor` executes GitLab issues from the requirement pipeline. It does not assume a project-specific test framework or material directory. The issue title, description, prior attempt summaries, and reviewer comments are rendered into `${LOG_DIR}/prompt.txt`.
 
+`/slot <正整数>` 只调用 `set_executor_slots.sh`。该 wrapper 在 scheduler lock 下持久化所有
+batch session 共享的物理并发上限；不得由 LLM 修改配置文件或 scheduler JSON。
+
 ## Wrapper Flow
 
 1. `dispatch_prepare_tick.sh` validates the trigger, reconciles GitLab labels, selects IIDs, prepares worktrees, builds prompts, and emits spawn entries.

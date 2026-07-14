@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-14.13] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-14.14] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -18,6 +18,8 @@ allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, sub
   `scripts/run_executor_batch_tick.sh`.
 - Exact `RUN_SINGLE_ISSUE` → Path E → first wrapper is
   `scripts/run_single_issue_batch.sh`.
+- A message whose first line starts with `/slot` → Path F → only wrapper is
+  `scripts/set_executor_slots.sh`; the wrapper validates the complete message.
 - Exact `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A → first wrapper is
   `scripts/dispatch_prepare_tick.sh`.
 
@@ -67,7 +69,7 @@ bytes through launch acknowledgement, reconciliation, and durable recording.
 
 ## The orchestrator loop (replaces Phases 1–6)
 
-There are **five trigger commands and five execution paths**, all
+There are **six trigger forms and six execution paths**, all
 reduced to fixed wrapper calls and strict JSON branches.
 
 > The legacy "Phase 1–6" numbering is **not** retired — the wrapper
@@ -408,6 +410,23 @@ optional `correlation_id`. When the correlation ID is omitted it derives stable
 content-addressed correlation and batch IDs. It converts the request to a
 single-selector `RUN_DRIVEN_ISSUE_BATCH`; it does not create an independent
 one-concurrency scheduled campaign.
+
+### Path F — `/slot <slot-number>` runtime control
+
+```
+1. cd "${SKILL_DIR}" && bash scripts/set_executor_slots.sh <<'SLOT_EOF' → result
+   <verbatim complete /slot message>
+   SLOT_EOF
+2. Return the wrapper's sole compact JSON object without prose or Markdown.
+```
+
+The wrapper accepts exactly `/slot` followed by one positive decimal integer.
+It updates the executor-wide `max_concurrency` stored in the shared scheduler
+state under the scheduler lock. Every batch session using the same
+`EXECUTOR_SCHEDULER_ROOT` observes the new value. Lowering the ceiling does not
+cancel running or already-reserved jobs; reservation stays at capacity until
+the active count naturally falls below the new value. The LLM never edits
+`scheduler_state.json` or deployment config itself.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
 the next tick imports it, releases the physical slot, fans out every attached

@@ -6,6 +6,8 @@ The exact first line is a hard router. `RUN_DRIVEN_ISSUE_BATCH` always means
 Path C and starts with `run_driven_issue_batch.sh`; `RUN_EXECUTOR_BATCH_TICK`
 alone means Path D and starts with `run_executor_batch_tick.sh`. Never replace
 the Path C intake wrapper with the tick wrapper.
+`/slot <positive-integer>` means Path F and calls only
+`set_executor_slots.sh`; the model never edits scheduler state directly.
 
 A protected native subagent completion has higher routing priority than those
 command first lines and always uses Path B. On OpenClaw 2026.4.9, pass only the
@@ -16,6 +18,10 @@ patches, or debugs a wrapper, and exits after the first ingester rejection.
 A heartbeat tick runs only the exact bare Path D wrapper command. It never
 reads config or `*.env` files and never copies credentials or deployment values
 into a tool call; the wrapper resolves all configuration privately.
+
+The executor-wide slot ceiling is runtime state shared by every batch session
+under one `EXECUTOR_SCHEDULER_ROOT`. Lowering it does not cancel existing work;
+new reservations pause until the active count falls below the new ceiling.
 
 The executor is deliberately thin:
 

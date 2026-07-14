@@ -136,6 +136,13 @@ case "${MAX_CONCURRENT_EFF}" in
   ''|*[!0-9]*) die "EXECUTOR_MAX_CONCURRENCY must be a positive integer" ;;
 esac
 [ "${MAX_CONCURRENT_EFF}" -ge 1 ] || die "EXECUTOR_MAX_CONCURRENCY must be >= 1"
+GRANT_COUNT="$(printf '%s' "${REQUEST_JSON}" | jq -r '.grants | length')"
+if [ "${GRANT_COUNT}" -gt "${MAX_CONCURRENT_EFF}" ]; then
+  # A grant already owns a physical scheduler slot. If /slot lowered the
+  # ceiling after reservation, finish launching those durable grants while
+  # preventing any later reservation from exceeding the new ceiling.
+  MAX_CONCURRENT_EFF="${GRANT_COUNT}"
+fi
 
 if ! RESOLVED_REPO_PATH="$(
   PROJECT_FULL="${PROJECT_FULL}" \

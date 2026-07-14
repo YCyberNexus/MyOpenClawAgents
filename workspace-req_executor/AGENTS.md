@@ -16,6 +16,8 @@ exactly one matching wrapper path:
 - `RUN_DRIVEN_ISSUE_BATCH` → Path C, `run_driven_issue_batch.sh`.
 - `RUN_EXECUTOR_BATCH_TICK` → Path D, `run_executor_batch_tick.sh`.
 - `RUN_SINGLE_ISSUE` → Path E, `run_single_issue_batch.sh`.
+- first line beginning with `/slot` → Path F, `set_executor_slots.sh`; the
+  wrapper validates the complete message and persists the shared ceiling.
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A, `dispatch_prepare_tick.sh`.
 
 `RUN_DRIVEN_ISSUE_BATCH` is never a heartbeat tick. Never call
@@ -27,6 +29,8 @@ Core contract:
 - The orchestrator calls wrapper scripts under `skills/gitlab_issue_campaign_dispatcher/scripts/`.
 - `RUN_EXECUTOR_BATCH_TICK` runs the exact bare Path D wrapper command. Never read config or `*.env` files and never inject credentials, paths, hosts, or
   scheduler settings into that command; the wrapper resolves them privately.
+- `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
+  never edit deployment config or scheduler JSON in the orchestrator.
 - A native completion turn calls its prescribed ingester once and exits on
   rejection; it never reads, edits, patches, or debugs wrapper scripts.
 - The outer subagent receives `references/executor_prompt.md`.

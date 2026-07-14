@@ -806,6 +806,8 @@ if [ "${RESERVE_RC}" -ne 0 ] || ! RESERVE_JSON="$(printf '%s' "${RESERVE_OUTPUT}
       and (.grants | type == "array")
       and (.active_count | type == "number" and . == floor and . >= 0)
       and (.available_slots | type == "number" and . == floor and . >= 0)
+      and ((has("max_concurrency") | not)
+        or (.max_concurrency | type == "number" and . == floor and . > 0))
     then . else error("invalid reserve envelope") end
   ' 2>/dev/null)"; then
   append_operation "$(jq -cn '{operation:"reservation",status:"failed"}')"
@@ -816,6 +818,10 @@ if [ "${RESERVE_RC}" -ne 0 ] || ! RESERVE_JSON="$(printf '%s' "${RESERVE_OUTPUT}
     chat_summary:"executor reservation failed"
   }'
   exit 0
+fi
+if [ "$(jq -r 'has("max_concurrency")' <<<"${RESERVE_JSON}")" = true ]; then
+  EXECUTOR_MAX_CONCURRENCY="$(jq -r '.max_concurrency' <<<"${RESERVE_JSON}")"
+  export EXECUTOR_MAX_CONCURRENCY
 fi
 append_operation "$(jq -cn --argjson reserve "${RESERVE_JSON}" '{
   operation:"reservation",status:$reserve.status,
@@ -1249,11 +1255,17 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
         and (.grants | type == "array")
         and (.active_count | type == "number" and . == floor and . >= 0)
         and (.available_slots | type == "number" and . == floor and . >= 0)
+        and ((has("max_concurrency") | not)
+          or (.max_concurrency | type == "number" and . == floor and . > 0))
       then . else error("invalid refill envelope") end
     ' 2>/dev/null)"; then
     append_operation "$(jq -cn '{operation:"reservation",status:"refill_failed"}')"
     HAD_FAILURE=true
     break
+  fi
+  if [ "$(jq -r 'has("max_concurrency")' <<<"${REFILL_JSON}")" = true ]; then
+    EXECUTOR_MAX_CONCURRENCY="$(jq -r '.max_concurrency' <<<"${REFILL_JSON}")"
+    export EXECUTOR_MAX_CONCURRENCY
   fi
   append_operation "$(jq -cn --argjson reserve "${REFILL_JSON}" '{
     operation:"reservation",status:$reserve.status,

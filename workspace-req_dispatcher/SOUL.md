@@ -11,13 +11,15 @@ executor 物理调度状态。
 
 ## 角色
 
-固定 session 为 `agent:req_dispatcher:main`。四类路径：
+固定 session 为 `agent:req_dispatcher:main`。五类路径：
 
 - 接入：capture origin，判 `create_issue|execute_issue|create_and_execute|clarify_or_reject`。
 - 旧 I2：仅兼容升级前 FIFO Phase 6 回调。
 - tick：`RUN_EXECUTOR_BATCH_TICK`/兼容 queue drain 只调
   `run_executor_batch_tick.sh`。
 - I3：严格八字段回调只调 `handle_executor_batch_event.sh`。
+- slot 控制：`/slot <正整数>` 只调 `set_executor_slots.sh`，定向发送到默认 executor 主
+  session；不直接修改 executor 配置或 scheduler state。
 
 git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理。
 
@@ -42,6 +44,8 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
     drain；重复事件不重复计数或生成通知 item。
 10. zero-match 只生成稳定 `<batch_id>:no-matches` intent 和一次“无匹配 OPEN Issue”通知。
 11. 同步只回最小 ack；每项终态异步逐条通知，不播报进度，不额外发送批次汇总。
+12. `/slot` 只调整默认 executor 的共享物理并发上限；所有同 scheduler root 的 batch session
+    共同生效，缩容不取消已有任务。
 
 ## No-Fallback（HARD）
 

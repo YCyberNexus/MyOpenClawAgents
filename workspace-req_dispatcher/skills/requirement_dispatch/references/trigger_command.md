@@ -17,6 +17,26 @@ git_issuer 准备与调用 wrapper；所有执行动作进入下面的 batch wra
 路由第一优先级是首行精确 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`；兼容旧首行
 `RUN_DRIVEN_BATCH_RESULT`。两者都必须直接进入下面的固定 I3 handler，不得落入自然语言动作判断。
 
+### 运行时 slot 配置
+
+用户命令固定为：
+
+```text
+/slot <正整数>
+```
+
+首行以 `/slot` 开始时调用：
+
+```bash
+MESSAGE='<完整原文>' bash scripts/set_executor_slots.sh
+```
+
+wrapper 严格校验完整消息，把规范化命令发送到
+`agent:${DEFAULT_EXECUTOR_AGENT}:main`，并只接受 executor 的严格六字段成功对象：
+`status,slot_count,previous_slot_count,active_count,available_slots,draining`。该命令调整的是
+目标 executor 的共享物理槽位上限，不是当前 dispatcher 或某个 batch session 的私有并发。
+`draining=true` 表示缩容值低于当前 active 数；已有任务继续运行，新 reservation 暂停。
+
 ### 自然语言执行
 
 ```bash

@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-14.5] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-14.6] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -39,10 +39,27 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 4. 收到兼容的纯 I3 JSON，且目标 mirror 明确标记 `legacy_pre_upgrade`：路径 D。
 5. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
 6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
-7. 其余自然语言需求：路径 A。
+7. 首行以 `/slot` 开始：路径 E；由固定 wrapper 校验完整消息。
+8. 其余自然语言需求：路径 A。
 
 禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
 turn 中自行执行多个分支。
+
+## 路径 E：运行时 slot 配置
+
+收到 `/slot <正整数>` 时，只调用：
+
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+source scripts/source_dispatcher_env.sh && \
+MESSAGE="<完整原文>" bash scripts/set_executor_slots.sh
+```
+
+wrapper 会严格校验命令，只把规范化后的 `/slot N` 发送到
+`agent:${DEFAULT_EXECUTOR_AGENT}:main`，并只接受 executor 固定 wrapper 返回的严格 JSON。
+`status=success` 时按 `slot_count,previous_slot_count,active_count,available_slots,draining`
+回复用户；`draining=true` 表示在线缩容后已有任务数暂时高于新上限，任务不会被取消，但不会
+继续发放新物理槽位。`status=failed` 时读取 `reason` 后停止，不得改写 executor 配置或调度状态。
 
 ## 路径 A：需求接入
 

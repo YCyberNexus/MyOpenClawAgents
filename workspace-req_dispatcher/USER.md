@@ -9,6 +9,16 @@
 - 明确“建单并执行”：建单成功后进入受驱动 batch；
 - project/selector 不完整：要求补充，不调用 executor。
 
+共享执行槽位可直接调整：
+
+```text
+/slot 5
+```
+
+该命令修改默认 `req_executor` 的共享物理并发上限，所有 batch session 共同生效，不是每个
+session 各自设置。在线调低时不会取消已有任务；如果当前 active 数高于新上限，会停止发放新
+槽位并等待自然回落。
+
 执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
 
 - 单 Issue：`处理 group/project 的 #42`；

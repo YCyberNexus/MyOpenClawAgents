@@ -17,6 +17,7 @@ dispatcher 是 prompt 路由器和 batch 控制面：
 - 周期恢复只使用 `run_executor_batch_tick.sh`；
 - I3 只使用 `handle_executor_batch_event.sh`；
 - 旧 I2/FIFO 只为部署升级排空保留。
+- `/slot <正整数>` 只使用 `set_executor_slots.sh` 转发到默认 executor 主 session。
 
 它不建 Issue、不改 GitLab、不跑 Issue、不查询 GitLab Issue、不展开 IID snapshot、不管理
 worktree/campaign/物理并发。wiki 是唯一只读 GitLab 入口。
@@ -39,6 +40,7 @@ prepare_executor_issue_payload.sh
 
 不得直接调用 receipt/mirror/event/notification/legacy bridge 内部脚本，也不得手写 JSON state。
 只读取顶层 wrapper 的严格 JSON。
+不得为了调整 slot 修改 tracked 配置；运行时调整只走 `set_executor_slots.sh`。
 
 `DISPATCHER_CALLBACK_TARGET` 为空必须在 ID/intent/network 前拒绝。I1 intent 必须先落盘；旧
 FIFO 非空时不发送。ack 丢失只重投同 batch。receipt immutable 字段冲突 fail closed。

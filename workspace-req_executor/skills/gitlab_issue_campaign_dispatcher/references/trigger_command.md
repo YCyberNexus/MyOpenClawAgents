@@ -1,17 +1,35 @@
 # Trigger Commands
 
-`req_executor` accepts four current trigger commands and one explicit legacy
-completion command:
+`req_executor` accepts five current trigger forms and one compatibility
+command:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN`
 - `RUN_CHILD_COMPLETION_CALLBACK`
 - `RUN_DRIVEN_ISSUE_BATCH`
 - `RUN_EXECUTOR_BATCH_TICK`
+- `/slot <positive-integer>`
 - `RUN_SINGLE_ISSUE`
 
 The executor is task-agnostic. It reads the GitLab issue, renders the issue content into `${LOG_DIR}/prompt.txt`, and asks the outer subagent to run `scripts/run_acpx_attempt.sh` from the prepared worktree. That script owns the fixed `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` call.
 
 Runtime state uses the fixed in-repo directory `${REPO_PATH}/.req_executor/`. There is no trigger or config field for runtime basenames, project data directories, or account-pool paths.
+
+## Runtime Slot Control
+
+Exact form:
+
+```text
+/slot <positive-integer>
+```
+
+Call `scripts/set_executor_slots.sh` with the complete message on stdin and
+return its sole compact JSON object. The wrapper persists `max_concurrency` in
+the executor-wide `scheduler_state.json` under `scheduler.lock`; every batch
+session sharing the same scheduler root uses that value. A decrease below the
+current active count is accepted without cancelling work: `draining=true`, no
+new physical jobs are reserved, and the active set drains naturally to the new
+ceiling. The tracked `EXECUTOR_MAX_CONCURRENCY=3` remains the initialization
+default when no runtime value has been set.
 
 ## Scheduled Tick
 
@@ -190,13 +208,16 @@ an older tombstone, including when the same job and numeric generation are
 reused with a new token. All conflicting outcome, runtime session, generation,
 token, or action evidence fails closed.
 
-The default executor-wide concurrency is 3 unless deployment config overrides
-`EXECUTOR_MAX_CONCURRENCY`. Multiple projects/batches share those slots. Grant
+The initial executor-wide concurrency is 3 unless deployment config overrides
+`EXECUTOR_MAX_CONCURRENCY`. `/slot` then persists the runtime ceiling in shared
+scheduler state. Multiple projects/batches share those slots. Grant
 order is persisted scheduler order and must be consumed one item at a time;
 project grouping must not reorder it. Explicit process values for
-`EXECUTOR_SCHEDULER_ROOT` and `EXECUTOR_MAX_CONCURRENCY` take precedence over
-config and are preserved consistently across intake, tick, top-up, and spawn
-recording, so one operation cannot split a batch across scheduler roots.
+`EXECUTOR_SCHEDULER_ROOT` process values take precedence over config and are
+preserved consistently across intake, tick, top-up, and spawn recording, so one
+operation cannot split a batch across scheduler roots. A process/config
+`EXECUTOR_MAX_CONCURRENCY` initializes scheduler capacity only while no runtime
+`max_concurrency` has been persisted.
 Completed batches leave the hot `batch_order`; completed launch actions and
 delivered callbacks move to cold per-ID archives. Direct replay still resolves
 those records without making every periodic tick scan the full history.

@@ -281,6 +281,8 @@ elif ! jq -e '
           and . == floor and . >= 0))));
   type == "object"
   and .version == 1
+  and ((has("max_concurrency") | not)
+    or (.max_concurrency | type == "number" and . == floor and . > 0))
   and ((.round_robin_cursor == null) or (.round_robin_cursor | type == "string"))
   and (.active_jobs | type == "object")
   and (.batch_order | type == "array")
@@ -289,6 +291,11 @@ elif ! jq -e '
   die "existing scheduler state is invalid: ${SCHEDULER_STATE_FILE}"
 fi
 scheduler_migrate_hot_launch_failed_receipts
+RUNTIME_MAX_CONCURRENCY="$(jq -r '.max_concurrency // empty' "${SCHEDULER_STATE_FILE}")"
+if [ -n "${RUNTIME_MAX_CONCURRENCY}" ]; then
+  EXECUTOR_MAX_CONCURRENCY="${RUNTIME_MAX_CONCURRENCY}"
+  export EXECUTOR_MAX_CONCURRENCY
+fi
 flock -u "${SCHEDULER_LOCK_FD}"
 exec {SCHEDULER_LOCK_FD}>&-
 

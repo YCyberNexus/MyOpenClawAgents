@@ -702,10 +702,18 @@ for expired_job_id in "${EXPIRED_PREPARING_JOB_IDS[@]}"; do
 done
 
 ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
-if [ "${ACTIVE_COUNT}" -gt "${EXECUTOR_MAX_CONCURRENCY}" ]; then
-  reserve_die "active job count exceeds EXECUTOR_MAX_CONCURRENCY" 3
+SCHEDULER_MAX_CONCURRENCY="$(jq -er \
+  --argjson configured_max "${EXECUTOR_MAX_CONCURRENCY}" '
+  (.max_concurrency // $configured_max)
+  | if type == "number" and . == floor and . > 0
+    then . else error("invalid max_concurrency") end
+' <<<"${SCHEDULER_STATE}")" \
+  || reserve_die "scheduler max_concurrency is invalid" 3
+if [ "${ACTIVE_COUNT}" -ge "${SCHEDULER_MAX_CONCURRENCY}" ]; then
+  AVAILABLE_SLOTS=0
+else
+  AVAILABLE_SLOTS=$((SCHEDULER_MAX_CONCURRENCY - ACTIVE_COUNT))
 fi
-AVAILABLE_SLOTS=$((EXECUTOR_MAX_CONCURRENCY - ACTIVE_COUNT))
 NEXT_RESERVATION_SEQ="$(jq -r \
   '[.active_jobs[].reservation_seq] | (max // 0) + 1' \
   <<<"${SCHEDULER_STATE}")"
@@ -1036,9 +1044,11 @@ jq -cn \
   --argjson grants "${GRANTS_JSON}" \
   --argjson active_count "${ACTIVE_COUNT}" \
   --argjson available_slots "${AVAILABLE_SLOTS}" \
+  --argjson max_concurrency "${SCHEDULER_MAX_CONCURRENCY}" \
   '{
     status:$status,
     grants:$grants,
     active_count:$active_count,
-    available_slots:$available_slots
+    available_slots:$available_slots,
+    max_concurrency:$max_concurrency
   }'
