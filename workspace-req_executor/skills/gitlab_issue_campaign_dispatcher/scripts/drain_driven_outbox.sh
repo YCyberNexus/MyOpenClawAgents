@@ -12,6 +12,7 @@ DELIVERY_TIMEOUT_SECONDS="${DRIVEN_CALLBACK_TIMEOUT_SECONDS:-300}"
 ATTEMPT_BUDGET="${DRIVEN_CALLBACK_MAX_ATTEMPTS_PER_TICK:-3}"
 BACKOFF_BASE_SECONDS="${DRIVEN_CALLBACK_BACKOFF_BASE_SECONDS:-30}"
 BACKOFF_MAX_SECONDS="${DRIVEN_CALLBACK_BACKOFF_MAX_SECONDS:-3600}"
+ACCEPTANCE_CMD="${DRIVEN_ACCEPTANCE_CMD:-${SCRIPT_DIR}/emit_driven_batch_acceptance.sh}"
 NOW_EPOCH_PROCESS_SET="${NOW_EPOCH+x}"
 DRAIN_NOW="${NOW_EPOCH:-$(date +%s)}"
 ACK_ONLY_INSTRUCTION='ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。'
@@ -20,6 +21,16 @@ drain_die() {
   echo "drain_driven_outbox.sh: $1" >&2
   exit "${2:-2}"
 }
+
+case "${ACCEPTANCE_CMD}" in
+  /*) ;;
+  *) drain_die "DRIVEN_ACCEPTANCE_CMD must be absolute" ;;
+esac
+case "${ACCEPTANCE_CMD}" in
+  *$'\n'*|*$'\r'*|*$'\t'*) drain_die "DRIVEN_ACCEPTANCE_CMD contains control characters" ;;
+esac
+[ -f "${ACCEPTANCE_CMD}" ] && [ -x "${ACCEPTANCE_CMD}" ] \
+  || drain_die "DRIVEN_ACCEPTANCE_CMD must be an executable regular file"
 
 atomic_write_json() {
   local destination="$1"
@@ -285,6 +296,45 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
     delivery_error="openclaw_not_found"
   fi
 
+  batch_acceptance=null
+  if [ -z "${delivery_error}" ] && [ "${callback_auth_mode}" = nonce_v1 ]; then
+    batch_id="$(jq -r '.batch_id' <<<"${public_body}")"
+    snapshot_index="$(jq -r '.snapshot_index' <<<"${public_body}")"
+    set +e
+    acceptance_output="$(
+      CONFIG_DIR="${CONFIG_DIR}" BATCH_ID="${batch_id}" \
+        bash "${ACCEPTANCE_CMD}" 2>/dev/null
+    )"
+    acceptance_rc=$?
+    set -e
+    if [ "${acceptance_rc}" -ne 0 ] || ! batch_acceptance="$(
+      printf '%s' "${acceptance_output}" | jq -cseS \
+        --arg batch_id "${batch_id}" \
+        --argjson snapshot_index "${snapshot_index}" '
+        if length == 1
+          and (.[0] | type == "object")
+          and ((.[0] | keys | sort) == [
+            "batch_id","matched_count","scheduler_status","snapshot_digest","status"
+          ])
+          and .[0].status == "success"
+          and .[0].batch_id == $batch_id
+          and (.[0].matched_count | type == "number"
+            and . == floor and . > $snapshot_index)
+          and (.[0].snapshot_digest | type == "string"
+            and test("^[0-9a-f]{64}$"))
+          and (.[0].scheduler_status == "queued"
+            or .[0].scheduler_status == "running"
+            or .[0].scheduler_status == "completed")
+        then .[0]
+        else error("invalid callback acceptance")
+        end
+      ' 2>/dev/null
+    )"; then
+      delivery_error="batch_acceptance_unavailable"
+      batch_acceptance=null
+    fi
+  fi
+
   if [ -n "${delivery_error}" ]; then
     attempted_at="$(current_epoch)"
     retry_delay="$(retry_delay_seconds "$(jq -r '.attempts' <<<"${entry_json}")")"
@@ -310,7 +360,9 @@ for outbox_file in "${OUTBOX_FILES[@]}"; do
     callback_envelope="$(jq -cnS \
       --arg callback_nonce "${callback_nonce}" \
       --arg executor_agent "${executor_agent}" \
+      --argjson batch_acceptance "${batch_acceptance}" \
       --argjson worker_result_json "${public_body}" '{
+        batch_acceptance:$batch_acceptance,
         callback_nonce:$callback_nonce,
         executor_agent:$executor_agent,
         worker_result_json:$worker_result_json

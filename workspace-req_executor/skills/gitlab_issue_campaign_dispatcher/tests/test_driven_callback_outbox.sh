@@ -25,6 +25,7 @@ TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-driven-callback.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
+FAKE_ACCEPTANCE="${TEST_ROOT}/fake-acceptance.sh"
 export CONFIG_DIR
 mkdir -p "${CONFIG_DIR}"
 printf '%s\n' \
@@ -36,6 +37,20 @@ printf '%s\n' \
   'DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0' \
   >"${CONFIG_DIR}/campaign_defaults.env"
 CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+cat >"${FAKE_ACCEPTANCE}" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+: "${BATCH_ID:?}"
+jq -cn --arg batch_id "${BATCH_ID}" '{
+  status:"success",
+  batch_id:$batch_id,
+  matched_count:1,
+  snapshot_digest:("c" * 64),
+  scheduler_status:"completed"
+}'
+EOF
+chmod +x "${FAKE_ACCEPTANCE}"
+export DRIVEN_ACCEPTANCE_CMD="${FAKE_ACCEPTANCE}"
 
 # Task9 binds the exact preparing claim into the project pending entry before
 # sessions_spawn. The bind must serialize on the campaign lock, preserve bytes
@@ -1067,9 +1082,19 @@ exec 8>&-
 envelope="${message#*callback_envelope=}"
 envelope="${envelope%%$'\n'*}"
 jq -e '
-  (keys | sort) == ["callback_nonce","executor_agent","worker_result_json"]
+  (keys | sort) == [
+    "batch_acceptance","callback_nonce","executor_agent","worker_result_json"
+  ]
   and (.callback_nonce | test("^[0-9a-f]{64}$"))
   and .executor_agent == "req_executor"
+  and (.batch_acceptance | keys | sort) == [
+    "batch_id","matched_count","scheduler_status","snapshot_digest","status"
+  ]
+  and .batch_acceptance.status == "success"
+  and .batch_acceptance.batch_id == .worker_result_json.batch_id
+  and .batch_acceptance.matched_count > .worker_result_json.snapshot_index
+  and (.batch_acceptance.snapshot_digest | test("^[0-9a-f]{64}$"))
+  and .batch_acceptance.scheduler_status == "completed"
   and (.worker_result_json | keys | sort) == [
     "batch_id","event_id","iid","mr_url","project","reason","snapshot_index","status"
   ]
@@ -1083,9 +1108,11 @@ jq -nc \
   --argjson token_env_present "${token_env_present}" \
   --arg callback_nonce "$(jq -r '.callback_nonce' <<<"${envelope}")" \
   --arg executor_agent "$(jq -r '.executor_agent' <<<"${envelope}")" \
+  --argjson batch_acceptance "$(jq -c '.batch_acceptance' <<<"${envelope}")" \
   --argjson body "${body}" \
   '{event_id:$event_id,run_id:$run_id,target:$target,token_env_present:$token_env_present,
-    callback_nonce:$callback_nonce,executor_agent:$executor_agent,body:$body}' \
+    callback_nonce:$callback_nonce,executor_agent:$executor_agent,
+    batch_acceptance:$batch_acceptance,body:$body}' \
   >>"${OPENCLAW_LOG:?}"
 call_count="$(jq -sr --arg event_id "${event_id}" \
   '[.[] | select(.event_id == $event_id)] | length' "${OPENCLAW_LOG}")"
@@ -1192,6 +1219,10 @@ jq -se '
   all(.[];
     (.callback_nonce | test("^[0-9a-f]{64}$"))
     and .executor_agent == "req_executor"
+    and .batch_acceptance.status == "success"
+    and .batch_acceptance.batch_id == .body.batch_id
+    and .batch_acceptance.matched_count > .body.snapshot_index
+    and (.batch_acceptance.snapshot_digest | test("^[0-9a-f]{64}$"))
     and (.body | has("callback_nonce") | not)
     and (.body | has("executor_agent") | not))
 ' "${OPENCLAW_LOG}" >/dev/null \

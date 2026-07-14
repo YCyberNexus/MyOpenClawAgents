@@ -428,6 +428,106 @@ if ! grep -qx 'executor_agent=req_executor' <<<"${single_payload}" \
   exit 1
 fi
 
+# A terminal I3 must be able to repair a lost synchronous acceptance. This is
+# the recovery path when executor already finished the Issue while dispatcher
+# still has only the queued I1 intent and therefore no callback-visible mirror.
+RECOVERY_ROOT="${TEST_ROOT}/callback-acceptance-recovery"
+RECOVERY_BATCH_ID='batch-callback-recovery'
+RECOVERY_CORRELATION_ID='reqd-callback-recovery'
+RECOVERY_SNAPSHOT_DIGEST='dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd'
+RECOVERY_PAYLOAD="$(
+  BATCH_ID="${RECOVERY_BATCH_ID}" \
+  CORRELATION_ID="${RECOVERY_CORRELATION_ID}" \
+  PROJECT='group/subgroup/project' \
+  SELECTOR_JSON='{"type":"single","iid":77}' \
+  FORCE_RERUN_PR=false \
+  EXECUTOR_AGENT=req_executor \
+  CALLBACK_NONCE="${FIXED_NONCE}" \
+  DISPATCHER_CALLBACK_TARGET='agent:req_dispatcher:main' \
+    "${BASH}" "${SKILL_DIR}/scripts/build_executor_batch_payload.sh"
+)"
+RECOVERY_REQUEST_DIGEST="$(printf '%s' "${RECOVERY_PAYLOAD}" | sha256_text)"
+STATE_ROOT="${RECOVERY_ROOT}" \
+BATCH_ID="${RECOVERY_BATCH_ID}" \
+CORRELATION_ID="${RECOVERY_CORRELATION_ID}" \
+PROJECT='group/subgroup/project' \
+SELECTOR_JSON='{"type":"single","iid":77}' \
+FORCE_RERUN_PR=false \
+TARGET_BRANCH='' \
+EXECUTOR_AGENT=req_executor \
+CALLBACK_NONCE="${FIXED_NONCE}" \
+ORIGIN_JSON=null \
+PAYLOAD="${RECOVERY_PAYLOAD}" \
+REQUEST_DIGEST="${RECOVERY_REQUEST_DIGEST}" \
+  "${BASH}" "${SKILL_DIR}/scripts/enqueue_executor_batch_request.sh" >/dev/null
+
+RECOVERY_EVENT="$(jq -cn --arg batch_id "${RECOVERY_BATCH_ID}" '{
+  event_id:($batch_id + ":snapshot-0:terminal-1"),
+  batch_id:$batch_id,
+  snapshot_index:0,
+  project:"group/subgroup/project",
+  iid:77,
+  status:"done",
+  mr_url:"https://gitlab.example/group/subgroup/project/-/merge_requests/77",
+  reason:null
+}')"
+RECOVERY_ACCEPTANCE="$(jq -cn \
+  --arg batch_id "${RECOVERY_BATCH_ID}" \
+  --arg snapshot_digest "${RECOVERY_SNAPSHOT_DIGEST}" '{
+  status:"success",
+  batch_id:$batch_id,
+  matched_count:1,
+  snapshot_digest:$snapshot_digest,
+  scheduler_status:"completed"
+}')"
+RECOVERY_ENVELOPE="$(jq -cn \
+  --arg nonce "${FIXED_NONCE}" \
+  --arg executor_agent req_executor \
+  --argjson acceptance "${RECOVERY_ACCEPTANCE}" \
+  --argjson event "${RECOVERY_EVENT}" '{
+  batch_acceptance:$acceptance,
+  callback_nonce:$nonce,
+  executor_agent:$executor_agent,
+  worker_result_json:$event
+}')"
+RECOVERY_TRIGGER="$(printf 'RUN_DRIVEN_BATCH_RESULT_ACK_ONLY\ncallback_envelope=%s\n%s\n' \
+  "${RECOVERY_ENVELOPE}" \
+  'ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。')"
+recovered_ack="$(
+  printf '%s' "${RECOVERY_TRIGGER}" | \
+    STATE_ROOT="${RECOVERY_ROOT}" \
+    NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" \
+      "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
+)"
+if ! jq -e --arg batch_id "${RECOVERY_BATCH_ID}" '
+    .status == "accepted"
+    and .event_id == ($batch_id + ":snapshot-0:terminal-1")
+  ' <<<"${recovered_ack}" >/dev/null \
+  || ! jq -e --arg batch_id "${RECOVERY_BATCH_ID}" '
+    .batches[$batch_id].matched_count == 1
+    and .batches[$batch_id].terminal_count == 1
+    and .batches[$batch_id].status == "completed"
+    and .batches[$batch_id].callback_auth_mode == "nonce_v1"
+  ' "${RECOVERY_ROOT}/_dispatcher/executor_batches.json" >/dev/null \
+  || ! jq -e '.requests == []' \
+    "${RECOVERY_ROOT}/_dispatcher/executor_batch_outbox.json" >/dev/null \
+  || [ "$(find "${RECOVERY_ROOT}/_dispatcher/accepted_intents" \
+      -type f -name '*.json' | wc -l | tr -d ' ')" -ne 1 ]; then
+  echo "authenticated I3 did not repair the lost acceptance before applying terminal state" >&2
+  printf '%s\n' "${recovered_ack}" >&2
+  exit 1
+fi
+recovered_duplicate="$(
+  printf '%s' "${RECOVERY_TRIGGER}" | \
+    STATE_ROOT="${RECOVERY_ROOT}" \
+    NOTIFY_USER_SCRIPT="${QUIET_NOTIFY}" \
+      "${BASH}" "${SKILL_DIR}/scripts/handle_executor_batch_event.sh"
+)"
+if ! jq -e '.status == "duplicate"' <<<"${recovered_duplicate}" >/dev/null; then
+  echo "replayed self-healing callback did not preserve duplicate acknowledgement" >&2
+  exit 1
+fi
+
 # A nonce_v1 mirror must reject every unauthenticated or mismatched transport
 # without changing any durable projection, then accept the exact envelope once.
 AUTH_ROOT="${TEST_ROOT}/authenticated-state"

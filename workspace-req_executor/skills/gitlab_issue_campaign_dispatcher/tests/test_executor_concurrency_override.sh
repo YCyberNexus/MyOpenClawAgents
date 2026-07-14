@@ -15,6 +15,16 @@ fail() {
   exit 1
 }
 
+sha256_canonical_json_file() {
+  local compact_json
+  compact_json="$(jq -cS . "$1")"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${compact_json}" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "${compact_json}" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
 TMP_PARENT="${TMPDIR:-/tmp}"
 TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-concurrency.XXXXXX")"
@@ -339,10 +349,17 @@ jq -cnS --arg batch_id "${AUTH_BATCH}" --arg nonce "${AUTH_NONCE}" '{
 }' >"${AUTH_ROOT}/batches/${AUTH_BATCH}/request.json"
 jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
   >"${AUTH_ROOT}/batches/${AUTH_BATCH}/snapshot.json"
-jq -cnS --arg batch_id "${AUTH_BATCH}" --arg job_id "${AUTH_JOB}" '{
+AUTH_REQUEST_DIGEST="$(sha256_canonical_json_file \
+  "${AUTH_ROOT}/batches/${AUTH_BATCH}/request.json")"
+AUTH_SNAPSHOT_DIGEST="$(sha256_canonical_json_file \
+  "${AUTH_ROOT}/batches/${AUTH_BATCH}/snapshot.json")"
+jq -cnS --arg batch_id "${AUTH_BATCH}" --arg job_id "${AUTH_JOB}" \
+  --arg request_digest "${AUTH_REQUEST_DIGEST}" \
+  --arg snapshot_digest "${AUTH_SNAPSHOT_DIGEST}" '{
   version:1,batch_id:$batch_id,status:"running",matched_count:1,
   terminal_count:0,done_count:0,failed_count:0,timeout_count:0,skipped_count:0,
-  next_snapshot_index:1,request_digest:"fixture",snapshot_digest:"fixture",
+  next_snapshot_index:1,request_digest:$request_digest,
+  snapshot_digest:$snapshot_digest,
   memberships:{"0":{snapshot_index:0,iid:42,status:"running",job_id:$job_id}}
 }' >"${AUTH_ROOT}/batches/${AUTH_BATCH}/state.json"
 jq -cnS --arg batch_id "${AUTH_BATCH}" --arg job_id "${AUTH_JOB}" '{
@@ -406,6 +423,13 @@ envelope="${envelope%%$'\n'*}"
 jq -e --arg nonce "${AUTH_NONCE:?}" '
   .executor_agent == "custom_executor"
   and .callback_nonce == $nonce
+  and (.batch_acceptance | keys | sort) == [
+    "batch_id","matched_count","scheduler_status","snapshot_digest","status"
+  ]
+  and .batch_acceptance.status == "success"
+  and .batch_acceptance.batch_id == .worker_result_json.batch_id
+  and .batch_acceptance.matched_count > .worker_result_json.snapshot_index
+  and (.batch_acceptance.snapshot_digest | test("^[0-9a-f]{64}$"))
 ' <<<"${envelope}" >/dev/null
 jq -nc --arg event_id "$(jq -r '.worker_result_json.event_id' <<<"${envelope}")" \
   '{status:"accepted",event_id:$event_id}'

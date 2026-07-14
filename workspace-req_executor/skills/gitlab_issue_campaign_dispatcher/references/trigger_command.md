@@ -241,9 +241,12 @@ returns an accepted/duplicate acknowledgement containing the same `event_id`.
 The callback `openclaw` subprocess inherits the executor process environment,
 including the effective `GITLAB_TOKEN` selected from process/config.
 The transport is `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`, one strict `callback_envelope`
-containing only `callback_nonce`, `executor_agent`, and the public eight-field
-`worker_result_json`, and one fixed third-line `ack_instruction` that forbids
-temporary files; the nonce never appears inside that public result. The
+containing `batch_acceptance`, `callback_nonce`, `executor_agent`, and the public
+eight-field `worker_result_json`, and one fixed third-line `ack_instruction` that
+forbids temporary files. `batch_acceptance` is rebuilt by the fixed public
+acceptance emitter immediately before transport and uses the same batch ID as
+the I3, so dispatcher can repair a receipt/mirror after a lost synchronous I1
+reply; the nonce never appears inside either public object. The
 dispatcher still accepts the former `RUN_DRIVEN_BATCH_RESULT` marker for
 in-flight compatibility, but new outbox delivery never emits it. The complete
 ack stdout must be exactly one strict accepted/duplicate JSON object, or exactly

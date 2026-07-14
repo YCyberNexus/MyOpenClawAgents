@@ -66,7 +66,7 @@ executor outbox 发送的真实 message 是：
 
 ```text
 RUN_DRIVEN_BATCH_RESULT_ACK_ONLY
-callback_envelope={"callback_nonce":"<64 个小写 hex>","executor_agent":"req_executor","worker_result_json":{"event_id":"<id>","batch_id":"<batch>","snapshot_index":0,"project":"group/subgroup/project","iid":42,"status":"done","mr_url":null,"reason":null}}
+callback_envelope={"batch_acceptance":{"status":"success","batch_id":"<batch>","matched_count":1,"snapshot_digest":"<64 个小写 hex>","scheduler_status":"completed"},"callback_nonce":"<64 个小写 hex>","executor_agent":"req_executor","worker_result_json":{"event_id":"<id>","batch_id":"<batch>","snapshot_index":0,"project":"group/subgroup/project","iid":42,"status":"done","mr_url":null,"reason":null}}
 ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。
 ```
 
@@ -76,11 +76,13 @@ bash -c 'source scripts/source_dispatcher_env.sh; WORKER_RESULT_JSON="$(cat)" ba
 CALLBACK_EOF
 ```
 
-handler 也接受把严格三字段 `callback_envelope` 对象直接放入 `CALLBACK_ENVELOPE_JSON`，但不得由
+handler 也接受把严格四字段 `callback_envelope` 对象直接放入 `CALLBACK_ENVELOPE_JSON`，但不得由
 LLM 手工解包真实 transport，也不得把 callback、nonce 或中间命令写入 `/tmp`、workspace 或
 其他临时文件。新 transport 必须恰好包含精确首行、唯一一行 `callback_envelope=`
 和上述逐字匹配的固定第三行；旧 marker 两行格式继续兼容。外层
-必须恰好是 `callback_nonce,executor_agent,worker_result_json`，内层 public I3 仍必须恰好八字段。
+新外层必须恰好是 `batch_acceptance,callback_nonce,executor_agent,worker_result_json`；滚动升级期间
+继续兼容原三字段认证 envelope。`batch_acceptance` 必须是同 batch 的严格五字段 public
+acceptance，内层 public I3 仍必须恰好八字段。
 额外行、重复字段、非 object、缺字段或多字段都非零 fail closed，且不得进入 durable apply、
 bridge、通知或网络调用。纯八字段 I3 只兼容已经明确标记 `legacy_pre_upgrade` 的部署前 mirror；
 任何新 batch/single mirror 都禁止降级接受纯 I3。
@@ -88,6 +90,10 @@ bridge、通知或网络调用。纯八字段 I3 只兼容已经明确标记 `le
 durable apply 在提交 event ledger 前固定校验：nonce 的 SHA-256 等于 mirror 摘要、I3 project 等于
 mirror project、envelope executor_agent 等于路由后 executor。nonce 明文不得进入 public
 acceptance、compact mirror、event ledger、用户通知或日志。
+
+mirror 缺失时，handler 先用 nonce、project、executor 对齐原 durable I1，再从
+`batch_acceptance` 幂等补写 receipt/mirror；同步 acceptance 即使因超时或会话中断丢失，已经完成
+的同一 I3 也不会陷入 `unknown_batch` 重投循环。
 
 stdout 必须只有一个严格 accepted/duplicate ack JSON；bridge、通知和网络 stdout 均被隔离，
 通知失败只写 stderr/state。最终 assistant 内容必须是该 stdout JSON 原样，禁止前后缀、Markdown、

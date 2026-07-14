@@ -348,7 +348,13 @@ if [ "${acceptance_json}" = null ]; then
     --arg error "${failure_reason}" \
     --arg updated_at "${failed_at}" '
     .requests |= map(
-      if .batch_id == $batch_id and .status != "accepted" then
+      # An authenticated I3 may repair a lost synchronous acceptance while
+      # this network attempt is still unwinding. Never downgrade that durable
+      # received receipt back to queued merely because the older turn returned
+      # an invalid/ambiguous public reply.
+      if .batch_id == $batch_id
+        and .status != "accepted"
+        and .status != "received" then
         .status = $status
         | .last_error = $error
         | .updated_at = $updated_at

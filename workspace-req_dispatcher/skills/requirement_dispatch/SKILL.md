@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-14.4] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-14.5] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -35,7 +35,7 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 
 1. 首行是精确 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`：路径 D；不得进入自然语言动作判定。
 2. 首行是兼容的精确 `RUN_DRIVEN_BATCH_RESULT`：路径 D。
-3. 收到严格三字段 `callback_envelope` 对象：路径 D。
+3. 收到严格三字段兼容 `callback_envelope`，或带严格 `batch_acceptance` 的四字段对象：路径 D。
 4. 收到兼容的纯 I3 JSON，且目标 mirror 明确标记 `legacy_pre_upgrade`：路径 D。
 5. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
 6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
@@ -196,7 +196,7 @@ executor outbox 实际发送的完整 transport 为：
 
 ```text
 RUN_DRIVEN_BATCH_RESULT_ACK_ONLY
-callback_envelope={"callback_nonce":"<64 个小写 hex>","executor_agent":"<路由 agent>","worker_result_json":<严格八字段 I3 object>}
+callback_envelope={"batch_acceptance":<严格五字段 acceptance>,"callback_nonce":"<64 个小写 hex>","executor_agent":"<路由 agent>","worker_result_json":<严格八字段 I3 object>}
 ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。
 ```
 
@@ -214,14 +214,18 @@ bash -c 'source scripts/source_dispatcher_env.sh; WORKER_RESULT_JSON="$(cat)" ba
 CALLBACK_EOF
 ```
 
-handler 还接受把严格三字段对象放入 `CALLBACK_ENVELOPE_JSON`。transport 必须只有首行和唯一一行
-`callback_envelope=`；外层字段及内层八字段对象都按精确 schema 校验。纯八字段 I3 只允许命中
+handler 还接受把严格四字段对象放入 `CALLBACK_ENVELOPE_JSON`；滚动升级期间兼容不带
+`batch_acceptance` 的旧三字段认证对象。transport 必须只有首行和唯一一行
+`callback_envelope=`；外层字段、五字段 acceptance 及内层八字段对象都按精确 schema 校验。
+纯八字段 I3 只允许命中
 明确 `legacy_pre_upgrade` mirror；新 batch/single 的任意纯 I3 都在 durable apply、bridge、通知
 和网络调用前 fail closed。apply 还必须先核对 nonce SHA-256、完整 project 与授权 executor。
 nonce 不得出现在 public acceptance、ack、用户通知、event ledger 或日志。
 
-handler 固定只完成严格 transport 解包与 `apply_executor_batch_event.sh` durable apply，随后立即
-返回唯一 ack；legacy bridge recovery 与通知投递由 `run_executor_batch_tick.sh` 周期恢复：
+若 mirror 尚未建立，handler 会先用 nonce、project、executor 与原 durable I1 核对
+`batch_acceptance`，幂等补写 `received` receipt 和 mirror，再执行
+`apply_executor_batch_event.sh` durable apply；已有 mirror 时直接校验并落 I3。随后立即返回唯一
+ack；legacy bridge recovery 与通知投递由 `run_executor_batch_tick.sh` 周期恢复：
 
 ```json
 {"status":"accepted|duplicate","event_id":"<与输入完全相同>"}
@@ -253,7 +257,8 @@ receipt 先落 `executor_batch_outbox.json` 的 `received` 状态，再生成 mi
 - receipt 后崩溃：tick 不再触网，直接修 mirror；
 - ack 丢失且 receipt 未落：同 batch I1 重投；
 - mirror 已落但 accepted 未落：相同 receipt 幂等修复；
-- I3 早到 mirror 之前：返回 unknown，不 ack；mirror 修复后同 event 重投即可 accepted。
+- 带 `batch_acceptance` 的认证 I3 早到 mirror 之前：先补 receipt/mirror，再以同一调用 accepted；
+  滚动升级中的旧三字段认证 I3 仍返回 unknown，待 mirror 修复后以同 event 重投。
 
 ## Working Directory 与 JSON 纪律
 

@@ -71,7 +71,7 @@ RUN_EXECUTOR_BATCH_TICK
 
 ```text
 RUN_DRIVEN_BATCH_RESULT_ACK_ONLY
-callback_envelope={"callback_nonce":"<64 hex>","executor_agent":"req_executor","worker_result_json":<strict 8-field I3 JSON>}
+callback_envelope={"batch_acceptance":<strict 5-field acceptance>,"callback_nonce":"<64 hex>","executor_agent":"req_executor","worker_result_json":<strict 8-field I3 JSON>}
 ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时文件；最终 assistant 内容必须逐字等于其唯一一行 stdout JSON；禁止任何前后缀、prose、Markdown、解释或总结。
 ```
 

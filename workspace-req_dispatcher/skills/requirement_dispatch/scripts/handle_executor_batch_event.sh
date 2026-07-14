@@ -84,7 +84,11 @@ fi
 if [ "${TRANSPORT_MODE}" = auto ]; then
   if jq -e '
     type == "object"
-    and (keys | sort) == ["callback_nonce","executor_agent","worker_result_json"]
+    and ((keys | sort) == [
+      "callback_nonce","executor_agent","worker_result_json"
+    ] or (keys | sort) == [
+      "batch_acceptance","callback_nonce","executor_agent","worker_result_json"
+    ])
   ' <<<"${TRANSPORT_JSON}" >/dev/null 2>&1; then
     TRANSPORT_MODE=authenticated
   else
@@ -103,15 +107,33 @@ if [ "${TRANSPORT_MODE}" = authenticated ]; then
         "batch_id","event_id","iid","mr_url","project","reason",
         "snapshot_index","status"
       ];
+    def batch_acceptance:
+      type == "object"
+      and (keys | sort) == [
+        "batch_id","matched_count","scheduler_status","snapshot_digest","status"
+      ]
+      and .status == "success"
+      and (.batch_id | printable)
+      and (.matched_count | type == "number" and . == floor and . > 0)
+      and (.snapshot_digest | type == "string" and test("^[0-9a-f]{64}$"))
+      and (.scheduler_status == "queued" or .scheduler_status == "running"
+        or .scheduler_status == "completed");
     if length == 1
       and (.[0] | type == "object")
-      and ((.[0] | keys | sort) == [
-        "callback_nonce","executor_agent","worker_result_json"
-      ])
+      and (((.[0] | keys | sort) == [
+          "callback_nonce","executor_agent","worker_result_json"
+        ]) or ((.[0] | keys | sort) == [
+          "batch_acceptance","callback_nonce","executor_agent","worker_result_json"
+        ]))
       and (.[0].callback_nonce | type == "string"
         and test("^[0-9a-f]{64}$"))
       and (.[0].executor_agent | printable)
       and (.[0].worker_result_json | public_i3)
+      and (if .[0] | has("batch_acceptance") then
+        (.[0].batch_acceptance | batch_acceptance)
+        and .[0].batch_acceptance.batch_id == .[0].worker_result_json.batch_id
+        and .[0].worker_result_json.snapshot_index < .[0].batch_acceptance.matched_count
+      else true end)
     then .[0]
     else error("invalid authenticated callback envelope")
     end
@@ -134,6 +156,18 @@ else
   fi
 fi
 
+APPLY_CALLBACK_ENVELOPE=""
+if [ "${TRANSPORT_MODE}" = authenticated ]; then
+  APPLY_CALLBACK_ENVELOPE="$(jq -cS '{
+    callback_nonce,executor_agent,worker_result_json
+  }' <<<"${CALLBACK_ENVELOPE}")"
+  if jq -e 'has("batch_acceptance")' <<<"${CALLBACK_ENVELOPE}" >/dev/null; then
+    CALLBACK_ENVELOPE_JSON="${CALLBACK_ENVELOPE}" \
+      "${BASH}" "${SCRIPT_DIR}/recover_executor_batch_callback_acceptance.sh" \
+      >/dev/null
+  fi
+fi
+
 # The authenticated transport is needed only by the durable apply subprocess.
 # Remove caller-provided envelope variables before bridge/notification children
 # can inherit the nonce-bearing value.
@@ -145,7 +179,7 @@ unset TRANSPORT_WRAPPED TRANSPORT_MARKER_MODE
 set +e
 if [ "${TRANSPORT_MODE}" = authenticated ]; then
   ack="$(
-    CALLBACK_ENVELOPE_JSON="${CALLBACK_ENVELOPE}" \
+    CALLBACK_ENVELOPE_JSON="${APPLY_CALLBACK_ENVELOPE}" \
       "${BASH}" "${SCRIPT_DIR}/apply_executor_batch_event.sh"
   )"
 else
@@ -160,7 +194,7 @@ if [ "${apply_rc}" -ne 0 ]; then
   [ -z "${ack}" ] || printf '%s\n' "${ack}"
   exit "${apply_rc}"
 fi
-unset CALLBACK_ENVELOPE PUBLIC_I3_JSON
+unset CALLBACK_ENVELOPE APPLY_CALLBACK_ENVELOPE PUBLIC_I3_JSON
 if ! jq -e '
   type == "object"
   and (keys | sort) == ["event_id","status"]

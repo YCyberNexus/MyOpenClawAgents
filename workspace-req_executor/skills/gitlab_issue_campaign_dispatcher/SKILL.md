@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-14.11] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-14.12] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -411,6 +411,14 @@ Markdown fence whose body is that sole strict ack. Fence-external text, prose,
 double fences, prefixes, suffixes, or multiple JSON objects remain retryable
 `malformed_or_ambiguous_ack` failures; the dispatcher alone preserves the old
 `RUN_DRIVEN_BATCH_RESULT` input marker for in-flight compatibility.
+
+For every nonce-authenticated I3, `drain_driven_outbox.sh` re-reads the named
+batch through `emit_driven_batch_acceptance.sh` and adds that exact five-field
+object as `batch_acceptance` beside `callback_nonce`, `executor_agent`, and
+`worker_result_json`. This lets req_dispatcher authenticate and rebuild a
+missing receipt/mirror when the synchronous I1 acceptance was interrupted;
+the public eight-field event remains unchanged. Pre-upgrade legacy callbacks
+continue to use the former raw I3 transport without this field.
 
 ### The envelope is the whole decision tree
 
