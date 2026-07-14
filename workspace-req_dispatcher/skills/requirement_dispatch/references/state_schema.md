@@ -4,7 +4,7 @@
 campaign state 或 claim token。所有文件由 `env_paths.sh` 从 `STATE_ROOT` 派生，
 并共用 `pending.lock`；网络调用永远在共享锁外。
 
-四类 selector 的 snapshot 都由 executor 从 intake 时的 OPEN Issue 冻结；dispatcher state 不保存
+五类 selector 的 snapshot 都由 executor 从 intake 时的 OPEN Issue 冻结；dispatcher state 不保存
 或补建 CLOSED Issue 记录。
 
 ## 磁盘布局

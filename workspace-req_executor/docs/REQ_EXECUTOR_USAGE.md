@@ -36,14 +36,14 @@ RUN_DRIVEN_ISSUE_BATCH
 batch_id=<stable-id>
 correlation_id=<stable-id>
 project=<group>/<project>
-selector_type=single|range|open_unfinished|open_label
+selector_type=single|iid_list|range|open_unfinished|open_label
 dispatcher_callback_target=<target>
 executor_agent=req_executor
 callback_nonce=<64 个小写 hex>
 force_rerun_pr=true|false
 ```
 
-根据 selector 类型再提供 `iid`、`iid_min/iid_max` 或 `label`，可选 `branch`。I1 字段用于项目、selector 与回调路由；executor 按进程环境优先、tracked `config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，完成 OPEN Issue 查询，并在内部执行链和子任务 prompt 中直接传递该值。私有仓库网络 Git 操作使用普通 `git`，`origin` 为 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL，Git 子进程继承 executor 当前环境。Issue 列表使用 GraphQL cursor 完整扫描，重复 IID、异常游标或扫描预算耗尽都会失败关闭；只有连续两次规范化结果一致才冻结不可变 snapshot。
+根据 selector 类型再提供 `iid`、`iids`、`iid_min/iid_max` 或 `label`，可选 `branch`。`iid_list` 的 `iids` 必须是至少两个升序去重的逗号分隔正整数，例如 `1,4,5`。I1 字段用于项目、selector 与回调路由；executor 按进程环境优先、tracked `config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，完成 OPEN Issue 查询，并在内部执行链和子任务 prompt 中直接传递该值。私有仓库网络 Git 操作使用普通 `git`，`origin` 为 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL，Git 子进程继承 executor 当前环境。Issue 列表使用 GraphQL cursor 完整扫描，重复 IID、异常游标或扫描预算耗尽都会失败关闭；只有连续两次规范化结果一致才冻结不可变 snapshot。
 
 `run_driven_issue_batch.sh` 与 `dispatch_single_issue.sh` 的 rich envelope 只用于 runtime 编排。按数组原序串行完成 `reconcile_actions`、`spawn_grants` 及逐条 `sessions_spawn` ack 后，Path C/E 必须调用固定 `emit_driven_batch_acceptance.sh`，并把它的唯一一行 JSON 原样返回。公开 acceptance 字段集合固定为：
 

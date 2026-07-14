@@ -107,6 +107,16 @@ if ! SELECTOR_TYPE="$(
       and (.iid == (.iid | floor))
       and (.iid > 0)
     then .type
+    elif .type == "iid_list"
+      and keys == ["iids", "type"]
+      and ((.iids | type) == "array")
+      and ((.iids | length) >= 2)
+      and (.iids | all(
+        (type == "number")
+        and (. == floor)
+        and (. > 0)))
+      and (.iids == (.iids | sort | unique))
+    then .type
     elif .type == "range"
       and keys == ["iid_max", "iid_min", "type"]
       and ((.iid_min | type) == "number")
@@ -147,6 +157,9 @@ EOF
 case "${SELECTOR_TYPE}" in
   single)
     printf 'iid=%s\n' "$(jq -r '.iid' <<<"${SELECTOR_JSON}")"
+    ;;
+  iid_list)
+    printf 'iids=%s\n' "$(jq -r '.iids | join(",")' <<<"${SELECTOR_JSON}")"
     ;;
   range)
     printf 'iid_min=%s\n' "$(jq -r '.iid_min' <<<"${SELECTOR_JSON}")"

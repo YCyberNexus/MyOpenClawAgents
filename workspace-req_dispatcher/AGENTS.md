@@ -18,7 +18,7 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 ## Execution Model
 
 - `create_issue`：既有 wiki/free-text prepare wrapper -> git_issuer -> 同轮审计，成功后停止。
-- `execute_issue`：只调 `submit_executor_batch.sh`；支持 single/range/open_unfinished/open_label。
+- `execute_issue`：只调 `submit_executor_batch.sh`；支持 single/iid_list/range/open_unfinished/open_label。
 - `create_and_execute`：git_issuer 严格成功后，把返回 Issue URL 交同一个 batch wrapper。
 - `clarify_or_reject`：不调用下游。
 - I3：首行 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 直接进入路径 D，只调
@@ -74,7 +74,7 @@ I1 在网络调用前持久化。旧 FIFO 非空时为 `waiting_for_legacy_drain
 receipt immutable 字段为 `executor_agent,matched_count,snapshot_digest`；冲突 fail closed。
 `scheduler_status` 可 `queued -> running -> completed`。
 
-四类 selector 都只处理 batch intake 时为 OPEN 的 Issue；dispatcher 不查询或补入 CLOSED
+五类 selector 都只处理 batch intake 时为 OPEN 的 Issue；dispatcher 不查询或补入 CLOSED
 Issue。`open_unfinished` 的终态标签排除、`open_label` 精确匹配及 `pr` 重跑覆盖均由 executor
 按冻结 snapshot 与实时预检执行。
 

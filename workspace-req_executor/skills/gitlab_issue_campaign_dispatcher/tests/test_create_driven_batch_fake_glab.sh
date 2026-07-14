@@ -313,6 +313,7 @@ unfinished_out="$(run_batch unfinished 'selector_type=open_unfinished')"
 label_out="$(run_batch label $'selector_type=open_label\nlabel=smoke')"
 range_out="$(run_batch range $'selector_type=range\niid_min=2\niid_max=4')"
 single_out="$(run_batch single $'selector_type=single\niid=2')"
+iid_list_out="$(run_batch iid-list $'selector_type=iid_list\niids=1,3,4')"
 zero_out="$(run_batch zero $'selector_type=single\niid=999')"
 
 BATCH_ROOT="${SCHEDULER_ROOT}/batches"
@@ -325,11 +326,12 @@ jq -e '.iids == [1]' "${BATCH_ROOT}/unfinished/snapshot.json" >/dev/null
 jq -e '.iids == [4]' "${BATCH_ROOT}/label/snapshot.json" >/dev/null
 jq -e '.iids == [2,3,4]' "${BATCH_ROOT}/range/snapshot.json" >/dev/null
 jq -e '.iids == [2]' "${BATCH_ROOT}/single/snapshot.json" >/dev/null
+jq -e '.iids == [1,3,4]' "${BATCH_ROOT}/iid-list/snapshot.json" >/dev/null
 jq -e '.iids == []' "${BATCH_ROOT}/zero/snapshot.json" >/dev/null
 jq -e '.status == "completed" and .matched_count == 0' \
   "${BATCH_ROOT}/zero/state.json" >/dev/null
 
-for batch_id in unfinished label range single; do
+for batch_id in unfinished label range single iid-list; do
   for filename in request.json snapshot.json state.json; do
     [ -f "${BATCH_ROOT}/${batch_id}/${filename}" ] || {
       echo "expected persisted ${filename} for ${batch_id}" >&2
@@ -372,6 +374,7 @@ jq -e \
 jq -e '.matched_count == 1 and .scheduler_status == "queued"' <<<"${label_out}" >/dev/null
 jq -e '.matched_count == 3 and .scheduler_status == "queued"' <<<"${range_out}" >/dev/null
 jq -e '.matched_count == 1 and .scheduler_status == "queued"' <<<"${single_out}" >/dev/null
+jq -e '.matched_count == 3 and .scheduler_status == "queued"' <<<"${iid_list_out}" >/dev/null
 
 # Public I1 acceptance is emitted only after runtime actions finish. It is
 # rebuilt from durable scheduler state rather than hand-written from the rich
@@ -394,6 +397,14 @@ jq -e '
   and (.snapshot_digest | type == "string" and test("^[0-9a-f]{64}$"))
   and .scheduler_status == "queued"
 ' <<<"${single_acceptance}" >/dev/null
+iid_list_acceptance="$(emit_acceptance iid-list)"
+jq -e '
+  .status == "success"
+  and .batch_id == "iid-list"
+  and .matched_count == 3
+  and (.snapshot_digest | type == "string" and test("^[0-9a-f]{64}$"))
+  and .scheduler_status == "queued"
+' <<<"${iid_list_acceptance}" >/dev/null
 zero_acceptance="$(emit_acceptance zero)"
 jq -e '
   .status == "success"
@@ -868,6 +879,21 @@ if find "${FAILED_INTAKE}" -name snapshot.json -print -quit | grep -q .; then
   exit 1
 fi
 
+invalid_iid_list_index=0
+for invalid_iids in '1' '4,1,5' '1,4,4' '1,0,5' '1, 4,5'; do
+  invalid_iid_list_index=$((invalid_iid_list_index + 1))
+  invalid_batch_id="invalid-iid-list-${invalid_iid_list_index}"
+  if run_batch "${invalid_batch_id}" $'selector_type=iid_list\niids='"${invalid_iids}" \
+      >"${TEST_ROOT}/${invalid_batch_id}.out" 2>"${TEST_ROOT}/${invalid_batch_id}.err"; then
+    echo "expected a non-canonical iid_list to fail: ${invalid_iids}" >&2
+    exit 1
+  fi
+  [ ! -e "${BATCH_ROOT}/${invalid_batch_id}" ] || {
+    echo "invalid iid_list created batch state: ${invalid_iids}" >&2
+    exit 1
+  }
+done
+
 if FAKE_GLAB_API_LOG="${API_LOG}" \
   GLAB_BIN="${FAKE_GLAB}" \
   GITLAB_TOKEN="executor-owned-token" \
@@ -1013,7 +1039,7 @@ if printf '%s\n' "${single_out}" | grep -q 'callback_nonce\|executor_agent'; the
 fi
 
 jq -e '
-  .batch_order == ["unfinished","label","range","single","boundary-stable"]
+  .batch_order == ["unfinished","label","range","single","iid-list","boundary-stable"]
   and (.batch_order | length) == (.batch_order | unique | length)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 

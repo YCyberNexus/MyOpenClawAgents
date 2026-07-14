@@ -36,6 +36,10 @@ if ! PREPARED_REQUEST_JSON="$(jq -ce '
     type == "object" and (
       (.type == "single" and (keys | sort) == ["iid","type"]
         and (.iid | type == "number" and . == floor and . > 0))
+      or (.type == "iid_list" and (keys | sort) == ["iids","type"]
+        and (.iids | type == "array" and length >= 2)
+        and (.iids | all(type == "number" and . == floor and . > 0))
+        and (.iids == (.iids | sort | unique)))
       or (.type == "range" and (keys | sort) == ["iid_max","iid_min","type"]
         and (.iid_min | type == "number" and . == floor and . > 0)
         and (.iid_max | type == "number" and . == floor and . > 0)

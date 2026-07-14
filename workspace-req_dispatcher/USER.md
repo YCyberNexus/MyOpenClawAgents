@@ -12,14 +12,16 @@
 执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
 
 - 单 Issue：`处理 group/project 的 #42`；
+- 离散 IID 列表：`处理 group/project 的 #1、#4、#5`；
 - IID 闭区间：`处理 group/project 的 #100 到 #250`；
 - OPEN 未完成：`处理 group/project 中未完成的 Issue`；
 - OPEN 指定标签：`处理 group/project 中 label 为 smoke 的 Issue`。
 
-同一请求出现多个不同 IID、单 IID 与范围混用，或给范围附加非 OPEN 状态/label 条件时，
-必须要求用户拆分或澄清，不能静默选取第一个条件。
+同一仓库的一组明确 IID 会排序去重后作为一个 `iid_list` batch 执行。用“或/or”表达备选 IID、
+把离散 IID 与范围或其他 selector 混用，或给范围附加非 OPEN 状态/label 条件时，必须要求用户
+拆分或澄清，不能静默选取第一个条件。
 
-四类 selector 都只纳入创建 batch 时为 OPEN 的 Issue，CLOSED 始终不处理。未完成模式排除
+五类 selector 都只纳入创建 batch 时为 OPEN 的 Issue，CLOSED 始终不处理。未完成模式排除
 `pr,timeout,blocked,blocked-*,failed,failed-*`；指定标签模式不额外排除这些标签。
 
 只有明确“重跑/重新处理/重新执行”才覆盖 `pr` 完成态；CLOSED Issue 不会重新打开。可在同一

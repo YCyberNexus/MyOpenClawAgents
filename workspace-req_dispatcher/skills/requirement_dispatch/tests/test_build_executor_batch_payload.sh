@@ -48,6 +48,15 @@ if ! grep -qx 'selector_type=single' <<<"${single_payload}" || \
   exit 1
 fi
 
+iid_list_payload="$(build_payload '{"type":"iid_list","iids":[1,4,5]}')"
+if ! grep -qx 'selector_type=iid_list' <<<"${iid_list_payload}" || \
+   ! grep -qx 'iids=1,4,5' <<<"${iid_list_payload}" || \
+   grep -Eq '^(iid|iid_min|iid_max|label|branch)=' <<<"${iid_list_payload}"; then
+  echo "expected iid_list selector to emit one canonical comma-separated field" >&2
+  printf '%s\n' "${iid_list_payload}" >&2
+  exit 1
+fi
+
 unfinished_payload="$(build_payload '{"type":"open_unfinished"}')"
 if ! grep -qx 'selector_type=open_unfinished' <<<"${unfinished_payload}" || \
    grep -Eq '^(iid|iid_min|iid_max|label|branch)=' <<<"${unfinished_payload}"; then
@@ -79,6 +88,18 @@ if build_payload '{"type":"open_unfinished","iid":1}' >/dev/null 2>&1; then
   echo "expected selector fields not defined for its type to fail" >&2
   exit 1
 fi
+
+for invalid_iid_list in \
+  '{"type":"iid_list","iids":[1]}' \
+  '{"type":"iid_list","iids":[4,1,5]}' \
+  '{"type":"iid_list","iids":[1,4,4]}' \
+  '{"type":"iid_list","iids":[1,0,5]}'
+do
+  if build_payload "${invalid_iid_list}" >/dev/null 2>&1; then
+    echo "expected a non-canonical iid_list selector to fail: ${invalid_iid_list}" >&2
+    exit 1
+  fi
+done
 
 if build_payload '{"type":"unknown"}' >/dev/null 2>&1; then
   echo "expected an unknown selector type to fail" >&2

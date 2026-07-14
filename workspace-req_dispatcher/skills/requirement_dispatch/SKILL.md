@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-14.3] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-14.4] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -17,7 +17,7 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
   Issue、修改 label/note 或 executor 操作。
 - 不得自行查询 GitLab、分页、展开 IID、拼 100+ 个 `RUN_SINGLE_ISSUE`，也不得写
   `executor_batch_outbox.json`、mirror、event ledger、notification queue 或旧 FIFO。
-- 四类 selector 都只处理 batch intake 时为 OPEN 的 Issue；OPEN snapshot 的查询、过滤与冻结
+- 五类 selector 都只处理 batch intake 时为 OPEN 的 Issue；OPEN snapshot 的查询、过滤与冻结
   全部由 executor 完成，dispatcher 不补查 CLOSED Issue。
 - 新执行请求只能调用 `submit_executor_batch.sh`。不得把
   `prepare_executor_issue_payload.sh -> route_project.sh -> build_executor_batch_payload.sh`
@@ -59,7 +59,7 @@ MESSAGE="<需求原文>" bash scripts/capture_origin.sh
 ### 2. 只判一个动作
 
 - `create_issue`：只分析、拆分、创建或变更 Issue，不要求执行。
-- `execute_issue`：处理既有单 Issue、IID 范围、OPEN 未完成 Issue 或 OPEN 指定标签 Issue。
+- `execute_issue`：处理既有单 Issue、离散 IID 列表、IID 范围、OPEN 未完成 Issue 或 OPEN 指定标签 Issue。
 - `create_and_execute`：明确要求先建单再执行。
 - `clarify_or_reject`：无法确定 project，或执行选择器不完整。
 
@@ -69,7 +69,8 @@ repository/wiki/Issue URL 或既有确定性 locator；仓库根 URL 保留完�
 规范化和去重；出现多个不同 project 时必须澄清，不得静默选任一来源，也不得把 label/branch 值
 当 project。
 
-四类 selector 都只纳入创建 snapshot 时为 OPEN 的 Issue。`open_unfinished` 排除
+五类 selector 都只纳入创建 snapshot 时为 OPEN 的 Issue。`iid_list` 表示同一 project 下排序、
+去重后的至少两个离散 IID；`open_unfinished` 排除
 `pr,timeout,blocked,blocked-*,failed,failed-*`；`open_label` 只按标签精确匹配，不追加这些
 排除条件。普通处理实时遇到 `pr` 会跳过，只有原文明确要求重跑/重新处理/重新执行时才设置
 `force_rerun_pr=true`；动作词可以位于宾语之后，但同分句否定窗口中的“不要、无需、不需要、

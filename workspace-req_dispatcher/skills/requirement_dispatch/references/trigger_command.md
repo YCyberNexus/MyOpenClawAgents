@@ -103,8 +103,9 @@ batch_id=<稳定安全 ID>
 correlation_id=<稳定 reqd-N>
 project=<完整 group/subgroup/.../project>
 executor_agent=<路由后的 executor agent>
-selector_type=single|range|open_unfinished|open_label
+selector_type=single|iid_list|range|open_unfinished|open_label
 iid=<single 专用正整数>
+iids=<iid_list 专用、升序去重的逗号分隔正整数列表，至少两个>
 iid_min=<range 专用正整数>
 iid_max=<range 专用正整数，且 >= iid_min>
 label=<open_label 专用精确标签>
@@ -114,20 +115,22 @@ callback_nonce=<dispatcher 生成的 64 个小写 hex>
 branch=<可选安全 Git ref>
 ```
 
-四类 selector 只允许各自字段：
+五类 selector 只允许各自字段：
 
 - `single`：仅 `iid`；
+- `iid_list`：仅 `iids`，规范形式如 `1,4,5`；
 - `range`：仅 `iid_min/iid_max`，闭区间；
 - `open_unfinished`：无 selector 附加字段；
 - `open_label`：仅非空 `label`。
 
-解析原始请求时，必须先把 `single/range/open_unfinished/open_label` 全部规范化为 selector
-证据并去重，不能按类型优先级静默选中一个。由“和、或、跟、and、or”等连接的多个不同
-IID、任意跨类型组合、同类型不同值，以及范围附加非 OPEN 状态都必须失败并要求拆分/澄清。
-只有同一 selector 的等价重复可以去重通过；`OPEN/打开`仅是状态修饰词，不产生第二个
-`open_unfinished` selector。
+解析原始请求时，必须先把 `single/iid_list/range/open_unfinished/open_label` 全部规范化为
+selector 证据并去重，不能按类型优先级静默选中一个。同一 project 下由逗号、顿号、“和、
+跟、与、及、and”等明确并列的多个 IID 规范化为一个升序去重 `iid_list`；“或/or”表达的备选
+IID 必须澄清。离散 IID 与范围或其他类型组合、同类型不同值，以及范围附加非 OPEN 状态都必须
+失败并要求拆分/澄清。只有同一 selector 的等价重复可以去重通过；`OPEN/打开`仅是状态修饰词，
+不产生第二个 `open_unfinished` selector。
 
-四类 selector 都只查询 intake 时为 OPEN 的 Issue。`open_unfinished` 排除
+五类 selector 都只查询 intake 时为 OPEN 的 Issue。`open_unfinished` 排除
 `pr,timeout,blocked,blocked-*,failed,failed-*`，`open_label` 不追加终态标签排除；普通处理实时
 遇到 `pr` 时跳过，只有明确重跑语义把 `force_rerun_pr` 设为 true。CLOSED 不进入 snapshot。
 重跑动作词可以位于 Issue 宾语之后；同分句中的“不要、无需、不需要、不得”等否定窗口保持

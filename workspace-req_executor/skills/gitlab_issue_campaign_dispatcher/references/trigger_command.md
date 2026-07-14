@@ -101,8 +101,9 @@ batch_id=<stable dispatcher batch ID>
 correlation_id=<dispatcher correlation ID>
 project=<full group/project path>
 executor_agent=<deployment-pinned executor agent>
-selector_type=single|range|open_unfinished|open_label
+selector_type=single|iid_list|range|open_unfinished|open_label
 iid=<positive integer; single only>
+iids=<comma-separated sorted unique positive integers; iid_list only, at least two>
 iid_min=<positive integer; range only>
 iid_max=<positive integer; range only>
 label=<exact label; open_label only>
@@ -112,8 +113,9 @@ callback_nonce=<64 lowercase hexadecimal characters>
 branch=<optional target branch>
 ```
 
-Exactly one selector shape is allowed. Every selector is restricted to OPEN
-issues. `open_unfinished` excludes `pr`, `timeout`, `blocked`, `blocked-*`,
+Exactly one selector shape is allowed. `iid_list` selects the exact canonical
+IID set supplied in `iids`. Every selector is restricted to OPEN issues.
+`open_unfinished` excludes `pr`, `timeout`, `blocked`, `blocked-*`,
 `failed`, and `failed-*` from the frozen snapshot. `open_label` matches the
 requested label exactly and does not apply those snapshot exclusions. Live
 preflight still skips an issue carrying `pr` unless `force_rerun_pr=true`; a

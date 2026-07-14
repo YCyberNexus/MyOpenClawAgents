@@ -556,10 +556,11 @@ has_open_unfinished_selector() {
 
 collect_selector_evidence() {
   local text="$1"
+  local parsed_iid="${2:-}"
   local iid_min=""
   local iid_max=""
   local label=""
-  local evidence_iid=""
+  local iid_evidence_json='[]'
 
   while IFS=$'\t' read -r iid_min iid_max; do
     [ -n "${iid_min}" ] && [ -n "${iid_max}" ] || continue
@@ -578,10 +579,23 @@ collect_selector_evidence() {
     printf '%s\n' '{"type":"open_unfinished"}'
   fi
 
-  while IFS= read -r evidence_iid; do
-    [ -n "${evidence_iid}" ] || continue
-    jq -ncS --arg iid "${evidence_iid}" '{type:"single",iid:($iid|tonumber)}'
-  done < <(extract_selector_iid_evidence "${text}")
+  iid_evidence_json="$({
+    extract_selector_iid_evidence "${text}"
+    [ -z "${parsed_iid}" ] || printf '%s\n' "${parsed_iid}"
+  } | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber) | sort | unique')"
+
+  case "$(jq -r 'length' <<<"${iid_evidence_json}")" in
+    0) ;;
+    1) jq -cS '{type:"single",iid:.[0]}' <<<"${iid_evidence_json}" ;;
+    *) jq -cS '{type:"iid_list",iids:.}' <<<"${iid_evidence_json}" ;;
+  esac
+}
+
+has_ambiguous_iid_alternative() {
+  local text="$1"
+
+  [[ "${text}" =~ 或 ]] \
+    || [[ "${text}" =~ [[:space:]][Oo][Rr][[:space:]] ]]
 }
 
 has_explicit_rerun_action() {
@@ -798,10 +812,7 @@ PROJECT_CANDIDATE_COUNT="$(
 PROJECT="$(printf '%s\n' "${PROJECT_CANDIDATES}" | sed -n '1p')"
 
 SELECTOR_EVIDENCE_JSON="$({
-  collect_selector_evidence "${PROJECT_SOURCE}"
-  if [ -n "${PARSED_IID}" ]; then
-    jq -ncS --arg iid "${PARSED_IID}" '{type:"single",iid:($iid|tonumber)}'
-  fi
+  collect_selector_evidence "${PROJECT_SOURCE}" "${PARSED_IID}"
 } | jq -csS 'unique')"
 SELECTOR_EVIDENCE_COUNT="$(jq -r 'length' <<<"${SELECTOR_EVIDENCE_JSON}")"
 
@@ -818,6 +829,12 @@ case "${SELECTOR_TYPE}" in
   single)
     IID="$(jq -r '.iid' <<<"${SELECTOR_JSON}")"
     ;;
+  iid_list)
+    PARSED_ISSUE_URL=""
+    if has_ambiguous_iid_alternative "${PROJECT_SOURCE}"; then
+      SELECTOR_ERROR="离散 issue IID 列表必须明确表示全部执行，不能使用“或/or”表达备选项"
+    fi
+    ;;
   range)
     RANGE_IID_MIN="$(jq -r '.iid_min' <<<"${SELECTOR_JSON}")"
     RANGE_IID_MAX="$(jq -r '.iid_max' <<<"${SELECTOR_JSON}")"
@@ -827,7 +844,7 @@ case "${SELECTOR_TYPE}" in
       SELECTOR_ERROR="issue IID 范围必须满足 iid_min <= iid_max"
     elif [ -z "${SELECTOR_ERROR}" ] \
         && has_unsupported_range_filter "${PROJECT_SOURCE}"; then
-      SELECTOR_ERROR="当前只支持 single/range/open_unfinished/open_label 四类独立选择器；请拆成一个受支持的选择器后重试"
+      SELECTOR_ERROR="当前只支持 single/iid_list/range/open_unfinished/open_label 五类独立选择器；请拆成一个受支持的选择器后重试"
     fi
     ;;
 esac
@@ -865,7 +882,7 @@ if [ -n "${SELECTOR_ERROR}" ]; then
 fi
 
 if [ "${SELECTOR_JSON}" = "null" ]; then
-  emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 issue IID、IID 范围、未完成选择器、label 选择器或具体 GitLab issue URL" null "${FORCE_RERUN_PR}"
+  emit_json failed "${PROJECT}" "" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 issue IID（单个或离散列表）、IID 范围、未完成选择器、label 选择器或具体 GitLab issue URL" null "${FORCE_RERUN_PR}"
   exit 0
 fi
 

@@ -89,7 +89,7 @@ while IFS= read -r trigger_line || [ -n "${trigger_line}" ]; do
   trigger_key="${trigger_line%%=*}"
   trigger_value="${trigger_line#*=}"
   case "${trigger_key}" in
-    batch_id|correlation_id|project|selector_type|iid|iid_min|iid_max|label|force_rerun_pr|dispatcher_callback_target|executor_agent|callback_nonce|branch)
+    batch_id|correlation_id|project|selector_type|iid|iids|iid_min|iid_max|label|force_rerun_pr|dispatcher_callback_target|executor_agent|callback_nonce|branch)
       ;;
     *)
       batch_die "unsupported trigger field: ${trigger_key}"
@@ -147,6 +147,7 @@ fi
 case "${SELECTOR_TYPE}" in
   single)
     require_field iid
+    reject_field iids
     reject_field iid_min
     reject_field iid_max
     reject_field label
@@ -154,10 +155,30 @@ case "${SELECTOR_TYPE}" in
     [[ "${IID}" =~ ^[1-9][0-9]*$ ]] || batch_die "iid must be a positive integer"
     SELECTOR_JSON="$(jq -cnS --arg iid "${IID}" '{type:"single",iid:($iid | tonumber)}')"
     ;;
+  iid_list)
+    require_field iids
+    reject_field iid
+    reject_field iid_min
+    reject_field iid_max
+    reject_field label
+    IIDS="${TRIGGER_FIELDS[iids]}"
+    [[ "${IIDS}" =~ ^[1-9][0-9]*(,[1-9][0-9]*)+$ ]] \
+      || batch_die "iids must be a comma-separated list of positive integers"
+    if ! SELECTOR_JSON="$(jq -Rce '
+      split(",") | map(tonumber)
+      | if length >= 2 and . == (sort | unique)
+        then {type:"iid_list",iids:.}
+        else error("iids must be sorted and unique")
+        end
+    ' <<<"${IIDS}")"; then
+      batch_die "iids must contain at least two sorted unique positive integers"
+    fi
+    ;;
   range)
     require_field iid_min
     require_field iid_max
     reject_field iid
+    reject_field iids
     reject_field label
     IID_MIN="${TRIGGER_FIELDS[iid_min]}"
     IID_MAX="${TRIGGER_FIELDS[iid_max]}"
@@ -171,6 +192,7 @@ case "${SELECTOR_TYPE}" in
     ;;
   open_unfinished)
     reject_field iid
+    reject_field iids
     reject_field iid_min
     reject_field iid_max
     reject_field label
@@ -179,6 +201,7 @@ case "${SELECTOR_TYPE}" in
   open_label)
     require_field label
     reject_field iid
+    reject_field iids
     reject_field iid_min
     reject_field iid_max
     LABEL="${TRIGGER_FIELDS[label]}"
@@ -610,6 +633,8 @@ MATCHED_IIDS="$(jq -cS \
     | map(select(
         if $selector_type == "single" then
           .iid == $selector.iid
+        elif $selector_type == "iid_list" then
+          .iid as $iid | ($selector.iids | index($iid)) != null
         elif $selector_type == "range" then
           .iid >= $selector.iid_min and .iid <= $selector.iid_max
         elif $selector_type == "open_unfinished" then

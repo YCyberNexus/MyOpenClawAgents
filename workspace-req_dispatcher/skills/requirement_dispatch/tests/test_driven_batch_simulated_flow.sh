@@ -354,7 +354,7 @@ env \
 
 waiting_output="$(
   env "${common_env[@]}" \
-    MESSAGE='处理 group/project 的 issue #1 到 #3' \
+    MESSAGE='处理 group/project 的 issue #1,#4,#5' \
     ORIGIN_JSON="${ORIGIN}" \
     "${BASH}" "${SKILL_DIR}/scripts/submit_executor_batch.sh"
 )"
@@ -380,11 +380,10 @@ if ! jq -e --arg batch_id "${BATCH_ID}" --arg correlation_id "${CORRELATION_ID}"
   and .requests[0].batch_id == $batch_id
   and .requests[0].correlation_id == $correlation_id
   and .requests[0].status == "waiting_for_legacy_drain"
-  and .requests[0].selector == {type:"range",iid_min:1,iid_max:3}
+  and .requests[0].selector == {type:"iid_list",iids:[1,4,5]}
   and (.requests[0].payload | startswith("RUN_DRIVEN_ISSUE_BATCH\n"))
-  and (.requests[0].payload | contains("selector_type=range"))
-  and (.requests[0].payload | contains("iid_min=1"))
-  and (.requests[0].payload | contains("iid_max=3"))
+  and (.requests[0].payload | contains("selector_type=iid_list"))
+  and (.requests[0].payload | contains("iids=1,4,5"))
 ' "${OUTBOX_FILE}" >/dev/null; then
   echo "expected the I1 request to be persisted before legacy drain" >&2
   sed -n '1,120p' "${OUTBOX_FILE}" >&2

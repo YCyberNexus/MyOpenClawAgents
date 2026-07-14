@@ -30,7 +30,8 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
 3. 周期恢复只调用 `run_executor_batch_tick.sh`；I3 只调用
    `handle_executor_batch_event.sh`。stdout 只按严格 JSON 分支读取。
 4. 不自行查询 GitLab、分页或展开 IID；不得并发调用多个 `RUN_SINGLE_ISSUE` 模拟 batch。
-   四类 selector 都只处理 intake 时为 OPEN 的 Issue，snapshot 过滤与冻结归 executor。
+   五类 selector 都只处理 intake 时为 OPEN 的 Issue，snapshot 过滤与冻结归 executor；同仓库的
+   离散 IID 必须使用一个 `iid_list` batch，不得拆成多个 single 调用。
 5. `DISPATCHER_CALLBACK_TARGET` 为空时，在分配 ID、落 intent、触达 executor 前拒绝。
 6. 新 I1 必须先落盘再发送。旧 FIFO active/queue 非空时状态为
    `waiting_for_legacy_drain`，I1 调用次数为零。

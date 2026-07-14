@@ -267,7 +267,7 @@ do
   )"
   if ! jq -e '
     .status == "failed"
-    and (.reason | contains("single/range/open_unfinished/open_label"))
+    and (.reason | contains("single/iid_list/range/open_unfinished/open_label"))
     and (.reason | contains("拆"))
   ' <<<"${unsupported_range_json}" >/dev/null; then
     echo "expected a range plus unsupported status condition to fail closed: ${unsupported_range_message}" >&2
@@ -286,7 +286,7 @@ do
   )"
   if ! jq -e '
     .status == "failed"
-    and (.reason | contains("single/range/open_unfinished/open_label"))
+    and (.reason | contains("single/iid_list/range/open_unfinished/open_label"))
   ' <<<"${conflicting_range_status_json}" >/dev/null; then
     echo "expected every range status condition to participate in validation: ${conflicting_range_status_message}" >&2
     printf '%s\n' "${conflicting_range_status_json}" >&2
@@ -309,11 +309,7 @@ fi
 
 for ambiguous_selector_message in \
   '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，并处理 #30' \
-  '处理 ai-infra/veqp_server_v3 的 issue #10 和 #20' \
-  '处理 ai-infra/veqp_server_v3 的 issue 10 和 20' \
-  '处理 ai-infra/veqp_server_v3 的 issue 10、20' \
-  '处理 ai-infra/veqp_server_v3 的 issue 10 到 20 以及 30' \
-  '处理 ai-infra/veqp_server_v3 的 issue #10，并处理 20，并再次确认 30'
+  '处理 ai-infra/veqp_server_v3 的 issue 10 到 20 以及 30'
 do
   ambiguous_selector_json="$(
     MESSAGE="${ambiguous_selector_message}" \
@@ -329,11 +325,40 @@ do
   fi
 done
 
+for discrete_iid_message in \
+  '处理 ai-infra/veqp_server_v3 的 issue #1,#4,#5' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10 和 #20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 和 20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10 跟 20' \
+  '处理 ai-infra/veqp_server_v3 的 issue 10、20' \
+  '处理 ai-infra/veqp_server_v3 的 issue #10，并处理 20，并再次确认 30' \
+  '处理 ai-infra/veqp_server_v3 的 issue #20、#10、#20'
+do
+  discrete_iid_json="$(
+    MESSAGE="${discrete_iid_message}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  expected_iids='[10,20]'
+  case "${discrete_iid_message}" in
+    *'#1,#4,#5'*) expected_iids='[1,4,5]' ;;
+    *'确认 30'*) expected_iids='[10,20,30]' ;;
+  esac
+  if ! jq -e --argjson expected_iids "${expected_iids}" '
+    .status == "success"
+    and .iid == null
+    and .issue_url == null
+    and .selector == {type:"iid_list",iids:$expected_iids}
+  ' <<<"${discrete_iid_json}" >/dev/null; then
+    echo "expected a discrete IID expression to produce one canonical iid_list: ${discrete_iid_message}" >&2
+    printf '%s\n' "${discrete_iid_json}" >&2
+    exit 1
+  fi
+done
+
 for alternative_iid_message in \
   '处理 ai-infra/veqp_server_v3 的 issue 10 或 20' \
   '处理 ai-infra/veqp_server_v3 的 issue 10 or 20' \
-  '处理 ai-infra/veqp_server_v3 的 issue 10 OR 20' \
-  '处理 ai-infra/veqp_server_v3 的 issue 10 跟 20'
+  '处理 ai-infra/veqp_server_v3 的 issue 10 OR 20'
 do
   alternative_iid_json="$(
     MESSAGE="${alternative_iid_message}" \
@@ -342,7 +367,7 @@ do
   if ! jq -e '
     .status == "failed"
     and .selector == null
-    and (.reason | contains("多个不同 issue selector"))
+    and (.reason | contains("或/or"))
   ' <<<"${alternative_iid_json}" >/dev/null; then
     echo "expected an alternative multi-IID expression to fail closed: ${alternative_iid_message}" >&2
     printf '%s\n' "${alternative_iid_json}" >&2
@@ -484,10 +509,11 @@ url_and_conflicting_iid_json="$(
 )"
 
 if ! jq -e '
-  .status == "failed"
-  and (.reason | contains("多个不同 issue selector"))
+  .status == "success"
+  and .issue_url == null
+  and .selector == {type:"iid_list",iids:[42,43]}
 ' <<<"${url_and_conflicting_iid_json}" >/dev/null; then
-  echo "expected an issue URL and a different hash IID to fail" >&2
+  echo "expected an issue URL and a different hash IID in one project to form an iid_list" >&2
   printf '%s\n' "${url_and_conflicting_iid_json}" >&2
   exit 1
 fi
@@ -498,10 +524,11 @@ url_and_bare_conflicting_iid_json="$(
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
 if ! jq -e '
-  .status == "failed"
-  and (.reason | contains("多个不同 issue selector"))
+  .status == "success"
+  and .issue_url == null
+  and .selector == {type:"iid_list",iids:[42,43]}
 ' <<<"${url_and_bare_conflicting_iid_json}" >/dev/null; then
-  echo "expected an issue URL and a different bare IID to fail" >&2
+  echo "expected an issue URL and a different bare IID in one project to form an iid_list" >&2
   printf '%s\n' "${url_and_bare_conflicting_iid_json}" >&2
   exit 1
 fi
@@ -513,10 +540,11 @@ multiple_issue_urls_json="$(
 )"
 
 if ! jq -e '
-  .status == "failed"
-  and (.reason | contains("多个不同 issue selector"))
+  .status == "success"
+  and .issue_url == null
+  and .selector == {type:"iid_list",iids:[42,43]}
 ' <<<"${multiple_issue_urls_json}" >/dev/null; then
-  echo "expected multiple distinct issue URLs to fail" >&2
+  echo "expected multiple distinct issue URLs in one project to form an iid_list" >&2
   printf '%s\n' "${multiple_issue_urls_json}" >&2
   exit 1
 fi
