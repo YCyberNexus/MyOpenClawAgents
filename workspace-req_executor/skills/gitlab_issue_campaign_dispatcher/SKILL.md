@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-14.12] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-14.13] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a default three-slot strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -358,6 +358,13 @@ windows where a downstream project/scheduler commit succeeded but its following
 coordinator stage write did not. Invoke only the fixed wrapper;
 never edit scheduler JSON, manually bind a claim, or reconstruct
 retry/round-robin logic in the LLM.
+Before reservation, the tick also builds an exact protected physical-job set
+from current scheduler `active_jobs` plus every unfinished durable launch
+coordinator. Under each project's `campaign.lock`,
+`reap_driven_orphan_placeholders.sh` removes only scheduler-driven placeholders
+with null `run_id`, `child_session_key`, and `spawned_at` whose exact `job_id`
+is outside that protected set. Missing/malformed identities remain unresolved;
+IID-only inference is forbidden.
 Before any reservation, the fixed tick wrapper reconciles terminal outcome
 classifications and verifies each aggregate counter against the durable
 memberships. A partial, contradictory, corrupt, or failed reconciliation emits
@@ -373,6 +380,14 @@ matching claim can synthesize `timeout` through the normal durable handoff; a
 stale generation cannot release a newer job. Terminal batches, delivered
 callbacks, and completed launch coordinators leave hot scans but remain
 addressable in cold per-ID storage for idempotent replay.
+Independently of that timeout backstop, when ordinary project preflight reports
+`pr`/closed for a running continuation that still has project pending state,
+the tick immediately re-reads the current scheduler claim and invokes
+`dispatch_followup.sh` in internal completion-reconcile mode. The followup
+rechecks the claim digest and narrow GitLab live evidence under
+`campaign.lock`, then atomically drains pending and stores a claim-bound
+`skipped` handoff intent. A stale preflight returns `not_completed` without
+mutation, and the private claim token is never exposed outside scheduler state.
 
 ### Path E — `RUN_SINGLE_ISSUE` compatibility shim
 
@@ -512,6 +527,8 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Best-effort terminal cleanup decision (preserves all terminal child sessions for diagnosis; no `subagents kill` request is emitted) | `_dispatch_lib.sh::phase6_decide_cleanup`; LLM acts on `envelope.cleanup.action` |
 | Driven batch intake, OPEN snapshot, and idempotency | `run_driven_issue_batch.sh` → `create_driven_batch.sh` |
 | Recovery-first handoff/outbox/coordinator replay and strict round-robin refill | `run_executor_batch_tick.sh` |
+| Claim-fenced immediate recovery for running jobs already `pr`/closed | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal completion reconcile |
+| Scheduler-protected orphan placeholder cleanup | `run_executor_batch_tick.sh` + `reap_driven_orphan_placeholders.sh` |
 | Preparing claim, bind, emitted-action fence, and claim-0 skip | `run_executor_batch_tick.sh` plus its fixed helpers |
 | Runtime-evidence reconciliation | `resolve_executor_batch_reconcile.sh` |
 | Project-first spawn/launch-failure record | `record_executor_batch_spawn.sh` |

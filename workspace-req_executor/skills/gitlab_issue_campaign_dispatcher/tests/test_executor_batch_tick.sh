@@ -100,6 +100,12 @@ case "${RECONCILE_TEST_MODE:-ok}" in
 esac
 '
 
+write_fake reap_driven_orphan_placeholders.sh '
+request="$(cat)"
+printf "reap:%s\n" "$(jq -r ".protected_job_ids | join(\",\")" <<<"${request}")" >>"${ORDER_LOG}"
+jq -cn "{status:\"reaped\",reaped_entries:[],protected_entries:[],unresolved_iids:[]}"
+'
+
 write_fake reserve_driven_batch_items.sh '
 if [ "${SERIAL_GATE_RESERVE_SENTINEL:-0}" = 1 ]; then
   printf "%s\n" reserve-unexpected >>"${ORDER_LOG}"
@@ -221,6 +227,24 @@ exit 99
 '
 
 write_fake expire_running.sh '
+if [ "${DRIVEN_COMPLETED_RECONCILE:-0}" = 1 ]; then
+  printf "completed:%s:%s:%s\n" \
+    "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
+    "${DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
+  if [ "${COMPLETION_TEST_RELEASE:-0}" = 1 ]; then
+    jq --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
+      "del(.active_jobs[\$job_id])" "${SCHEDULER_ROOT}/scheduler_state.json" \
+      >"${SCHEDULER_ROOT}/scheduler_state.completed.json"
+    mv "${SCHEDULER_ROOT}/scheduler_state.completed.json" \
+      "${SCHEDULER_ROOT}/scheduler_state.json"
+    jq -cn --argjson iid "${IID}" \
+      "{callback_status:\"handled\",iid:\$iid,terminal_status:\"skipped\"}"
+  else
+    jq -cn --argjson iid "${IID}" \
+      "{callback_status:\"not_completed\",iid:\$iid}"
+  fi
+  exit 0
+fi
 printf "timeout:%s:%s:%s\n" \
   "${DRIVEN_TIMEOUT_JOB_ID}" "${DRIVEN_TIMEOUT_CLAIM_GENERATION}" \
   "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
@@ -252,6 +276,7 @@ run_tick() {
   DRAIN_HANDOFF_CMD="${FAKE_BIN}/drain_driven_handoff_intents.sh" \
   DRAIN_OUTBOX_CMD="${FAKE_BIN}/drain_driven_outbox.sh" \
   RECONCILE_COUNTS_CMD="${FAKE_BIN}/reconcile_driven_terminal_counts.sh" \
+  REAP_PLACEHOLDERS_CMD="${FAKE_BIN}/reap_driven_orphan_placeholders.sh" \
   EXPIRE_RUNNING_CMD="${FAKE_BIN}/expire_running.sh" \
   RESERVE_CMD="${FAKE_BIN}/reserve_driven_batch_items.sh" \
   TOPUP_CMD="${FAKE_BIN}/dispatch_driven_topup.sh" \
@@ -275,6 +300,7 @@ expected_order='scheduler_env
 reconcile
 intent:group/repo
 outbox
+reap:
 reserve:1
 topup:A:snapshot-0,A:snapshot-1
 skip:A:snapshot-1
@@ -492,9 +518,22 @@ grep -q '^topup:A:snapshot-0$' "${ORDER_LOG}" \
 archive_launch_actions continuation
 
 # A live preflight may report that a continuation now looks closed/pr-labeled.
-# While the exact project pending entry still exists, its runtime callback is
-# authoritative and the preflight skip must remain suppressed.
+# While the exact project pending entry still exists, the tick must re-check
+# the current claim and GitLab completion through dispatch_followup, then write
+# a claim-bound skipped handoff immediately instead of waiting for the running
+# timeout lease.
 : >"${ORDER_LOG}"
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","project":"group/repo","iid":42,
+    "branch":null,"entry_mode":"auto","force_rerun_pr":false,
+    "status":"running","owner":{"batch_id":"A","snapshot_index":0},
+    "finalization":null,"claim_generation":2,
+    "claim_token":"continuation-private-claim"
+  }
+}}
+EOF
 cat >"${FAKE_BIN}/dispatch_driven_topup.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -510,26 +549,45 @@ jq -cn '{
 }'
 EOF
 chmod +x "${FAKE_BIN}/dispatch_driven_topup.sh"
-running_skip_output="$(run_tick)" || fail "running preflight-skip tick failed"
-if grep -q '^skip:A:snapshot-0$' "${ORDER_LOG}"; then
-  fail "running continuation with project pending was terminalized early"
+running_skip_output="$(COMPLETION_TEST_RELEASE=1 run_tick)" \
+  || fail "running preflight-skip tick failed"
+grep -q '^reap:A:snapshot-0$' "${ORDER_LOG}" \
+  || fail "orphan reaper did not protect the current scheduler active job"
+grep -Eq '^completed:A:snapshot-0:2:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "running completion did not receive the exact hashed claim fence"
+if grep -q 'continuation-private-claim' "${ORDER_LOG}" \
+    || grep -q 'continuation-private-claim' <<<"${running_skip_output}"; then
+  fail "running completion recovery exposed the private claim token"
 fi
 jq -e '
   .spawn_grants == []
   and ([.operation_results[]
     | select(.operation == "running_preflight_skip"
-      and .job_id == "A:snapshot-0" and .status == "suppressed")]
+      and .job_id == "A:snapshot-0"
+      and .status == "handoff_recorded"
+      and .claim_generation == 2)]
     | length) == 1
   and ([.operation_results[]
     | select(.operation == "synthetic_skip" and .job_id == "A:snapshot-0")]
     | length) == 0
 ' <<<"${running_skip_output}" >/dev/null \
-  || fail "running continuation produced a synthetic skip result"
+  || fail "running continuation did not produce an immediate claim-bound handoff"
 
 # A scheduler running job may outlive its project pending entry after a
 # blocked attempt was imported. If the next live preflight observes closed/pr,
 # the absence of that exact project pending IID is authoritative: terminalize
 # the physical job instead of suppressing the skip forever and leaking a slot.
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","project":"group/repo","iid":42,
+    "branch":null,"entry_mode":"auto","force_rerun_pr":false,
+    "status":"running","owner":{"batch_id":"A","snapshot_index":0},
+    "finalization":null,"claim_generation":2,
+    "claim_token":"continuation-private-claim"
+  }
+}}
+EOF
 cat >"${FAKE_BIN}/dispatch_driven_topup.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

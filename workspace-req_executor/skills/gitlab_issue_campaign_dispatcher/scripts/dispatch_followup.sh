@@ -56,19 +56,35 @@ sha256_text() {
 }
 
 TIMEOUT_RECONCILE="${DRIVEN_TIMEOUT_RECONCILE:-0}"
+COMPLETED_RECONCILE="${DRIVEN_COMPLETED_RECONCILE:-0}"
 case "${TIMEOUT_RECONCILE}" in
   0|1) ;;
   *) echo "dispatch_followup.sh: DRIVEN_TIMEOUT_RECONCILE must be 0 or 1" >&2; exit 2 ;;
 esac
+case "${COMPLETED_RECONCILE}" in
+  0|1) ;;
+  *) echo "dispatch_followup.sh: DRIVEN_COMPLETED_RECONCILE must be 0 or 1" >&2; exit 2 ;;
+esac
+if [ "${TIMEOUT_RECONCILE}" = 1 ] && [ "${COMPLETED_RECONCILE}" = 1 ]; then
+  echo "dispatch_followup.sh: timeout and completed reconcile modes are mutually exclusive" >&2
+  exit 2
+fi
+INTERNAL_CLAIM_RECONCILE=0
+if [ "${TIMEOUT_RECONCILE}" = 1 ] || [ "${COMPLETED_RECONCILE}" = 1 ]; then
+  INTERNAL_CLAIM_RECONCILE=1
+  RECONCILE_JOB_ID="${DRIVEN_RECONCILE_JOB_ID:-${DRIVEN_TIMEOUT_JOB_ID:-}}"
+  RECONCILE_CLAIM_GENERATION="${DRIVEN_RECONCILE_CLAIM_GENERATION:-${DRIVEN_TIMEOUT_CLAIM_GENERATION:-}}"
+  RECONCILE_CLAIM_TOKEN_SHA256="${DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256:-${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256:-}}"
+  : "${RECONCILE_JOB_ID:?dispatch_followup.sh: DRIVEN_RECONCILE_JOB_ID required}"
+  : "${RECONCILE_CLAIM_GENERATION:?dispatch_followup.sh: DRIVEN_RECONCILE_CLAIM_GENERATION required}"
+  : "${RECONCILE_CLAIM_TOKEN_SHA256:?dispatch_followup.sh: DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256 required}"
+  [[ "${RECONCILE_CLAIM_GENERATION}" =~ ^[1-9][0-9]*$ ]] \
+    || { echo "dispatch_followup.sh: invalid internal reconcile claim generation" >&2; exit 2; }
+  [[ "${RECONCILE_CLAIM_TOKEN_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+    || { echo "dispatch_followup.sh: invalid internal reconcile claim digest" >&2; exit 2; }
+fi
 if [ "${TIMEOUT_RECONCILE}" = 1 ]; then
-  : "${DRIVEN_TIMEOUT_JOB_ID:?dispatch_followup.sh: DRIVEN_TIMEOUT_JOB_ID required}"
-  : "${DRIVEN_TIMEOUT_CLAIM_GENERATION:?dispatch_followup.sh: DRIVEN_TIMEOUT_CLAIM_GENERATION required}"
-  : "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256:?dispatch_followup.sh: DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256 required}"
   : "${DRIVEN_TIMEOUT_NOW_EPOCH:?dispatch_followup.sh: DRIVEN_TIMEOUT_NOW_EPOCH required}"
-  [[ "${DRIVEN_TIMEOUT_CLAIM_GENERATION}" =~ ^[1-9][0-9]*$ ]] \
-    || { echo "dispatch_followup.sh: invalid timeout claim generation" >&2; exit 2; }
-  [[ "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
-    || { echo "dispatch_followup.sh: invalid timeout claim digest" >&2; exit 2; }
   [[ "${DRIVEN_TIMEOUT_NOW_EPOCH}" =~ ^(0|[1-9][0-9]*)$ ]] \
     || { echo "dispatch_followup.sh: invalid timeout clock" >&2; exit 2; }
 fi
@@ -98,9 +114,9 @@ STATE_JSON="$(load_state)"
 PENDING_ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" '.pending_subagents[($iid|tostring)] // null')"
 if [ "${PENDING_ENTRY}" != "null" ]; then
   AUTH_PENDING_ATTEMPT="$(jq -r '.attempt_number' <<<"${PENDING_ENTRY}")"
-  if [ "${TIMEOUT_RECONCILE}" = 1 ]; then
-    # Internal timeout reconciliation has its own job/generation/token digest
-    # fence below and is not a runtime completion callback.
+  if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ]; then
+    # Internal completion/timeout reconciliation has its own
+    # job/generation/token-digest fence below and is not a runtime callback.
     ATTEMPT_NUMBER="${ATTEMPT_NUMBER:-${AUTH_PENDING_ATTEMPT}}"
   else
     if ! CALLBACK_AUTH_MODE="$(completion_authenticate_pending \
@@ -219,24 +235,39 @@ if jq -e '
   IS_SCHEDULER_DRIVEN=true
 fi
 
-if [ "${TIMEOUT_RECONCILE}" = 1 ]; then
-  timeout_pending_token="$(jq -r '.claim_token // empty' <<<"${PENDING_ENTRY}")"
-  timeout_pending_digest=""
-  [ -z "${timeout_pending_token}" ] \
-    || timeout_pending_digest="$(printf '%s' "${timeout_pending_token}" | sha256_text)"
+if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ]; then
+  reconcile_pending_token="$(jq -r '.claim_token // empty' <<<"${PENDING_ENTRY}")"
+  reconcile_pending_digest=""
+  [ -z "${reconcile_pending_token}" ] \
+    || reconcile_pending_digest="$(printf '%s' "${reconcile_pending_token}" | sha256_text)"
   if [ "${IS_SCHEDULER_DRIVEN}" != true ] \
-      || [ "$(jq -r '.job_id // empty' <<<"${PENDING_ENTRY}")" != "${DRIVEN_TIMEOUT_JOB_ID}" ] \
-      || [ "$(jq -r '.claim_generation // 0' <<<"${PENDING_ENTRY}")" != "${DRIVEN_TIMEOUT_CLAIM_GENERATION}" ] \
-      || [ "${timeout_pending_digest}" != "${DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256}" ]; then
+      || [ "$(jq -r '.job_id // empty' <<<"${PENDING_ENTRY}")" != "${RECONCILE_JOB_ID}" ] \
+      || [ "$(jq -r '.claim_generation // 0' <<<"${PENDING_ENTRY}")" != "${RECONCILE_CLAIM_GENERATION}" ] \
+      || [ "${reconcile_pending_digest}" != "${RECONCILE_CLAIM_TOKEN_SHA256}" ]; then
     jq -nc --argjson iid "${IID}" '{
       callback_status:"stale_claim",iid:$iid,
-      chat_summary:("stale timeout claim ignored for #" + ($iid|tostring))
+      chat_summary:("stale internal reconcile claim ignored for #" + ($iid|tostring))
     }'
     exit 0
   fi
 fi
 
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
+
+# Positive completion recovery is intentionally independent of the running
+# lease. The scheduler first observed `pr`/closed through the ordinary project
+# preflight; this lock-held narrow reconcile is the authoritative re-check.
+# A false/stale preflight therefore returns without touching project state.
+if [ "${COMPLETED_RECONCILE}" = 1 ]; then
+  if [ -z "${RECON_EVIDENCE_PATH}" ] \
+      || ! phase6_evidence_shows_completed "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
+    jq -nc --argjson iid "${IID}" '{
+      callback_status:"not_completed",iid:$iid,
+      chat_summary:("GitLab completion evidence is absent for #" + ($iid|tostring))
+    }'
+    exit 0
+  fi
+fi
 
 # Synthesized-reply status for a dead subagent (empty / unparseable /
 # status-less worker_result_json). 只要超时就不重试: when the run already
@@ -325,13 +356,17 @@ fi
 REPLY_STATUS="$(printf '%s' "${REPLY_JSON}" | jq -r '.status')"
 if [ "${REPLY_STATUS}" != "done" ] && [ -n "${RECON_EVIDENCE_PATH}" ] \
    && phase6_evidence_shows_completed "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
-  if [ "${TIMEOUT_RECONCILE}" = 1 ] && [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
+  if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ] && [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
     # A scheduler-owned running claim still needs its exact terminal I3 even
     # when GitLab already shows a completed/closed issue. Classify this as a
     # non-regressing `skipped` handoff instead of running Phase 6 label sync.
     # The pending claim digest was checked above; the importer independently
     # rechecks generation+token against active_jobs before releasing the slot.
-    COMPLETED_REASON="GitLab live state already completed/closed during running-timeout reconciliation"
+    if [ "${COMPLETED_RECONCILE}" = 1 ]; then
+      COMPLETED_REASON="GitLab live state already completed/closed during heartbeat completion reconciliation"
+    else
+      COMPLETED_REASON="GitLab live state already completed/closed during running-timeout reconciliation"
+    fi
     COMPLETED_STATE="$(printf '%s' "${STATE_JSON}" | jq -c \
       --argjson iid "${IID}" --arg project "${PROJECT}" '
       .pending_subagents       = (.pending_subagents | del(.[($iid|tostring)]))

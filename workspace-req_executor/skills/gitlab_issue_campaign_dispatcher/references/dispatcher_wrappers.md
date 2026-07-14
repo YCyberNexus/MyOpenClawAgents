@@ -65,6 +65,21 @@ results back to `req_dispatcher`, and emits cleanup instructions. Direct legacy
 compact JSON is accepted only when the pending record explicitly carries
 `completion_auth:"legacy"`.
 
+For scheduler-internal recovery, `dispatch_followup.sh` also accepts a
+token-digest claim fence. Completion-reconcile mode first repeats a narrow
+GitLab read under `campaign.lock`; only live `pr`/closed evidence may atomically
+drain pending and persist a claim-bound `skipped` handoff intent. Timeout mode
+keeps the existing running-lease plus project ACPX-deadline backstop.
+
+## `reap_driven_orphan_placeholders.sh`
+
+Consumes the protected physical-job IDs built by `run_executor_batch_tick.sh`
+from current scheduler jobs plus unfinished launch coordinators. Under the
+project campaign lock it removes only scheduler-driven `placeholder:true`
+entries whose `run_id`, `child_session_key`, and `spawned_at` are null and whose
+exact safe `job_id` is not protected. It never guesses from IID, attempt, batch
+labels, or malformed identity, and it returns unresolved IIDs explicitly.
+
 ## Standard Env
 
 All wrappers accept:

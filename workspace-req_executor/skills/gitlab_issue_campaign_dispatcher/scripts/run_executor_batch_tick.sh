@@ -13,6 +13,7 @@ RESOLVE_REPO_CMD="${RESOLVE_REPO_CMD:-${SCRIPT_DIR}/resolve_driven_repo_path.sh}
 DRAIN_HANDOFF_CMD="${DRAIN_HANDOFF_CMD:-${SCRIPT_DIR}/drain_driven_handoff_intents.sh}"
 DRAIN_OUTBOX_CMD="${DRAIN_OUTBOX_CMD:-${SCRIPT_DIR}/drain_driven_outbox.sh}"
 RECONCILE_COUNTS_CMD="${RECONCILE_COUNTS_CMD:-${SCRIPT_DIR}/reconcile_driven_terminal_counts.sh}"
+REAP_PLACEHOLDERS_CMD="${REAP_PLACEHOLDERS_CMD:-${SCRIPT_DIR}/reap_driven_orphan_placeholders.sh}"
 RESERVE_CMD="${RESERVE_CMD:-${SCRIPT_DIR}/reserve_driven_batch_items.sh}"
 TOPUP_CMD="${TOPUP_CMD:-${SCRIPT_DIR}/dispatch_driven_topup.sh}"
 IMPORT_SKIP_CMD="${IMPORT_SKIP_CMD:-${SCRIPT_DIR}/import_driven_skipped.sh}"
@@ -59,6 +60,7 @@ for command_spec in \
   "DRAIN_HANDOFF_CMD:${DRAIN_HANDOFF_CMD}" \
   "DRAIN_OUTBOX_CMD:${DRAIN_OUTBOX_CMD}" \
   "RECONCILE_COUNTS_CMD:${RECONCILE_COUNTS_CMD}" \
+  "REAP_PLACEHOLDERS_CMD:${REAP_PLACEHOLDERS_CMD}" \
   "RESERVE_CMD:${RESERVE_CMD}" \
   "TOPUP_CMD:${TOPUP_CMD}" \
   "IMPORT_SKIP_CMD:${IMPORT_SKIP_CMD}" \
@@ -565,6 +567,118 @@ if ! flock -n -x "${EXECUTOR_TICK_LOCK_FD}"; then
   exit 0
 fi
 
+# Reap only project placeholders whose exact scheduler job is absent from both
+# current active_jobs and every unfinished launch coordinator. This runs under
+# the agent-wide tick lock, so another tick cannot create a project placeholder
+# between the protected-set snapshot and the campaign-lock mutation. A
+# scheduler job is always reserved before its project placeholder is created;
+# exact job-id protection therefore closes the cross-state observation window.
+reap_project_orphan_placeholders() {
+  local project="$1" context protected_job_ids action_file action_json
+  local project_repo reap_input reap_output reap_rc reap_json
+  local reap_status reaped_count protected_count unresolved_count
+  local -a action_files=()
+
+  context="$(project_context "${project}")" || return 2
+  project_repo="$(jq -r '.repo_path' <<<"${context}")"
+  [ -d "${project_repo}/.git" ] || return 0
+
+  exec {ORPHAN_SNAPSHOT_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+  flock -x "${ORPHAN_SNAPSHOT_LOCK_FD}"
+  protected_job_ids="$(jq -ce '
+    [.active_jobs[].job_id]
+    | unique | sort
+  ' "${SCHEDULER_STATE_FILE}")" || {
+    flock -u "${ORPHAN_SNAPSHOT_LOCK_FD}"
+    exec {ORPHAN_SNAPSHOT_LOCK_FD}>&-
+    return 2
+  }
+  flock -u "${ORPHAN_SNAPSHOT_LOCK_FD}"
+  exec {ORPHAN_SNAPSHOT_LOCK_FD}>&-
+
+  shopt -s nullglob
+  action_files=("${DLC_ROOT}"/*.json)
+  shopt -u nullglob
+  if [ "${#action_files[@]}" -gt 0 ]; then
+    IFS=$'\n' action_files=($(printf '%s\n' "${action_files[@]}" | LC_ALL=C sort))
+    unset IFS
+  fi
+  for action_file in "${action_files[@]}"; do
+    action_json="$(jq -ce '
+      if type == "object"
+        and (.job_id | type == "string" and length > 0)
+        and (.project | type == "string" and length > 0)
+        and (.stage | type == "string" and length > 0)
+      then {job_id,project,stage}
+      else error("invalid launch coordinator identity")
+      end
+    ' "${action_file}")" || return 2
+    if [ "$(jq -r '.stage' <<<"${action_json}")" != completed ]; then
+      protected_job_ids="$(jq -ce \
+        --arg job_id "$(jq -r '.job_id' <<<"${action_json}")" \
+        '(. + [$job_id]) | unique | sort' <<<"${protected_job_ids}")"
+    fi
+  done
+
+  reap_input="$(jq -cn --argjson protected_job_ids "${protected_job_ids}" \
+    '{protected_job_ids:$protected_job_ids}')"
+  set +e
+  reap_output="$(printf '%s' "${reap_input}" | \
+    PROJECT="$(jq -r '.slug' <<<"${context}")" \
+    GROUP="$(jq -r '.group' <<<"${context}")" \
+    GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+    REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${context}")" \
+      bash "${REAP_PLACEHOLDERS_CMD}" 2>/dev/null)"
+  reap_rc=$?
+  set -e
+  if [ "${reap_rc}" -ne 0 ] || ! reap_json="$(printf '%s' "${reap_output}" | jq -ce '
+      if type == "object"
+        and (.status == "reaped" or .status == "lock_held")
+        and (.reaped_entries | type == "array")
+        and (.protected_entries | type == "array")
+        and (.unresolved_iids | type == "array")
+      then . else error("invalid orphan reaper envelope") end
+    ' 2>/dev/null)"; then
+    append_operation "$(jq -cn --arg project "${project}" '{
+      operation:"orphan_placeholder_reap",project:$project,status:"failed"
+    }')"
+    HAD_FAILURE=true
+    return 0
+  fi
+
+  reap_status="$(jq -r '.status' <<<"${reap_json}")"
+  reaped_count="$(jq -r '.reaped_entries | length' <<<"${reap_json}")"
+  protected_count="$(jq -r '.protected_entries | length' <<<"${reap_json}")"
+  unresolved_count="$(jq -r '.unresolved_iids | length' <<<"${reap_json}")"
+  if [ "${reap_status}" != reaped ] \
+      || [ "${reaped_count}" -gt 0 ] \
+      || [ "${unresolved_count}" -gt 0 ]; then
+    append_operation "$(jq -cn \
+      --arg project "${project}" \
+      --arg status "${reap_status}" \
+      --argjson reaped_count "${reaped_count}" \
+      --argjson protected_count "${protected_count}" \
+      --argjson unresolved_count "${unresolved_count}" '{
+      operation:"orphan_placeholder_reap",
+      project:$project,
+      status:$status,
+      reaped_count:$reaped_count,
+      protected_count:$protected_count,
+      unresolved_count:$unresolved_count
+    }')"
+  fi
+}
+
+while IFS= read -r orphan_project; do
+  [ -n "${orphan_project}" ] || continue
+  if ! reap_project_orphan_placeholders "${orphan_project}"; then
+    append_operation "$(jq -cn --arg project "${orphan_project}" '{
+      operation:"orphan_placeholder_reap",project:$project,status:"invalid_project"
+    }')"
+    HAD_FAILURE=true
+  fi
+done < <(jq -r '.[]' <<<"${PROJECTS_JSON}")
+
 # A prior sessions_spawn action globally closes the launch gate until its
 # acknowledgement is durable (or explicit runtime reconciliation resolves the
 # ambiguity). Do this independent of the current reservation set: a preparing
@@ -952,13 +1066,94 @@ if [ "${DRIVEN_COORDINATOR_FAULT:-}" = after_topup_seed ]; then
   exit 83
 fi
 
+# Re-check a running preflight completion against both current scheduler claim
+# identity and GitLab live state. The project wrapper writes the claim-bound
+# skipped handoff intent in the same campaign-state transaction that drains the
+# pending entry, so a callback lost after creating an MR does not wait for the
+# running timeout lease.
+reconcile_running_preflight_completion() {
+  local job_id="$1" project="$2" iid="$3"
+  local current_job claim_generation claim_token_sha256 context
+  local completion_output completion_rc completion_json
+
+  exec {COMPLETION_SNAPSHOT_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+  flock -x "${COMPLETION_SNAPSHOT_LOCK_FD}"
+  current_job="$(jq -c --arg job_id "${job_id}" \
+    '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
+  flock -u "${COMPLETION_SNAPSHOT_LOCK_FD}"
+  exec {COMPLETION_SNAPSHOT_LOCK_FD}>&-
+
+  if ! jq -e \
+      --arg job_id "${job_id}" \
+      --arg project "${project}" \
+      --argjson iid "${iid}" '
+      type == "object"
+      and .job_id == $job_id
+      and .project == $project
+      and .iid == $iid
+      and .status == "running"
+      and (.finalization // null) == null
+      and (.claim_generation | type == "number"
+        and . == floor and . > 0)
+      and (.claim_token | type == "string" and length > 0)
+    ' <<<"${current_job}" >/dev/null; then
+    jq -cn '{status:"stale_scheduler"}'
+    return 0
+  fi
+
+  claim_generation="$(jq -r '.claim_generation' <<<"${current_job}")"
+  claim_token_sha256="$(printf '%s' \
+    "$(jq -r '.claim_token' <<<"${current_job}")" | dlc_sha256)" \
+    || return 2
+  context="$(project_context "${project}")" || return 2
+
+  set +e
+  completion_output="$(printf '' | \
+    PROJECT="$(jq -r '.slug' <<<"${context}")" \
+    GROUP="$(jq -r '.group' <<<"${context}")" \
+    GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+    REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${context}")" \
+    IID="${iid}" DRIVEN_COMPLETED_RECONCILE=1 \
+    DRIVEN_RECONCILE_JOB_ID="${job_id}" \
+    DRIVEN_RECONCILE_CLAIM_GENERATION="${claim_generation}" \
+    DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${claim_token_sha256}" \
+      bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
+  completion_rc=$?
+  set -e
+  if [ "${completion_rc}" -ne 0 ] || ! completion_json="$(printf '%s' "${completion_output}" | jq -ce \
+      --argjson iid "${iid}" '
+      if type == "object"
+        and .iid == $iid
+        and (.callback_status == "handled"
+          or .callback_status == "not_completed"
+          or .callback_status == "stale_claim"
+          or .callback_status == "stale_or_already_drained"
+          or .callback_status == "lock_held")
+        and (if .callback_status == "handled"
+          then .terminal_status == "skipped"
+          else true end)
+      then . else error("invalid completion reconcile envelope") end
+    ' 2>/dev/null)"; then
+    jq -cn '{status:"failed"}'
+    return 0
+  fi
+
+  jq -cn \
+    --arg status "$(jq -r '.callback_status' <<<"${completion_json}")" \
+    --argjson claim_generation "${claim_generation}" '{
+    status:$status,
+    claim_generation:$claim_generation
+  }'
+}
+
 # Every live-preflight skip is terminalized through its exact scheduler claim:
-# claim-0 for a fresh reservation, or the current positive claim for a running
-# continuation whose project pending entry has drained. This guarantees zero
-# new spawn for skips and releases slots before actionable claims are emitted.
+# claim-0 for a fresh reservation, or a claim-fenced project handoff for a
+# running continuation. This guarantees zero new spawn for skips and releases
+# slots before actionable claims are emitted.
 import_candidate_skips() {
   local candidate_set="$1"
   local grant job_id project iid skipped skipped_count skip_output skip_rc skip_status
+  local completion_result completion_status
   LAST_IMPORTED_SKIP_COUNT=0
   while IFS= read -r grant; do
     [ -n "${grant}" ] || continue
@@ -974,9 +1169,36 @@ import_candidate_skips() {
       if jq -e --arg project "${project}" --argjson iid "${iid}" '
           any(.[]; .project == $project and .iid == $iid)
         ' <<<"${PROJECT_PENDING_ENTRIES}" >/dev/null; then
-        append_operation "$(jq -cn --arg job_id "${job_id}" '{
-          operation:"running_preflight_skip",job_id:$job_id,status:"suppressed"
-        }')"
+        completion_result="$(reconcile_running_preflight_completion \
+          "${job_id}" "${project}" "${iid}")" || completion_result='{"status":"failed"}'
+        completion_status="$(jq -r '.status' <<<"${completion_result}")"
+        case "${completion_status}" in
+          handled)
+            append_operation "$(jq -cn \
+              --arg job_id "${job_id}" \
+              --argjson claim_generation \
+                "$(jq -r '.claim_generation' <<<"${completion_result}")" '{
+              operation:"running_preflight_skip",
+              job_id:$job_id,
+              status:"handoff_recorded",
+              claim_generation:$claim_generation
+            }')"
+            LAST_IMPORTED_SKIP_COUNT=$((LAST_IMPORTED_SKIP_COUNT + 1))
+            ;;
+          not_completed|stale_claim|stale_or_already_drained|lock_held|stale_scheduler)
+            append_operation "$(jq -cn \
+              --arg job_id "${job_id}" \
+              --arg status "${completion_status}" '{
+              operation:"running_preflight_skip",job_id:$job_id,status:$status
+            }')"
+            ;;
+          *)
+            append_operation "$(jq -cn --arg job_id "${job_id}" '{
+              operation:"running_preflight_skip",job_id:$job_id,status:"failed"
+            }')"
+            HAD_FAILURE=true
+            ;;
+        esac
         continue
       fi
     fi

@@ -1838,6 +1838,66 @@ jq -e '.callback_status == "not_due"' <<<"${not_due_out}" >/dev/null \
 cmp -s "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-not-due.json" \
   || fail "not-due timeout reconcile mutated campaign state"
 
+# A heartbeat preflight that observes pr/closed may request immediate
+# completion reconciliation without waiting for the running lease. The project
+# wrapper must re-check GitLab under campaign.lock, reject stale positive
+# evidence without mutation, then write the same claim-bound skipped handoff
+# when the live evidence is still present.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-not-completed.json"
+not_completed_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_COMPLETED_RECONCILE=1 \
+  DRIVEN_RECONCILE_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_RECONCILE_CLAIM_GENERATION=1 \
+  DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "not_completed" and .iid == 42' \
+  <<<"${not_completed_out}" >/dev/null \
+  || fail "heartbeat completion reconcile accepted stale positive evidence"
+cmp -s "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-not-completed.json" \
+  || fail "not-completed heartbeat reconcile mutated campaign state"
+
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
+heartbeat_completed_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  RECONCILE_LIVE_COMPLETED=true \
+  DRIVEN_COMPLETED_RECONCILE=1 \
+  DRIVEN_RECONCILE_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_RECONCILE_CLAIM_GENERATION=1 \
+  DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=skipped EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "skipped"
+  and (.block_reason | contains("heartbeat completion reconciliation"))
+' <<<"${heartbeat_completed_out}" >/dev/null \
+  || fail "heartbeat completion reconcile did not emit a claim-bound skipped handoff"
+[ "$(wc -l <"${FOLLOWUP_IMPORT_LOG}" | tr -d ' ')" = 1 ] \
+  || fail "heartbeat completion reconcile did not invoke the handoff importer once"
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .active_issue_iids == []
+  and .campaign_status == "running"
+  and .completed_iids == []
+  and .timeout_iids == []
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "heartbeat completion reconcile did not release project pending state"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven-handoffs-heartbeat-completed"
+fi
+
 # A lost running callback can be discovered after GitLab already shows the
 # issue closed/pr-complete. The timeout reconciler must preserve those labels
 # while still emitting the exact claim-bound terminal handoff that releases

@@ -76,6 +76,7 @@ for required_tick_command in \
   drain_driven_handoff_intents.sh \
   drain_driven_outbox.sh \
   reconcile_driven_terminal_counts.sh \
+  reap_driven_orphan_placeholders.sh \
   reserve_driven_batch_items.sh \
   dispatch_driven_topup.sh \
   import_driven_skipped.sh \
