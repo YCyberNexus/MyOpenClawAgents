@@ -89,7 +89,7 @@ while IFS= read -r trigger_line || [ -n "${trigger_line}" ]; do
   trigger_key="${trigger_line%%=*}"
   trigger_value="${trigger_line#*=}"
   case "${trigger_key}" in
-    batch_id|correlation_id|project|selector_type|iid|iids|iid_min|iid_max|label|force_rerun_pr|dispatcher_callback_target|executor_agent|callback_nonce|branch)
+    batch_id|correlation_id|project|selector_type|iid|iids|iid_min|iid_max|label|force_rerun_pr|auto_merge|dispatcher_callback_target|executor_agent|callback_nonce|branch|merge_target_branch)
       ;;
     *)
       batch_die "unsupported trigger field: ${trigger_key}"
@@ -115,10 +115,12 @@ CORRELATION_ID="${TRIGGER_FIELDS[correlation_id]}"
 PROJECT_FULL="${TRIGGER_FIELDS[project]}"
 SELECTOR_TYPE="${TRIGGER_FIELDS[selector_type]}"
 FORCE_RERUN_PR="${TRIGGER_FIELDS[force_rerun_pr]}"
+AUTO_MERGE="${TRIGGER_FIELDS[auto_merge]:-false}"
 CALLBACK_TARGET_INPUT="${TRIGGER_FIELDS[dispatcher_callback_target]}"
 EXECUTOR_AGENT_INPUT="${TRIGGER_FIELDS[executor_agent]}"
 CALLBACK_NONCE="${TRIGGER_FIELDS[callback_nonce]}"
 BRANCH="${TRIGGER_FIELDS[branch]:-}"
+MERGE_TARGET_BRANCH="${TRIGGER_FIELDS[merge_target_branch]:-}"
 
 if ! [[ "${BATCH_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]; then
   batch_die "batch_id must be a safe path component"
@@ -135,13 +137,27 @@ case "${FORCE_RERUN_PR}" in
   true|false) ;;
   *) batch_die "force_rerun_pr must be true or false" ;;
 esac
-if [ -n "${BRANCH}" ]; then
-  case "${BRANCH}" in
-    -*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*" "*|*.lock|*.)
-      batch_die "branch must be a safe Git ref name"
+case "${AUTO_MERGE}" in
+  true|false) ;;
+  *) batch_die "auto_merge must be true or false" ;;
+esac
+validate_branch_name() {
+  local branch="$1"
+  case "${branch}" in
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*'`'*|*"'"*|*'"'*|*'<'*|*'>'*|*'!'*|*" "*|*$'\t'*|*$'\r'*|*$'\n'*|*.lock|*.)
+      return 1
       ;;
   esac
-  [ "${BRANCH}" != @ ] || batch_die "branch must be a safe Git ref name"
+  [ "${branch}" != @ ]
+}
+if [ -n "${BRANCH}" ] && ! validate_branch_name "${BRANCH}"; then
+  batch_die "branch must be a safe Git ref name"
+fi
+if [ -n "${MERGE_TARGET_BRANCH}" ] && ! validate_branch_name "${MERGE_TARGET_BRANCH}"; then
+  batch_die "merge_target_branch must be a safe Git ref name"
+fi
+if [ "${AUTO_MERGE}" = true ] && [ -z "${MERGE_TARGET_BRANCH}" ]; then
+  batch_die "merge_target_branch is required when auto_merge=true"
 fi
 
 case "${SELECTOR_TYPE}" in
@@ -251,10 +267,12 @@ REQUEST_JSON="$(jq -cnS \
   --arg project "${PROJECT_FULL}" \
   --argjson selector "${SELECTOR_JSON}" \
   --argjson force_rerun_pr "${FORCE_RERUN_PR}" \
+  --argjson auto_merge "${AUTO_MERGE}" \
   --arg dispatcher_callback_target "${CALLBACK_TARGET_INPUT}" \
   --arg executor_agent "${EXECUTOR_AGENT_INPUT}" \
   --arg callback_nonce "${CALLBACK_NONCE}" \
   --arg branch "${BRANCH}" \
+  --arg merge_target_branch "${MERGE_TARGET_BRANCH}" \
   '{
     version: 1,
     batch_id: $batch_id,
@@ -262,10 +280,12 @@ REQUEST_JSON="$(jq -cnS \
     project: $project,
     selector: $selector,
     force_rerun_pr: $force_rerun_pr,
+    auto_merge: $auto_merge,
     dispatcher_callback_target: $dispatcher_callback_target,
     executor_agent: $executor_agent,
     callback_nonce: $callback_nonce,
-    branch: (if $branch == "" then null else $branch end)
+    branch: (if $branch == "" then null else $branch end),
+    merge_target_branch: (if $merge_target_branch == "" then null else $merge_target_branch end)
   }')"
 REQUEST_DIGEST="$(printf '%s' "${REQUEST_JSON}" | sha256_text)"
 
@@ -289,8 +309,17 @@ if [ -e "${BATCH_DIR}" ]; then
   ' "${BATCH_DIR}/request.json")" || \
     batch_die "existing request.json is invalid" 3
   EXISTING_REQUEST_DIGEST="$(printf '%s' "${EXISTING_REQUEST_JSON}" | sha256_text)"
-  [ "${EXISTING_REQUEST_DIGEST}" = "${REQUEST_DIGEST}" ] || \
+  EXISTING_REQUEST_SEMANTIC="$(jq -cS '
+    . + {
+      auto_merge:(.auto_merge // false),
+      merge_target_branch:(.merge_target_branch // null)
+    }
+  ' <<<"${EXISTING_REQUEST_JSON}")"
+  [ "${EXISTING_REQUEST_SEMANTIC}" = "$(jq -cS . <<<"${REQUEST_JSON}")" ] || \
     batch_die "batch_id request conflict" 3
+  # Keep the original digest for an old on-disk request that predates these
+  # optional fields. State and public acceptance continue hashing raw bytes.
+  REQUEST_DIGEST="${EXISTING_REQUEST_DIGEST}"
 
   EXISTING_SNAPSHOT_JSON="$(jq -ceS '
     if type == "object"
@@ -621,6 +650,7 @@ MATCHED_IIDS="$(jq -cS \
   '
     def unfinished_terminal_label:
       . == "pr"
+      or . == "finish"
       or . == "timeout"
       or . == "blocked"
       or startswith("blocked-")

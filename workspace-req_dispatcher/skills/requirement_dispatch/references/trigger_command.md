@@ -62,6 +62,10 @@ queue_launch_reclaim_seconds,stuck_after_minutes,active_count,applies_to`
 
 ### 自然语言执行
 
+`create_and_execute` 在 git_issuer 成功后必须保留用户的完整原请求，并把新返回的
+`issue_url` 作为新增一行追加到同一个 `MESSAGE`；不得只拼接 URL、分支或模型转述，避免丢失
+自动合并动作、合并目标及否定语义。
+
 先在加载 `source_dispatcher_env.sh` 的同一环境调用
 `get_executor_timeout_budget.sh`。它会显式读取并严格校验 executor scheduler state；
 state 不存在、不可读或无效时立即停止。把严格结果中的
@@ -167,9 +171,11 @@ iid_min=<range 专用正整数>
 iid_max=<range 专用正整数，且 >= iid_min>
 label=<open_label 专用精确标签>
 force_rerun_pr=true|false
+auto_merge=true|false
 dispatcher_callback_target=<非空回调目标>
 callback_nonce=<dispatcher 生成的 64 个小写 hex>
-branch=<可选安全 Git ref>
+branch=<可选安全 Git ref；处理基准分支>
+merge_target_branch=<可选安全 Git ref；MR 目标分支；auto_merge=true 时必填>
 ```
 
 五类 selector 只允许各自字段：
@@ -188,8 +194,8 @@ IID 必须澄清。离散 IID 与范围或其他类型组合、同类型不同�
 不产生第二个 `open_unfinished` selector。
 
 五类 selector 都只查询 intake 时为 OPEN 的 Issue。`open_unfinished` 排除
-`pr,timeout,blocked,blocked-*,failed,failed-*`，`open_label` 不追加终态标签排除；普通处理实时
-遇到 `pr` 时跳过，只有明确重跑语义把 `force_rerun_pr` 设为 true。CLOSED 不进入 snapshot。
+`pr,finish,timeout,blocked,blocked-*,failed,failed-*`，`open_label` 不追加终态标签排除；普通处理实时
+遇到 `pr` 或 `finish` 时跳过，只有明确重跑语义把 `force_rerun_pr` 设为 true。CLOSED 不进入 snapshot。
 重跑动作词可以位于 Issue 宾语之后；同分句中的“不要、无需、不需要、不得”等否定窗口保持
 false，label/branch selector 值中的动作词不算动作。project 支持多层 subgroup；可信 GitLab
 仓库根 URL 保留完整 path，带 `/-/` 的 URL 保留其前 path。Issue URL、仓库 URL、
@@ -199,6 +205,14 @@ false，label/branch selector 值中的动作词不算动作。project 支持多
 I1 字段固定为上表，不携带任何 IID snapshot。
 `callback_nonce` 只允许以明文存在私有 durable outbox/intent 与发送中的 I1；重投必须复用原值，
 不得重新生成。
+
+`auto_merge=true` 只能来自用户明确的“完成后直接/自动 merge”语义，否定表达不得启用。
+`branch` 与 `merge_target_branch` 分别表示处理基准和 MR 目标：未指定 MR 目标时回退到处理基准，
+两者都未指定时使用 `master`。仅给出普通 MR 目标但没有完成后合并动作时，保持
+`auto_merge=false`，MR 创建后停留在 `pr`。
+自然语言及用户输入字段中，`branch`、`base_branch`、`source_branch` 与“基于某分支”映射到
+处理基准；`target_branch`、`merge_target_branch` 与“目标分支”映射到 MR 目标。只给出后者
+时，处理基准兼容性回退到同一分支，但字段归属不能覆盖另行明确指定的处理基准。
 
 ### I1 durable intent
 

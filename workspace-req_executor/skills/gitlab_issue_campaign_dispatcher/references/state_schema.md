@@ -76,6 +76,27 @@ result without persisting again, so `quota_launched_this_tick`, `spawned_at`,
 after the pending entry was drained. A conflicting outcome, run/session,
 attempt, generation, or token fails closed.
 
+Scheduler-driven pending entries also freeze `auto_merge:boolean` and
+`merge_target_branch:string|null` from the exact active job. New automatic
+requests require a non-empty merge target; legacy records missing both fields
+normalize to `false/null`. Phase 6 reads only this trusted pending configuration,
+not callback-authored labels. The fixed outer executor may already have written
+`finish` after its exact GET/PUT/GET merge confirmation; Phase 6 separately
+verifies the exact MR before durable terminal persistence and callback emission.
+Neither callback fields nor an attempt marker alone authorize that Phase 6
+success decision.
+
+If the exact merge is verified but the atomic `finish` update fails,
+Phase 6 keeps the claim in `pending_subagents[iid]` and adds
+`finish_label_retry:true` plus
+`finish_label_retry_attempt:<current positive attempt>`. Reconciliation may
+then override even a non-empty killed/failure callback with current-attempt
+marker recovery, but only when that retry attempt exactly equals the pending
+claim's `attempt_number`. A missing, invalid, or stale retry-attempt fence is
+ignored and cannot hijack a later attempt. The retry re-verifies the exact MR
+against GitLab before trying only the `finish` transition; it does not rerun
+Issue work or drain the scheduler slot early.
+
 ## Executor-Wide Scheduler State
 
 Path:
@@ -91,6 +112,12 @@ In addition to `version`, `round_robin_cursor`, `batch_order`, and
 `scheduler.lock` and override deployment initialization defaults for later
 batch sessions. A `pending_transaction.scheduler_state` carries the same
 values so transaction recovery cannot roll back a concurrent runtime update.
+
+Each active job stores the processing `branch`, `auto_merge`, and
+`merge_target_branch` as part of its physical intent. Deduplication attaches a
+second batch membership only when all three values, `entry_mode`, and
+`force_rerun_pr` match; a conflicting merge policy remains pending behind the
+current physical job.
 
 Version 1 may also contain `launch_failed_receipts`. This optional object is
 keyed by `job_id`; each value has exactly:

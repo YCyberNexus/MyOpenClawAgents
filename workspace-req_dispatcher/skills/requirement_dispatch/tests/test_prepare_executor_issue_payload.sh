@@ -34,8 +34,12 @@ if [ "$(jq -r '.issue_url' <<<"${issue_url_input}")" != "http://gitlab-b.pxsemic
   exit 1
 fi
 
-if [ "$(jq -r '.target_branch' <<<"${issue_url_input}")" != "release/2026.07" ]; then
-  echo "expected target_branch extracted from execution request" >&2
+if ! jq -e '
+  .target_branch == "release/2026.07"
+  and .merge_target_branch == "release/2026.07"
+  and .auto_merge == false
+' <<<"${issue_url_input}" >/dev/null; then
+  echo "expected a legacy target-branch phrase to set the MR target without automatic merge" >&2
   printf '%s\n' "${issue_url_input}" >&2
   exit 1
 fi
@@ -102,8 +106,12 @@ target_branch_equals_input="$(
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
 
-if [ "$(jq -r '.target_branch' <<<"${target_branch_equals_input}")" != "release/2026.08" ]; then
-  echo "expected target_branch= syntax to set target_branch release/2026.08" >&2
+if ! jq -e '
+  .target_branch == "release/2026.08"
+  and .merge_target_branch == "release/2026.08"
+  and .auto_merge == false
+' <<<"${target_branch_equals_input}" >/dev/null; then
+  echo "expected legacy target_branch= syntax to set the MR target without automatic merge" >&2
   printf '%s\n' "${target_branch_equals_input}" >&2
   exit 1
 fi
@@ -113,8 +121,12 @@ target_branch_without_colon_input="$(
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
 
-if [ "$(jq -r '.target_branch' <<<"${target_branch_without_colon_input}")" != "release/2026.08" ]; then
-  echo "expected target branch wording without a colon to set target_branch release/2026.08" >&2
+if ! jq -e '
+  .target_branch == "release/2026.08"
+  and .merge_target_branch == "release/2026.08"
+  and .auto_merge == false
+' <<<"${target_branch_without_colon_input}" >/dev/null; then
+  echo "expected legacy target-branch wording without a colon to set the MR target without automatic merge" >&2
   printf '%s\n' "${target_branch_without_colon_input}" >&2
   exit 1
 fi
@@ -1208,5 +1220,350 @@ do
     exit 1
   fi
 done
+
+explicit_auto_merge_json="$(
+  MESSAGE='请基于 develop 分支处理 GitLab ai-infra/veqp_server_v3 issue #312，执行完成后直接merge到release/2026.07分支。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "develop"
+  and .auto_merge == true
+  and .merge_target_branch == "release/2026.07"
+' <<<"${explicit_auto_merge_json}" >/dev/null; then
+  echo "expected an explicit automatic merge target to remain distinct from the base branch" >&2
+  printf '%s\n' "${explicit_auto_merge_json}" >&2
+  exit 1
+fi
+
+create_and_execute_auto_merge_json="$(
+  GITLAB_HOST=gitlab.example.test \
+  MESSAGE=$'请在 GitLab ai-infra/veqp_server_v3 创建 Issue 并执行，基于 develop 分支处理，完成后直接 merge 到 release/2026.07。\n创建结果 issue_url=https://gitlab.example.test/ai-infra/veqp_server_v3/-/issues/313' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "ai-infra/veqp_server_v3"
+  and .selector == {type:"single",iid:313}
+  and .target_branch == "develop"
+  and .auto_merge == true
+  and .merge_target_branch == "release/2026.07"
+' <<<"${create_and_execute_auto_merge_json}" >/dev/null; then
+  echo "expected create_and_execute to preserve automatic-merge intent beside the new issue URL" >&2
+  printf '%s\n' "${create_and_execute_auto_merge_json}" >&2
+  exit 1
+fi
+
+target_branch_alias_auto_merge_json="$(
+  MESSAGE='请基于 develop 分支开发并处理 GitLab ai-infra/veqp_server_v3 issue #312，target_branch=release，完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "develop"
+  and .auto_merge == true
+  and .merge_target_branch == "release"
+' <<<"${target_branch_alias_auto_merge_json}" >/dev/null; then
+  echo "expected target_branch= to remain the MR target beside an explicit processing base" >&2
+  printf '%s\n' "${target_branch_alias_auto_merge_json}" >&2
+  exit 1
+fi
+
+natural_target_auto_merge_json="$(
+  MESSAGE='请基于 develop 分支开发并处理 GitLab ai-infra/veqp_server_v3 issue #312，目标分支：release，完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "develop"
+  and .auto_merge == true
+  and .merge_target_branch == "release"
+' <<<"${natural_target_auto_merge_json}" >/dev/null; then
+  echo "expected the Chinese target-branch phrase to remain the MR target beside an explicit processing base" >&2
+  printf '%s\n' "${natural_target_auto_merge_json}" >&2
+  exit 1
+fi
+
+base_fallback_auto_merge_json="$(
+  MESSAGE='请基于 develop 分支处理 GitLab ai-infra/veqp_server_v3 issue #312，执行完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "develop"
+  and .auto_merge == true
+  and .merge_target_branch == "develop"
+' <<<"${base_fallback_auto_merge_json}" >/dev/null; then
+  echo "expected automatic merge without an explicit target to use the base branch" >&2
+  printf '%s\n' "${base_fallback_auto_merge_json}" >&2
+  exit 1
+fi
+
+master_fallback_auto_merge_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，执行完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "master"
+  and .auto_merge == true
+  and .merge_target_branch == "master"
+' <<<"${master_fallback_auto_merge_json}" >/dev/null; then
+  echo "expected automatic merge without either branch to default to master" >&2
+  printf '%s\n' "${master_fallback_auto_merge_json}" >&2
+  exit 1
+fi
+
+for merge_feature_discussion in \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，修复自动合并失败的问题。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，排查直接 merge 按钮为何失效。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，修复 auto_merge=true 解析失败的问题。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，文档中补充 auto_merge=true 示例。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，修复“完成后直接 merge”功能失效的问题。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，排查完成后直接 merge 按钮。'
+do
+  merge_feature_discussion_json="$(
+    MESSAGE="${merge_feature_discussion}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '.status == "success" and .auto_merge == false' \
+      <<<"${merge_feature_discussion_json}" >/dev/null; then
+    echo "expected discussion of a merge feature not to enable automatic merge: ${merge_feature_discussion}" >&2
+    printf '%s\n' "${merge_feature_discussion_json}" >&2
+    exit 1
+  fi
+done
+
+legacy_merge_target_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，合到 release/2026.07。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "release/2026.07"
+  and .auto_merge == false
+  and .merge_target_branch == "release/2026.07"
+' <<<"${legacy_merge_target_json}" >/dev/null; then
+  echo "expected a legacy merge-target phrase without completion intent to keep review-only behavior" >&2
+  printf '%s\n' "${legacy_merge_target_json}" >&2
+  exit 1
+fi
+
+negated_auto_merge_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，不要直接 merge 到 main。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '.status == "success" and .auto_merge == false' <<<"${negated_auto_merge_json}" >/dev/null; then
+  echo "expected a negated automatic merge instruction not to enable automatic merge" >&2
+  printf '%s\n' "${negated_auto_merge_json}" >&2
+  exit 1
+fi
+
+single_character_negated_direct_merge_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，完成后不直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '.status == "success" and .auto_merge == false' \
+    <<<"${single_character_negated_direct_merge_json}" >/dev/null; then
+  echo "expected a single-character negation before direct merge to disable automatic merge" >&2
+  printf '%s\n' "${single_character_negated_direct_merge_json}" >&2
+  exit 1
+fi
+
+single_character_negated_auto_merge_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，不自动合并。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '.status == "success" and .auto_merge == false' \
+    <<<"${single_character_negated_auto_merge_json}" >/dev/null; then
+  echo "expected a single-character negation before automatic merge to disable automatic merge" >&2
+  printf '%s\n' "${single_character_negated_auto_merge_json}" >&2
+  exit 1
+fi
+
+ambiguous_double_negation_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，不是不需要自动合并。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '.status == "success" and .auto_merge == false' \
+    <<<"${ambiguous_double_negation_json}" >/dev/null; then
+  echo "expected ambiguous double negation to fail closed for automatic merge" >&2
+  printf '%s\n' "${ambiguous_double_negation_json}" >&2
+  exit 1
+fi
+
+for mixed_auto_merge_instruction in \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，完成后直接 merge；但不要自动合并。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，不要自动合并；完成后直接 merge。' \
+  '请处理 GitLab ai-infra/veqp_server_v3 issue #312，原计划完成后直接 merge，不过现在不自动合并。'
+do
+  mixed_auto_merge_json="$(
+    MESSAGE="${mixed_auto_merge_instruction}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '.status == "success" and .auto_merge == false' \
+      <<<"${mixed_auto_merge_json}" >/dev/null; then
+    echo "expected any explicit merge negation to disable automatic merge: ${mixed_auto_merge_instruction}" >&2
+    printf '%s\n' "${mixed_auto_merge_json}" >&2
+    exit 1
+  fi
+done
+
+conflicting_merge_targets_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，target_branch=release/old，完成后直接 merge 到 release/new。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("conflicting merge target branches"))
+' <<<"${conflicting_merge_targets_json}" >/dev/null; then
+  echo "expected different explicitly named merge targets to fail closed" >&2
+  printf '%s\n' "${conflicting_merge_targets_json}" >&2
+  exit 1
+fi
+
+corrected_merge_target_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，目标分支 release，改为 main，完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("conflicting merge target branches"))
+' <<<"${corrected_merge_target_json}" >/dev/null; then
+  echo "expected an abbreviated correction to a merge target to fail closed" >&2
+  printf '%s\n' "${corrected_merge_target_json}" >&2
+  exit 1
+fi
+
+corrected_base_branch_json="$(
+  MESSAGE='请基于 develop 分支处理 GitLab ai-infra/veqp_server_v3 issue #312，改为基于 main 分支，完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("conflicting processing branches"))
+' <<<"${corrected_base_branch_json}" >/dev/null; then
+  echo "expected different explicitly named processing branches to fail closed" >&2
+  printf '%s\n' "${corrected_base_branch_json}" >&2
+  exit 1
+fi
+
+abbreviated_corrected_base_branch_json="$(
+  MESSAGE='请基于 develop 分支处理 GitLab ai-infra/veqp_server_v3 issue #312，改为 main 分支，完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("conflicting processing branches"))
+' <<<"${abbreviated_corrected_base_branch_json}" >/dev/null; then
+  echo "expected an abbreviated processing-branch correction to fail closed" >&2
+  printf '%s\n' "${abbreviated_corrected_base_branch_json}" >&2
+  exit 1
+fi
+
+duplicate_merge_target_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，target_branch=release，完成后直接 merge 到 release。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .auto_merge == true
+  and .merge_target_branch == "release"
+' <<<"${duplicate_merge_target_json}" >/dev/null; then
+  echo "expected duplicate references to the same merge target to remain valid" >&2
+  printf '%s\n' "${duplicate_merge_target_json}" >&2
+  exit 1
+fi
+
+compact_branch_fields_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=develop target_branch=release 完成后merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "develop"
+  and .merge_target_branch == "release"
+  and .auto_merge == true
+' <<<"${compact_branch_fields_json}" >/dev/null; then
+  echo "expected adjacent recognized branch directives to remain unambiguous" >&2
+  printf '%s\n' "${compact_branch_fields_json}" >&2
+  exit 1
+fi
+
+semicolon_separated_merge_fields_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=develop；target_branch=release；完成后merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "develop"
+  and .merge_target_branch == "release"
+  and .auto_merge == true
+' <<<"${semicolon_separated_merge_fields_json}" >/dev/null; then
+  echo "expected semicolons followed by recognized directives to remain valid" >&2
+  printf '%s\n' "${semicolon_separated_merge_fields_json}" >&2
+  exit 1
+fi
+
+unsafe_backtick_base_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，branch=feature/`id`。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("safe Git ref"))
+' <<<"${unsafe_backtick_base_json}" >/dev/null; then
+  echo "expected a backtick-bearing base branch to fail closed" >&2
+  printf '%s\n' "${unsafe_backtick_base_json}" >&2
+  exit 1
+fi
+
+unsafe_backtick_merge_target_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，执行完成后直接 merge 到 feature/`id`。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "failed"
+  and (.reason | contains("safe Git ref"))
+' <<<"${unsafe_backtick_merge_target_json}" >/dev/null; then
+  echo "expected a backtick-bearing merge target branch to fail closed" >&2
+  printf '%s\n' "${unsafe_backtick_merge_target_json}" >&2
+  exit 1
+fi
+
+for unsafe_assignment_merge_target in \
+  'target_branch=feature [bad]' \
+  'target_branch=release;evil' \
+  'target_branch=release; evil' \
+  'target_branch=release ;evil'
+do
+  unsafe_assignment_merge_target_json="$(
+    MESSAGE="请处理 GitLab ai-infra/veqp_server_v3 issue #312，${unsafe_assignment_merge_target}，完成后直接 merge。" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "failed"
+    and (.reason | contains("safe Git ref"))
+  ' <<<"${unsafe_assignment_merge_target_json}" >/dev/null; then
+    echo "expected an unsafe assignment-style merge target to fail closed: ${unsafe_assignment_merge_target}" >&2
+    printf '%s\n' "${unsafe_assignment_merge_target_json}" >&2
+    exit 1
+  fi
+done
+
+common_branch_json="$(
+  MESSAGE='请基于 feature/foo-1.2 分支处理 GitLab ai-infra/veqp_server_v3 issue #312，执行完成后直接 merge。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "feature/foo-1.2"
+  and .auto_merge == true
+  and .merge_target_branch == "feature/foo-1.2"
+' <<<"${common_branch_json}" >/dev/null; then
+  echo "expected common slash, dash, and dot branch characters to remain valid" >&2
+  printf '%s\n' "${common_branch_json}" >&2
+  exit 1
+fi
 
 echo "ok prepare_executor_issue_payload extracts existing issue execution input"

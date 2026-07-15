@@ -41,9 +41,31 @@ dispatcher_callback_target=<target>
 executor_agent=req_executor
 callback_nonce=<64 个小写 hex>
 force_rerun_pr=true|false
+auto_merge=true|false
+branch=<可选处理基准分支>
+merge_target_branch=<auto_merge=true 时必填的 MR 目标分支>
 ```
 
-根据 selector 类型再提供 `iid`、`iids`、`iid_min/iid_max` 或 `label`，可选 `branch`。`iid_list` 的 `iids` 必须是至少两个升序去重的逗号分隔正整数，例如 `1,4,5`。I1 字段用于项目、selector 与回调路由；executor 按进程环境优先、tracked `config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，完成 OPEN Issue 查询，并在内部执行链和子任务 prompt 中直接传递该值。私有仓库网络 Git 操作使用普通 `git`，`origin` 为 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL，Git 子进程继承 executor 当前环境。Issue 列表使用 GraphQL cursor 完整扫描，重复 IID、异常游标或扫描预算耗尽都会失败关闭；只有连续两次规范化结果一致才冻结不可变 snapshot。
+根据 selector 类型再提供 `iid`、`iids`、`iid_min/iid_max` 或 `label`，可选处理基准分支
+`branch`；启用 `auto_merge=true` 时必须同时提供非空的 `merge_target_branch`。dispatcher 在
+生成 I1 前完成目标回退：明确的合并目标优先；未指定合并目标时回退到 `branch`；两者都未指定时
+使用 `master`。executor 不从自由文本重新推断该策略，并会拒绝缺少目标分支的自动合并 I1。
+`auto_merge=false` 时，MR 创建成功后以 `pr` 作为稳定完成态。`auto_merge=true` 时，固定外层
+执行器先执行精确 MR GET、带预期 SHA 的 PUT 和精确 GET；只有后一次 GET 观察到匹配 MR 的
+`state=merged`，才原子写入 `finish`。Phase 6 不延后这次首次标签写入，但会在提交 durable
+终态和发送成功回调前，再次独立、有界地核验相同 MR 身份、分支和 SHA。单凭
+`mr_result.json` marker 或回调字段永远不能授权 `finish` 或成功终态。
+`force_rerun_pr=true` 表示用户明确要求重跑，并同时覆盖已有 `pr` 与 `finish` 两种稳定完成态；
+字段名保留 `pr` 只是为了兼容既有 I1 schema。
+
+`iid_list` 的 `iids` 必须是至少两个升序去重的逗号分隔正整数，例如 `1,4,5`。I1 字段用于
+项目、selector、处理及合并策略与回调路由；executor 按进程环境优先、tracked
+`config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，完成 OPEN Issue 查询，并在内部执行链和
+子任务 prompt 中直接传递该值。私有仓库网络 Git 操作使用普通 `git`，`origin` 为
+`${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git`
+形式的直接认证 URL，Git 子进程继承 executor 当前环境。Issue 列表使用 GraphQL cursor 完整
+扫描，重复 IID、异常游标或扫描预算耗尽都会失败关闭；只有连续两次规范化结果一致才冻结不可变
+snapshot。
 
 `run_driven_issue_batch.sh` 与 `dispatch_single_issue.sh` 的 rich envelope 只用于 runtime 编排。先处理 `cleanup_actions`，再按数组原序串行完成 `reconcile_actions`、`spawn_grants` 及逐条 `sessions_spawn` ack；之后 Path C/E 必须调用固定 `emit_driven_batch_acceptance.sh`，并把它的唯一一行 JSON 原样返回。公开 acceptance 字段集合固定为：
 
@@ -65,7 +87,7 @@ status,batch_id,matched_count,snapshot_digest,scheduler_status
 RUN_EXECUTOR_BATCH_TICK
 ```
 
-建议每分钟在 executor main session 唤醒一次。tick 会先对账 durable terminal counts，再检查运行任务的 `${LOG_DIR}/worker_result.json`。若 OpenClaw 在长工具调用返回后没有调度外层模型的最终回复，tick 会在当前 claim fence 下直接完成 Phase 6，并通过 `cleanup_actions` 回收仍占用 slot 的 child；随后扫描项目 durable intent、导入 terminal handoff、投递 callback outbox，并恢复未完成的 post-spawn coordinator。`run_acpx_attempt.sh` 会在 acpx 结束时先写 `${LOG_DIR}/acpx_terminal.json`；若完整结果在默认 2400 秒宽限期后仍未出现，tick 仅回收身份完全匹配的 child。之后 tick 用 scheduler active job 与未完成 launch coordinator 构造保护集，在项目锁内清除不受保护且没有任何运行标识的旧 placeholder。项目预检发现 running Issue 已有 `pr` 或已关闭时，tick 会立即按当前 claim fence 重新核验 GitLab 并生成 `skipped` handoff，不再等待运行租约；超过运行租约且确已越过项目 ACPX 截止时间的丢回调任务仍由 timeout 路径兜底。最后才按严格 round-robin 补满空槽。进程重启或聊天 turn 中断后，下一次 tick 从 durable state 继续。完成批次、已确认 outbox 和完成的 launch action 会退出热索引并保留在按 ID 可定位的冷记录中，周期成本只随活动工作量增长。
+建议每分钟在 executor main session 唤醒一次。tick 会先对账 durable terminal counts，再检查运行任务的 `${LOG_DIR}/worker_result.json`。若 OpenClaw 在长工具调用返回后没有调度外层模型的最终回复，tick 会在当前 claim fence 下直接完成 Phase 6，并通过 `cleanup_actions` 回收仍占用 slot 的 child；随后扫描项目 durable intent、导入 terminal handoff、投递 callback outbox，并恢复未完成的 post-spawn coordinator。`run_acpx_attempt.sh` 会在 acpx 结束时先写 `${LOG_DIR}/acpx_terminal.json`；若完整结果在默认 2400 秒宽限期后仍未出现，tick 仅回收身份完全匹配的 child。之后 tick 用 scheduler active job 与未完成 launch coordinator 构造保护集，在项目锁内清除不受保护且没有任何运行标识的旧 placeholder。项目预检发现 running Issue 已有 `pr`、`finish` 或已关闭时，tick 会立即按当前 claim fence 重新核验 GitLab 并生成 `skipped` handoff，不再等待运行租约；超过运行租约且确已越过项目 ACPX 截止时间的丢回调任务仍由 timeout 路径兜底。最后才按严格 round-robin 补满空槽。进程重启或聊天 turn 中断后，下一次 tick 从 durable state 继续。完成批次、已确认 outbox 和完成的 launch action 会退出热索引并保留在按 ID 可定位的冷记录中，周期成本只随活动工作量增长。
 
 整个 topup/skip-finalize 事务由 agent 级 nonblocking tick 锁串行化；重叠唤醒立即返回 `idle`，不会使用旧的 pending 快照终结刚创建的新任务。
 
@@ -91,6 +113,7 @@ callback `openclaw` 子进程继承 executor 当前环境，包括按既定优�
 ## 本地覆盖、升级与回滚
 
 - 本地 `REPO_PARENT_PATH`、`EXECUTOR_SCHEDULER_ROOT`、初始 `EXECUTOR_MAX_CONCURRENCY`、初始 `EXECUTOR_ACPX_TIMEOUT_SECONDS`、`EXECUTOR_RUNNING_LEASE_SECONDS`、`EXECUTOR_AGENT` 或 `DISPATCHER_CALLBACK_TARGET` 只能通过进程环境或 ignored `config/campaign_defaults.local.env` 覆盖；显式 scheduler 进程环境优先，并须在 intake、tick、import、delivery 使用同一组值。`/slot` 和 `/timeout-executor` 写入的共享运行时值优先于初始配置。tracked 配置继续保留蓝区 GitLab host/protocol、token 注入、callback 和 `/data` 默认，不写本机路径或测试 endpoint。
+- I1 schema 滚动升级必须先暂停新的执行请求，排空或停止旧 executor，部署并验证新版 executor 后，最后升级 dispatcher。旧 executor 的严格 I1 白名单不认识 `auto_merge` 与 `merge_target_branch`；新版 dispatcher 即使对普通请求也固定发送 `auto_merge=false`，所以任何新版 I1 都不得投递到旧 executor，自动合并请求也不得尝试降级执行。回滚时先停新入口与双方 tick，先回滚 dispatcher 或继续保留新版 executor；只有确认不会再发送新字段后才能回滚 executor。未完成自动合并 intent 保留在 durable state，等待兼容版本恢复。
 - 升级时先排空 req_dispatcher 的旧 FIFO。旧 active/queue 非空期间，新 batch 只保持 `waiting_for_legacy_drain`，不与旧 single active 重叠；清空后由 `RUN_EXECUTOR_BATCH_TICK` 推进新 scheduler。
 - 认证回调上线前已经存在于 executor 私有 scheduler 根、且同时缺少 `executor_agent` 与 `callback_nonce` 的旧 request/outbox，会在读取时一次性显式标记为 `legacy_pre_upgrade`，并用 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 加 `worker_result_json=<严格八字段 I3>` 完成旧 mirror。dispatcher 仍接受旧 marker 以兼容已发出的在途消息。新 I1 始终强制 nonce、executor 与固定 target；触发输入不能请求或伪造 `legacy_pre_upgrade`。
 - 新旧锁目录滚动升级默认保留 86400 秒兼容窗口（起点持久化在 scheduler 根的 `lock_layout_v2.json`）。窗口内新进程同时获取旧、新两条 callback/launch 锁；窗口后才在双锁保护下把旧锁移出热目录。只有确认所有旧 executor 进程已停止，才可用 `DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0` 提前结束窗口。

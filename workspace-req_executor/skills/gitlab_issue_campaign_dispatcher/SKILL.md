@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-15.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-15.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists and explicit automatic merge intent, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; ordinary or still-open MRs remain at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -398,13 +398,27 @@ stale generation cannot release a newer job. Terminal batches, delivered
 callbacks, and completed launch coordinators leave hot scans but remain
 addressable in cold per-ID storage for idempotent replay.
 Independently of that timeout backstop, when ordinary project preflight reports
-`pr`/closed for a running continuation that still has project pending state,
+`pr`/`finish`/closed for a running continuation that still has project pending state,
 the tick immediately re-reads the current scheduler claim and invokes
 `dispatch_followup.sh` in internal completion-reconcile mode. The followup
 rechecks the claim digest and narrow GitLab live evidence under
 `campaign.lock`, then atomically drains pending and stores a claim-bound
 `skipped` handoff intent. A stale preflight returns `not_completed` without
 mutation, and the private claim token is never exposed outside scheduler state.
+The fixed outer `run_executor_attempt.sh` owns the first merge authorization.
+Its `merge_mr.sh` attempt mode performs an exact MR GET, a SHA-fenced PUT, and a
+second exact GET; only a matching server-side merged response lets the wrapper
+atomically replace the work label with `finish`. Phase 6 does not delay that
+first label write. Before it commits the durable terminal result or emits the
+callback, however, it performs a separate bounded read-only verification of
+the same exact MR identity, branches, and SHA.
+
+If the automatic-merge compact result is empty or unavailable, Phase 6 may
+recover identity only from the current attempt's mode-600, regular non-symlink
+`${LOG_DIR}/mr_result.json`, whose Issue, attempt, canonical source branch,
+frozen merge target, and expected SHA must all match. A marker or callback by
+itself never authorizes `finish` or a successful terminal callback; Phase 6
+must still complete its independent live verification.
 
 ### Path E — `RUN_SINGLE_ISSUE` compatibility shim
 
@@ -585,7 +599,7 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Claim-fenced durable-result recovery and post-acpx stale-child reclamation | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal result reconcile; LLM acts on `cleanup_actions[]` |
 | Driven batch intake, OPEN snapshot, and idempotency | `run_driven_issue_batch.sh` → `create_driven_batch.sh` |
 | Recovery-first handoff/outbox/coordinator replay and strict round-robin refill | `run_executor_batch_tick.sh` |
-| Claim-fenced immediate recovery for running jobs already `pr`/closed | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal completion reconcile |
+| Claim-fenced immediate recovery for running jobs already `pr`/`finish`/closed | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal completion reconcile |
 | Scheduler-protected orphan placeholder cleanup | `run_executor_batch_tick.sh` + `reap_driven_orphan_placeholders.sh` |
 | Preparing claim, bind, emitted-action fence, and claim-0 skip | `run_executor_batch_tick.sh` plus its fixed helpers |
 | Runtime-evidence reconciliation | `resolve_executor_batch_reconcile.sh` |

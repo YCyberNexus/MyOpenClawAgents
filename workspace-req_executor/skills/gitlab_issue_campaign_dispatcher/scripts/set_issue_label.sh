@@ -15,7 +15,10 @@
 # so manually-added labels on the issue are preserved. Adding a workflow label
 # also removes conflicting workflow labels to keep the issue in a single
 # workflow state. Allowed transient pairs: done+blocked-cc and done+blocked-dispatcher
-# (failure after `done`, before `pr`). `pr` replaces `done` (done removed when pr added).
+# (failure after `done`, before a stable completion label). `pr` replaces `done`
+# after ordinary MR creation; `finish` replaces `done`/`pr` only after the exact
+# explicitly requested automatic merge is independently verified. `pr` and
+# `finish` are mutually exclusive stable completion labels.
 # model:<tier> and quality:low are orthogonal (not in WORKFLOW_LABELS) — adding/removing
 # them never disturbs work labels, and adding a work label never disturbs them.
 
@@ -38,7 +41,7 @@ LABEL="$2"
 # Legacy single `blocked`/`failed` are kept in this list ONLY so that adding a
 # new workflow state still clears any stray residue of them; the agent never
 # WRITES single blocked/failed anymore (it uses *-cc / *-dispatcher).
-WORKFLOW_LABELS=(todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher blocked failed timeout continue contiune)
+WORKFLOW_LABELS=(todo retry new doing pr finish done blocked-cc blocked-dispatcher failed-cc failed-dispatcher blocked failed timeout continue contiune)
 
 is_workflow_label() {
   local label="$1"
@@ -73,8 +76,8 @@ workflow_conflicts_for_add() {
   fi
 
   case "${label}" in
-    pr)
-      keep=(pr)
+    pr|finish)
+      keep=("${label}")
       ;;
     blocked-cc)
       keep=(done blocked-cc)
@@ -106,6 +109,38 @@ case "${OP}" in
 esac
 
 if [ "${OP}" = "add" ]; then
+  # Re-read stable terminal evidence at the mutation boundary so a reconcile
+  # failure or a pr/finish/closed race cannot let a late ordinary transition
+  # downgrade the Issue. An explicit rerun removes pr/finish before adding
+  # doing; newly arriving terminal evidence still wins fail-closed.
+  if [ "${LABEL}" != finish ] && is_workflow_label "${LABEL}"; then
+    CURRENT_LABELS_JSON="$(glab api \
+      "projects/${PROJECT_URI}/issues/${ISSUE_IID}")"
+    if ! jq -e '
+        type == "object"
+        and (.labels | type == "array")
+        and all(.labels[]; type == "string")
+        and ((.state // "opened") | type == "string")
+      ' <<<"${CURRENT_LABELS_JSON}" >/dev/null; then
+      echo "set_issue_label: current Issue labels response is invalid" >&2
+      exit 3
+    fi
+    if jq -e '.state == "closed"' <<<"${CURRENT_LABELS_JSON}" >/dev/null; then
+      echo "preserve:closed"
+      exit 0
+    fi
+    if jq -e '(.labels | index("finish")) != null' \
+        <<<"${CURRENT_LABELS_JSON}" >/dev/null; then
+      echo "preserve:finish"
+      exit 0
+    fi
+    if jq -e '(.labels | index("pr")) != null' \
+        <<<"${CURRENT_LABELS_JSON}" >/dev/null; then
+      echo "preserve:pr"
+      exit 0
+    fi
+  fi
+
   CONFLICTS=()
   while IFS= read -r conflict_label; do
     CONFLICTS+=("${conflict_label}")

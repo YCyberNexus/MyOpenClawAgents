@@ -125,7 +125,9 @@ migrate_legacy_scheduler_state() {
     any(.active_jobs[];
       (has("reservation_seq") | not)
       or (has("claim_generation") | not)
-      or (has("claim_token") | not))
+      or (has("claim_token") | not)
+      or (has("auto_merge") | not)
+      or (has("merge_target_branch") | not))
   ' <<<"${migration_target}")"
   [ "${migration_needed}" = true ] || return 0
 
@@ -148,6 +150,14 @@ migrate_legacy_scheduler_state() {
           or .value.entry_mode == "fresh"
           or .value.entry_mode == "continue")
         and (.value.force_rerun_pr | type == "boolean")
+        and ((.value | has("auto_merge") | not)
+          or (.value.auto_merge | type == "boolean"))
+        and ((.value | has("merge_target_branch") | not)
+          or .value.merge_target_branch == null
+          or (.value.merge_target_branch | type == "string" and length > 0))
+        and (((.value.auto_merge // false) == false)
+          or ((.value.merge_target_branch // null)
+            | type == "string" and length > 0))
         and (.value.status == "reserved"
           or .value.status == "preparing"
           or .value.status == "running")
@@ -217,7 +227,11 @@ migrate_legacy_scheduler_state() {
   done
 
   migrated_state="$(jq -c '
-    ([.active_jobs | to_entries[]
+    .active_jobs |= with_entries(
+      .value |= (
+        if has("auto_merge") then . else .auto_merge = false end
+        | if has("merge_target_branch") then . else .merge_target_branch = null end))
+    | ([.active_jobs | to_entries[]
         | select(.value | has("reservation_seq"))
         | .value.reservation_seq
         | select(type == "number" and . == floor and . > 0)]
@@ -462,6 +476,11 @@ SCHEDULER_STATE="$(jq -ce '
       and ((.value.branch == null) or (.value.branch | type == "string"))
       and (.value.entry_mode == "auto" or .value.entry_mode == "fresh" or .value.entry_mode == "continue")
       and (.value.force_rerun_pr | type == "boolean")
+      and (.value.auto_merge | type == "boolean")
+      and ((.value.merge_target_branch == null)
+        or (.value.merge_target_branch | type == "string" and length > 0))
+      and ((.value.auto_merge == false)
+        or (.value.merge_target_branch | type == "string" and length > 0))
       and (.value.status == "reserved" or .value.status == "preparing" or .value.status == "running")
       and (.value.reservation_seq | type == "number" and . == floor and . > 0)
       and (.value.reserved_at | type == "number" and . == floor and . >= 0)
@@ -569,11 +588,19 @@ load_batch() {
         and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
       and (.force_rerun_pr | type == "boolean")
       and ((.branch == null) or (.branch | type == "string"))
+      and ((has("auto_merge") | not) or (.auto_merge | type == "boolean"))
+      and ((has("merge_target_branch") | not)
+        or .merge_target_branch == null
+        or (.merge_target_branch | type == "string" and length > 0))
+      and (((.auto_merge // false) == false)
+        or ((.merge_target_branch // null)
+          | type == "string" and length > 0))
       and ((has("entry_mode") | not)
         or .entry_mode == "auto"
         or .entry_mode == "fresh"
         or .entry_mode == "continue")
-    then .
+    then (if has("auto_merge") then . else .auto_merge = false end
+      | if has("merge_target_branch") then . else .merge_target_branch = null end)
     else error("invalid request")
     end
   ' "${batch_dir}/request.json")" || reserve_die "batch request is invalid: ${batch_id}" 3
@@ -734,6 +761,8 @@ GRANTS_JSON="$(jq -c '
         branch,
         entry_mode,
         force_rerun_pr,
+        auto_merge,
+        merge_target_branch,
         reservation_seq
       }]
   | sort_by(.reservation_seq)
@@ -775,6 +804,8 @@ while [ "${batch_order_length}" -gt 0 ]; do
     branch_json="$(jq -c '.branch // null' <<<"${request_json}")"
     entry_mode="$(jq -r '.entry_mode // "auto"' <<<"${request_json}")"
     force_rerun_pr="$(jq -r '.force_rerun_pr' <<<"${request_json}")"
+    auto_merge="$(jq -r '.auto_merge' <<<"${request_json}")"
+    merge_target_branch_json="$(jq -c '.merge_target_branch' <<<"${request_json}")"
 
     # A blocked low-index membership must not hide a later runnable item. Scan
     # pending and still-lazy snapshot indices in order, but stop after the first
@@ -813,10 +844,14 @@ while [ "${batch_order_length}" -gt 0 ]; do
       same_intent="$(jq -r \
         --argjson branch "${branch_json}" \
         --arg entry_mode "${entry_mode}" \
-        --argjson force_rerun_pr "${force_rerun_pr}" '
+        --argjson force_rerun_pr "${force_rerun_pr}" \
+        --argjson auto_merge "${auto_merge}" \
+        --argjson merge_target_branch "${merge_target_branch_json}" '
         (.[0].value.branch == $branch)
         and (.[0].value.entry_mode == $entry_mode)
         and (.[0].value.force_rerun_pr == $force_rerun_pr)
+        and (.[0].value.auto_merge == $auto_merge)
+        and (.[0].value.merge_target_branch == $merge_target_branch)
       ' <<<"${matching_jobs}")"
       finalization_present="$(jq -r \
         '.[0].value.finalization != null' <<<"${matching_jobs}")"
@@ -935,6 +970,8 @@ while [ "${batch_order_length}" -gt 0 ]; do
       --argjson branch "${branch_json}" \
       --arg entry_mode "${entry_mode}" \
       --argjson force_rerun_pr "${force_rerun_pr}" \
+      --argjson auto_merge "${auto_merge}" \
+      --argjson merge_target_branch "${merge_target_branch_json}" \
       --argjson reservation_seq "${reservation_seq}" \
       --argjson reserved_at "${RESERVED_AT}" \
       --arg batch_id "${batch_id}" \
@@ -947,6 +984,8 @@ while [ "${batch_order_length}" -gt 0 ]; do
         branch:$branch,
         entry_mode:$entry_mode,
         force_rerun_pr:$force_rerun_pr,
+        auto_merge:$auto_merge,
+        merge_target_branch:$merge_target_branch,
         status:"reserved",
         reservation_seq:$reservation_seq,
         claim_generation:0,
@@ -966,7 +1005,9 @@ while [ "${batch_order_length}" -gt 0 ]; do
       --argjson iid "${iid}" \
       --argjson branch "${branch_json}" \
       --arg entry_mode "${entry_mode}" \
-      --argjson force_rerun_pr "${force_rerun_pr}" '
+      --argjson force_rerun_pr "${force_rerun_pr}" \
+      --argjson auto_merge "${auto_merge}" \
+      --argjson merge_target_branch "${merge_target_branch_json}" '
       . + [{
         job_id:$job_id,
         batch_id:$batch_id,
@@ -975,7 +1016,9 @@ while [ "${batch_order_length}" -gt 0 ]; do
         iid:$iid,
         branch:$branch,
         entry_mode:$entry_mode,
-        force_rerun_pr:$force_rerun_pr
+        force_rerun_pr:$force_rerun_pr,
+        auto_merge:$auto_merge,
+        merge_target_branch:$merge_target_branch
       }]
     ' <<<"${GRANTS_JSON}")"
     BATCH_STATES["${batch_id}"]="${batch_state}"

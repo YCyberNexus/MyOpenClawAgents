@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-15.3] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-15.4] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -107,10 +107,18 @@ repository/wiki/Issue URL 或既有确定性 locator；仓库根 URL 保留完�
 
 五类 selector 都只纳入创建 snapshot 时为 OPEN 的 Issue。`iid_list` 表示同一 project 下排序、
 去重后的至少两个离散 IID；`open_unfinished` 排除
-`pr,timeout,blocked,blocked-*,failed,failed-*`；`open_label` 只按标签精确匹配，不追加这些
-排除条件。普通处理实时遇到 `pr` 会跳过，只有原文明确要求重跑/重新处理/重新执行时才设置
+`pr,finish,timeout,blocked,blocked-*,failed,failed-*`；`open_label` 只按标签精确匹配，不追加这些
+排除条件。普通处理实时遇到 `pr` 或 `finish` 会跳过，只有原文明确要求重跑/重新处理/重新执行时才设置
 `force_rerun_pr=true`；动作词可以位于宾语之后，但同分句否定窗口中的“不要、无需、不需要、
 不得”等必须保持 false，label/branch 值中的动作词不算动作。CLOSED 始终不处理。
+
+分支意图必须分开保存：`target_branch` 是处理 Issue 的基准分支，
+`merge_target_branch` 是 MR 的目标分支。只有明确的“执行完成后直接/自动 merge”语义才设置
+`auto_merge=true`。用户只指定基准分支而未指定合并目标时，合并目标回退到基准分支；两者都
+未指定时回退到 `master`。未明确要求自动合并的旧请求继续只创建 MR 并保留 `pr`。
+输入中的 `branch`、`base_branch`、`source_branch` 与“基于某分支”表示处理基准；
+`target_branch`、`merge_target_branch` 与“目标分支”表示 MR 目标。只给出 MR 目标时，处理
+基准为保持兼容而回退到该目标，但不得因此启用自动合并。
 
 ### 3. 建单动作
 
@@ -122,8 +130,9 @@ repository/wiki/Issue URL 或既有确定性 locator；仓库根 URL 保留完�
 - 严格读取 git_issuer JSON，并用 `record_pending.sh` / `drain_pending.sh` 完成审计。
 
 `create_issue` 成功即停止，绝不进入执行。`create_and_execute` 只在 git_issuer 返回严格
-`status=success,project,issue_iid,issue_url` 后，把返回的 `issue_url` 与原始分支指令交给下面
-的单一执行 wrapper；不得回到旧 `enqueue_executor_issue.sh`。
+`status=success,project,issue_iid,issue_url` 后，把用户的**完整原请求逐字保留**，再追加返回的
+`issue_url`，整体作为 `MESSAGE` 交给下面的单一执行 wrapper；不得只转述 `issue_url` 或分支，
+否则会丢失“完成后直接合并”及其否定语义。不得回到旧 `enqueue_executor_issue.sh`。
 
 ### 4. 执行动作只调用一个 wrapper
 

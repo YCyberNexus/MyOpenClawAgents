@@ -466,6 +466,108 @@ while IFS= read -r post_job; do
         -lt "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" ]; then
     continue
   fi
+
+  # The fixed wrapper writes acpx_terminal.json before MR finalization. Once
+  # the short post-acpx grace expires, proactively recover a private exact MR
+  # marker under the current scheduler claim before asking OpenClaw to kill the
+  # stalled child. A kill event is not recovery evidence and may carry an empty
+  # or failure-shaped callback, so relying on it would lose an already-merged
+  # MR or a pending finish-label retry.
+  post_token_sha256="$(printf '%s' "$(jq -r '.claim_token' <<<"${post_job}")" | dlc_sha256)" \
+    || tick_die "unable to hash post-acpx claim fence"
+  post_recovery_handled=false
+  post_auto_merge="$(jq -r '.auto_merge // false' <<<"${post_pending}")"
+  if [ "${post_auto_merge}" = true ]; then
+    set +e
+    post_marker_reconcile_output="$(printf '' | \
+      PROJECT="$(jq -r '.slug' <<<"${post_context}")" \
+      GROUP="$(jq -r '.group' <<<"${post_context}")" \
+      GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+      REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${post_context}")" \
+      IID="${post_iid}" DRIVEN_MARKER_RECONCILE=1 \
+      DRIVEN_RECONCILE_JOB_ID="${post_job_id}" \
+      DRIVEN_RECONCILE_CLAIM_GENERATION="${post_generation}" \
+      DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${post_token_sha256}" \
+        bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
+    post_marker_reconcile_rc=$?
+    set -e
+    if [ "${post_marker_reconcile_rc}" -eq 0 ] \
+        && post_marker_reconcile_json="$(jq -ce \
+          --argjson iid "${post_iid}" '
+          if type == "object" and .iid == $iid
+            and (.callback_status == "handled"
+              or .callback_status == "marker_not_ready"
+              or .callback_status == "stale_claim"
+              or .callback_status == "stale_or_already_drained"
+              or .callback_status == "lock_held")
+            and (if .callback_status == "handled"
+              then (.terminal_status == "done"
+                or .terminal_status == "failed"
+                or .terminal_status == "blocked")
+              else true end)
+          then . else error("invalid marker reconcile envelope") end
+        ' <<<"${post_marker_reconcile_output}" 2>/dev/null)"; then
+      post_marker_reconcile_status="$(jq -r '.callback_status' \
+        <<<"${post_marker_reconcile_json}")"
+      append_operation "$(jq -cn \
+        --arg job_id "${post_job_id}" \
+        --arg status "${post_marker_reconcile_status}" \
+        --arg terminal_status "$(jq -r '.terminal_status // ""' \
+          <<<"${post_marker_reconcile_json}")" '{
+          operation:"post_acpx_marker_reconcile",job_id:$job_id,status:$status
+        } + (if $terminal_status == "" then {}
+             else {terminal_status:$terminal_status} end)')"
+      [ "${post_marker_reconcile_status}" != handled ] \
+        || post_recovery_handled=true
+    else
+      append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+        operation:"post_acpx_marker_reconcile",job_id:$job_id,status:"failed"
+      }')"
+      HAD_FAILURE=true
+    fi
+  fi
+
+  # cleanup_required is returned before the ordinary expired-running scan
+  # below. Perform its claim-fenced timeout reconciliation here once the same
+  # scheduler lease is due, otherwise a persistent acpx marker would shadow
+  # timeout recovery forever. A handled marker retry (notably finish-label
+  # blocked) wins and remains pending for the next marker-only tick.
+  post_updated_at="$(jq -r '.updated_at // -1' <<<"${post_job}")"
+  if [ "${post_recovery_handled}" != true ] \
+      && [[ "${post_updated_at}" =~ ^[0-9]+$ ]] \
+      && [ "${POST_ACPX_NOW_EPOCH}" -ge "${post_updated_at}" ] \
+      && [ $((POST_ACPX_NOW_EPOCH - post_updated_at)) \
+        -ge "${EXECUTOR_RUNNING_LEASE_SECONDS}" ]; then
+    set +e
+    post_timeout_output="$(printf '' | \
+      PROJECT="$(jq -r '.slug' <<<"${post_context}")" \
+      GROUP="$(jq -r '.group' <<<"${post_context}")" \
+      GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+      REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${post_context}")" \
+      IID="${post_iid}" DRIVEN_TIMEOUT_RECONCILE=1 \
+      DRIVEN_TIMEOUT_JOB_ID="${post_job_id}" \
+      DRIVEN_TIMEOUT_CLAIM_GENERATION="${post_generation}" \
+      DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${post_token_sha256}" \
+      DRIVEN_TIMEOUT_NOW_EPOCH="${POST_ACPX_NOW_EPOCH}" \
+        bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
+    post_timeout_rc=$?
+    set -e
+    if [ "${post_timeout_rc}" -eq 0 ] \
+        && post_timeout_status="$(jq -er '
+          .callback_status | select(type == "string" and length > 0)
+        ' <<<"${post_timeout_output}" 2>/dev/null)"; then
+      append_operation "$(jq -cn \
+        --arg job_id "${post_job_id}" --arg status "${post_timeout_status}" '{
+        operation:"post_acpx_timeout_reconcile",job_id:$job_id,status:$status
+      }')"
+    else
+      append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+        operation:"post_acpx_timeout_reconcile",job_id:$job_id,status:"failed"
+      }')"
+      HAD_FAILURE=true
+    fi
+  fi
+
   CLEANUP_ACTIONS="$(jq -c \
     --arg target "${post_child_session_key}" \
     --arg job_id "${post_job_id}" \
@@ -1099,7 +1201,9 @@ ACTIVE_CONTINUATIONS="$(jq -ce '
         iid,
         branch,
         entry_mode,
-        force_rerun_pr
+        force_rerun_pr,
+        auto_merge,
+        merge_target_branch
       }]
 ' "${SCHEDULER_STATE_FILE}")" || tick_die "active scheduler jobs are invalid"
 flock -u "${ACTIVE_LOCK_FD}"
@@ -1386,12 +1490,16 @@ reconcile_running_preflight_completion() {
       if type == "object"
         and .iid == $iid
         and (.callback_status == "handled"
+          or .callback_status == "marker_not_ready"
           or .callback_status == "not_completed"
           or .callback_status == "stale_claim"
           or .callback_status == "stale_or_already_drained"
           or .callback_status == "lock_held")
         and (if .callback_status == "handled"
-          then .terminal_status == "skipped"
+          then (.terminal_status == "skipped"
+            or .terminal_status == "done"
+            or .terminal_status == "failed"
+            or .terminal_status == "blocked")
           else true end)
       then . else error("invalid completion reconcile envelope") end
     ' 2>/dev/null)"; then
@@ -1401,10 +1509,12 @@ reconcile_running_preflight_completion() {
 
   jq -cn \
     --arg status "$(jq -r '.callback_status' <<<"${completion_json}")" \
+    --arg terminal_status "$(jq -r '.terminal_status // ""' <<<"${completion_json}")" \
     --argjson claim_generation "${claim_generation}" '{
     status:$status,
     claim_generation:$claim_generation
-  }'
+  } + (if $terminal_status == "" then {}
+       else {terminal_status:$terminal_status} end)'
 }
 
 # Every live-preflight skip is terminalized through its exact scheduler claim:
@@ -1414,7 +1524,7 @@ reconcile_running_preflight_completion() {
 import_candidate_skips() {
   local candidate_set="$1"
   local grant job_id project iid skipped skipped_count skip_output skip_rc skip_status
-  local completion_result completion_status
+  local completion_result completion_status completion_terminal_status
   LAST_IMPORTED_SKIP_COUNT=0
   while IFS= read -r grant; do
     [ -n "${grant}" ] || continue
@@ -1435,18 +1545,35 @@ import_candidate_skips() {
         completion_status="$(jq -r '.status' <<<"${completion_result}")"
         case "${completion_status}" in
           handled)
-            append_operation "$(jq -cn \
-              --arg job_id "${job_id}" \
-              --argjson claim_generation \
-                "$(jq -r '.claim_generation' <<<"${completion_result}")" '{
-              operation:"running_preflight_skip",
-              job_id:$job_id,
-              status:"handoff_recorded",
-              claim_generation:$claim_generation
-            }')"
-            LAST_IMPORTED_SKIP_COUNT=$((LAST_IMPORTED_SKIP_COUNT + 1))
+            completion_terminal_status="$(jq -r '.terminal_status' \
+              <<<"${completion_result}")"
+            if [ "${completion_terminal_status}" = blocked ]; then
+              append_operation "$(jq -cn \
+                --arg job_id "${job_id}" \
+                --argjson claim_generation \
+                  "$(jq -r '.claim_generation' <<<"${completion_result}")" '{
+                operation:"running_preflight_skip",
+                job_id:$job_id,
+                status:"marker_retry_pending",
+                terminal_status:"blocked",
+                claim_generation:$claim_generation
+              }')"
+            else
+              append_operation "$(jq -cn \
+                --arg job_id "${job_id}" \
+                --arg terminal_status "${completion_terminal_status}" \
+                --argjson claim_generation \
+                  "$(jq -r '.claim_generation' <<<"${completion_result}")" '{
+                operation:"running_preflight_skip",
+                job_id:$job_id,
+                status:"handoff_recorded",
+                terminal_status:$terminal_status,
+                claim_generation:$claim_generation
+              }')"
+              LAST_IMPORTED_SKIP_COUNT=$((LAST_IMPORTED_SKIP_COUNT + 1))
+            fi
             ;;
-          not_completed|stale_claim|stale_or_already_drained|lock_held|stale_scheduler)
+          marker_not_ready|not_completed|stale_claim|stale_or_already_drained|lock_held|stale_scheduler)
             append_operation "$(jq -cn \
               --arg job_id "${job_id}" \
               --arg status "${completion_status}" '{

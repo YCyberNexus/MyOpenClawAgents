@@ -48,17 +48,26 @@ if ! PREPARED_REQUEST_JSON="$(jq -ce '
       or (.type == "open_label" and (keys | sort) == ["label","type"]
         and (.label | type == "string" and length > 0))
     );
+  if type == "object" then
+    (if has("auto_merge") then . else .auto_merge = false end
+    | if has("merge_target_branch") then . else .merge_target_branch = null end)
+  else . end
+  |
   if type == "object"
     and (keys | sort) == [
-      "force_rerun_pr","iid","issue_url","project","reason",
-      "request_text","selector","status","target_branch"
+      "auto_merge","force_rerun_pr","iid","issue_url","merge_target_branch",
+      "project","reason","request_text","selector","status","target_branch"
     ]
     and .status == "success"
     and (.project | type == "string"
       and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
     and (.selector | valid_selector)
     and (.force_rerun_pr | type == "boolean")
+    and (.auto_merge | type == "boolean")
     and (.target_branch | nullable_string)
+    and (.merge_target_branch | nullable_string)
+    and (.auto_merge == false
+      or (.merge_target_branch | type == "string" and length > 0))
     and (.issue_url | nullable_string)
     and (.request_text | nullable_string)
     and .reason == null
@@ -74,7 +83,9 @@ fi
 PROJECT="$(jq -r '.project' <<<"${PREPARED_REQUEST_JSON}")"
 SELECTOR_JSON="$(jq -cS '.selector' <<<"${PREPARED_REQUEST_JSON}")"
 FORCE_RERUN_PR="$(jq -r '.force_rerun_pr' <<<"${PREPARED_REQUEST_JSON}")"
+AUTO_MERGE="$(jq -r '.auto_merge' <<<"${PREPARED_REQUEST_JSON}")"
 TARGET_BRANCH="$(jq -r '.target_branch // ""' <<<"${PREPARED_REQUEST_JSON}")"
+MERGE_TARGET_BRANCH="$(jq -r '.merge_target_branch // ""' <<<"${PREPARED_REQUEST_JSON}")"
 
 if [ "${ORIGIN_JSON+x}" != x ]; then
   origin_message="${MESSAGE}"
@@ -110,10 +121,12 @@ PAYLOAD="$(
   PROJECT="${PROJECT}" \
   SELECTOR_JSON="${SELECTOR_JSON}" \
   FORCE_RERUN_PR="${FORCE_RERUN_PR}" \
+  AUTO_MERGE="${AUTO_MERGE}" \
   EXECUTOR_AGENT="${EXECUTOR_AGENT}" \
   CALLBACK_NONCE="${CALLBACK_NONCE}" \
   DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}" \
   TARGET_BRANCH="${TARGET_BRANCH}" \
+  MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH}" \
     "${BASH}" "${SCRIPT_DIR}/build_executor_batch_payload.sh"
 )"
 REQUEST_DIGEST="$(printf '%s' "${PAYLOAD}" | executor_batch_sha256)"
@@ -125,7 +138,9 @@ enqueue_result="$(
   PROJECT="${PROJECT}" \
   SELECTOR_JSON="${SELECTOR_JSON}" \
   FORCE_RERUN_PR="${FORCE_RERUN_PR}" \
+  AUTO_MERGE="${AUTO_MERGE}" \
   TARGET_BRANCH="${TARGET_BRANCH}" \
+  MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH}" \
   EXECUTOR_AGENT="${EXECUTOR_AGENT}" \
   CALLBACK_NONCE="${CALLBACK_NONCE}" \
   ORIGIN_JSON="${ORIGIN_JSON}" \

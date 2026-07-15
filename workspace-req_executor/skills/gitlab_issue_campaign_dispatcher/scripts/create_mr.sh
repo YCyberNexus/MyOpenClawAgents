@@ -30,15 +30,22 @@
 #                   no longer changes MR rotation behavior)
 #   ISSUE_TITLE     short human title for the MR title
 #   LOG_DIR         where mr_description.md lives (under WORKTREE_DIR/.req_executor/issue-<iid>/log/attempt-NNN)
-#   BRANCH          target branch
+#   BRANCH          default target branch
+#   MERGE_TARGET_BRANCH  MR target branch (optional; falls back to BRANCH)
+#   AUTO_MERGE      true|false (optional; default false)
+#   COMMIT_SHA      exact source HEAD that the MR must expose
 #   WORK_BRANCH     source branch (single, fixed)
 #   ATTEMPT_NUMBER_PADDED  e.g. "002" (used in MR title for visibility)
 #
-# Output (two lines on stdout):
+# Output (four lines on stdout):
 #   <merge-request-web-url>
 #   <mr_action>            "created" when no prior open MR existed,
 #                          "rotated" when a prior open MR was closed first.
-#   The executor captures both lines into the compact JSON.
+#   <merge-request-iid>
+#   <merge_outcome>        "merged" only after exact server verification;
+#                          otherwise "opened" or conservative "unknown".
+#   The first three lines are emitted as soon as the new MR identity is known,
+#   so the executor can recover an MR even if the optional merge step stalls.
 
 set -euo pipefail
 
@@ -47,7 +54,36 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${PROJECT_FULL:?}" "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${ISSUE_TITLE:?}" \
-  "${LOG_DIR:?}" "${BRANCH:?}" "${WORK_BRANCH:?}" "${ATTEMPT_NUMBER_PADDED:?}"
+  "${LOG_DIR:?}" "${BRANCH:?}" "${WORK_BRANCH:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
+  "${PROJECT_URI:?}" "${COMMIT_SHA:?}"
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AUTO_MERGE="${AUTO_MERGE:-false}"
+MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
+MR_RESULT_FILE="${LOG_DIR}/mr_result.json"
+
+case "${AUTO_MERGE}" in
+  true|false) ;;
+  *)
+    echo "create_mr: AUTO_MERGE must be true or false" >&2
+    exit 2
+    ;;
+esac
+if [ -z "${MERGE_TARGET_BRANCH}" ]; then
+  echo "create_mr: MERGE_TARGET_BRANCH or BRANCH must be non-empty" >&2
+  exit 2
+fi
+if ! [[ "${COMMIT_SHA}" =~ ^[0-9a-fA-F]{7,64}$ ]]; then
+  echo "create_mr: COMMIT_SHA must be a hexadecimal Git object ID" >&2
+  exit 2
+fi
+
+# A prior attempt-local file is untrusted input because the inner model can
+# write inside LOG_DIR.  Retire it before any GitLab mutation; only this outer
+# fixed script may create the marker consumed for recovery below.
+if [ -e "${MR_RESULT_FILE}" ] || [ -L "${MR_RESULT_FILE}" ]; then
+  mv "${MR_RESULT_FILE}" "${MR_RESULT_FILE}.stale.$$.${RANDOM}"
+fi
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -81,8 +117,13 @@ list_open_mrs_for_work_branch() {
     jq '[.[] | select((.state // "opened") == "opened")]'
 }
 
-# Look up any open MR currently pointing at this branch.
-EXISTING_JSON="$(list_open_mrs_for_work_branch 2>/dev/null || echo '[]')"
+# Look up any open MR currently pointing at this branch.  This read is the
+# mutation fence: an auth/network failure must not be mistaken for an empty
+# list, otherwise the script could create a duplicate or close the wrong set.
+if ! EXISTING_JSON="$(list_open_mrs_for_work_branch)"; then
+  echo "create_mr: failed to list existing open MRs for ${WORK_BRANCH}" >&2
+  exit 5
+fi
 EXISTING_COUNT="$(echo "${EXISTING_JSON}" | jq -r 'length')"
 
 # Always close existing open MRs before creating a new one. Both fresh
@@ -125,7 +166,11 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
   echo
   echo "Per-attempt summaries are posted as comments on the linked issue."
   echo
-  echo "Do not merge until reviewed."
+  if [ "${AUTO_MERGE}" = true ]; then
+    echo "req_executor will attempt an immediate merge; if GitLab does not confirm it, this MR remains available for normal review."
+  else
+    echo "Do not merge until reviewed."
+  fi
 } > "${DESC_FILE}"
 
 # NOTE: --description (inline string) is used instead of --description-file
@@ -135,7 +180,7 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
 glab mr create \
   --repo "${PROJECT_FULL}" \
   --source-branch "${WORK_BRANCH}" \
-  --target-branch "${BRANCH}" \
+  --target-branch "${MERGE_TARGET_BRANCH}" \
   --title "Issue #${ISSUE_IID} (attempt ${ATTEMPT_NUMBER_PADDED}): ${ISSUE_TITLE}" \
   --description "$(cat "${DESC_FILE}")" \
   --yes >/dev/null
@@ -148,5 +193,119 @@ if [ "${OPEN_COUNT}" -ne 1 ]; then
   echo "create_mr: expected exactly one open MR for ${WORK_BRANCH}, found ${OPEN_COUNT}" >&2
   exit 6
 fi
-echo "${OPEN_JSON}" | jq -r '.[0].web_url'
-echo "${MR_ACTION}"
+
+MR_IID="$(jq -er '.[0].iid | select(type == "number" and . == floor and . > 0)' <<<"${OPEN_JSON}")" || {
+  echo "create_mr: created MR is missing a valid project-local IID" >&2
+  exit 6
+}
+MR_URL="$(jq -er '.[0].web_url | select(type == "string" and length > 0)' <<<"${OPEN_JSON}")" || {
+  echo "create_mr: created MR is missing a valid web URL" >&2
+  exit 6
+}
+
+persist_mr_result() {
+  local result_json="$1" result_tmp
+  result_tmp="$(mktemp "${MR_RESULT_FILE}.tmp.XXXXXX")"
+  if ! jq -c \
+      --arg mr_action "${MR_ACTION}" \
+      --argjson issue_iid "${ISSUE_IID}" \
+      --argjson attempt_number "${ATTEMPT_NUMBER}" \
+      --argjson auto_merge "${AUTO_MERGE}" '
+        . + {
+          mr_action:$mr_action,
+          issue_iid:$issue_iid,
+          attempt_number:$attempt_number,
+          auto_merge:$auto_merge
+        }
+      ' <<<"${result_json}" >"${result_tmp}"; then
+    echo "create_mr: failed to render ${MR_RESULT_FILE}" >&2
+    return 1
+  fi
+  chmod 600 "${result_tmp}"
+  mv "${result_tmp}" "${MR_RESULT_FILE}"
+}
+
+# Emit the durable identity before the optional merge call.  If the helper is
+# later killed, run_executor_attempt.sh can still recover this exact MR and
+# conservatively apply `pr`, never `finish`.
+printf '%s\n%s\n%s\n' "${MR_URL}" "${MR_ACTION}" "${MR_IID}"
+INITIAL_RESULT="$(jq -cn \
+  --argjson iid "${MR_IID}" \
+  --arg web_url "${MR_URL}" \
+  --arg source_branch "${WORK_BRANCH}" \
+  --arg target_branch "${MERGE_TARGET_BRANCH}" \
+  --arg sha "${COMMIT_SHA}" '{
+    version:1,
+    iid:$iid,
+    web_url:$web_url,
+    source_branch:$source_branch,
+    target_branch:$target_branch,
+    sha:$sha,
+    observed_state:"unknown",
+    outcome:"unknown",
+    verified:false,
+    merge_attempted:false,
+    merge_api_succeeded:false,
+    reason:"exact_mr_verification_pending"
+  }')"
+persist_mr_result "${INITIAL_RESULT}"
+
+set +e
+MERGE_RESULT="$(
+  MERGE_MR_MODE=attempt \
+  AUTO_MERGE="${AUTO_MERGE}" \
+  MR_IID="${MR_IID}" \
+  MERGE_REQUEST_URL="${MR_URL}" \
+  WORK_BRANCH="${WORK_BRANCH}" \
+  MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH}" \
+  COMMIT_SHA="${COMMIT_SHA}" \
+    bash "${SCRIPT_DIR}/merge_mr.sh"
+)"
+MERGE_HELPER_RC=$?
+set -e
+
+if [ "${MERGE_HELPER_RC}" -ne 0 ] \
+    || ! jq -e \
+      --argjson iid "${MR_IID}" \
+      --arg web_url "${MR_URL}" \
+      --arg source_branch "${WORK_BRANCH}" \
+      --arg target_branch "${MERGE_TARGET_BRANCH}" \
+      --arg sha "${COMMIT_SHA}" '
+        type == "object"
+        and .version == 1
+        and .iid == $iid
+        and .web_url == $web_url
+        and .source_branch == $source_branch
+        and .target_branch == $target_branch
+        and ((.sha | ascii_downcase) == ($sha | ascii_downcase))
+        and (.outcome as $outcome
+          | ["merged","opened","unknown"] | index($outcome) != null)
+        and (.verified | type == "boolean")
+        and (.merge_attempted | type == "boolean")
+        and (.merge_api_succeeded | type == "boolean")
+        and (.observed_state | type == "string")
+        and (.reason | type == "string")
+      ' <<<"${MERGE_RESULT}" >/dev/null 2>&1; then
+  MERGE_RESULT="$(jq -cn \
+    --argjson iid "${MR_IID}" \
+    --arg web_url "${MR_URL}" \
+    --arg source_branch "${WORK_BRANCH}" \
+    --arg target_branch "${MERGE_TARGET_BRANCH}" \
+    --arg sha "${COMMIT_SHA}" '{
+      version:1,
+      iid:$iid,
+      web_url:$web_url,
+      source_branch:$source_branch,
+      target_branch:$target_branch,
+      sha:$sha,
+      observed_state:"unknown",
+      outcome:"unknown",
+      verified:false,
+      merge_attempted:false,
+      merge_api_succeeded:false,
+      reason:"merge_helper_failed_or_invalid"
+    }')"
+fi
+
+persist_mr_result "${MERGE_RESULT}"
+jq -r '.outcome' <<<"${MERGE_RESULT}"

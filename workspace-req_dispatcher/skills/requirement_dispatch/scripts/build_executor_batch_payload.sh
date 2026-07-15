@@ -10,8 +10,10 @@ set -euo pipefail
 : "${CALLBACK_NONCE:?CALLBACK_NONCE required}"
 
 FORCE_RERUN_PR="${FORCE_RERUN_PR:-false}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
 DISPATCHER_CALLBACK_TARGET="${DISPATCHER_CALLBACK_TARGET:-}"
 TARGET_BRANCH="${TARGET_BRANCH:-}"
+MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-}"
 
 [ -n "${DISPATCHER_CALLBACK_TARGET}" ] \
   || { echo "DISPATCHER_CALLBACK_TARGET must not be empty" >&2; exit 2; }
@@ -39,7 +41,7 @@ validate_scalar_value() {
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
-    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*'`'*|*"'"*|*'"'*|*'<'*|*'>'*|*'!'*|*" "*|*$'\t'*|*$'\r'*|*$'\n'*|*.lock|*.)
       return 1
       ;;
   esac
@@ -54,8 +56,10 @@ validate_scalar_value SELECTOR_JSON "${SELECTOR_JSON}"
 validate_scalar_value EXECUTOR_AGENT "${EXECUTOR_AGENT}"
 validate_scalar_value CALLBACK_NONCE "${CALLBACK_NONCE}"
 validate_scalar_value FORCE_RERUN_PR "${FORCE_RERUN_PR}"
+validate_scalar_value AUTO_MERGE "${AUTO_MERGE}"
 validate_scalar_value DISPATCHER_CALLBACK_TARGET "${DISPATCHER_CALLBACK_TARGET}"
 validate_scalar_value TARGET_BRANCH "${TARGET_BRANCH}"
+validate_scalar_value MERGE_TARGET_BRANCH "${MERGE_TARGET_BRANCH}"
 
 if ! [[ "${PROJECT}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; then
   echo "PROJECT must be <group>/<project>, got: ${PROJECT}" >&2
@@ -92,8 +96,24 @@ case "${FORCE_RERUN_PR}" in
     ;;
 esac
 
+case "${AUTO_MERGE}" in
+  true|false) ;;
+  *)
+    echo "AUTO_MERGE must be true or false" >&2
+    exit 2
+    ;;
+esac
+
 if [ -n "${TARGET_BRANCH}" ] && ! validate_branch_name "${TARGET_BRANCH}"; then
   echo "branch must be a safe Git ref name, got: ${TARGET_BRANCH}" >&2
+  exit 2
+fi
+if [ -n "${MERGE_TARGET_BRANCH}" ] && ! validate_branch_name "${MERGE_TARGET_BRANCH}"; then
+  echo "merge target branch must be a safe Git ref name, got: ${MERGE_TARGET_BRANCH}" >&2
+  exit 2
+fi
+if [ "${AUTO_MERGE}" = true ] && [ -z "${MERGE_TARGET_BRANCH}" ]; then
+  echo "MERGE_TARGET_BRANCH is required when AUTO_MERGE=true" >&2
   exit 2
 fi
 
@@ -172,9 +192,13 @@ case "${SELECTOR_TYPE}" in
 esac
 
 printf 'force_rerun_pr=%s\n' "${FORCE_RERUN_PR}"
+printf 'auto_merge=%s\n' "${AUTO_MERGE}"
 printf 'dispatcher_callback_target=%s\n' "${DISPATCHER_CALLBACK_TARGET}"
 printf 'callback_nonce=%s\n' "${CALLBACK_NONCE}"
 
 if [ -n "${TARGET_BRANCH}" ]; then
   printf 'branch=%s\n' "${TARGET_BRANCH}"
+fi
+if [ -n "${MERGE_TARGET_BRANCH}" ]; then
+  printf 'merge_target_branch=%s\n' "${MERGE_TARGET_BRANCH}"
 fi

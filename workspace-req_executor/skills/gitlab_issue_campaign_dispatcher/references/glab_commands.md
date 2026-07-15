@@ -21,7 +21,7 @@ glab auth status --hostname "${GITLAB_HOST}"
 
 ## Flag compatibility
 
-Every flag used in G1–G13 (plus G1b) has been verified to exist on the runner's installed `glab`. Before adding a new flag — here, in `scripts/*.sh`, or in `references/executor_prompt.md` — run `glab <subcommand> --help` on the runner and confirm the flag is listed. The runner may lag mainstream releases: e.g. `--description-file` on `glab mr create` is documented upstream but missing on some runner installs, so G7 uses `--description "$(cat <file>)"` instead. Workspace-wide policy lives in [`SOUL.md`](../../../SOUL.md) §GitLab Access.
+Every CLI flag used below has been verified against the deployment contract. Before adding a new flag — here, in `scripts/*.sh`, or in `references/executor_prompt.md` — verify it on the runner. The runner may lag mainstream releases: e.g. `--description-file` on `glab mr create` is missing on some installs, so G7 uses `--description "$(cat <file>)"`. G15/G16 use the stable `glab api` surface rather than version-sensitive `glab mr merge` flags. Workspace-wide policy lives in [`SOUL.md`](../../../SOUL.md) §GitLab Access.
 
 ## Commands
 
@@ -69,7 +69,7 @@ glab api --method POST \
 
 ### G4 — Add a target label (dispatcher prep + subagent)
 
-Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing` and to re-apply final callback labels (`done` + `pr`, `blocked`, or `failed`). The subagent also uses it for immediate `done` / `pr` / `blocked` updates during the post-acpx flow.
+Wrapped by `scripts/set_issue_label.sh add <label>`. The dispatcher uses this to transition entry labels to `doing` and to re-apply final callback labels (`pr`, server-verified `finish`, blocked, failed, or timeout). The subagent also uses it for immediate `done` / `pr` / `finish` / failure updates during the post-acpx flow.
 
 For workflow labels, the wrapper also passes `remove_labels=<conflicting workflow labels>` in the same issue update, preserving unrelated non-workflow labels while enforcing the allowed workflow states (`done` + `pr`, `done` + `blocked`, or one workflow label).
 
@@ -110,7 +110,7 @@ Wrapped by `scripts/create_mr.sh`. Called once per attempt in **both** modes, af
 glab mr create \
   --repo "${PROJECT_FULL}" \
   --source-branch "${WORK_BRANCH}" \
-  --target-branch "${BRANCH}" \
+  --target-branch "${MERGE_TARGET_BRANCH}" \
   --title "Issue #${ISSUE_IID}: ${ISSUE_TITLE}" \
   --description "$(cat "${LOG_DIR}/mr_description.md")" \
   --yes
@@ -164,9 +164,44 @@ Used by `scripts/post_result_note.sh` when `result_note_enabled` is on, after a 
 
 This is best-effort and dispatcher-side: failure is logged to `wrapper.log` and never aborts Phase 6. It touches only issue **notes** — never labels, MR, or state files. Full cross-region contract: the req_dispatcher workspace's `docs/integration/result_notify_loop.md`.
 
+### G15 — Read one exact MR (executor + Phase 6)
+
+Used by `scripts/merge_mr.sh` before and after any requested merge, and again by
+Phase 6 in read-only `verify` mode:
+
+```bash
+glab api "projects/${PROJECT_URI}/merge_requests/${MR_IID}"
+```
+
+The response must match the expected project-local IID, web URL, source branch,
+target branch, and commit SHA. In attempt mode, only the exact post-PUT
+`state=merged` response authorizes the fixed outer wrapper's first atomic
+`finish` write. Phase 6 later repeats the bounded read-only check before durable
+terminal persistence and callback emission. A marker or callback alone never
+authorizes either decision; `opened` remains `pr`, and an unknown/mismatched
+response must never authorize completion.
+
+### G16 — Merge one exact MR with a SHA fence (executor only)
+
+Allowed only inside `scripts/merge_mr.sh`, only when the durable request has
+`auto_merge=true`, and only after G15 verified the exact MR identity:
+
+```bash
+glab api --method PUT \
+  "projects/${PROJECT_URI}/merge_requests/${MR_IID}/merge" \
+  -f "sha=${COMMIT_SHA}" \
+  -f "should_remove_source_branch=false"
+```
+
+The command's exit code is not merge evidence. The helper must always perform a
+second G15 read; only the exact server-side merged state is success. Approval,
+CI, conflict, SHA mismatch, or network uncertainty leaves the outer executor's
+first `finish` write unset. Phase 6 still performs its independent G15 read
+before terminal persistence and callback emission.
+
 ## What is FORBIDDEN
 
-- `glab mr merge` — under any circumstances. The MR stays open until a human merges.
+- Direct `glab mr merge`, merge-by-URL, merge without the exact SHA fence, or any merge outside G16. Ordinary requests keep the MR open for human review.
 - `glab issue close`, `glab api ... -f state_event=close` — the agent never closes the issue; GitLab auto-closes via the MR's `Closes #<iid>`.
 - Full-set label overwrite (`-f labels=...`) for transitions — wipes manually added labels. Use G4/G5 instead.
 - `curl`, `wget`, `httpie`, any HTTP library, any non-glab GitLab SDK.

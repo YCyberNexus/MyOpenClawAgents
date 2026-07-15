@@ -289,6 +289,14 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
       type == "string" and length > 0
       and (explode | all(. >= 32 and . != 127));
     def exact_keys($wanted): (keys | sort) == ($wanted | sort);
+    if type == "object" and ((.grants | type) == "array") then
+      .grants |= map(
+        if type == "object" then
+          (if has("auto_merge") then . else .auto_merge = false end
+          | if has("merge_target_branch") then . else .merge_target_branch = null end)
+        else . end)
+    else . end
+    |
     if type != "object"
        or (exact_keys(["owner_id","grants"]) | not)
        or (.owner_id | clean_string | not)
@@ -296,7 +304,7 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
        or ((.grants | length) == 0)
        or (all(.grants[];
             type == "object"
-            and exact_keys(["job_id","batch_id","snapshot_index","project","iid","branch","entry_mode","force_rerun_pr"])
+            and exact_keys(["job_id","batch_id","snapshot_index","project","iid","branch","entry_mode","force_rerun_pr","auto_merge","merge_target_branch"])
             and (.job_id | clean_string)
             and (.batch_id | clean_string)
             and (.project == $project)
@@ -304,7 +312,10 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
             and (.snapshot_index | type == "number" and . == floor and . >= 0)
             and (.iid | type == "number" and . == floor and . >= 1)
             and (.entry_mode == "auto" or .entry_mode == "fresh" or .entry_mode == "continue")
-            and (.force_rerun_pr | type == "boolean")) | not)
+            and (.force_rerun_pr | type == "boolean")
+            and (.auto_merge | type == "boolean")
+            and (.merge_target_branch == null or (.merge_target_branch | clean_string))
+            and (.auto_merge == false or (.merge_target_branch | clean_string))) | not)
        or ([.grants[] | [.project,.iid]] | group_by(.) | any(length > 1))
        or ([.grants[].job_id] | group_by(.) | any(length > 1))
        or ([.grants[] | [.batch_id,.snapshot_index]] | group_by(.) | any(length > 1))
@@ -553,6 +564,12 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c '
   | del(.active_issue_session)
   | if has("pending_subagents") | not then .pending_subagents = {} else . end
   | if .pending_subagents == null then .pending_subagents = {} else . end
+  | .pending_subagents |= with_entries(
+      .value |= (
+        if type == "object" then
+          (if has("auto_merge") then . else .auto_merge = false end
+          | if has("merge_target_branch") then . else .merge_target_branch = null end)
+        else . end))
   | if has("blocked_at_tick_by_iid") | not then .blocked_at_tick_by_iid = {} else . end
   | if .blocked_at_tick_by_iid == null then .blocked_at_tick_by_iid = {} else . end
   | if has("timeout_iids") | not then .timeout_iids = [] else . end
@@ -753,6 +770,7 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
               status:"skipped",reason:"closed"
             })]
           elif (((($live.has_done_pr // false) == true)
+                  or (($live.has_finish // false) == true)
                   or (($live.is_done_on_gitlab // false) == true)
                  ) and ($grant.force_rerun_pr == false)) then
             .skipped += [($grant | {
@@ -794,7 +812,7 @@ STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c --argjson ev "${EVIDENCE_JSON}
           | .failed_iids     = (.failed_iids     - [$e.iid])
           | .timeout_iids    = (.timeout_iids    - [$e.iid])
           | .blocked_at_tick_by_iid = (.blocked_at_tick_by_iid | del(.[$e.iid|tostring]))
-        elif $e.has_done_pr == true and $e.needs_continue != true then
+        elif (($e.has_done_pr == true) or (($e.has_finish // false) == true)) and $e.needs_continue != true then
           .completed_iids = (([$e.iid] + .completed_iids) | unique)
           | .unfinished_iids = (.unfinished_iids - [$e.iid])
           | .blocked_iids    = (.blocked_iids - [$e.iid])
@@ -1030,7 +1048,8 @@ BATCH_CANDIDATES_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
         | ($byiid[($i|tostring)] // null) as $e
         | $e != null
         and ($e.is_closed_on_gitlab // false) != true
-        and (($e.has_done_pr // false) != true or ($e.needs_continue // false) == true)
+        and (((($e.has_done_pr // false) != true) and (($e.has_finish // false) != true))
+             or ($e.needs_continue // false) == true)
       ))) as $eligible
   | ($eligible | map(select(. as $i |
       (($s.blocked_iids // []) | index($i) | not)
@@ -1197,7 +1216,7 @@ done
 PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" --argjson acpx_timeout "${ACPX_TIMEOUT}" )
 FILTER='.pending_subagents = (.pending_subagents // {})'
 for iid in "${BATCH_IIDS[@]}"; do
-  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout}"
+  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout, auto_merge: false, merge_target_branch: null}"
 done
 FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)'
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
@@ -1213,7 +1232,7 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     --argjson batch "${BATCH_JSON}" '
     reduce ($grants[] | select(.iid as $iid | $batch | index($iid) != null)) as $grant (.;
       .pending_subagents[($grant.iid | tostring)] +=
-        (($grant | {job_id,batch_id,snapshot_index,branch,entry_mode,force_rerun_pr})
+        (($grant | {job_id,batch_id,snapshot_index,branch,entry_mode,force_rerun_pr,auto_merge,merge_target_branch})
          + {memberships_source:"scheduler_active_job"}))')"
 fi
 persist_state "${STATE_JSON}"
@@ -1239,13 +1258,22 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE_QUOTED="''"
   IID_BRANCH="${T[branch]}"
   GRANT_ENTRY_MODE="auto"
+  IID_FORCE_RERUN_PR="false"
+  IID_AUTO_MERGE="false"
+  IID_MERGE_TARGET_BRANCH="${T[branch]}"
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     IID_GRANT_JSON="$(printf '%s' "${DRIVEN_EXECUTABLE_GRANTS_JSON}" \
       | jq -c --argjson iid "${iid}" '.[] | select(.iid == $iid)')"
     IID_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" \
       | jq -r --arg default_branch "${T[branch]}" '.branch // $default_branch')"
     GRANT_ENTRY_MODE="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.entry_mode')"
+    IID_FORCE_RERUN_PR="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.force_rerun_pr')"
+    IID_AUTO_MERGE="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.auto_merge')"
+    IID_MERGE_TARGET_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" \
+      | jq -r --arg default_branch "${IID_BRANCH}" '.merge_target_branch // $default_branch')"
   fi
+  IID_BRANCH_QUOTED="'${IID_BRANCH//\'/\'\\\'\'}'"
+  IID_MERGE_TARGET_BRANCH_QUOTED="'${IID_MERGE_TARGET_BRANCH//\'/\'\\\'\'}'"
 
   # Per-IID env for env_paths-derived paths.
   iid_env=(
@@ -1271,6 +1299,11 @@ for iid in "${BATCH_IIDS[@]}"; do
       ISSUE_MODE="continue"
     fi
   fi
+  ALLOW_TERMINAL_RERUN="false"
+  if [ "${ISSUE_MODE}" = "continue" ] \
+      || [ "${IID_FORCE_RERUN_PR}" = "true" ]; then
+    ALLOW_TERMINAL_RERUN="true"
+  fi
 
   prep_blocked() {
     local reason="$1"
@@ -1280,6 +1313,44 @@ for iid in "${BATCH_IIDS[@]}"; do
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     persist_state "${STATE_JSON}"
     TICK_OUTCOMES="$(printf '%s' "${TICK_OUTCOMES}" | jq -c --arg k "${iid}" --arg v "blocked: ${reason}" '. + {($k):$v}')"
+  }
+
+  # Reconciliation is a snapshot.  A terminal label/state may land after that
+  # snapshot but before this IID reaches its mutation boundary.  Drain the
+  # placeholder as a completed skip instead of routing the race through
+  # prep_blocked (which would overwrite the stronger terminal state).
+  prep_terminal_skip() {
+    local reason="$1"
+    wrapper_log prepare_tick \
+      "iid=${iid} terminal-race skip during prep: ${reason}"
+    STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+      --argjson iid "${iid}" --arg project "${PROJECT}" '
+        .pending_subagents = ((.pending_subagents // {}) | del(.[($iid|tostring)]))
+        | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)
+        | .active_issue_sessions = (.active_issue_iids
+            | map("issue-" + $project + "-" + (.|tostring)))
+        | .completed_iids = (([ $iid ] + (.completed_iids // [])) | unique)
+        | .unfinished_iids = ((.unfinished_iids // []) - [$iid])
+        | .blocked_iids = ((.blocked_iids // []) - [$iid])
+        | .failed_iids = ((.failed_iids // []) - [$iid])
+        | .timeout_iids = ((.timeout_iids // []) - [$iid])
+        | .blocked_at_tick_by_iid = ((.blocked_at_tick_by_iid // {})
+            | del(.[($iid|tostring)]))
+      ')"
+    if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
+      SKIPPED_ENTRIES_JSON="$(printf '%s' "${SKIPPED_ENTRIES_JSON}" | jq -c \
+        --argjson grant "${IID_GRANT_JSON}" --arg reason "${reason}" '
+          if any(.[]; .job_id == $grant.job_id) then .
+          else . + [($grant | {
+            job_id,batch_id,snapshot_index,project,iid,
+            status:"skipped",reason:$reason
+          })]
+          end
+        ')"
+    fi
+    persist_state "${STATE_JSON}"
+    TICK_OUTCOMES="$(printf '%s' "${TICK_OUTCOMES}" | jq -c \
+      --arg k "${iid}" --arg v "skipped: ${reason}" '. + {($k):$v}')"
   }
 
   # prepare_attempt.sh — keep stdout clean (the script's contract is two
@@ -1440,6 +1511,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_TITLE="$(printf '%s' "${ISSUE_JSON}" | jq -r '.title // ""')"
   ISSUE_URL="$(printf '%s' "${ISSUE_JSON}" | jq -r '.web_url // ""')"
   ISSUE_LABELS="$(printf '%s' "${ISSUE_JSON}" | jq -r '.labels // [] | join(",")')"
+  ISSUE_LIVE_STATE="$(printf '%s' "${ISSUE_JSON}" | jq -r '.state // "opened"')"
+  ISSUE_HAS_FINISH="$(printf '%s' "${ISSUE_JSON}" | jq -r \
+    '(.labels // [] | index("finish")) != null')"
+  ISSUE_HAS_PR="$(printf '%s' "${ISSUE_JSON}" | jq -r \
+    '(.labels // [] | index("pr")) != null')"
   # Truncate by Unicode codepoint (jq `.[a:b]`), NOT bytes: issue bodies are
   # almost always Chinese, and a byte-wise `head -c 4096` could split a
   # multibyte char, leaving an invalid byte that breaks the python renderer's
@@ -1447,11 +1523,25 @@ for iid in "${BATCH_IIDS[@]}"; do
   ISSUE_BODY="$(printf '%s' "${ISSUE_JSON}" | jq -r '(.description // "")[0:4096]')"
   ISSUE_TITLE_QUOTED="'${ISSUE_TITLE//\'/\'\\\'\'}'"
 
+  if [ "${ISSUE_LIVE_STATE}" = "closed" ]; then
+    prep_terminal_skip "closed"
+    continue
+  fi
+  if [ "${ALLOW_TERMINAL_RERUN}" != "true" ] \
+      && { [ "${ISSUE_HAS_FINISH}" = "true" ] \
+           || [ "${ISSUE_HAS_PR}" = "true" ]; }; then
+    prep_terminal_skip "pr_without_force_rerun"
+    continue
+  fi
+
   # Transition labels: remove entry labels + add doing.
   # `timeout` is included so that a reviewer who re-enqueued the IID (e.g. by
   # adding `retry` on top of `timeout`) doesn't end up with a `timeout +
   # doing` mix between this prep and `set_issue_label.sh add doing`.
-  REMOVE_LBLS=(todo retry new continue contiune blocked blocked-cc blocked-dispatcher failed failed-cc failed-dispatcher done pr timeout)
+  REMOVE_LBLS=(todo retry new continue contiune blocked blocked-cc blocked-dispatcher failed failed-cc failed-dispatcher done timeout)
+  if [ "${ALLOW_TERMINAL_RERUN}" = "true" ]; then
+    REMOVE_LBLS+=(pr finish)
+  fi
   # Plus require_labels intersected with current snapshot.
   if [ "$(printf '%s' "${STATE_JSON}" | jq -r '.require_labels | length')" -gt 0 ]; then
     mapfile -t REQ_TO_REMOVE < <(printf '%s' "${STATE_JSON}" | jq -r \
@@ -1467,9 +1557,27 @@ for iid in "${BATCH_IIDS[@]}"; do
       LABEL_OK=false; break
     fi
   done
+  LABEL_ADD_OUT=""
+  TERMINAL_PRESERVE_REASON=""
   if [ "${LABEL_OK}" = true ]; then
-    env "${iid_env[@]}" bash "${SCRIPT_DIR}/set_issue_label.sh" add doing \
-      >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1 || LABEL_OK=false
+    if LABEL_ADD_OUT="$(env "${iid_env[@]}" \
+        bash "${SCRIPT_DIR}/set_issue_label.sh" add doing \
+        2>>"${DISPATCHER_LOG_DIR}/wrapper.log")"; then
+      [ -z "${LABEL_ADD_OUT}" ] \
+        || printf '%s\n' "${LABEL_ADD_OUT}" >>"${DISPATCHER_LOG_DIR}/wrapper.log"
+      case "${LABEL_ADD_OUT}" in
+        *preserve:closed*) TERMINAL_PRESERVE_REASON="closed" ;;
+        *preserve:finish*|*preserve:pr*)
+          TERMINAL_PRESERVE_REASON="pr_without_force_rerun"
+          ;;
+      esac
+    else
+      LABEL_OK=false
+    fi
+  fi
+  if [ -n "${TERMINAL_PRESERVE_REASON}" ]; then
+    prep_terminal_skip "${TERMINAL_PRESERVE_REASON}"
+    continue
   fi
   if [ "${LABEL_OK}" != true ]; then
     prep_blocked "set_issue_label transition to doing failed"
@@ -1479,6 +1587,8 @@ for iid in "${BATCH_IIDS[@]}"; do
   # build_prompt.sh
   set +e
   env "${iid_env[@]}" BRANCH="${IID_BRANCH}" \
+    AUTO_MERGE="${IID_AUTO_MERGE}" \
+    MERGE_TARGET_BRANCH="${IID_MERGE_TARGET_BRANCH:-${IID_BRANCH}}" \
     ISSUE_MODE="${MODE_ACTUAL}" \
     bash "${SCRIPT_DIR}/build_prompt.sh" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>&1
   BP_RC=$?
@@ -1607,6 +1717,10 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_ISSUE_BODY="${ISSUE_BODY}" \
               TPL_ISSUE_MODE="${MODE_ACTUAL}" \
               TPL_BRANCH="${IID_BRANCH}" \
+              TPL_BRANCH_QUOTED="${IID_BRANCH_QUOTED}" \
+              TPL_AUTO_MERGE="${IID_AUTO_MERGE}" \
+              TPL_MERGE_TARGET_BRANCH="${IID_MERGE_TARGET_BRANCH}" \
+              TPL_MERGE_TARGET_BRANCH_QUOTED="${IID_MERGE_TARGET_BRANCH_QUOTED}" \
               TPL_WORK_BRANCH="${WORK_BRANCH_X}" \
               TPL_LOCAL_ATTEMPT_BRANCH="${LOCAL_ATTEMPT_BRANCH}" \
               TPL_REPO_PATH="${REPO_PATH}" \

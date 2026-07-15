@@ -60,6 +60,8 @@ emit_json() {
   local reason="$7"
   local selector="${8:-null}"
   local force_rerun_pr="${9:-false}"
+  local auto_merge="${AUTO_MERGE:-false}"
+  local merge_target_branch="${MERGE_TARGET_BRANCH:-}"
 
   if [ "${selector}" = "null" ] && [ -n "${iid}" ]; then
     selector="$(jq -nc --arg iid "${iid}" '{type:"single",iid:($iid | tonumber)}')"
@@ -70,7 +72,9 @@ emit_json() {
     --arg project "${project}" \
     --argjson selector "${selector}" \
     --argjson force_rerun_pr "${force_rerun_pr}" \
+    --argjson auto_merge "${auto_merge}" \
     --arg target_branch "${target_branch}" \
+    --arg merge_target_branch "${merge_target_branch}" \
     --arg issue_url "${issue_url}" \
     --arg request_text "${request_text}" \
     --arg reason "${reason}" '
@@ -80,7 +84,9 @@ emit_json() {
       iid: (if $selector.type == "single" then $selector.iid else null end),
       selector: $selector,
       force_rerun_pr: $force_rerun_pr,
+      auto_merge: $auto_merge,
       target_branch: (if $target_branch == "" then null else $target_branch end),
+      merge_target_branch: (if $merge_target_branch == "" then null else $merge_target_branch end),
       issue_url: (if $issue_url == "" then null else $issue_url end),
       request_text: (if $request_text == "" then null else $request_text end),
       reason: (if $reason == "" then null else $reason end)
@@ -387,6 +393,24 @@ strip_label_selector_values() {
     }'
 }
 
+# Branch and automatic-merge parsing must ignore label values without
+# normalizing surrounding punctuation. The selector helper above deliberately
+# rebuilds segment separators as Chinese commas, which would turn an unsafe
+# `branch=release;evil` value into the apparently safe `release` token.
+strip_label_values_preserving_delimiters() {
+  local text="$1"
+  local line="${text}"
+  local pattern='((([Ll][Aa][Bb][Ee][Ll]|标签)[[:space:]]*(为|是|[:=：]))|带[[:space:]]*标签)[[:space:]]*[^[:space:]，,。;；]+'
+  local matched=""
+
+  while [[ "${line}" =~ ${pattern} ]]; do
+    matched="${BASH_REMATCH[0]}"
+    [ -n "${matched}" ] || break
+    line="${line/"${matched}"/ __LABEL_VALUE__ }"
+  done
+  printf '%s\n' "${line}"
+}
+
 extract_selector_range_evidence() {
   local text="$1"
 
@@ -653,7 +677,7 @@ has_explicit_rerun_action() {
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
-    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*'`'*|*"'"*|*'"'*|*'<'*|*'>'*|*'!'*|*" "*|*$'\t'*|*$'\r'*|*$'\n'*|*.lock|*.)
       return 1
       ;;
   esac
@@ -661,7 +685,7 @@ validate_branch_name() {
   return 0
 }
 
-extract_target_branch() {
+extract_base_branch() {
   local text="$1"
   printf '%s\n' "${text}" | awk '
     function emit(value) {
@@ -676,7 +700,9 @@ extract_target_branch() {
         tail = substr(rest, RLENGTH + 1)
         trimmed_tail = tail
         gsub(/^[[:space:]"'\''`“”‘’]+/, "", trimmed_tail)
-        if (trimmed_tail != "" && trimmed_tail !~ /^[，,。)）]/) {
+        if (trimmed_tail ~ /^(分支|[Bb][Rr][Aa][Nn][Cc][Hh])([[:space:]]*[，,。)）]|[[:space:]]*$)/) {
+          candidate = candidate
+        } else if (trimmed_tail != "" && trimmed_tail !~ /^[，,。)）]/) {
           candidate = candidate tail
         }
       } else {
@@ -686,15 +712,11 @@ extract_target_branch() {
     }
     {
       line = $0
-      if (match(line, /(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*/)) {
+      if (match(line, /(^|[^A-Za-z0-9_-])(base[_ -]?branch|source[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*/)) {
         emit_explicit(substr(line, RSTART + RLENGTH))
         exit
       }
-      if (match(line, /(目标分支|分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)/)) {
-        emit_explicit(substr(line, RSTART + RLENGTH))
-        exit
-      }
-      if (match(line, /(合并到|合到|merge[[:space:]]+to)[[:space:]]*/)) {
+      if (match(line, /(^|[^目标])分支([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)/)) {
         emit_explicit(substr(line, RSTART + RLENGTH))
         exit
       }
@@ -708,15 +730,225 @@ extract_target_branch() {
     }'
 }
 
-strip_target_branch_directive() {
+extract_merge_target_branch() {
+  local text="$1"
+  printf '%s\n' "${text}" | awk '
+    function emit(value) {
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", value)
+      gsub(/[[:space:]"'\''`“”‘’)，,。;；]+$/, "", value)
+      print value
+    }
+    function emit_explicit(rest, candidate, tail, trimmed_tail) {
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", rest)
+      if (match(rest, /^[A-Za-z0-9._\/-]+/)) {
+        candidate = substr(rest, RSTART, RLENGTH)
+        tail = substr(rest, RLENGTH + 1)
+        trimmed_tail = tail
+        gsub(/^[[:space:]"'\''`“”‘’]+/, "", trimmed_tail)
+        if (trimmed_tail ~ /^(分支|[Bb][Rr][Aa][Nn][Cc][Hh])([[:space:]]*[，,。)）]|[[:space:]]*$)/) {
+          candidate = candidate
+        } else if (trimmed_tail != "" && trimmed_tail !~ /^[，,。)）]/) {
+          candidate = candidate tail
+        }
+      } else {
+        candidate = rest
+      }
+      emit(candidate)
+    }
+    {
+      line = $0
+      if (match(line, /(merge[_ -]?target[_ -]?branch|mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch)[[:space:]]*[:=][[:space:]]*/)) {
+        emit_explicit(substr(line, RSTART + RLENGTH))
+        exit
+      }
+      if (match(line, /(合并目标分支|[Mm][Rr][[:space:]]*目标分支|[Pp][Rr][[:space:]]*目标分支|目标分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)/)) {
+        emit_explicit(substr(line, RSTART + RLENGTH))
+        exit
+      }
+      if (match(line, /(合并到|合到|[Mm][Ee][Rr][Gg][Ee][[:space:]]*(到|[Tt][Oo]|[Ii][Nn][Tt][Oo]))[[:space:]]*/)) {
+        emit_explicit(substr(line, RSTART + RLENGTH))
+        exit
+      }
+    }'
+}
+
+# Emit every explicitly named merge destination. Automatic merge is a
+# destructive action, so two different destinations must never be resolved by
+# "first match wins" (for example: an old release target followed by "改为
+# main"). The caller validates every emitted token and fails closed on a
+# distinct-target conflict.
+merge_target_tail_is_boundary() {
+  local tail="$1"
+  local remainder=""
+
+  case "${tail}" in
+    ""|，*|,*|。*|\)*|）*) return 0 ;;
+    分支*) remainder="${tail#分支}" ;;
+    branch*) remainder="${tail#branch}" ;;
+    BRANCH*) remainder="${tail#BRANCH}" ;;
+    *) return 1 ;;
+  esac
+  remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+  case "${remainder}" in
+    ""|，*|,*|。*|\)*|）*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+branch_tail_starts_next_directive() {
+  local tail="$1"
+  case "${tail}" in
+    base_branch=*|base_branch:*|base-branch=*|base-branch:*|\
+    source_branch=*|source_branch:*|source-branch=*|source-branch:*|\
+    branch=*|branch:*|target_branch=*|target_branch:*|target-branch=*|target-branch:*|\
+    merge_target_branch=*|merge_target_branch:*|merge-target-branch=*|merge-target-branch:*|\
+    mr_target_branch=*|mr_target_branch:*|pr_target_branch=*|pr_target_branch:*|\
+    auto_merge=*|auto_merge:*|auto-merge=*|auto-merge:*|\
+    目标分支*|合并目标分支*|分支：*|分支:*|\
+    完成*|完毕*|结束*|跑完*|做完*|处理完*|执行完*|\
+    after*|After*|AFTER*)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+semicolon_tail_starts_next_directive() {
+  local tail="$1"
+  local remainder=""
+  case "${tail}" in
+    \;*) remainder="${tail#\;}" ;;
+    ；*) remainder="${tail#；}" ;;
+    *) return 1 ;;
+  esac
+  remainder="${remainder#"${remainder%%[![:space:]]*}"}"
+  [ -z "${remainder}" ] \
+    || branch_tail_starts_next_directive "${remainder}"
+}
+
+# Emit every explicitly named processing/base branch.  Automatic merge falls
+# back to this branch when no merge destination is named, so a correction must
+# not be lost to the legacy first-match parser.
+collect_base_branches() {
+  local text="$1"
+  local line="${text}" pattern matched candidate tail trimmed_tail
+  local patterns=(
+    '(^|[^A-Za-z0-9_-])(base[_ -]?branch|source[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*["'\''`“”‘’]?([^[:space:]，,。;；]+)'
+    '(^|[[:space:]，,;；])分支([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)["'\''`“”‘’]?([^[:space:]，,。;；]+)'
+    '(基于|从|以)[[:space:]]*["'\''`“”‘’]?([^[:space:]"'\''`“”‘’，,。;；]+)["'\''`“”‘’]?[[:space:]]*(分支|[Bb][Rr][Aa][Nn][Cc][Hh])'
+    '(^|[[:space:]，,;；])(改为|改成|改到|调整为|变更为|切换到|[Ss][Ww][Ii][Tt][Cc][Hh][[:space:]]+[Tt][Oo]|[Uu][Ss][Ee])[[:space:]]*["'\''`“”‘’]?([^[:space:]，,。;；]+)["'\''`“”‘’]?[[:space:]]*(分支|[Bb][Rr][Aa][Nn][Cc][Hh])'
+  )
+  local capture_indexes=(3 3 2 3)
+  local index=0 capture_index found_explicit_base=false
+
+  for pattern in "${patterns[@]}"; do
+    if [ "${index}" -eq 3 ] && [ "${found_explicit_base}" != true ]; then
+      index=$((index + 1))
+      continue
+    fi
+    capture_index="${capture_indexes[$index]}"
+    while [[ "${line}" =~ ${pattern} ]]; do
+      matched="${BASH_REMATCH[0]}"
+      candidate="${BASH_REMATCH[$capture_index]}"
+      [ -n "${matched}" ] || break
+      [ "${index}" -ge 3 ] || found_explicit_base=true
+      candidate="${candidate#\"}"
+      candidate="${candidate#\'}"
+      candidate="${candidate#\`}"
+      candidate="${candidate%\"}"
+      candidate="${candidate%\'}"
+      candidate="${candidate%\`}"
+      candidate="${candidate%分支}"
+      candidate="${candidate%branch}"
+      candidate="${candidate%BRANCH}"
+      if [ "${index}" -le 1 ]; then
+        tail="${line#*"${matched}"}"
+        tail="${tail%%$'\n'*}"
+        trimmed_tail="${tail#"${tail%%[![:space:]]*}"}"
+        trimmed_tail="${trimmed_tail#\"}"
+        trimmed_tail="${trimmed_tail#\'}"
+        trimmed_tail="${trimmed_tail#\`}"
+        if merge_target_tail_is_boundary "${trimmed_tail}" \
+            || branch_tail_starts_next_directive "${trimmed_tail}" \
+            || semicolon_tail_starts_next_directive "${trimmed_tail}"; then
+          :
+        else
+          candidate="${candidate} ${trimmed_tail}"
+        fi
+      fi
+      [ -z "${candidate}" ] || printf '%s\n' "${candidate}"
+      line="${line/"${matched}"/ }"
+    done
+    index=$((index + 1))
+  done
+}
+
+collect_merge_target_branches() {
+  local text="$1"
+  local line="${text}" pattern matched candidate tail trimmed_tail
+  local patterns=(
+    '(merge[_ -]?target[_ -]?branch|mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch)[[:space:]]*[:=][[:space:]]*["'\''`“”‘’]?([^[:space:]，,。;；]+)'
+    '(合并目标分支|[Mm][Rr][[:space:]]*目标分支|[Pp][Rr][[:space:]]*目标分支|目标分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)["'\''`“”‘’]?([^[:space:]，,。;；]+)'
+    '(合并到|合到|[Mm][Ee][Rr][Gg][Ee][[:space:]]*(到|[Tt][Oo]|[Ii][Nn][Tt][Oo]))[[:space:]]*["'\''`“”‘’]?([^[:space:]，,。;；]+)'
+    '(^|[[:space:]，,;；])(改为|改成|改到|调整为|变更为|切换到|[Ss][Ww][Ii][Tt][Cc][Hh][[:space:]]+[Tt][Oo]|[Uu][Ss][Ee])[[:space:]]*["'\''`“”‘’]?([^[:space:]，,。;；]+)'
+  )
+  local capture_indexes=(2 3 3 3)
+  local index=0 capture_index found_explicit_target=false
+
+  for pattern in "${patterns[@]}"; do
+    if [ "${index}" -eq 3 ] && [ "${found_explicit_target}" != true ]; then
+      index=$((index + 1))
+      continue
+    fi
+    capture_index="${capture_indexes[$index]}"
+    while [[ "${line}" =~ ${pattern} ]]; do
+      matched="${BASH_REMATCH[0]}"
+      candidate="${BASH_REMATCH[$capture_index]}"
+      [ -n "${matched}" ] || break
+      [ "${index}" -ge 3 ] || found_explicit_target=true
+      candidate="${candidate#\"}"
+      candidate="${candidate#\'}"
+      candidate="${candidate#\`}"
+      candidate="${candidate%\"}"
+      candidate="${candidate%\'}"
+      candidate="${candidate%\`}"
+      candidate="${candidate%分支}"
+      candidate="${candidate%branch}"
+      candidate="${candidate%BRANCH}"
+      tail="${line#*"${matched}"}"
+      tail="${tail%%$'\n'*}"
+      trimmed_tail="${tail#"${tail%%[![:space:]]*}"}"
+      trimmed_tail="${trimmed_tail#\"}"
+      trimmed_tail="${trimmed_tail#\'}"
+      trimmed_tail="${trimmed_tail#\`}"
+      # A punctuation boundary may follow the branch token.  Do not treat a
+      # semicolon as a boundary for assignment syntax: values such as
+      # `target_branch=release;evil` must reach validate_branch_name intact
+      # and fail closed, just like the legacy base-branch parser.  A semicolon
+      # is accepted only when its remainder starts another recognized branch
+      # or completion directive.
+      if merge_target_tail_is_boundary "${trimmed_tail}" \
+          || branch_tail_starts_next_directive "${trimmed_tail}" \
+          || semicolon_tail_starts_next_directive "${trimmed_tail}"; then
+        :
+      else
+        candidate="${candidate} ${trimmed_tail}"
+      fi
+      [ -z "${candidate}" ] || printf '%s\n' "${candidate}"
+      line="${line/"${matched}"/ }"
+    done
+    index=$((index + 1))
+  done
+}
+
+strip_base_branch_directive() {
   local text="$1"
   local line="${text}"
   local pattern=""
   local matched=""
   local patterns=(
-    '[[:space:]]*(mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
-    '[[:space:]]*(目标分支|分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
-    '[[:space:]]*(合并到|合到|merge[[:space:]]+to)[[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
+    '(^|[[:space:]，,;；])(base[_ -]?branch|source[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
+    '(^|[[:space:]，,;；])分支([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
     '[[:space:]]*(请)?[[:space:]]*(基于|从|以)[[:space:]]*["'\''`“”‘’]?[^[:space:]"'\''`“”‘’，,。;；]+["'\''`“”‘’]?[[:space:]]*(分支|branch)[[:space:]]*(开发|处理|执行|实现|修改|修复)?[[:space:]]*[，,;；]?'
   )
 
@@ -731,6 +963,151 @@ strip_target_branch_directive() {
   line="${line#"${line%%[![:space:]]*}"}"
   line="${line%"${line##*[![:space:]]}"}"
   [ -z "${line}" ] || printf '%s\n' "${line}"
+}
+
+strip_merge_target_directive() {
+  local text="$1"
+  local line="${text}"
+  local pattern=""
+  local matched=""
+  local patterns=(
+    '[[:space:]]*(merge[_ -]?target[_ -]?branch|mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch)[[:space:]]*[:=][[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
+    '[[:space:]]*(合并目标分支|[Mm][Rr][[:space:]]*目标分支|[Pp][Rr][[:space:]]*目标分支|目标分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
+    '[[:space:]]*(合并到|合到|[Mm][Ee][Rr][Gg][Ee][[:space:]]*(到|[Tt][Oo]|[Ii][Nn][Tt][Oo]))[[:space:]]*[^[:space:]，,。;；]+[[:space:]]*[，,;；]?'
+  )
+
+  for pattern in "${patterns[@]}"; do
+    while [[ "${line}" =~ ${pattern} ]]; do
+      matched="${BASH_REMATCH[0]}"
+      [ -n "${matched}" ] || break
+      line="${line/"${matched}"/ }"
+    done
+  done
+
+  line="${line#"${line%%[![:space:]]*}"}"
+  line="${line%"${line##*[![:space:]]}"}"
+  [ -z "${line}" ] || printf '%s\n' "${line}"
+}
+
+strip_merge_target_value_for_action() {
+  local text="$1"
+  local line="${text}"
+  local assignment_pattern='(merge[_ -]?target[_ -]?branch|mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch)[[:space:]]*[:=][[:space:]]*[^[:space:]，,。;；]+'
+  local named_natural_pattern='(合并目标分支|[Mm][Rr][[:space:]]*目标分支|[Pp][Rr][[:space:]]*目标分支|目标分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)[^[:space:]，,。;；]+'
+  local natural_pattern='(合并到|合到|[Mm][Ee][Rr][Gg][Ee][[:space:]]*(到|[Tt][Oo]|[Ii][Nn][Tt][Oo]))[[:space:]]*["'\''`“”‘’]?[^[:space:]"'\''`“”‘’，,。;；]+'
+  local matched=""
+  local action=""
+
+  while [[ "${line}" =~ ${assignment_pattern} ]]; do
+    matched="${BASH_REMATCH[0]}"
+    [ -n "${matched}" ] || break
+    line="${line/"${matched}"/ }"
+  done
+  while [[ "${line}" =~ ${named_natural_pattern} ]]; do
+    matched="${BASH_REMATCH[0]}"
+    [ -n "${matched}" ] || break
+    line="${line/"${matched}"/ }"
+  done
+  while [[ "${line}" =~ ${natural_pattern} ]]; do
+    matched="${BASH_REMATCH[0]}"
+    action="${BASH_REMATCH[1]}"
+    [ -n "${matched}" ] || break
+    line="${line/"${matched}"/"${action}"}"
+  done
+  printf '%s\n' "${line}"
+}
+
+has_explicit_auto_merge_action() {
+  local text="$1"
+
+  printf '%s\n' "${text}" | awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function has_negation(prefix, lower) {
+      prefix = trim(prefix)
+      sub(/^.*(但|而是|不过|然而)/, "", prefix)
+      lower = tolower(prefix)
+      return prefix ~ /(不要|无需|无须|不用|不必|不能|不可|不得|别|莫|不允许|禁止|严禁|避免|不需要|不是要|不是让|暂不|暂时不|并非|并不是|不建议|不打算)/ \
+        || prefix ~ /不[[:space:]]*$/ \
+        || lower ~ /(^|[^a-z])(do[[:space:]]+not|don'\''t|never|without)([^a-z]|$)/
+    }
+    function has_nominal_suffix(suffix, lower) {
+      suffix = trim(suffix)
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", suffix)
+      lower = tolower(suffix)
+      return suffix ~ /^(功能|按钮|逻辑|流程|能力|代码|配置|解析|失败|失效|问题|异常|示例|文档)/ \
+        || lower ~ /^(feature|button|logic|flow|code|config|parser|failure|error|bug|example|document)([^a-z]|$)/
+    }
+    function is_positive_action(segment, remaining, prefix, suffix) {
+      remaining = trim(segment)
+      while (match(remaining, /(((执行|处理|开发|实现|修改|修复|运行|跑)?[[:space:]]*(完成|完毕|结束|跑完|做完|处理完|执行完)[[:space:]]*(后|以后|之后)?[[:space:]]*(就|即|自动|直接)?[[:space:]]*(合并|合到|[Mm][Ee][Rr][Gg][Ee]))|([Aa][Ff][Tt][Ee][Rr][^，,。;；:：!！?？]*(complete|completed|done|finish|finished)[^，,。;；:：!！?？]*[Mm][Ee][Rr][Gg][Ee]))/)) {
+        prefix = substr(remaining, 1, RSTART - 1)
+        suffix = substr(remaining, RSTART + RLENGTH)
+        if (!has_negation(prefix) && !has_nominal_suffix(suffix)) return 1
+        remaining = substr(remaining, RSTART + RLENGTH)
+      }
+      return 0
+    }
+    {
+      segment_count = split($0, segments, /[，,。；;：:！!？?]/)
+      for (segment_index = 1; segment_index <= segment_count; segment_index++) {
+        if (is_positive_action(segments[segment_index])) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }'
+}
+
+# Return true when any sentence explicitly negates automatic/direct merge.
+# The full request is scanned even after a positive sentence was found: mixed
+# positive/negative instructions disable the destructive action rather than
+# allowing sentence order to choose the outcome.
+has_explicit_auto_merge_negation() {
+  local text="$1"
+
+  printf '%s\n' "${text}" | awk '
+    function trim(value) {
+      sub(/^[[:space:]]+/, "", value)
+      sub(/[[:space:]]+$/, "", value)
+      return value
+    }
+    function has_negation(prefix, lower) {
+      prefix = trim(prefix)
+      sub(/^.*(但|而是|不过|然而)/, "", prefix)
+      lower = tolower(prefix)
+      return prefix ~ /(不要|无需|无须|不用|不必|不能|不可|不得|别|莫|不允许|禁止|严禁|避免|不需要|不是要|不是让|暂不|暂时不|并非|并不是|不建议|不打算)/ \
+        || prefix ~ /不[[:space:]]*$/ \
+        || lower ~ /(^|[^a-z])(do[[:space:]]+not|don'\''t|never|without)([^a-z]|$)/
+    }
+    function has_negated_action(segment, remaining, prefix) {
+      remaining = trim(segment)
+      while (match(remaining, /([Aa][Uu][Tt][Oo][ _-]?[Mm][Ee][Rr][Gg][Ee][[:space:]]*[:=][[:space:]]*(true|TRUE|True|1|yes|YES|Yes)|自动[[:space:]]*(合并|[Mm][Ee][Rr][Gg][Ee])|直接[[:space:]]*(合并|合到|[Mm][Ee][Rr][Gg][Ee])|((执行|处理|开发|实现|修改|修复|运行|跑)?[[:space:]]*(完成|完毕|结束|跑完|做完|处理完|执行完)[[:space:]]*(后|以后|之后)?[[:space:]]*(就|即|自动|直接)?[[:space:]]*(合并|合到|[Mm][Ee][Rr][Gg][Ee]))|([Aa][Ff][Tt][Ee][Rr][^，,。;；:：!！?？]*(complete|completed|done|finish|finished)[^，,。;；:：!！?？]*[Mm][Ee][Rr][Gg][Ee]))/)) {
+        prefix = substr(remaining, 1, RSTART - 1)
+        if (has_negation(prefix)) return 1
+        remaining = substr(remaining, RSTART + RLENGTH)
+      }
+      return 0
+    }
+    {
+      lower = tolower($0)
+      if (lower ~ /auto[ _-]?merge[[:space:]]*[:=][[:space:]]*(false|0|no)/) {
+        found = 1
+        exit
+      }
+      segment_count = split($0, segments, /[，,。；;：:！!？?]/)
+      for (segment_index = 1; segment_index <= segment_count; segment_index++) {
+        if (has_negated_action(segments[segment_index])) {
+          found = 1
+          exit
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }'
 }
 
 if [ -z "${MESSAGE}" ]; then
@@ -764,16 +1141,71 @@ if [ -z "${NORMALIZED}" ]; then
   exit 0
 fi
 
-TARGET_BRANCH="$(extract_target_branch "${NORMALIZED}")"
+BRANCH_PARSE_SOURCE="$(strip_label_values_preserving_delimiters "${NORMALIZED}")"
+BASE_BRANCH_SOURCE="$(strip_merge_target_directive "${BRANCH_PARSE_SOURCE}")"
+BASE_BRANCHES_JSON="$(collect_base_branches "${BASE_BRANCH_SOURCE}" | jq -Rsc '
+  split("\n") | map(select(length > 0)) | unique
+')"
+BASE_BRANCH_COUNT="$(jq -r 'length' <<<"${BASE_BRANCHES_JSON}")"
+if [ "${BASE_BRANCH_COUNT}" -gt 1 ]; then
+  emit_json failed "" "" "" "" "${NORMALIZED}" \
+    "conflicting processing branches; specify exactly one base branch"
+  exit 0
+elif [ "${BASE_BRANCH_COUNT}" -eq 1 ]; then
+  TARGET_BRANCH="$(jq -r '.[0]' <<<"${BASE_BRANCHES_JSON}")"
+else
+  TARGET_BRANCH="$(extract_base_branch "${BASE_BRANCH_SOURCE}")"
+fi
+MERGE_TARGET_BRANCHES_JSON="$(collect_merge_target_branches \
+  "${BRANCH_PARSE_SOURCE}" | jq -Rsc '
+    split("\n") | map(select(length > 0)) | unique
+  ')"
+MERGE_TARGET_BRANCH_COUNT="$(jq -r 'length' <<<"${MERGE_TARGET_BRANCHES_JSON}")"
+if [ "${MERGE_TARGET_BRANCH_COUNT}" -gt 1 ]; then
+  MERGE_TARGET_BRANCH=""
+  emit_json failed "" "" "${TARGET_BRANCH}" "" "${NORMALIZED}" \
+    "conflicting merge target branches; specify exactly one destination"
+  exit 0
+elif [ "${MERGE_TARGET_BRANCH_COUNT}" -eq 1 ]; then
+  MERGE_TARGET_BRANCH="$(jq -r '.[0]' <<<"${MERGE_TARGET_BRANCHES_JSON}")"
+else
+  MERGE_TARGET_BRANCH="$(extract_merge_target_branch "${BRANCH_PARSE_SOURCE}")"
+fi
+AUTO_MERGE_SOURCE="$(strip_merge_target_value_for_action "${BRANCH_PARSE_SOURCE}")"
+AUTO_MERGE_SOURCE="$(strip_base_branch_directive "${AUTO_MERGE_SOURCE}")"
+AUTO_MERGE=false
+if has_explicit_auto_merge_action "${AUTO_MERGE_SOURCE}" \
+    && ! has_explicit_auto_merge_negation "${AUTO_MERGE_SOURCE}"; then
+  AUTO_MERGE=true
+fi
+
+# A merge destination is also the safest processing baseline when the user did
+# not name a separate base branch. For an automatic merge with neither branch
+# stated, the public contract deliberately uses master rather than origin/HEAD.
+if [ -z "${TARGET_BRANCH}" ] && [ -n "${MERGE_TARGET_BRANCH}" ]; then
+  TARGET_BRANCH="${MERGE_TARGET_BRANCH}"
+fi
+if [ "${AUTO_MERGE}" = true ]; then
+  if [ -z "${MERGE_TARGET_BRANCH}" ]; then
+    MERGE_TARGET_BRANCH="${TARGET_BRANCH:-master}"
+  fi
+  if [ -z "${TARGET_BRANCH}" ]; then
+    TARGET_BRANCH="${MERGE_TARGET_BRANCH}"
+  fi
+fi
+
 if [ -n "${TARGET_BRANCH}" ] && ! validate_branch_name "${TARGET_BRANCH}"; then
   emit_json failed "" "" "" "" "${NORMALIZED}" "branch must be a safe Git ref name"
   exit 0
 fi
+if [ -n "${MERGE_TARGET_BRANCH}" ] && ! validate_branch_name "${MERGE_TARGET_BRANCH}"; then
+  emit_json failed "" "" "${TARGET_BRANCH}" "" "${NORMALIZED}" "merge target branch must be a safe Git ref name"
+  exit 0
+fi
 
 PROJECT_SOURCE="${NORMALIZED}"
-if [ -n "${TARGET_BRANCH}" ]; then
-  PROJECT_SOURCE="$(strip_target_branch_directive "${NORMALIZED}")"
-fi
+PROJECT_SOURCE="$(strip_merge_target_directive "${PROJECT_SOURCE}")"
+PROJECT_SOURCE="$(strip_base_branch_directive "${PROJECT_SOURCE}")"
 
 PARSED_ISSUE_URL=""
 PARSED_PROJECT=""

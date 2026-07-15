@@ -242,6 +242,7 @@ case "${1:-}" in
         ;;
       *:first)
         response '[
+          {"iid":"5","state":"opened","labels":{"nodes":[{"title":"finish"}]}},
           {"iid":"4","state":"opened","labels":{"nodes":[{"title":"smoke"},{"title":"timeout"}]}},
           {"iid":"2","state":"opened","labels":{"nodes":[{"title":"pr"}]}},
           {"iid":"1","state":"opened","labels":{"nodes":[]}}
@@ -916,6 +917,81 @@ then
   exit 1
 fi
 
+run_branch_validation_case() {
+  local case_id="$1"
+  local branch="$2"
+  local auto_merge="$3"
+  local merge_target_branch="$4"
+  local trigger
+
+  trigger="$(printf '%s\n' \
+    RUN_DRIVEN_ISSUE_BATCH \
+    "batch_id=${case_id}" \
+    "correlation_id=correlation-${case_id}" \
+    'project=group/repo' \
+    'selector_type=single' \
+    'iid=1' \
+    'force_rerun_pr=false' \
+    "auto_merge=${auto_merge}" \
+    'dispatcher_callback_target=agent:req_dispatcher:main' \
+    'executor_agent=req_executor' \
+    'callback_nonce=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')"
+  [ -z "${branch}" ] || trigger+=$'\n'"branch=${branch}"
+  [ -z "${merge_target_branch}" ] \
+    || trigger+=$'\n'"merge_target_branch=${merge_target_branch}"
+
+  FAKE_GLAB_API_LOG="${API_LOG}" \
+    FAKE_GLAB_SCAN_STATE="${TEST_ROOT}/scan-${case_id}" \
+    GLAB_BIN="${FAKE_GLAB}" \
+    GITLAB_TOKEN="executor-owned-token" \
+    CONFIG_DIR="${CONFIG_DIR}" \
+    bash "${CREATE_BATCH}" <<<"${trigger}"
+}
+
+valid_auto_merge_out="$(
+  run_branch_validation_case valid-auto-merge develop true release
+)"
+if ! jq -e '
+    .status == "success"
+    and .batch_id == "valid-auto-merge"
+    and .matched_count == 1
+    and .scheduler_status == "queued"
+  ' <<<"${valid_auto_merge_out}" >/dev/null \
+  || ! jq -e '
+    .branch == "develop"
+    and .auto_merge == true
+    and .merge_target_branch == "release"
+  ' "${BATCH_ROOT}/valid-auto-merge/request.json" >/dev/null; then
+  echo "executor intake did not persist the exact automatic merge intent" >&2
+  exit 1
+fi
+
+if run_branch_validation_case missing-auto-merge-target develop true '' \
+    >"${TEST_ROOT}/missing-auto-merge-target.out" \
+    2>"${TEST_ROOT}/missing-auto-merge-target.err"; then
+  echo "expected automatic merge without an exact target to fail closed at executor intake" >&2
+  exit 1
+fi
+[ ! -e "${BATCH_ROOT}/missing-auto-merge-target" ] \
+  || { echo "missing automatic merge target created batch state" >&2; exit 1; }
+
+if run_branch_validation_case unsafe-base-backtick 'feature/`id`' false '' \
+    >"${TEST_ROOT}/unsafe-base-backtick.out" \
+    2>"${TEST_ROOT}/unsafe-base-backtick.err"; then
+  echo "expected a backtick-bearing base branch to fail closed at executor intake" >&2
+  exit 1
+fi
+if run_branch_validation_case unsafe-target-backtick develop true 'feature/`id`' \
+    >"${TEST_ROOT}/unsafe-target-backtick.out" \
+    2>"${TEST_ROOT}/unsafe-target-backtick.err"; then
+  echo "expected a backtick-bearing merge target to fail closed at executor intake" >&2
+  exit 1
+fi
+[ ! -e "${BATCH_ROOT}/unsafe-base-backtick" ] \
+  || { echo "unsafe base branch created batch state" >&2; exit 1; }
+[ ! -e "${BATCH_ROOT}/unsafe-target-backtick" ] \
+  || { echo "unsafe merge target created batch state" >&2; exit 1; }
+
 if FAKE_GLAB_API_LOG="${API_LOG}" \
   GLAB_BIN="${FAKE_GLAB}" \
   GITLAB_TOKEN="executor-owned-token" \
@@ -1039,7 +1115,7 @@ if printf '%s\n' "${single_out}" | grep -q 'callback_nonce\|executor_agent'; the
 fi
 
 jq -e '
-  .batch_order == ["unfinished","label","range","single","iid-list","boundary-stable"]
+  .batch_order == ["unfinished","label","range","single","iid-list","boundary-stable","valid-auto-merge"]
   and (.batch_order | length) == (.batch_order | unique | length)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 

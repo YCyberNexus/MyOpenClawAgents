@@ -245,6 +245,34 @@ if [ "${DRIVEN_RESULT_RECONCILE:-0}" = 1 ]; then
     "{callback_status:\"handled\",iid:\$iid,terminal_status:\"done\",cleanup:{action:\"kill\",target:\"agent:req_executor:subagent:42\",reason:\"durable_worker_result_recovered\"}}"
   exit 0
 fi
+if [ "${DRIVEN_MARKER_RECONCILE:-0}" = 1 ]; then
+  printf "marker:%s:%s:%s\n" \
+    "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
+    "${DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
+  case "${MARKER_TEST_STATUS:-marker_not_ready}" in
+    marker_not_ready)
+      jq -cn --argjson iid "${IID}" \
+        "{callback_status:\"marker_not_ready\",iid:\$iid}"
+      ;;
+    blocked)
+      jq -cn --argjson iid "${IID}" \
+        "{callback_status:\"handled\",iid:\$iid,terminal_status:\"blocked\"}"
+      ;;
+    done)
+      if [ "${MARKER_TEST_RELEASE:-0}" = 1 ]; then
+        jq --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
+          "del(.active_jobs[\$job_id])" "${SCHEDULER_ROOT}/scheduler_state.json" \
+          >"${SCHEDULER_ROOT}/scheduler_state.marker.json"
+        mv "${SCHEDULER_ROOT}/scheduler_state.marker.json" \
+          "${SCHEDULER_ROOT}/scheduler_state.json"
+      fi
+      jq -cn --argjson iid "${IID}" \
+        "{callback_status:\"handled\",iid:\$iid,terminal_status:\"done\"}"
+      ;;
+    *) exit 94 ;;
+  esac
+  exit 0
+fi
 if [ "${DRIVEN_COMPLETED_RECONCILE:-0}" = 1 ]; then
   printf "completed:%s:%s:%s\n" \
     "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
@@ -950,5 +978,74 @@ jq -e '
   and (tostring | contains("post-acpx-private-claim") | not)
 ' <<<"${post_acpx_output}" >/dev/null \
   || fail "post-acpx marker did not return one exact cleanup action"
+
+# Automatic-merge post-acpx stalls are reconciled from the exact MR marker
+# before cleanup. A finish-label failure remains blocked/pending; the next tick
+# retries the same claim and may then finish without relying on a killed-event
+# callback or waiting for the long running lease.
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":5,
+    "claim_token":"marker-retry-private-claim","finalization":null,
+    "auto_merge":true,"merge_target_branch":"release",
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":5,"attempt_number":5,
+  "run_id":"run-42-marker-retry","child_session_key":"agent:req_executor:subagent:42",
+  "auto_merge":true,"branch":"main","merge_target_branch":"release"
+}}}
+EOF
+MARKER_RETRY_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-005"
+mkdir -p "${MARKER_RETRY_LOG_DIR}"
+cat >"${MARKER_RETRY_LOG_DIR}/acpx_terminal.json" <<'EOF'
+{"version":1,"iid":42,"attempt_number":5,"exit_code":0,"completed_at_epoch":100}
+EOF
+marker_retry_blocked_out="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  MARKER_TEST_STATUS=blocked SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "post-acpx marker blocked retry tick failed"
+grep -Eq '^marker:A:snapshot-0:5:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "marker reconcile did not receive the exact hashed claim fence"
+if grep -q 'marker-retry-private-claim' "${ORDER_LOG}" \
+    || grep -q 'marker-retry-private-claim' <<<"${marker_retry_blocked_out}"; then
+  fail "marker reconcile exposed the private claim token"
+fi
+jq -e '
+  .status == "cleanup_required"
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_marker_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "handled"
+    and .terminal_status == "blocked")] | length) == 1
+' <<<"${marker_retry_blocked_out}" >/dev/null \
+  || fail "finish-label failure was not retained as marker retry pending"
+jq -e '.active_jobs["A:snapshot-0"] != null' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "blocked marker retry released the scheduler job"
+
+marker_retry_done_out="$(
+  NOW_EPOCH=2001 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  MARKER_TEST_STATUS=done MARKER_TEST_RELEASE=1 \
+  SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "post-acpx marker successful retry tick failed"
+jq -e '
+  .status == "cleanup_required"
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_marker_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "handled"
+    and .terminal_status == "done")] | length) == 1
+' <<<"${marker_retry_done_out}" >/dev/null \
+  || fail "second marker tick did not finish the retained retry"
+jq -e '.active_jobs["A:snapshot-0"] == null' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "successful marker retry did not release the scheduler job"
 
 echo "ok executor batch tick is recovery-first and returns strict spawn grants"

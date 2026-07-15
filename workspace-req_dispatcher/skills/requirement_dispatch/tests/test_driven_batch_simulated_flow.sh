@@ -284,24 +284,13 @@ jq -c '
 ' "${TARGETED_OUTBOX}" >"${TEST_ROOT}/targeted-submit.outbox.next.json"
 mv "${TEST_ROOT}/targeted-submit.outbox.next.json" "${TARGETED_OUTBOX}"
 
-TARGETED_PREPARED='{
-  "status":"success",
-  "project":"group/project",
-  "iid":99,
-  "selector":{"type":"single","iid":99},
-  "force_rerun_pr":false,
-  "target_branch":null,
-  "issue_url":null,
-  "request_text":"处理 group/project issue #99",
-  "reason":null
-}'
 targeted_output="$(
   env "${common_env[@]}" \
     STATE_ROOT="${TARGETED_STATE_ROOT}" \
     OPENCLAW_CALL_LOG="${TARGETED_CALL_LOG}" \
     DRIVEN_COUNT_FILE="${TEST_ROOT}/targeted-submit.count" \
     NOTIFY_LOG="${TARGETED_NOTIFY_LOG}" \
-    PREPARED_REQUEST_JSON="${TARGETED_PREPARED}" \
+    MESSAGE='请处理 group/project issue #99，基于 develop 分支处理，执行完成后直接 merge 到 release 分支' \
     ORIGIN_JSON="${ORIGIN}" \
     "${BASH}" "${SKILL_DIR}/scripts/submit_executor_batch.sh"
 )"
@@ -330,17 +319,22 @@ fi
 if [ "$(find "${TARGETED_STATE_ROOT}/_dispatcher/accepted_intents" -type f -name '*.json' | wc -l | tr -d ' ')" -ne 1 ] \
   || ! find "${TARGETED_STATE_ROOT}/_dispatcher/accepted_intents" \
     -type f -name '*.json' -exec jq -e \
-      '.batch_id == "reqd-batch-1" and .matched_count == 0' {} + >/dev/null; then
-  echo "targeted submit did not compact its accepted intent" >&2
+      '.batch_id == "reqd-batch-1"
+      and .matched_count == 0' {} + >/dev/null; then
+  echo "targeted auto-merge submit did not compact its accepted intent" >&2
   exit 1
 fi
 if [ "$(wc -l <"${TARGETED_CALL_LOG}" | tr -d ' ')" -ne 1 ] \
   || ! jq -e '
     .trigger == "RUN_DRIVEN_ISSUE_BATCH"
+    and .persisted_before_call == true
     and (.message | contains("batch_id=reqd-batch-1"))
     and (.message | contains("iid=99"))
+    and (.message | contains("branch=develop"))
+    and (.message | contains("auto_merge=true"))
+    and (.message | contains("merge_target_branch=release"))
   ' "${TARGETED_CALL_LOG}" >/dev/null; then
-  echo "targeted submit did not call exactly its own batch once" >&2
+  echo "targeted auto-merge submit did not deliver exactly its own complete batch once" >&2
   exit 1
 fi
 

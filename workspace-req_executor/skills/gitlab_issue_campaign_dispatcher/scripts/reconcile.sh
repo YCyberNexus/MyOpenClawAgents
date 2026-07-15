@@ -29,13 +29,14 @@
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
 #       "has_done_pr":       bool,   # labels include `pr` (pr 替换 done 后，有 pr 即完成)
+#       "has_finish":        bool,   # labels include `finish` (matching MR was independently verified merged)
 #       "is_closed_on_gitlab": bool,  # state is "closed"
-#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR has pr
+#       "is_done_on_gitlab": bool,   # terminal for dispatcher: closed OR has pr OR has finish
 #       "has_timeout":       bool,   # labels include "timeout" (terminal until a human strips it or adds retry/continue)
 #       "has_retry":         bool,   # labels include "retry" (also re-enqueues timeout issues)
 #       "has_blocked":       bool,   # 任一 cc/dispatcher 变体或旧单一标签（blocked-cc / blocked-dispatcher / blocked）
 #       "has_failed":        bool,   # 任一 cc/dispatcher 变体或旧单一标签（failed-cc / failed-dispatcher / failed）
-#       "user_reopened":     bool,   # opened, no completed pair, and no failed/blocked/doing/continue/contiune label; timeout is allowed only with retry. `doing` excludes because a non-pending issue still wearing it is a dispatcher-owned terminal whose label sync did not land — the disk-cached park (esp. timeout) must win, not be silently un-parked
+#       "user_reopened":     bool,   # opened, no stable pr/finish completion, and no failed/blocked/doing/continue/contiune label; timeout is allowed only with retry. `doing` excludes because a non-pending issue still wearing it is a dispatcher-owned terminal whose label sync did not land — the disk-cached park (esp. timeout) must win, not be silently un-parked
 #       "needs_continue":    bool,   # opened and labels include literal "continue" (or legacy misspelling "contiune")
 #       "model_tier":        str|null, # current model:<tier> suffix or null (extracted from model:* label if present)
 #       "missing":           bool    # GET returned non-OK (treat as not done)
@@ -49,7 +50,7 @@
 #         work branch (or build one from the target branch if none exists)
 #   - `user_reopened == true`                             → re-enqueue from
 #         scratch (label was reverted to todo / doing, or is done-only
-#         before MR / pr completion)
+#         before stable pr / finish completion)
 #
 # Closed issue state wins over every label combination, including `continue`.
 # For opened issues, `needs_continue` wins over every other label combination.
@@ -116,6 +117,7 @@ for iid in "${IIDS[@]}"; do
       . as $issue |
       ($issue.labels // []) as $labels |
       (($labels | index("pr") != null)) as $done_with_pr |
+      (($labels | index("finish") != null)) as $has_finish |
       ($issue.state == "closed") as $closed |
       (($labels | index("continue") != null) or ($labels | index("contiune") != null)) as $needs_continue |
       (($labels | index("retry") != null)) as $has_retry |
@@ -128,8 +130,9 @@ for iid in "${IIDS[@]}"; do
         labels: $labels,
         title: $issue.title,
         has_done_pr: $done_with_pr,
+        has_finish: $has_finish,
         is_closed_on_gitlab: $closed,
-        is_done_on_gitlab: ($closed or $done_with_pr),
+        is_done_on_gitlab: ($closed or $done_with_pr or $has_finish),
         has_timeout: $has_timeout,
         has_retry: $has_retry,
         has_blocked: $has_blocked,
@@ -137,6 +140,7 @@ for iid in "${IIDS[@]}"; do
         user_reopened: (
           ($closed | not) and
           ($done_with_pr | not) and
+          ($has_finish | not) and
           ($labels | index("failed") == null) and
           ($labels | index("failed-cc") == null) and
           ($labels | index("failed-dispatcher") == null) and
@@ -152,7 +156,7 @@ for iid in "${IIDS[@]}"; do
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, has_blocked:false, has_failed:false, user_reopened:false, needs_continue:false, model_tier:null, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, has_finish:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, has_blocked:false, has_failed:false, user_reopened:false, needs_continue:false, model_tier:null, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

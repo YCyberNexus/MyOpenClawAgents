@@ -19,6 +19,8 @@ ensure_state_dirs
 : "${PAYLOAD:?PAYLOAD required}"
 : "${REQUEST_DIGEST:?REQUEST_DIGEST required}"
 TARGET_BRANCH="${TARGET_BRANCH:-}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
+MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-}"
 ORIGIN_JSON="${ORIGIN_JSON:-null}"
 
 expected_digest="$(printf '%s' "${PAYLOAD}" | executor_batch_sha256)"
@@ -28,11 +30,26 @@ ORIGIN_JSON="$(printf '%s' "${ORIGIN_JSON}" | normalize_executor_batch_origin 2>
   || executor_batch_outbox_die "ORIGIN_JSON is invalid"
 
 case "${FORCE_RERUN_PR}" in true|false) ;; *) executor_batch_outbox_die "FORCE_RERUN_PR must be true or false" ;; esac
+case "${AUTO_MERGE}" in true|false) ;; *) executor_batch_outbox_die "AUTO_MERGE must be true or false" ;; esac
+[ "${AUTO_MERGE}" != true ] || [ -n "${MERGE_TARGET_BRANCH}" ] \
+  || executor_batch_outbox_die "MERGE_TARGET_BRANCH is required when AUTO_MERGE=true"
 validate_executor_callback_nonce "${CALLBACK_NONCE}" \
   || executor_batch_outbox_die "CALLBACK_NONCE must be 64 lowercase hexadecimal characters"
 if ! grep -Fqx "executor_agent=${EXECUTOR_AGENT}" <<<"${PAYLOAD}" \
   || ! grep -Fqx "callback_nonce=${CALLBACK_NONCE}" <<<"${PAYLOAD}"; then
   executor_batch_outbox_die "PAYLOAD callback authentication fields do not match the durable intent"
+fi
+if grep -Eq '^auto_merge=' <<<"${PAYLOAD}"; then
+  grep -Fqx "auto_merge=${AUTO_MERGE}" <<<"${PAYLOAD}" \
+    || executor_batch_outbox_die "PAYLOAD automatic merge field does not match the durable intent"
+elif [ "${AUTO_MERGE}" = true ]; then
+  executor_batch_outbox_die "PAYLOAD omits the requested automatic merge field"
+fi
+if [ -n "${MERGE_TARGET_BRANCH}" ]; then
+  grep -Fqx "merge_target_branch=${MERGE_TARGET_BRANCH}" <<<"${PAYLOAD}" \
+    || executor_batch_outbox_die "PAYLOAD merge target branch does not match the durable intent"
+elif grep -Eq '^merge_target_branch=' <<<"${PAYLOAD}"; then
+  executor_batch_outbox_die "PAYLOAD contains an unexpected merge target branch"
 fi
 
 now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -73,7 +90,9 @@ entry_json="$(jq -cn \
   --arg project "${PROJECT}" \
   --argjson selector "${SELECTOR_JSON}" \
   --argjson force_rerun_pr "${FORCE_RERUN_PR}" \
+  --argjson auto_merge "${AUTO_MERGE}" \
   --arg target_branch "${TARGET_BRANCH}" \
+  --arg merge_target_branch "${MERGE_TARGET_BRANCH}" \
   --arg executor_agent "${EXECUTOR_AGENT}" \
   --arg callback_nonce "${CALLBACK_NONCE}" \
   --argjson origin "${ORIGIN_JSON}" \
@@ -86,7 +105,9 @@ entry_json="$(jq -cn \
     project:$project,
     selector:$selector,
     force_rerun_pr:$force_rerun_pr,
+    auto_merge:$auto_merge,
     target_branch:(if $target_branch == "" then null else $target_branch end),
+    merge_target_branch:(if $merge_target_branch == "" then null else $merge_target_branch end),
     executor_agent:$executor_agent,
     callback_nonce:$callback_nonce,
     origin:$origin,

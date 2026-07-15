@@ -58,6 +58,7 @@ sha256_text() {
 TIMEOUT_RECONCILE="${DRIVEN_TIMEOUT_RECONCILE:-0}"
 COMPLETED_RECONCILE="${DRIVEN_COMPLETED_RECONCILE:-0}"
 RESULT_RECONCILE="${DRIVEN_RESULT_RECONCILE:-0}"
+MARKER_RECONCILE="${DRIVEN_MARKER_RECONCILE:-0}"
 case "${TIMEOUT_RECONCILE}" in
   0|1) ;;
   *) echo "dispatch_followup.sh: DRIVEN_TIMEOUT_RECONCILE must be 0 or 1" >&2; exit 2 ;;
@@ -70,7 +71,11 @@ case "${RESULT_RECONCILE}" in
   0|1) ;;
   *) echo "dispatch_followup.sh: DRIVEN_RESULT_RECONCILE must be 0 or 1" >&2; exit 2 ;;
 esac
-RECONCILE_MODE_COUNT=$((TIMEOUT_RECONCILE + COMPLETED_RECONCILE + RESULT_RECONCILE))
+case "${MARKER_RECONCILE}" in
+  0|1) ;;
+  *) echo "dispatch_followup.sh: DRIVEN_MARKER_RECONCILE must be 0 or 1" >&2; exit 2 ;;
+esac
+RECONCILE_MODE_COUNT=$((TIMEOUT_RECONCILE + COMPLETED_RECONCILE + RESULT_RECONCILE + MARKER_RECONCILE))
 if [ "${RECONCILE_MODE_COUNT}" -gt 1 ]; then
   echo "dispatch_followup.sh: internal reconcile modes are mutually exclusive" >&2
   exit 2
@@ -261,8 +266,9 @@ fi
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
 
 # Positive completion recovery is intentionally independent of the running
-# lease. The scheduler first observed `pr`/closed through the ordinary project
-# preflight; this lock-held narrow reconcile is the authoritative re-check.
+# lease. The scheduler first observed `pr`, `finish`, or closed through the
+# ordinary project preflight; this lock-held narrow reconcile is the
+# authoritative re-check.
 # A false/stale preflight therefore returns without touching project state.
 if [ "${COMPLETED_RECONCILE}" = 1 ]; then
   if [ -z "${RECON_EVIDENCE_PATH}" ] \
@@ -273,6 +279,7 @@ if [ "${COMPLETED_RECONCILE}" = 1 ]; then
     }'
     exit 0
   fi
+
 fi
 
 # Synthesized-reply status for a dead subagent (empty / unparseable /
@@ -316,6 +323,118 @@ fi
 # Read the compact reply from stdin. Empty stdin → synthesize a terminal
 # reply: timeout when the run consumed its time budget, blocked otherwise.
 RAW_REPLY="$(cat)"
+
+recover_current_auto_merge_reply() {
+  local marker=""
+  # Marker reconcile is an optimistic probe that may run while create_mr.sh is
+  # still between its initial identity write and the bounded merge helper. Do
+  # not classify that in-progress marker as an opened failure. Native terminal
+  # callbacks and due timeout/completion reconciliation prove the wrapper is no
+  # longer merely in this optimistic window and may use the identity for a
+  # fresh live verification.
+  if [ "${MARKER_RECONCILE}" = 1 ]; then
+    marker="$(phase6_read_auto_merge_marker \
+      "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}" 2>/dev/null || true)"
+    [ -n "${marker}" ] || return 1
+    [ "$(jq -r '.reason' <<<"${marker}")" != exact_mr_verification_pending ] \
+      || return 1
+  fi
+  phase6_reply_from_auto_merge_marker \
+    "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}"
+}
+
+# A verified merge whose finish transition failed is durably marked on the
+# pending claim. Override even a non-empty killed/failure callback with the
+# exact marker recovery path: cleanup of the stalled native child must not be
+# able to terminate or downgrade this label-only retry. The live MR is still
+# independently re-verified on every retry.
+FINISH_LABEL_RETRY_ACTIVE=false
+if [ "$(jq -r '.finish_label_retry // false' <<<"${PENDING_ENTRY}")" = true ]; then
+  FINISH_LABEL_RETRY_ATTEMPT="$(jq -r \
+    '.finish_label_retry_attempt // empty' <<<"${PENDING_ENTRY}")"
+  if [[ "${FINISH_LABEL_RETRY_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] \
+      && [ "${FINISH_LABEL_RETRY_ATTEMPT}" -eq "${PENDING_ATTEMPT}" ]; then
+    FINISH_LABEL_RETRY_ACTIVE=true
+  else
+    wrapper_log followup \
+      "ignored stale/invalid finish-label retry fence iid=${IID} pending_attempt=${PENDING_ATTEMPT} retry_attempt=${FINISH_LABEL_RETRY_ATTEMPT:-missing}"
+  fi
+fi
+if [ "${FINISH_LABEL_RETRY_ACTIVE}" = true ]; then
+  RECOVERED_AUTO_MERGE_REPLY="$(recover_current_auto_merge_reply \
+    2>/dev/null || true)"
+  if [ -n "${RECOVERED_AUTO_MERGE_REPLY}" ]; then
+    RAW_REPLY="${RECOVERED_AUTO_MERGE_REPLY}"
+    wrapper_log followup \
+      "recovered durable finish-label retry iid=${IID} attempt=${PENDING_ATTEMPT}"
+  else
+    jq -nc --argjson iid "${IID}" --argjson attempt_number "${PENDING_ATTEMPT}" '{
+      callback_status:"marker_not_ready",
+      iid:$iid,
+      attempt_number:$attempt_number,
+      chat_summary:("finish-label retry marker is not ready for #" + ($iid|tostring))
+    }'
+    exit 0
+  fi
+fi
+# Recover a fixed-wrapper marker before synthesizing blocked/timeout for every
+# empty current callback and before accepting a non-done native failure shape.
+# The latter covers a platform kill after the fixed wrapper already persisted
+# the exact MR identity (and possibly `finish`) but before OpenClaw delivered
+# its final compact line. A merge into a non-default target may also leave the
+# Issue open, so timeout reconciliation must discover it. Claim/callback
+# authentication above remains the authorization fence; the marker only
+# supplies exact current-attempt identity, and Phase 6 independently verifies
+# it against GitLab. A parseable `done` callback is not replaced, so forged
+# done identity still fails the marker equality check in Phase 6.
+RAW_REPLY_STATUS="$(jq -r '
+  if type == "object" and (.status | type == "string") then .status else "" end
+' <<<"${RAW_REPLY}" 2>/dev/null || true)"
+if { [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
+      || [ "${RAW_REPLY_STATUS}" != done ]; } \
+    && [ "${RESULT_RECONCILE}" != 1 ] \
+    && [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ]; then
+  RECOVERED_AUTO_MERGE_REPLY="$(recover_current_auto_merge_reply \
+    2>/dev/null || true)"
+  if [ -n "${RECOVERED_AUTO_MERGE_REPLY}" ]; then
+    RAW_REPLY="${RECOVERED_AUTO_MERGE_REPLY}"
+    wrapper_log followup \
+      "recovered auto-merge marker iid=${IID} attempt=${PENDING_ATTEMPT} before empty-result synthesis"
+  fi
+fi
+
+# Marker and live-completed reconciliation are optimistic recovery probes, not
+# permission to synthesize a terminal failure while the fixed wrapper may still
+# be between MR creation and its atomic marker write. Keep the exact claim
+# pending and let the next tick retry. This also prevents an auto-merge request
+# with live `pr`/closed evidence but a missing/invalid marker from falling into
+# the generic completed->skipped path and silently losing merge/finish work.
+if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
+    && { [ "${MARKER_RECONCILE}" = 1 ] \
+      || { [ "${COMPLETED_RECONCILE}" = 1 ] \
+        && [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ]; }; }; then
+  jq -nc --argjson iid "${IID}" --argjson attempt_number "${PENDING_ATTEMPT}" '{
+    callback_status:"marker_not_ready",
+    iid:$iid,
+    attempt_number:$attempt_number,
+    chat_summary:("trusted automatic-merge marker is not ready for #" + ($iid|tostring))
+  }'
+  exit 0
+fi
+
+# Once the running timeout is genuinely due, an auto-merge attempt whose
+# marker never became recoverable must terminate honestly without destroying a
+# live `pr`/`finish`. A success-shaped synthetic reply deliberately enters the
+# auto-merge resolver, which converts the missing-marker condition to
+# failed+preserve before any terminal handoff is committed.
+if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
+    && [ "${TIMEOUT_RECONCILE}" = 1 ] \
+    && [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ]; then
+  RAW_REPLY="$(phase6_synthesize_blocked \
+    "${IID}" "${PENDING_ATTEMPT}" \
+    "automatic merge marker was not recoverable before the running deadline" \
+    | jq -c '.status = "done" | .block_reason = ""')"
+fi
 if [ "${RESULT_RECONCILE}" = 1 ] \
     && [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
   echo "dispatch_followup.sh: durable result reconcile requires worker JSON" >&2
@@ -363,10 +482,37 @@ fi
 # workflow-label mutual-exclusion group (the keep-table never preserves `pr`).
 # So if GitLab live labels already show this issue completed/closed, DROP the
 # regressing reply without touching labels and drain the stale pending entry.
-# `done` replies are never dropped (a success on a completed issue is idempotent).
+# A current automatic-merge `done` reply is never dropped because Phase 6 must
+# verify its exact MR and converge `finish`. For an ordinary request, however,
+# fresh evidence that already contains `finish` supplies a trusted label
+# override so a late `done` can be drained without downgrading it to `pr`.
 REPLY_STATUS="$(printf '%s' "${REPLY_JSON}" | jq -r '.status')"
-if [ "${REPLY_STATUS}" != "done" ] && [ -n "${RECON_EVIDENCE_PATH}" ] \
-   && phase6_evidence_shows_completed "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
+TRUSTED_COMPLETION_OVERRIDE=""
+PENDING_AUTO_MERGE="$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")"
+LIVE_COMPLETED_EVIDENCE=false
+if [ -n "${RECON_EVIDENCE_PATH}" ] \
+    && phase6_evidence_shows_completed \
+      "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
+  LIVE_COMPLETED_EVIDENCE=true
+fi
+if [ "${REPLY_STATUS}" = done ] \
+    && [ "${PENDING_AUTO_MERGE}" != true ] \
+    && [ "${LIVE_COMPLETED_EVIDENCE}" = true ] \
+    && phase6_evidence_has_finish "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
+  TRUSTED_COMPLETION_OVERRIDE=preserve
+  wrapper_log followup \
+    "preserving live finish for ordinary late done iid=${IID} attempt=${REPLY_ATTEMPT}"
+fi
+if [ "${PENDING_AUTO_MERGE}" = true ] \
+    && [ "${LIVE_COMPLETED_EVIDENCE}" = true ]; then
+  # Auto-merge outcomes must be resolved by the exact marker/MR path, never by
+  # the generic live-completed skip. Preserve the live completion label if the
+  # callback itself is failure-shaped and no stronger exact outcome is found.
+  TRUSTED_COMPLETION_OVERRIDE=preserve
+fi
+if [ "${REPLY_STATUS}" != "done" ] \
+   && [ "${PENDING_AUTO_MERGE}" != true ] \
+   && [ "${LIVE_COMPLETED_EVIDENCE}" = true ]; then
   if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ] && [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
     # A scheduler-owned running claim still needs its exact terminal I3 even
     # when GitLab already shows a completed/closed issue. Classify this as a
@@ -471,12 +617,15 @@ if [ "${REPLY_STATUS}" != "done" ] && [ -n "${RECON_EVIDENCE_PATH}" ] \
   exit 0
 fi
 
-# Run Phase 6 inline.
-PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "false")"
+# Run Phase 6 inline. The optional override is derived only from the fresh
+# reconcile evidence above; no callback field can request label preservation.
+PHASE6_OUT="$(phase6_process \
+  "${STATE_JSON}" "${REPLY_JSON}" "false" "${TRUSTED_COMPLETION_OVERRIDE}")"
 
 # Build the final envelope inputs before the one campaign-state transaction.
 NEW_STATE="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
 FINAL_STATUS="$(printf '%s' "${PHASE6_OUT}" | jq -r '.final_status')"
+REPLY_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.final_reply')"
 CLEANUP="$(printf '%s' "${PHASE6_OUT}" | jq -c '.cleanup')"
 # A claim-fenced durable worker result means the fixed all-in-one wrapper
 # finished even if OpenClaw never scheduled the outer model's final reply. The

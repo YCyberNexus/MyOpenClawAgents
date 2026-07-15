@@ -46,11 +46,17 @@ stuck 驱逐会按新值自动派生；旧 FIFO active/pending 保留创建时�
 拆分或澄清，不能静默选取第一个条件。
 
 五类 selector 都只纳入创建 batch 时为 OPEN 的 Issue，CLOSED 始终不处理。未完成模式排除
-`pr,timeout,blocked,blocked-*,failed,failed-*`；指定标签模式不额外排除这些标签。
+`pr,finish,timeout,blocked,blocked-*,failed,failed-*`；指定标签模式不额外排除这些标签。
 
-只有明确“重跑/重新处理/重新执行”才覆盖 `pr` 完成态；CLOSED Issue 不会重新打开。可在同一
-消息中指定 `branch=release/x`、`target_branch=release/x`、`目标分支：release/x`、
-`合到 release/x` 或“基于 release/x 分支开发”。
+只有明确“重跑/重新处理/重新执行”才覆盖 `pr` 或 `finish` 完成态；CLOSED Issue 不会重新打开。
+可用 `branch=release/x` 或“基于 release/x 分支开发”指定处理基准分支，用
+`target_branch=release/x`、`目标分支：release/x` 或 `合到 release/x` 指定 MR 目标分支。
+
+只有用户明确要求“执行完成后直接/自动 merge”才启用自动合并；普通“提 MR”“合到某分支”仍在
+MR 创建后停留于 `pr`，等待人工处理。自动合并时，用户明确写出的合并目标优先；若只指定处理
+基准分支而未写合并目标，则合并到该处理基准分支；若两者都未指定，则处理基准和合并目标均为
+`master`。只有 GitLab 端对精确 MR、源分支、目标分支和提交 SHA 的合并结果验证通过后，Issue
+才进入 `finish`；未合并或状态无法确认时不得写入 `finish`。
 
 origin 优先来自 OpenClaw 运行时元数据；正文 `[origin] ...` 只是兼容 fallback。只有合法
 origin object 才向 114/企微推送，手动 WebUI 入口通常只留审计。
@@ -77,7 +83,7 @@ origin object 才向 114/企微推送，手动 WebUI 入口通常只留审计。
 - done：`#<iid> 已处理完成，MR：<mr_url>`；
 - failed：`#<iid> 处理未通过：<reason>`；
 - timeout：`#<iid> 处理超时未完成，已停放待人工处理`；
-- skipped：该 Issue 在实时预检时已 CLOSED、普通处理遇到 `pr` 或无需再执行；
+- skipped：该 Issue 在实时预检时已 CLOSED、普通处理遇到 `pr`/`finish` 或无需再执行；
 - zero-match：`无匹配 OPEN Issue`，整个 batch 只通知一次。
 
 不会发送额外批次进度或聚合汇总。通知通道失败时 intent 保留；duplicate I3 或周期 tick 会
@@ -98,7 +104,7 @@ durable 日志修复，不再调用通知通道。
 ## 职责边界
 
 dispatcher 不查询 GitLab Issue、不展开 IID、不自行跑 Issue。GitLab snapshot、并发槽位、
-worktree、MR 和 retry 均由 req_executor 管理。
+worktree、MR、显式请求的精确 SHA 自动合并和 retry 均由 req_executor 管理。
 
 GitLab project 支持多层 subgroup path。多个裸路径候选会要求澄清；重跑动作允许放在 Issue
 宾语之后，但否定措辞及 label/branch 值不会触发重跑。

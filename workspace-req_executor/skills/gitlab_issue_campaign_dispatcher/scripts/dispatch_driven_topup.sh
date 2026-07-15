@@ -33,6 +33,14 @@ if ! REQUEST_JSON="$(printf '%s' "${REQUEST_RAW}" | jq -ce '
     type == "string" and length > 0
     and (explode | all(. >= 32 and . != 127));
   def exact_keys($wanted): (keys | sort) == ($wanted | sort);
+  if type == "object" and ((.grants | type) == "array") then
+    .grants |= map(
+      if type == "object" then
+        (if has("auto_merge") then . else .auto_merge = false end
+        | if has("merge_target_branch") then . else .merge_target_branch = null end)
+      else . end)
+  else . end
+  |
   if type != "object"
      or (exact_keys(["owner_id","grants"]) | not)
      or (.owner_id | clean_string | not)
@@ -40,7 +48,7 @@ if ! REQUEST_JSON="$(printf '%s' "${REQUEST_RAW}" | jq -ce '
      or ((.grants | length) == 0)
      or (all(.grants[];
           type == "object"
-          and exact_keys(["job_id","batch_id","snapshot_index","project","iid","branch","entry_mode","force_rerun_pr"])
+          and exact_keys(["job_id","batch_id","snapshot_index","project","iid","branch","entry_mode","force_rerun_pr","auto_merge","merge_target_branch"])
           and (.job_id | clean_string)
           and (.batch_id | clean_string)
           and (.project | clean_string)
@@ -48,7 +56,10 @@ if ! REQUEST_JSON="$(printf '%s' "${REQUEST_RAW}" | jq -ce '
           and (.snapshot_index | type == "number" and . == floor and . >= 0)
           and (.iid | type == "number" and . == floor and . >= 1)
           and (.entry_mode == "auto" or .entry_mode == "fresh" or .entry_mode == "continue")
-          and (.force_rerun_pr | type == "boolean")) | not)
+          and (.force_rerun_pr | type == "boolean")
+          and (.auto_merge | type == "boolean")
+          and (.merge_target_branch == null or (.merge_target_branch | clean_string))
+          and (.auto_merge == false or (.merge_target_branch | clean_string))) | not)
      or ([.grants[].project] | unique | length != 1)
      or ([.grants[] | [.project,.iid]] | group_by(.) | any(length > 1))
      or ([.grants[].job_id] | group_by(.) | any(length > 1))
@@ -72,7 +83,7 @@ PROJECT_SLUG="${PROJECT_FULL##*/}"
 validate_branch_name() {
   local branch="$1"
   case "${branch}" in
-    ""|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\[*|*\]*|*" "*|*$'\t'*|*$'\n'*|*.lock|*.)
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*'`'*|*"'"*|*'"'*|*'<'*|*'>'*|*'!'*|*" "*|*$'\t'*|*$'\r'*|*$'\n'*|*.lock|*.)
       return 1
       ;;
   esac
@@ -81,6 +92,11 @@ validate_branch_name() {
 while IFS= read -r branch; do
   validate_branch_name "${branch}" || die "grant branch is not a safe Git ref name"
 done < <(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[] | select(.branch != null) | .branch')
+while IFS= read -r merge_target_branch; do
+  validate_branch_name "${merge_target_branch}" \
+    || die "grant merge_target_branch is not a safe Git ref name"
+done < <(printf '%s' "${REQUEST_JSON}" | jq -r \
+  '.grants[] | select(.merge_target_branch != null) | .merge_target_branch')
 
 [ -f "${CONFIG_DIR}/gitlab.env" ] \
   || die "missing config/gitlab.env at ${CONFIG_DIR}/gitlab.env"

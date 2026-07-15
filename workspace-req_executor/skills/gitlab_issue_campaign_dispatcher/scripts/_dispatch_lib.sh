@@ -45,7 +45,7 @@
 #                                → validated + normalized reply JSON; synth_status
 #                                  (default blocked) is used when the raw reply is
 #                                  unparseable or carries no status field
-#   phase6_sync_labels <iid> <final_status>
+#   phase6_sync_labels <iid> <final_status> [block_side] [completion_label]
 #                                → run set_issue_label.sh ops; echo any append-on-failure text
 #   phase6_write_state_files <iid> <attempt_number> <reply_json> <final_status>
 #                                                  <prior_state_json> <prior_retry_count>
@@ -735,9 +735,10 @@ phase6_synthesize_timeout() {
 # phase6_evidence_shows_completed <iid> <evidence_json>
 # Pure check (NO GitLab call): returns 0 (true) iff the reconcile evidence array
 # in <evidence_json> marks <iid> as already in a GitLab-completed/closed terminal
-# state. Tolerant of both label vocabularies — v2 `pr` via has_done_pr /
-# is_done_on_gitlab, benchmark-test `done` via is_done_on_gitlab — and of missing
-# fields (null → false). This is the Source-of-Truth guard: a completed/closed
+# state. Tolerant of both label vocabularies — `pr` via has_done_pr,
+# `finish` via either its dedicated field or raw labels, and benchmark-test
+# `done` via is_done_on_gitlab — and of missing fields (null → false). This is
+# the Source-of-Truth guard: a completed/closed
 # issue must NEVER be regressed to timeout/blocked/failed by a stale earlier
 # attempt's late callback or stuck-eviction. (needs_continue is intentionally NOT
 # excluded here — a `pr`+`continue` issue must also be protected from a stale
@@ -750,7 +751,22 @@ phase6_evidence_shows_completed() {
       (.iid == $iid) and (
         (.is_closed_on_gitlab == true)
         or (.is_done_on_gitlab == true)
-        or (.has_done_pr == true)))' >/dev/null 2>&1
+        or (.has_done_pr == true)
+        or (.has_finish == true)
+        or (((.labels // []) | index("finish")) != null)))' >/dev/null 2>&1
+}
+
+# Narrow compatibility check used to prevent an old ordinary `done` callback
+# from replacing a newer automatic-merge `finish` with `pr`. Raw labels are
+# accepted for rolling upgrades whose reconcile evidence predates has_finish.
+phase6_evidence_has_finish() {
+  local iid="$1" evidence_json="$2"
+  [ -n "${evidence_json}" ] || return 1
+  printf '%s' "${evidence_json}" | jq -e --argjson iid "${iid}" '
+    (type == "array") and any(.[];
+      (.iid == $iid) and (
+        (.has_finish == true)
+        or (((.labels // []) | index("finish")) != null)))' >/dev/null 2>&1
 }
 
 # phase6_iid_completed_live <iid>
@@ -859,15 +875,282 @@ phase6_normalize_reply() {
   '
 }
 
+# Read the exact MR identity produced by the fixed outer wrapper for one
+# issue/attempt. The compact callback is not trusted to choose which MR is
+# verified: it must agree with this mode-600 attempt-local marker, whose source
+# branch is additionally pinned to the canonical `issue/<iid>` branch.
+phase6_file_mode() {
+  local path="$1" mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "${path}" 2>/dev/null
+  fi
+}
+
+phase6_auto_merge_marker_path() {
+  local iid="$1" attempt_number="$2" attempt_padded
+  [[ "${iid}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [[ "${attempt_number}" =~ ^[1-9][0-9]*$ ]] || return 1
+  [ -n "${WORKTREES_ROOT:-}" ] || return 1
+  printf -v attempt_padded '%03d' "${attempt_number}"
+  printf '%s\n' \
+    "${WORKTREES_ROOT}/issue-${iid}/${REQ_EXECUTOR_DIR:-.req_executor}/issue-${iid}/log/attempt-${attempt_padded}/mr_result.json"
+}
+
+# Output the validated marker or return non-zero. State supplies the trusted
+# auto-merge intent and target branch; neither value is accepted from callback
+# JSON or from the marker itself without an exact comparison.
+phase6_read_auto_merge_marker() {
+  local state_json="$1" iid="$2" attempt_number="$3"
+  local pending target_branch marker_path marker_bytes marker_mode
+  pending="$(jq -ce --argjson iid "${iid}" \
+    '.pending_subagents[($iid|tostring)] // error("missing pending entry")' \
+    <<<"${state_json}" 2>/dev/null)" || return 1
+  [ "$(jq -r '.auto_merge // false' <<<"${pending}")" = true ] || return 1
+  target_branch="$(jq -r '.merge_target_branch // .branch // ""' <<<"${pending}")"
+  [ -n "${target_branch}" ] || return 1
+  marker_path="$(phase6_auto_merge_marker_path "${iid}" "${attempt_number}")" || return 1
+  [ -f "${marker_path}" ] && [ ! -L "${marker_path}" ] || return 1
+  marker_mode="$(phase6_file_mode "${marker_path}")" || return 1
+  [ "${marker_mode}" = 600 ] || return 1
+  marker_bytes="$(wc -c <"${marker_path}" 2>/dev/null | tr -d '[:space:]')"
+  [[ "${marker_bytes}" =~ ^[0-9]+$ ]] \
+    && [ "${marker_bytes}" -gt 0 ] \
+    && [ "${marker_bytes}" -le 65536 ] || return 1
+
+  jq -ce \
+    --argjson issue_iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
+    --arg source_branch "issue/${iid}" \
+    --arg target_branch "${target_branch}" '
+      if type == "object"
+        and (keys | sort) == ([
+          "attempt_number","auto_merge","iid","issue_iid",
+          "merge_api_succeeded","merge_attempted","mr_action","observed_state",
+          "outcome","reason","sha","source_branch","target_branch",
+          "verified","version","web_url"
+        ] | sort)
+        and .version == 1
+        and .issue_iid == $issue_iid
+        and .attempt_number == $attempt_number
+        and .auto_merge == true
+        and .source_branch == $source_branch
+        and .target_branch == $target_branch
+        and (.iid | type == "number" and . == floor and . > 0)
+        and (.web_url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*$"))
+        and (.sha | type == "string" and test("^[0-9a-fA-F]{7,64}$"))
+        and (.mr_action == "created" or .mr_action == "rotated")
+        and (.outcome == "merged" or .outcome == "opened" or .outcome == "unknown")
+        and (.verified | type == "boolean")
+        and (.observed_state | type == "string")
+        and (.merge_attempted | type == "boolean")
+        and (.merge_api_succeeded | type == "boolean")
+        and (.reason | type == "string")
+      then . else error("invalid automatic-merge marker") end
+    ' "${marker_path}" 2>/dev/null
+}
+
+# Recovery path for a wrapper that was killed after persisting mr_result.json
+# but before worker_result.json. The returned compact reply is only evidence to
+# enter Phase 6; it still cannot authorize `finish` until the independent live
+# MR verification below succeeds.
+phase6_reply_from_auto_merge_marker() {
+  local state_json="$1" iid="$2" attempt_number="$3" marker marker_path log_dir
+  marker="$(phase6_read_auto_merge_marker \
+    "${state_json}" "${iid}" "${attempt_number}")" || return 1
+  marker_path="$(phase6_auto_merge_marker_path "${iid}" "${attempt_number}")" || return 1
+  log_dir="$(dirname "${marker_path}")"
+  jq -nc \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
+    --arg work_branch "$(jq -r '.source_branch' <<<"${marker}")" \
+    --arg local_branch "issue/${iid}-att$(printf '%03d' "${attempt_number}")" \
+    --arg commit_sha "$(jq -r '.sha' <<<"${marker}")" \
+    --arg merge_request_url "$(jq -r '.web_url' <<<"${marker}")" \
+    --arg mr_action "$(jq -r '.mr_action' <<<"${marker}")" \
+    --arg log_dir "${log_dir}" '{
+      iid:$iid,attempt_number:$attempt_number,status:"done",mode_actual:"",
+      work_branch:$work_branch,local_branch:$local_branch,
+      commit_sha:$commit_sha,merge_request_url:$merge_request_url,
+      mr_action:$mr_action,wiki_url:"",labels_added:[],labels_removed:[],
+      summary_posted:false,block_reason:"",log_dir:$log_dir,block_side:"dispatcher"
+    }'
+}
+
+# Reconcile an automatic-merge result against the exact live GitLab MR.
+# Inputs: $1=current campaign state, $2=normalized compact reply.
+# Output: {reply:<normalized reply>,completion_label:""|"pr"|"finish"|"preserve"}
+phase6_resolve_auto_merge() {
+  local state_json="$1" reply_json="$2"
+  local iid attempt_number pending auto_merge reply_status marker
+  local mr_url work_branch commit_sha target_branch mr_iid mr_action
+  iid="$(jq -r '.iid' <<<"${reply_json}")"
+  attempt_number="$(jq -r '.attempt_number' <<<"${reply_json}")"
+  pending="$(jq -c --argjson iid "${iid}" '.pending_subagents[($iid|tostring)] // {}' <<<"${state_json}")"
+  auto_merge="$(jq -r '.auto_merge // false' <<<"${pending}")"
+  reply_status="$(jq -r '.status' <<<"${reply_json}")"
+
+  if [ "${auto_merge}" != true ]; then
+    jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:""}'
+    return 0
+  fi
+
+  if ! marker="$(phase6_read_auto_merge_marker \
+      "${state_json}" "${iid}" "${attempt_number}")"; then
+    if [ "${reply_status}" = done ] \
+        || [ -n "$(jq -r '.merge_request_url // ""' <<<"${reply_json}")" ]; then
+      reply_json="$(jq -c '
+        .status = "failed"
+        | .block_side = "dispatcher"
+        | .block_reason = "automatic merge could not be verified: the trusted current-attempt MR marker is missing or invalid"
+      ' <<<"${reply_json}")"
+      jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:"preserve"}'
+    else
+      jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:""}'
+    fi
+    return 0
+  fi
+
+  mr_url="$(jq -r '.web_url' <<<"${marker}")"
+  work_branch="$(jq -r '.source_branch' <<<"${marker}")"
+  commit_sha="$(jq -r '.sha' <<<"${marker}")"
+  target_branch="$(jq -r '.target_branch' <<<"${marker}")"
+  mr_iid="$(jq -r '.iid' <<<"${marker}")"
+  mr_action="$(jq -r '.mr_action' <<<"${marker}")"
+
+  # A callback may report outcome, but it may not select or alter the identity
+  # being verified. Every identity field must exactly match the fixed marker.
+  if ! jq -e \
+      --arg mr_url "${mr_url}" \
+      --arg work_branch "${work_branch}" \
+      --arg commit_sha "${commit_sha}" \
+      --arg mr_action "${mr_action}" '
+        .merge_request_url == $mr_url
+        and .work_branch == $work_branch
+        and ((.commit_sha | ascii_downcase) == ($commit_sha | ascii_downcase))
+        and .mr_action == $mr_action
+      ' <<<"${reply_json}" >/dev/null 2>&1; then
+    reply_json="$(jq -c '
+      .status = "failed"
+      | .block_side = "dispatcher"
+      | .block_reason = "automatic merge could not be verified: compact result does not match the trusted current-attempt MR identity"
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:"preserve"}'
+    return 0
+  fi
+
+  local verify_result="" verify_rc=1 verify_valid=false verify_timeout
+  verify_timeout="${PHASE6_MR_VERIFY_TIMEOUT_SECONDS:-120}"
+  if [[ "${verify_timeout}" =~ ^[1-9][0-9]*$ ]] \
+      && [ "${verify_timeout}" -le 600 ] \
+      && command -v timeout >/dev/null 2>&1; then
+    set +e
+    verify_result="$(
+      timeout --kill-after=5s "${verify_timeout}s" env \
+        PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
+        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
+        MERGE_MR_MODE=verify AUTO_MERGE=false \
+        MR_IID="${mr_iid}" MERGE_REQUEST_URL="${mr_url}" \
+        WORK_BRANCH="${work_branch}" MERGE_TARGET_BRANCH="${target_branch}" \
+        COMMIT_SHA="${commit_sha}" \
+        bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/merge_mr.sh" 2>/dev/null
+    )"
+    verify_rc=$?
+    set -e
+  fi
+
+  if [ "${verify_rc}" -eq 0 ] && jq -e \
+      --argjson iid "${mr_iid}" \
+      --arg web_url "${mr_url}" \
+      --arg source_branch "${work_branch}" \
+      --arg target_branch "${target_branch}" \
+      --arg sha "${commit_sha}" '
+        type == "object"
+        and .version == 1
+        and .iid == $iid
+        and .web_url == $web_url
+        and .source_branch == $source_branch
+        and .target_branch == $target_branch
+        and ((.sha | ascii_downcase) == ($sha | ascii_downcase))
+        and (.verified | type == "boolean")
+        and (.outcome == "merged" or .outcome == "opened" or .outcome == "unknown")
+        and (.observed_state | type == "string")
+        and (.reason | type == "string")
+      ' <<<"${verify_result}" >/dev/null 2>&1; then
+    verify_valid=true
+  fi
+
+  if [ "${verify_valid}" = true ] \
+      && jq -e '.verified == true and .outcome == "merged" and .observed_state == "merged"' \
+        <<<"${verify_result}" >/dev/null; then
+    reply_json="$(jq -c '
+      .status = "done"
+      | .block_side = "cc"
+      | .block_reason = ""
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:"finish"}'
+    return 0
+  fi
+
+  if [ "${verify_valid}" = true ] \
+      && jq -e '.verified == true and .outcome == "opened" and .observed_state == "opened"' \
+        <<<"${verify_result}" >/dev/null; then
+    local opened_reason
+    opened_reason="$(jq -r '.reason' <<<"${verify_result}")"
+    reply_json="$(jq -c --arg reason "automatic merge did not complete; exact MR remains opened (${opened_reason})" '
+      .status = "failed"
+      | .block_side = "cc"
+      | .block_reason = $reason
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:"pr"}'
+    return 0
+  fi
+
+  local unknown_reason="verification_unavailable_or_identity_mismatch"
+  if [ "${verify_valid}" = true ]; then
+    unknown_reason="$(jq -r '.reason' <<<"${verify_result}")"
+  elif [ "${verify_rc}" -eq 124 ] || [ "${verify_rc}" -eq 137 ]; then
+    unknown_reason="verification_timeout"
+  fi
+  reply_json="$(jq -c --arg reason "automatic merge state is uncertain; existing issue labels were preserved (${unknown_reason})" '
+    .status = "failed"
+    | .block_side = "dispatcher"
+    | .block_reason = $reason
+  ' <<<"${reply_json}")"
+  jq -nc --argjson reply "${reply_json}" '{reply:$reply,completion_label:"preserve"}'
+}
+
 # Synchronize live workflow labels via set_issue_label.sh.
 # Inputs: $1=iid, $2=final_status (done|blocked|failed|timeout)
 #         $3=block_side (cc|dispatcher, 默认 dispatcher) — selects
 #            blocked-cc/blocked-dispatcher and failed-cc/failed-dispatcher.
+#         $4=completion_label (optional): finish for a server-verified merge,
+#            pr for an automatic merge that is verified still-open, preserve
+#            for uncertain live state, or empty for ordinary status behavior.
 # Returns: 0 on success, non-zero with stderr if any required op fails.
 phase6_sync_labels() {
-  local iid="$1" final_status="$2" block_side="${3:-dispatcher}"
+  local iid="$1" final_status="$2" block_side="${3:-dispatcher}" completion_label="${4:-}"
   case "${block_side}" in cc|dispatcher) ;; *) block_side="dispatcher" ;; esac
   local rc=0
+
+  if [ "${completion_label}" = preserve ]; then
+    return 0
+  fi
+  if [ "${completion_label}" = finish ]; then
+    # set_issue_label.sh performs one GitLab label update that adds `finish`
+    # while removing every conflicting workflow label. Never remove `pr` or
+    # `done` first: if the single add/update fails, the last stable completion
+    # label must remain visible until the durable Phase 6 retry succeeds.
+    _label_op "${iid}" add finish
+    return $?
+  fi
+  if [ "${completion_label}" = pr ]; then
+    # Same atomic-transition rule as `finish` above.
+    _label_op "${iid}" add pr
+    return $?
+  fi
   case "${final_status}" in
     done)
       # C: pr 替换 done —— 终态只留 pr。
@@ -1147,14 +1430,30 @@ phase6_decide_cleanup() {
 #   $1 = current state JSON (typically: load_state output already mutated upstream)
 #   $2 = reply JSON (normalized)
 #   $3 = is_launch_synth ("true"|"false")
+#   $4 = trusted completion-label override (optional: "preserve")
 # Output (stdout): one-line JSON envelope:
 #   {"final_status":"...","cleanup":{...},"remaining_pending_count":N,"updated_state":<json>}
 phase6_process() {
   local state_json="$1" reply_json="$2" is_launch_synth="$3"
-  local iid attempt_number reply_status
+  local trusted_completion_override="${4:-}"
+  local iid attempt_number reply_status completion_label=""
+  case "${trusted_completion_override}" in
+    ""|preserve) ;;
+    *) trusted_completion_override="" ;;
+  esac
   iid="$(printf '%s' "${reply_json}" | jq -r '.iid')"
   attempt_number="$(printf '%s' "${reply_json}" | jq -r '.attempt_number')"
   reply_status="$(printf '%s' "${reply_json}" | jq -r '.status')"
+
+  local auto_merge_resolution
+  auto_merge_resolution="$(phase6_resolve_auto_merge "${state_json}" "${reply_json}")"
+  reply_json="$(jq -c '.reply' <<<"${auto_merge_resolution}")"
+  completion_label="$(jq -r '.completion_label' <<<"${auto_merge_resolution}")"
+  if [ -z "${completion_label}" ] \
+      && [ "${trusted_completion_override}" = preserve ]; then
+    completion_label=preserve
+  fi
+  reply_status="$(jq -r '.status' <<<"${reply_json}")"
   local block_side
   block_side="$(printf '%s' "${reply_json}" | jq -r '.block_side // "dispatcher"')"
 
@@ -1169,12 +1468,23 @@ phase6_process() {
   #                 to block_reason and retry the sync best-effort once).
   #   - else      → demote to `blocked` (the historical safety net for
   #                 transient GitLab API failures on done/blocked outcomes).
-  local label_err=""
+  local label_err="" label_retry_pending=false
   local final_status="${reply_status}"
   local _err=""
-  if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" "${block_side}" 2>&1 >/dev/null)"; then
+  if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" "${block_side}" "${completion_label}" 2>&1 >/dev/null)"; then
     label_err="${_err}"
-    if [ "${final_status}" = "timeout" ]; then
+    if [ "${completion_label}" = finish ]; then
+      final_status="blocked"
+      block_side="dispatcher"
+      completion_label=preserve
+      label_retry_pending=true
+      reply_json="$(printf '%s' "${reply_json}" | jq -c \
+        --arg le "phase6 finish label sync failed after verified merge: ${label_err}" '
+        .status = "blocked"
+        | .block_side = "dispatcher"
+        | (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
+      ')"
+    elif [ "${final_status}" = "timeout" ]; then
       reply_json="$(printf '%s' "${reply_json}" | jq -c \
         --arg le "phase6 label sync failed: ${label_err}" '
         (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
@@ -1198,6 +1508,41 @@ phase6_process() {
       # best-effort blocked sync
       phase6_sync_labels "${iid}" blocked "dispatcher" >/dev/null 2>&1 || true
     fi
+  fi
+
+  # A verified merge whose atomic `finish` transition failed is not terminal.
+  # Keep the exact pending claim and durable worker/MR markers intact so the
+  # heartbeat's result/completion reconciliation re-enters Phase 6 and retries
+  # only the live verification + label transition; it must never rerun issue
+  # code, emit a success handoff, or drain the scheduler slot prematurely.
+  if [ "${label_retry_pending}" = true ]; then
+    local retry_cleanup retry_remaining retry_state
+    retry_state="$(jq -c \
+      --argjson iid "${iid}" \
+      --argjson attempt_number "${attempt_number}" '
+      if .pending_subagents[($iid|tostring)] != null then
+        .pending_subagents[($iid|tostring)].finish_label_retry = true
+        | .pending_subagents[($iid|tostring)].finish_label_retry_attempt = $attempt_number
+      else . end
+    ' <<<"${state_json}")"
+    retry_cleanup="$(phase6_decide_cleanup \
+      "${retry_state}" "${iid}" "${final_status}" "${child_session_key}")"
+    retry_remaining="$(printf '%s' "${retry_state}" | jq -r \
+      '.pending_subagents | keys | length')"
+    jq -nc \
+      --arg final_status "${final_status}" \
+      --argjson final_reply "${reply_json}" \
+      --argjson cleanup "${retry_cleanup}" \
+      --argjson remaining_pending_count "${retry_remaining}" \
+      --argjson updated_state "${retry_state}" '{
+        final_status:$final_status,
+        final_reply:$final_reply,
+        cleanup:$cleanup,
+        remaining_pending_count:$remaining_pending_count,
+        updated_state:$updated_state,
+        label_retry_pending:true
+      }'
+    return 0
   fi
 
   # Write per-issue state files (computes new retry_count).
@@ -1231,11 +1576,13 @@ phase6_process() {
 
   jq -nc \
     --arg final_status "${final_status}" \
+    --argjson final_reply "${reply_json}" \
     --argjson cleanup "${cleanup}" \
     --argjson remaining_pending_count "${remaining_pending_count}" \
     --argjson updated_state "${updated_state}" '
     {
       final_status: $final_status,
+      final_reply: $final_reply,
       cleanup: $cleanup,
       remaining_pending_count: $remaining_pending_count,
       updated_state: $updated_state

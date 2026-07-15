@@ -151,6 +151,10 @@ cat >"${FIXTURE_SCRIPTS}/set_issue_label.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s|%s\n' "${ISSUE_IID}" "$*" >>"${TEST_LABEL_LOG}"
+if [ "$*" = "add doing" ] && [ -n "${FAKE_MUTATION_PRESERVE:-}" ]; then
+  printf 'preserve:%s\n' "${FAKE_MUTATION_PRESERVE}"
+  exit 0
+fi
 exit 0
 EOF
 cat >"${FIXTURE_SCRIPTS}/build_prompt.sh" <<'EOF'
@@ -176,10 +180,15 @@ case "$*" in
     exit 97
     ;;
 esac
+if [ -n "${FAKE_LIVE_LABEL:-}" ]; then
+  labels="[\"${FAKE_LIVE_LABEL}\"]"
+fi
 printf '%s\n' "${iid}" >>"${TEST_GLAB_LOG}"
 jq -nc --argjson iid "${iid}" --argjson labels "${labels}" \
+  --arg state "${FAKE_LIVE_STATE:-opened}" \
   '{iid:$iid,title:("Issue " + ($iid|tostring)),description:"body",
-    web_url:("https://gitlab.test/group/project/-/issues/" + ($iid|tostring)),labels:$labels}'
+    web_url:("https://gitlab.test/group/project/-/issues/" + ($iid|tostring)),
+    labels:$labels,state:$state}'
 EOF
 chmod +x "${FIXTURE_SCRIPTS}"/*.sh "${BIN_DIR}/glab"
 
@@ -208,7 +217,7 @@ cp "${STATE_FILE}" "${TEST_ROOT}/state-before-invalid.json"
 
 GRANTS='[
   {"job_id":"job-2","batch_id":"batch-A","snapshot_index":0,"project":"group/project","iid":2,"branch":null,"entry_mode":"auto","force_rerun_pr":false},
-  {"job_id":"job-3","batch_id":"batch-A","snapshot_index":1,"project":"group/project","iid":3,"branch":"release/explicit","entry_mode":"continue","force_rerun_pr":false},
+  {"job_id":"job-3","batch_id":"batch-A","snapshot_index":1,"project":"group/project","iid":3,"branch":"release/explicit","entry_mode":"continue","force_rerun_pr":false,"auto_merge":true,"merge_target_branch":"release/merge"},
   {"job_id":"job-4","batch_id":"batch-B","snapshot_index":0,"project":"group/project","iid":4,"branch":null,"entry_mode":"auto","force_rerun_pr":true},
   {"job_id":"job-5","batch_id":"batch-B","snapshot_index":1,"project":"group/project","iid":5,"branch":null,"entry_mode":"auto","force_rerun_pr":false},
   {"job_id":"job-6","batch_id":"batch-C","snapshot_index":0,"project":"group/project","iid":6,"branch":null,"entry_mode":"auto","force_rerun_pr":true}
@@ -450,6 +459,16 @@ for iid in 2 3 6; do
      grep -Fq 'GITLAB_TOKEN=' "${EXECUTOR_PAYLOAD_PATH}"; then
     fail "private executor payload for IID ${iid} contains a GitLab credential"
   fi
+  if [ "${iid}" -eq 3 ]; then
+    grep -Fq 'AUTO_MERGE=true' "${EXECUTOR_PAYLOAD_PATH}" \
+      || fail "automatic merge intent was not rendered for IID 3"
+    grep -Fq "ISSUE_MODE=continue BRANCH='release/explicit' \\" \
+      "${EXECUTOR_PAYLOAD_PATH}" \
+      || fail "processing branch was not shell quoted in the wrapper command for IID 3"
+    grep -Fq "AUTO_MERGE=true MERGE_TARGET_BRANCH='release/merge' \\" \
+      "${EXECUTOR_PAYLOAD_PATH}" \
+      || fail "automatic merge target was not shell quoted in the wrapper command for IID 3"
+  fi
 done
 
 jq -e '
@@ -457,6 +476,10 @@ jq -e '
   and .pending_subagents["1"].run_id == "old-run"
   and (all(.pending_subagents | to_entries[] | select(.key != "1");
     .value.memberships_source == "scheduler_active_job"))
+  and .pending_subagents["3"].auto_merge == true
+  and .pending_subagents["3"].merge_target_branch == "release/merge"
+  and .pending_subagents["2"].auto_merge == false
+  and .pending_subagents["2"].merge_target_branch == null
   and .issue_iids_whitelist == [1,2,3,4,5,6]
   and .dispatch_owner == (.dispatch_owner | select(.mode == "driven" and .owner_id == "owner-A"))
 ' "${STATE_FILE}" >/dev/null || fail "driven topup pending state froze skips or omitted scheduler membership source"
@@ -510,5 +533,75 @@ printf '%s' "${REPLAY}" | jq -e '
 ' >/dev/null || fail "same grants replay must retain skips without re-preparing pending jobs"
 [ "$(cat "${ALLOC_LOG}")" = $'2\n3\n6' ] \
   || fail "same grants replay allocated existing pending jobs twice"
+
+write_terminal_race_state() {
+  jq -n --arg now "${NOW}" '{
+    project:"project",repo_path:"unused",branch:"main",
+    issue_min_iid:2,issue_max_iid:2,hourly_issue_quota:4,
+    max_runtime_minutes:300,blocked_retry_limit:3,blocked_cooldown_ticks:1,
+    max_concurrent_subagents:4,stuck_after_minutes:332,acpx_timeout_seconds:18000,
+    issue_iids_whitelist:[2],require_labels:[],require_labels_match:"or",
+    tick_seq:8,active_issue_iids:[],active_issue_sessions:[],pending_subagents:{},
+    blocked_at_tick_by_iid:{},unfinished_iids:[2],completed_iids:[],blocked_iids:[],
+    failed_iids:[],timeout_iids:[],campaign_status:"running",
+    quota_launched_this_tick:0,last_reconcile_evidence:null,
+    dispatch_owner:{mode:"driven",owner_id:"owner-A",leased_at:$now},updated_at:$now
+  }' >"${STATE_FILE}"
+  : >"${ALLOC_LOG}"
+  : >"${PREP_LOG}"
+  : >"${LABEL_LOG}"
+  : >"${GLAB_LOG}"
+}
+
+RACE_REQUEST="$(printf '%s' "${VALID_REQUEST}" | jq -c \
+  '.grants |= map(select(.iid == 2))')"
+
+# A finish that becomes visible on the fresh pre-mutation GET drains the grant
+# as a successful skip and never removes a terminal label.
+write_terminal_race_state
+export FAKE_LIVE_LABEL=finish
+LIVE_FINISH_SKIP="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_LIVE_LABEL
+printf '%s' "${LIVE_FINISH_SKIP}" | jq -e '
+  .status == "no_eligible_iids"
+  and .dispatch_entries == []
+  and [.skipped_entries[] | {iid,status,reason}] == [
+    {iid:2,status:"skipped",reason:"pr_without_force_rerun"}
+  ]
+  and .pending_iids == []
+' >/dev/null || fail "live finish race was not drained as a stable skipped grant"
+[ ! -s "${LABEL_LOG}" ] \
+  || fail "live finish race reached workflow-label mutations"
+jq -e '
+  (.pending_subagents | has("2") | not)
+  and (.completed_iids | index(2) != null)
+' "${STATE_FILE}" >/dev/null \
+  || fail "live finish race left a pending placeholder or omitted completion"
+
+# The final add-doing operation performs its own live read.  If finish or pr
+# lands in the smaller window after the GET above, preserve:* must also drain
+# the grant rather than treating exit 0 as a successful transition to doing.
+for preserved_terminal in finish pr; do
+  write_terminal_race_state
+  export FAKE_MUTATION_PRESERVE="${preserved_terminal}"
+  MUTATION_SKIP="$(run_wrapper "${RACE_REQUEST}")"
+  unset FAKE_MUTATION_PRESERVE
+  printf '%s' "${MUTATION_SKIP}" | jq -e '
+    .status == "no_eligible_iids"
+    and .dispatch_entries == []
+    and [.skipped_entries[] | {iid,status,reason}] == [
+      {iid:2,status:"skipped",reason:"pr_without_force_rerun"}
+    ]
+    and .pending_iids == []
+  ' >/dev/null \
+    || fail "mutation-boundary ${preserved_terminal} race was not drained"
+  grep -Fxq '2|add doing' "${LABEL_LOG}" \
+    || fail "mutation-boundary ${preserved_terminal} fixture did not reach add doing"
+  jq -e '
+    (.pending_subagents | has("2") | not)
+    and (.completed_iids | index(2) != null)
+  ' "${STATE_FILE}" >/dev/null \
+    || fail "mutation-boundary ${preserved_terminal} race left pending state"
+done
 
 echo "ok driven topup filters live skips and preserves scheduler job identity"

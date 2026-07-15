@@ -6,11 +6,14 @@
 #   GITLAB_HOST    from glab_auth.sh
 #   PROJECT_URI    URI-encoded "${GROUP}/${PROJECT}"
 #
-# Workflow labels: todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue
+# Workflow labels: todo retry new doing done pr finish blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue
 # Orthogonal: model:<tier> (created from trigger model_tiers; persistent), quality:low (one-shot soft signal)
+# `pr` is the stable completion state for an MR awaiting human action. `finish`
+# is the mutually exclusive stable state used only after an explicitly requested
+# automatic merge has been independently verified at the expected MR and SHA.
 #
 # `continue` is a human-applied review label. Reviewers set it on an issue
-# whose MR was created and labeled `done` + `pr` by the agent, but where the
+# whose MR was created and labeled `pr` by the agent, but where the
 # Claude Code run actually didn't finish (env error, partial edits, etc.).
 # When the dispatcher's reconciliation sees `continue` on an issue, it
 # re-enqueues the IID and the executor restarts the resolution flow on
@@ -30,7 +33,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${GITLAB_HOST:?}" "${PROJECT_URI:?}"
 
-REQUIRED_LABELS=(todo retry new doing pr done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue quality:low)
+REQUIRED_LABELS=(todo retry new doing pr finish done blocked-cc blocked-dispatcher failed-cc failed-dispatcher timeout continue quality:low)
 
 # model:{tier} 档位标签按 trigger model_tiers 动态创建（缺省=不创建，特性关）。
 if [ -n "${MODEL_TIERS:-}" ]; then

@@ -154,22 +154,29 @@ iid_min=<positive integer; range only>
 iid_max=<positive integer; range only>
 label=<exact label; open_label only>
 force_rerun_pr=true|false
+auto_merge=true|false
 dispatcher_callback_target=<non-empty req_dispatcher target>
 callback_nonce=<64 lowercase hexadecimal characters>
-branch=<optional target branch>
+branch=<optional processing base branch>
+merge_target_branch=<optional MR target branch; required when auto_merge=true>
 ```
 
 Exactly one selector shape is allowed. `iid_list` selects the exact canonical
 IID set supplied in `iids`. Every selector is restricted to OPEN issues.
-`open_unfinished` excludes `pr`, `timeout`, `blocked`, `blocked-*`,
+`open_unfinished` excludes `pr`, `finish`, `timeout`, `blocked`, `blocked-*`,
 `failed`, and `failed-*` from the frozen snapshot. `open_label` matches the
 requested label exactly and does not apply those snapshot exclusions. Live
-preflight still skips an issue carrying `pr` unless `force_rerun_pr=true`; a
+preflight still skips an issue carrying `pr` or `finish` unless `force_rerun_pr=true`; a
 closed issue is always skipped. The executor uses the GitLab GraphQL cursor
 connection, rejects duplicate IIDs and unsafe/non-advancing or over-budget
 cursors, and freezes the matching IID snapshot only after two consecutive full
 scans normalize to the same result. Persistent movement fails closed, and later
 matching issues are not added.
+
+`auto_merge=true` is accepted only with an exact `merge_target_branch`. The
+scheduler persists and compares both fields as part of physical-job intent, so
+conflicting merge policies cannot attach to the same running Issue. Legacy
+requests and scheduler records missing the fields normalize to `false/null`.
 
 `batch_id` is idempotent: the same canonical request replays the existing
 batch, while the same ID with different bytes fails closed. The external I1

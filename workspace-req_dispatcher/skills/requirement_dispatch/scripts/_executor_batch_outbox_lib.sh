@@ -105,6 +105,14 @@ load_executor_batch_outbox_locked() {
           and (keys | sort) == ["label","type"]
           and (.label | printable))
       );
+    if type == "object" and ((.requests | type) == "array") then
+      .requests |= map(
+        if type == "object" then
+          (if has("auto_merge") then . else .auto_merge = false end
+          | if has("merge_target_branch") then . else .merge_target_branch = null end)
+        else . end)
+    else . end
+    |
     if type == "object"
       and (keys | sort) == ["requests","version"]
       and .version == 1
@@ -113,16 +121,16 @@ load_executor_batch_outbox_locked() {
         type == "object"
         and (
           (keys | sort) == [
-            "accepted_at","attempts","batch_id","correlation_id","created_at",
+            "accepted_at","attempts","auto_merge","batch_id","correlation_id","created_at",
             "executor_agent","force_rerun_pr","last_attempt_at","last_error",
-            "matched_count","origin","payload","project","received_at",
+            "matched_count","merge_target_branch","origin","payload","project","received_at",
             "request_digest","scheduler_status","selector","snapshot_digest","status",
             "target_branch","updated_at"
           ]
           or (keys | sort) == [
-            "accepted_at","attempts","batch_id","callback_nonce","correlation_id",
+            "accepted_at","attempts","auto_merge","batch_id","callback_nonce","correlation_id",
             "created_at","executor_agent","force_rerun_pr","last_attempt_at",
-            "last_error","matched_count","origin","payload","project","received_at",
+            "last_error","matched_count","merge_target_branch","origin","payload","project","received_at",
             "request_digest","scheduler_status","selector","snapshot_digest","status",
             "target_branch","updated_at"
           ]
@@ -132,12 +140,23 @@ load_executor_batch_outbox_locked() {
         and (.project | printable and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
         and (.selector | valid_selector)
         and (.force_rerun_pr | type == "boolean")
+        and (.auto_merge | type == "boolean")
         and (.target_branch | nullable_printable)
+        and (.merge_target_branch | nullable_printable)
+        and (.auto_merge == false or (.merge_target_branch | printable))
         and (.executor_agent | printable)
         and ((has("callback_nonce") | not)
           or (.callback_nonce | type == "string" and test("^[0-9a-f]{64}$")))
         and (.origin | valid_origin)
         and (.payload | multiline_printable and startswith("RUN_DRIVEN_ISSUE_BATCH\n"))
+        and (. as $request
+          | ($request.payload | split("\n")) as $lines
+          | (($lines | index("auto_merge=" + ($request.auto_merge|tostring))) != null
+            or ($request.auto_merge == false
+              and ($lines | map(select(startswith("auto_merge="))) | length) == 0))
+          and (if $request.merge_target_branch == null then true
+            else ($lines | index("merge_target_branch=" + $request.merge_target_branch)) != null
+            end))
         and (if has("callback_nonce") then . as $request
           | ($request.payload | split("\n")
             | index("executor_agent=" + $request.executor_agent) != null)

@@ -1700,17 +1700,41 @@ cat >"${FOLLOWUP_SCRIPTS}/reconcile.sh" <<'EOF'
 set -euo pipefail
 evidence="${DISPATCHER_LOG_DIR}/reconcile-20260711T000000Z.json"
 jq -cn --argjson iid "${MIN_IID:?}" \
-  --argjson completed "${RECONCILE_LIVE_COMPLETED:-false}" '[{
+  --argjson completed "${RECONCILE_LIVE_COMPLETED:-false}" \
+  --argjson finish "${RECONCILE_LIVE_FINISH:-false}" '[{
   iid:$iid,
   is_closed_on_gitlab:$completed,
-  is_done_on_gitlab:false,
-  has_done_pr:$completed
+  is_done_on_gitlab:($completed or $finish),
+  has_done_pr:$completed,
+  has_finish:$finish,
+  labels:(if $finish then ["finish"] else [] end)
 }]' >"${evidence}"
 printf '%s\n' "${evidence}"
 EOF
 cat >"${FOLLOWUP_SCRIPTS}/set_issue_label.sh" <<'EOF'
 #!/usr/bin/env bash
+printf '%s:%s\n' "$1" "$2" >>"${FOLLOWUP_LABEL_LOG:?}"
+if [ "${FOLLOWUP_FAIL_FINISH:-false}" = true ] \
+    && [ "$1" = add ] && [ "$2" = finish ]; then
+  exit 73
+fi
 exit 0
+EOF
+cat >"${FOLLOWUP_SCRIPTS}/merge_mr.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${MERGE_MR_MODE:?}" = verify ]
+jq -cn \
+  --argjson iid "${MR_IID}" \
+  --arg web_url "${MERGE_REQUEST_URL}" \
+  --arg source_branch "${WORK_BRANCH}" \
+  --arg target_branch "${MERGE_TARGET_BRANCH}" \
+  --arg sha "${COMMIT_SHA}" '{
+    version:1,iid:$iid,web_url:$web_url,
+    source_branch:$source_branch,target_branch:$target_branch,sha:$sha,
+    observed_state:"merged",outcome:"merged",verified:true,
+    merge_attempted:false,merge_api_succeeded:false,reason:"verified_merged"
+  }'
 EOF
 cat >"${FOLLOWUP_SCRIPTS}/notify_dispatcher.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -1722,6 +1746,9 @@ cat >"${FOLLOWUP_SCRIPTS}/post_result_note.sh" <<'EOF'
 exit 0
 EOF
 chmod +x "${FOLLOWUP_SCRIPTS}"/*.sh
+FOLLOWUP_LABEL_LOG="${FOLLOWUP_ROOT}/labels.log"
+export FOLLOWUP_LABEL_LOG
+: >"${FOLLOWUP_LABEL_LOG}"
 
 FOLLOWUP_STATE="${FOLLOWUP_REPO}/.req_executor/_dispatcher/campaign_state.json"
 FOLLOWUP_LOCK="${FOLLOWUP_REPO}/.req_executor/_dispatcher/campaign.lock"
@@ -1764,6 +1791,21 @@ jq -cnS '{
 }' >"${FOLLOWUP_STATE}"
 cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/campaign-state-baseline.json"
 : >"${FOLLOWUP_IMPORT_LOG}"
+
+write_followup_auto_merge_marker() {
+  local marker_dir="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/attempt-001"
+  mkdir -p "${marker_dir}"
+  jq -cn '{
+    version:1,iid:9,
+    web_url:"https://gitlab.example/group/repo/-/merge_requests/9",
+    source_branch:"issue/42",target_branch:"release",
+    sha:"0123456789abcdef0123456789abcdef01234567",
+    observed_state:"merged",outcome:"merged",verified:true,
+    merge_attempted:true,merge_api_succeeded:true,reason:"verified_merged",
+    mr_action:"created",issue_iid:42,attempt_number:1,auto_merge:true
+  }' >"${marker_dir}/mr_result.json"
+  chmod 600 "${marker_dir}/mr_result.json"
+}
 
 FAKE_IMPORTER="${FOLLOWUP_ROOT}/fake-importer.sh"
 cat >"${FAKE_IMPORTER}" <<'EOF'
@@ -1965,6 +2007,301 @@ jq -e '(.pending_subagents | has("42") | not) and .timeout_iids == [42]' \
 if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
   mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
     "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs-timeout"
+fi
+
+# The proactive marker probe can overlap create_mr.sh after it has persisted
+# exact identity but before its bounded merge helper returns. That initial
+# marker is not a terminal opened/merged observation and must stay pending.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"] += {
+  auto_merge:true,
+  merge_target_branch:"release"
+}' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.marker-pending"
+mv "${FOLLOWUP_STATE}.marker-pending" "${FOLLOWUP_STATE}"
+write_followup_auto_merge_marker
+PENDING_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/attempt-001/mr_result.json"
+jq '.verified=false
+  | .outcome="unknown"
+  | .observed_state="unknown"
+  | .merge_attempted=false
+  | .merge_api_succeeded=false
+  | .reason="exact_mr_verification_pending"' \
+  "${PENDING_MARKER}" >"${PENDING_MARKER}.pending"
+chmod 600 "${PENDING_MARKER}.pending"
+mv "${PENDING_MARKER}.pending" "${PENDING_MARKER}"
+cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-marker-pending.json"
+: >"${FOLLOWUP_LABEL_LOG}"
+marker_pending_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_MARKER_RECONCILE=1 \
+  DRIVEN_RECONCILE_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_RECONCILE_CLAIM_GENERATION=1 \
+  DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "marker_not_ready" and .iid == 42' \
+  <<<"${marker_pending_out}" >/dev/null \
+  || fail "optimistic marker reconcile classified an in-progress marker"
+cmp -s "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-marker-pending.json" \
+  || fail "in-progress marker reconcile mutated pending state"
+[ ! -s "${FOLLOWUP_LABEL_LOG}" ] \
+  || fail "in-progress marker reconcile changed workflow labels"
+
+# A wrapper may be killed after GitLab merged a non-default-target MR but before
+# worker_result.json was written. Such a merge need not close the Issue, so the
+# due timeout path must recover the private current-attempt marker, independently
+# verify the exact MR, add finish, and emit done instead of synthesizing timeout.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"] += {
+  auto_merge:true,
+  merge_target_branch:"release"
+}' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.auto-merge"
+mv "${FOLLOWUP_STATE}.auto-merge" "${FOLLOWUP_STATE}"
+write_followup_auto_merge_marker
+: >"${FOLLOWUP_IMPORT_LOG}"
+: >"${FOLLOWUP_LABEL_LOG}"
+marker_timeout_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_TIMEOUT_RECONCILE=1 \
+  DRIVEN_TIMEOUT_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_TIMEOUT_CLAIM_GENERATION=1 \
+  DRIVEN_TIMEOUT_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  DRIVEN_TIMEOUT_NOW_EPOCH=2000000000 \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=done EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "done"
+  and .merge_request_url == "https://gitlab.example/group/repo/-/merge_requests/9"
+' <<<"${marker_timeout_out}" >/dev/null \
+  || fail "timeout reconcile did not recover a merged current-attempt marker"
+[ "$(cat "${FOLLOWUP_LABEL_LOG}")" = 'add:finish' ] \
+  || fail "marker recovery did not perform one atomic finish transition"
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .completed_iids == [42]
+  and .timeout_iids == []
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "marker recovery was classified as timeout or left pending"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven-handoffs-marker-timeout"
+fi
+
+# A platform-generated failed/killed callback can race after the fixed wrapper
+# has already persisted the exact current-attempt MR marker. Even without a
+# prior finish-label failure flag, the callback must enter the same independent
+# MR verification path and converge the merged result instead of downgrading it.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"] += {
+  auto_merge:true,
+  merge_target_branch:"release"
+}' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.post-merge-kill"
+mv "${FOLLOWUP_STATE}.post-merge-kill" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
+: >"${FOLLOWUP_LABEL_LOG}"
+post_merge_killed_out="$(printf '%s\n' '{
+  "iid":42,
+  "attempt_number":1,
+  "status":"failed",
+  "block_reason":"platform killed outer task before final compact reply"
+}' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  CALLBACK_RUN_ID=run-42 \
+  CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=done EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "done"
+  and .merge_request_url == "https://gitlab.example/group/repo/-/merge_requests/9"
+' <<<"${post_merge_killed_out}" >/dev/null \
+  || fail "post-merge killed callback downgraded a verified current marker"
+[ "$(cat "${FOLLOWUP_LABEL_LOG}")" = 'add:finish' ] \
+  || fail "post-merge killed recovery did not converge finish atomically"
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .completed_iids == [42]
+  and .failed_iids == []
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "post-merge killed recovery did not complete and drain"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven-handoffs-post-merge-kill"
+fi
+
+# If exact merge verification succeeds but the atomic finish write is
+# transiently unavailable, the claim remains pending with an attempt fence.
+# A later non-empty native killed/failure callback must not downgrade it: the
+# fence recovers the same marker, retries only verification + finish, and then
+# releases the scheduler job.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"] += {
+  auto_merge:true,
+  merge_target_branch:"release"
+}' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.finish-retry"
+mv "${FOLLOWUP_STATE}.finish-retry" "${FOLLOWUP_STATE}"
+write_followup_auto_merge_marker
+: >"${FOLLOWUP_IMPORT_LOG}"
+: >"${FOLLOWUP_LABEL_LOG}"
+finish_retry_blocked_out="$(printf '' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 \
+  DRIVEN_MARKER_RECONCILE=1 \
+  DRIVEN_RECONCILE_JOB_ID='batch-A:snapshot-0' \
+  DRIVEN_RECONCILE_CLAIM_GENERATION=1 \
+  DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${TIMEOUT_TOKEN_SHA}" \
+  FOLLOWUP_FAIL_FINISH=true \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "blocked"
+  and .remaining_pending_iids == [42]
+' <<<"${finish_retry_blocked_out}" >/dev/null \
+  || fail "finish-label failure did not stay pending and retryable"
+jq -e '
+  .pending_subagents["42"].finish_label_retry == true
+  and .pending_subagents["42"].finish_label_retry_attempt == 1
+  and ((.completed_iids // []) | index(42) == null)
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "finish-label failure omitted its current-attempt durable fence"
+[ ! -s "${FOLLOWUP_IMPORT_LOG}" ] \
+  || fail "finish-label failure emitted a terminal scheduler handoff"
+[ "$(cat "${FOLLOWUP_LABEL_LOG}")" = 'add:finish' ] \
+  || fail "finish-label failure performed unexpected label transitions"
+
+: >"${FOLLOWUP_IMPORT_LOG}"
+finish_retry_killed_out="$(printf '%s\n' '{
+  "iid":42,
+  "attempt_number":1,
+  "status":"failed",
+  "block_reason":"native child killed after marker recovery"
+}' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  CALLBACK_RUN_ID=run-42 \
+  CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=done EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled"
+  and .terminal_status == "done"
+  and .merge_request_url == "https://gitlab.example/group/repo/-/merge_requests/9"
+' <<<"${finish_retry_killed_out}" >/dev/null \
+  || fail "current-attempt finish retry was downgraded by a killed callback"
+[ "$(cat "${FOLLOWUP_LABEL_LOG}")" = $'add:finish\nadd:finish' ] \
+  || fail "finish retry did not perform exactly two atomic finish attempts"
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .completed_iids == [42]
+  and .failed_iids == []
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "successful finish retry did not complete and drain the claim"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven-handoffs-finish-retry"
+fi
+
+# A stale retry flag from another attempt is never an override authority for a
+# current callback, even if an old marker remains on disk.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"] += {
+  auto_merge:true,
+  merge_target_branch:"release",
+  finish_label_retry:true,
+  finish_label_retry_attempt:99
+}' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.stale-finish-retry"
+mv "${FOLLOWUP_STATE}.stale-finish-retry" "${FOLLOWUP_STATE}"
+STALE_FENCE_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/attempt-001/mr_result.json"
+mv "${STALE_FENCE_MARKER}" "${STALE_FENCE_MARKER}.held-for-stale-fence-test"
+: >"${FOLLOWUP_IMPORT_LOG}"
+: >"${FOLLOWUP_LABEL_LOG}"
+stale_finish_retry_out="$(printf '%s\n' '{
+  "iid":42,
+  "attempt_number":1,
+  "status":"failed",
+  "block_reason":"current native failure"
+}' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  CALLBACK_RUN_ID=run-42 \
+  CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=failed EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "handled" and .terminal_status == "failed"' \
+  <<<"${stale_finish_retry_out}" >/dev/null \
+  || fail "stale finish retry attempt hijacked the current native callback"
+if grep -Fxq 'add:finish' "${FOLLOWUP_LABEL_LOG}"; then
+  fail "stale finish retry attempt authorized a finish transition"
+fi
+jq -e '
+  (.pending_subagents | has("42") | not)
+  and .failed_iids == [42]
+  and .completed_iids == []
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "stale finish retry attempt prevented current failure classification"
+mv "${STALE_FENCE_MARKER}.held-for-stale-fence-test" "${STALE_FENCE_MARKER}"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven-handoffs-stale-finish-retry"
+fi
+
+# A late ordinary done callback may arrive after a newer automatic flow already
+# placed finish. Fresh reconcile evidence must drain the old callback without
+# invoking the ordinary done->pr transition.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+: >"${FOLLOWUP_IMPORT_LOG}"
+: >"${FOLLOWUP_LABEL_LOG}"
+late_done_out="$(printf '%s\n' '{
+  "iid":42,
+  "attempt_number":1,
+  "status":"done",
+  "merge_request_url":"https://gitlab.example/group/repo/-/merge_requests/8"
+}' | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  CALLBACK_RUN_ID=run-42 \
+  CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
+  RECONCILE_LIVE_FINISH=true \
+  DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
+  EXPECT_HANDOFF_STATUS=done EXPECT_CAMPAIGN_LOCK="${FOLLOWUP_LOCK}" \
+  EXPECT_CAMPAIGN_STATE="${FOLLOWUP_STATE}" \
+  FOLLOWUP_IMPORT_LOG="${FOLLOWUP_IMPORT_LOG}" \
+  FOLLOWUP_NOTIFY_LOG="${FOLLOWUP_NOTIFY_LOG}" \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '.callback_status == "handled" and .terminal_status == "done"' \
+  <<<"${late_done_out}" >/dev/null \
+  || fail "late ordinary done callback was not drained as done"
+[ ! -s "${FOLLOWUP_LABEL_LOG}" ] \
+  || fail "late ordinary done callback downgraded live finish: $(cat "${FOLLOWUP_LABEL_LOG}")"
+if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
+  mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
+    "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven-handoffs-late-finish"
 fi
 
 # A durable worker_result.json is authoritative only when the heartbeat passes

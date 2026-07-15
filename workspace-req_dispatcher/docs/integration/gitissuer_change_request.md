@@ -34,7 +34,8 @@ git_issuer 先用 `glab` 读 #N 的当前 **state（opened/closed）+ 工作态 
 |---|---|---|
 | opened，入口标签未被捞起（`todo`/`new`/`retry`，无 `doing`） | **编辑 issue description = 新需求**（保留现有入口标签）。可附一条变更说明 note。 | 下一轮 attempt 按新 description 重跑（fresh）。 |
 | opened，`doing`（**正在跑**） | 编辑 description = 新需求 + 留一条 reviewer note 写变更要点；并打 **`retry`**（清零 fresh 重跑）或 **`continue`**（在工作分支上续跑）。**不要试图打断当前 attempt**（见 §5）。 | 当前 attempt 先跑完；**下一次** attempt 用新内容；旧 MR 被 req_executor 轮换关闭、建新 MR（`Supersedes !旧`）。 |
-| opened，`pr`（**已完成**，MR 已建） | 编辑 description（可选）+ 留 reviewer note 写变更要点 + 打 **`continue`**。 | continue 模式续跑，req_executor 把 reviewer note 注入 prompt。 |
+| opened，`pr`（**已完成**，MR 已建、等待人工处理） | 编辑 description（可选）+ 留 reviewer note 写变更要点 + 打 **`continue`**。 | continue 模式续跑，req_executor 把 reviewer note 注入 prompt。 |
+| opened，`finish`（**已完成且自动合并已验证**） | 不把旧 Issue 重新标成 `continue`；若仍有实质变更，按 supersede 新建 Issue。 | 保留已合并事实和 `finish` 终态，新 Issue 独立处理。 |
 | opened，`blocked-*`/`failed-*`/`timeout` | 编辑 description = 新需求 + 留 note + 打 **`retry`**。 | 清零重跑。 |
 | **撤销整个需求** | `glab issue close`（note 写撤销原因）。 | req_executor 把 `closed` 当**硬终态跳过**，永不再排。 |
 | 变更**太大 ≈ 新需求** | 关旧 #N（note 写"被 #N' 取代"）+ **新建 #N'**（带入口标签，走创建流程）。 | req_executor 处理 #N'。 |
@@ -45,9 +46,9 @@ git_issuer 先用 `glab` 读 #N 的当前 **state（opened/closed）+ 工作态 
 
 git_issuer 在变更场景里**扮演 human reviewer**，所以可以打 req_executor 的人工 review 标签。但只能用下面这套，且只能碰指定的几个：
 
-- **工作态标签（互斥）**：`todo` `new` `retry` `continue` `doing` `done`(瞬态) `pr` `blocked-cc` `blocked-dispatcher` `failed-cc` `failed-dispatcher` `timeout`。
+- **工作态标签（互斥）**：`todo` `new` `retry` `continue` `doing` `done`(瞬态) `pr` `finish` `blocked-cc` `blocked-dispatcher` `failed-cc` `failed-dispatcher` `timeout`。`pr` 表示 MR 已建、等待人工处理；`finish` 只表示用户显式要求的自动合并已由 req_executor 按精确 MR 身份、目标分支和 SHA 验证成功。
 - git_issuer **只允许打** `retry`（fresh 重置重跑）或 `continue`（续跑）——这俩是 req_executor 约定的 human review 重跑信号（req_executor 自己从不打它们）。
-- git_issuer **绝不能打** `doing`/`done`/`pr`/`blocked-*`/`failed-*`/`timeout`——那些是 req_executor 自己的状态机，外部插手会破坏一致性。
+- git_issuer **绝不能打** `doing`/`done`/`pr`/`finish`/`blocked-*`/`failed-*`/`timeout`——那些是 req_executor 自己的状态机，外部插手会破坏一致性，尤其不能用 `finish` 冒充已经验证的合并。
 - **撤销**用 `glab issue close`（不是打标签）。
 - **不要动** req_executor 的正交标签 `model:*` / `quality:low`，也不要动用户的 priority/severity 等业务标签。
 - 打标签务必用**定向 add/remove**（保留其它非工作态标签），不要整组覆盖 `labels=`。
@@ -55,7 +56,7 @@ git_issuer 在变更场景里**扮演 human reviewer**，所以可以打 req_exe
 ## 5. 安全边界（务必遵守）
 
 1. **"正在跑（`doing`）"改不了当前这次 attempt**：req_executor 在 attempt 开始时一次性渲染 prompt、`acpx claude exec` 是 one-shot。变更只在**下一次** attempt 生效。git_issuer **不要**尝试 kill 正在跑的子代理——req_executor 没有对外的"中途取消"流程（只有 stuck 驱逐和终态 kill）。若确需"立刻掐断正在跑的"，那是 **req_executor 侧的新能力**，不在本流程。
-2. **git_issuer 只动 issue**（description / note / `retry`\|`continue` / `close` / 新建），**绝不 merge MR、绝不 close MR、绝不删历史**——MR 由 req_executor 轮换、由人合并。
+2. **git_issuer 只动 issue**（description / note / `retry`\|`continue` / `close` / 新建），**绝不 merge MR、绝不 close MR、绝不删历史**——MR 由 req_executor 轮换；普通请求由人合并，用户明确要求自动合并时由 req_executor 按精确 SHA 验证后执行。
 3. **幂等**：同一 #N 短时间多次变更，以"最新一条"为准。重复编辑 description 没问题；重复打 `retry`/`continue` 无害，但避免无意义抖动。
 4. **project 解析失败 / #N 不存在 / #N 已 closed**：按失败回传（见 §7），不臆造、不自动新建（除非用户明确要 supersede）。
 
@@ -101,7 +102,7 @@ supersede（关旧 312、新建 318）：
 - [ ] 入参意图识别：CREATE vs CHANGE（从文本解析 `#N`/URL）。
 - [ ] 读 #N 当前 state + 工作态 label（`glab`）。
 - [ ] 按 §3 状态表选操作（编辑 description / 加 note / 打 `retry`\|`continue` / `close` / supersede 新建）。
-- [ ] 严格遵守 §4 label 语义：只打 `retry`/`continue`，绝不碰 `doing`/`done`/`pr`/`blocked*`/`failed*`/`model:*`/`quality:low`；用定向 add/remove。
+- [ ] 严格遵守 §4 label 语义：只打 `retry`/`continue`，绝不碰 `doing`/`done`/`pr`/`finish`/`blocked*`/`failed*`/`model:*`/`quality:low`；用定向 add/remove。
 - [ ] 权威需求写进 **description**（fresh 重跑只认 description；评论仅 continue 模式注入）。
 - [ ] 遵守 §5 边界：不打断正在跑的 attempt、不碰 MR、幂等。
 - [ ] 创建流程的**用户通知带 `#N` + URL**（支撑关联方案 A）。
@@ -115,4 +116,4 @@ supersede（关旧 312、新建 318）：
 | 114 bot | 透传变更文本；（方案 B）补 `#N` 引用 |
 | **req_dispatcher** | **不变**：仍纯透传 + 记 pending(run_id) + 回调 drain |
 | **git_issuer** | **新增**：识别变更意图 → 按 #N 状态 编辑/打标签/关闭/supersede → 回调带 `action` |
-| req_executor | **不变**：靠既有 `retry`/`continue`/`closed` + 重读 description + MR 轮换自动重跑收尾 |
+| req_executor | **不变**：靠既有 `retry`/`continue`/`closed` + 重读 description + MR 轮换自动重跑收尾；普通请求停在 `pr`，显式自动合并经精确验证后进入 `finish` |

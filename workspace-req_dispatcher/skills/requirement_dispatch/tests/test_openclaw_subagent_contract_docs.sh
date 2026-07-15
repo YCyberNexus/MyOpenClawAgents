@@ -49,8 +49,12 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-15.3' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-15.4' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
+grep -Fq '完整原请求逐字保留' "${SKILL_DIR}/SKILL.md" \
+  || fail "create_and_execute must preserve the complete original request"
+grep -Fq '否则会丢失“完成后直接合并”及其否定语义' "${SKILL_DIR}/SKILL.md" \
+  || fail "create_and_execute must document automatic-merge intent preservation"
 grep -Fq '/timeout-executor <时长>' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must route runtime acpx timeout commands"
 if grep -Eq '/(acpx-timeout|executor-timeout)' "${SKILL_DIR}/SKILL.md"; then

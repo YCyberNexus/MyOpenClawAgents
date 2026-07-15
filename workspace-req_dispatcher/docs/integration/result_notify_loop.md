@@ -6,9 +6,9 @@
 
 ## 1. 目标
 
-issue #N 被 req_executor 处理到终态（`pr` 成功 / `failed-*` / `timeout`）后，通知**当初发起该需求的企微用户**，而不只是把 issue 建出来就断了。
+issue #N 被 req_executor 处理到终态（`pr` 普通成功 / `finish` 自动合并成功 / `failed-*` / `timeout`）后，通知**当初发起该需求的企微用户**，而不只是把 issue 建出来就断了。
 
-> 词表提示：`pr` / `failed-*` / `timeout` 是 req_executor **内部 GitLab 标签**（req_executor 据此判终态）；对外回报的 req_result note 把它映射成 `status` ∈ `done` / `failed` / `timeout`（114 读的是这个，**不是**标签）。下文 §3/§5/§7 一致按 `status` 描述。
+> 词表提示：`pr` / `finish` / `failed-*` / `timeout` 是 req_executor **内部 GitLab 标签**（req_executor 据此判终态）；其中 `pr` 与 `finish` 对外都映射为 req_result note 的 `status=done`，其余映射为 `failed` / `timeout`。114 读的是 `status`，**不是**标签；下文 §3/§5/§7 一致按 `status` 描述。
 
 ## 2. 为什么这条闭环不经过 req_dispatcher
 
@@ -23,7 +23,7 @@ issue #N 被 req_executor 处理到终态（`pr` 成功 / `failed-*` / `timeout`
             → req_dispatcher（driven 路径先准备下游消息；cron 旧闭环不消费 dispatcher state）
             → git_issuer（解析 project + origin；建 issue；把 origin 写成隐藏标记 note）
             → GitLab issue #N（带执行器入口标签 + req_origin 标记 note）
-            → req_executor cron 捞起 → 跑测试 → 终态(pr/failed-*/timeout)
+            → req_executor cron 捞起 → 跑测试 → 终态(pr/finish/failed-*/timeout)
             → req_executor 读 issue 的 req_origin 标记 → 通过 channel 通知该 origin
             → 114 接收 → 投递结果给那个企微用户
 ```
@@ -36,7 +36,7 @@ issue #N 被 req_executor 处理到终态（`pr` 成功 / `failed-*` / `timeout`
 3. **git_issuer（创建流程新增一步）**：从文本解析出 origin（和解析 project 一样）；建好 issue 后，把 origin 以**隐藏标记 note** 写到 issue 上（§4）。**不要写进 description**——description 是给 Claude Code 读的需求正文，混入元数据会污染它。
 4. **req_executor（新增能力，在 `workspace-req_executor`）**：Phase 6 到达终态时，读 issue 的 `req_origin` 标记（req_executor 本就用 `glab` 读 issue notes / G1b），把结果回报出去。
    - ⚠️ **事实纠正（历史背景）**：该能力是**从零新增**，不是"复用既有基建"——执行器骨架（acpx_auto_tester 原版）当时并无任何 notify 实现（`SOUL.md`/`CLAUDE.md` 里的 "optional notify_channel" 只是字面提法，`scripts/` 里 grep `notify` 为空），req_executor 这份实现是随整份复制带过来的。
-   - **选定机制 = option A（发 `req_result` note + 114 轮询）**：req_executor 在 issue 上用 G9 发一条结构化 note `<!-- req_result v1 {"iid":N,"status":"done|failed|timeout","attempt":K,"mr_url":...,"wiki_url":...,"reason":...,"ts":"...","origin":{...}} -->`，由 114 轮询/webhook 拿到再投递给企微用户。纯 glab、req_executor 侧零待对齐、不依赖任何跨区 push 原语。完整字段以 §7（与 `post_result_note.sh` writer 同源）为准——`status` 是 note 自带的 `done|failed|timeout`，**不是** GitLab 标签 `pr`/`failed-*`。
+   - **选定机制 = option A（发 `req_result` note + 114 轮询）**：req_executor 在 issue 上用 G9 发一条结构化 note `<!-- req_result v1 {"iid":N,"status":"done|failed|timeout","attempt":K,"mr_url":...,"wiki_url":...,"reason":...,"ts":"...","origin":{...}} -->`，由 114 轮询/webhook 拿到再投递给企微用户。纯 glab、req_executor 侧零待对齐、不依赖任何跨区 push 原语。完整字段以 §7（与 `post_result_note.sh` writer 同源）为准——`status` 是 note 自带的 `done|failed|timeout`，**不是** GitLab 标签 `pr`/`finish`/`failed-*`。
    - **终态触发集**：req_executor 的 `final_status ∈ {done, failed, timeout}` 才发（`done`=成功、`failed`=终态失败、`timeout`）；**`blocked` 不发**（可重试态，否则每次 attempt 刷屏）。
    - **落地形态**：`post_result_note.sh`（G1b 读 `req_origin` → G9 发 `req_result`），在 `dispatch_followup.sh` 终态处 best-effort 调用（`set +e` 隔离，绝不污染 stdout/打断 Phase 6），用 trigger 开关 `result_note_enabled`（默认 off）门控，现有部署不受影响。
 
@@ -55,7 +55,7 @@ git_issuer 在 issue 上发一条隐藏标记 note（仿 req_executor 自己的 
 
 ## 5. 通知内容（114 读 req_result note → origin，文案待对齐）
 
-114 按 **req_result note 的 `status` 字段**（`done`/`failed`/`timeout`，见 §3/§7）选文案，**不是**按 GitLab 标签 `pr`/`failed-*`——后者是 req_executor 内部的 issue 标签，从不出现在 note 里，114 也读不到：
+114 按 **req_result note 的 `status` 字段**（`done`/`failed`/`timeout`，见 §3/§7）选文案，**不是**按 GitLab 标签 `pr`/`finish`/`failed-*`——后者是 req_executor 内部的 issue 标签，从不出现在 note 里，114 也读不到：
 
 - 成功（`status=done`）：`#N 测试完成，MR：<mr_url>`
 - 失败（`status=failed`）：`#N 测试未通过：<reason 摘要>，证据见 <wiki_url>`

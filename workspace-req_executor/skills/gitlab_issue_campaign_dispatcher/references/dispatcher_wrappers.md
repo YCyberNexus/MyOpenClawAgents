@@ -67,12 +67,26 @@ compact JSON is accepted only when the pending record explicitly carries
 
 For scheduler-internal recovery, `dispatch_followup.sh` also accepts a
 token-digest claim fence. Completion-reconcile mode first repeats a narrow
-GitLab read under `campaign.lock`; only live `pr`/closed evidence may atomically
+GitLab read under `campaign.lock`; only live `pr`/`finish`/closed evidence may atomically
 drain pending and persist a claim-bound `skipped` handoff intent. Timeout mode
 keeps the existing running-lease plus project ACPX-deadline backstop. Durable
 result mode accepts one non-empty compact worker result, rechecks the exact
 job/generation/token digest, runs ordinary Phase 6, and returns a kill cleanup
 for the stale native child only after state persistence.
+
+The fixed outer attempt performs the first authorization before Phase 6:
+`merge_mr.sh` uses exact GET, SHA-fenced PUT, and exact GET, then
+`run_executor_attempt.sh` atomically writes `finish` only for the matching
+server-side merged result. Phase 6 does not postpone this first label update;
+it separately gates durable terminal persistence and callback emission with a
+bounded read-only verification of the same MR identity, branches, and SHA.
+
+If the automatic-merge compact result is empty or unavailable, Phase 6 may
+recover identity only from the current attempt's mode-600, regular non-symlink
+`${LOG_DIR}/mr_result.json`, with exact Issue, attempt, canonical source branch,
+frozen merge target, and SHA checks. A marker or callback by itself never
+authorizes `finish` or a successful terminal callback; the independent live
+verification remains mandatory.
 
 ## `run_executor_attempt.sh` and post-acpx recovery
 

@@ -89,9 +89,9 @@ REQUEST_JSON="$(jq -ceS --arg batch_id "${BATCH_ID}" '
     );
   if type == "object"
     and ((keys - [
-      "batch_id","branch","callback_nonce","correlation_id",
+      "auto_merge","batch_id","branch","callback_nonce","correlation_id",
       "dispatcher_callback_target","entry_mode","executor_agent",
-      "force_rerun_pr","project","selector","version"
+      "force_rerun_pr","merge_target_branch","project","selector","version"
     ]) | length == 0)
     and .version == 1
     and .batch_id == $batch_id
@@ -100,6 +100,12 @@ REQUEST_JSON="$(jq -ceS --arg batch_id "${BATCH_ID}" '
       and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
     and (.selector | selector)
     and (.force_rerun_pr | type == "boolean")
+    and ((has("auto_merge") | not) or (.auto_merge | type == "boolean"))
+    and ((has("merge_target_branch") | not)
+      or .merge_target_branch == null
+      or (.merge_target_branch | printable))
+    and (((.auto_merge // false) == false)
+      or ((.merge_target_branch // null) | printable))
     and (.dispatcher_callback_target | printable)
     and (.executor_agent | type == "string"
       and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"))

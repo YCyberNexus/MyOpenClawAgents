@@ -14,6 +14,7 @@ This document is the workspace-wide reference for issue workflow labels. Both ha
 - `doing`
 - `done` — **transient only.** Applied by the subagent in Step 5 after post-push verification and before MR creation. Removed by Step 7 when `pr` is added. `done` and `pr` are never present simultaneously in steady state.
 - `pr` — **stable completion label.** Applied by the subagent in Step 7 immediately after `create_mr.sh` succeeds; replaces `done` (which is removed in the same operation). An issue carrying `pr` is considered complete by the dispatcher.
+- `finish` — **stable merged-completion label.** The fixed outer executor first writes it atomically only after `merge_mr.sh` completes exact GET, SHA-fenced PUT, and exact GET and observes the matching server-side `state=merged`. Phase 6 then performs an independent bounded read-only verification before committing the durable terminal result or emitting a successful callback. `finish` and `pr` are mutually exclusive and both are dispatcher completion signals.
 - `blocked-cc` — subagent/CC-side retryable failure (acpx non-timeout failure, NO_CHANGES, push rejected, post-push steps failed). Partial work may be pushed to `${WORK_BRANCH}` but no MR / `pr` is opened.
 - `blocked-dispatcher` — dispatcher-synthesized retryable failure: prep failed, launch failed after retry exhaustion, scope/stuck eviction, unparseable reply downgrade, or label-sync failure downgrade. No CC run produced output.
 - `failed-cc` — `blocked-cc` promoted after `retry_count > blocked_retry_limit`. Terminal until human relabel.
@@ -39,7 +40,8 @@ When the scheduled trigger supplies `require_labels`, those labels are also trea
                           │                                                │
                           ▼                                                │
    todo/retry/new/continue/blocked-cc/blocked-dispatcher/trigger-label
-             ──► doing ──► done (transient) ──► pr                        │
+             ──► doing ──► done (transient) ──► pr (review)              │
+                                      └──────► finish (verified merge)    │
                 │                                                          │
                 ├──► blocked-cc   ──► doing  (after cooldown)  ────────────┘
                 │      │
@@ -71,10 +73,11 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 
 | From       | To         | Performer  | Trigger                                              | Operations                                                            |
 | ---------- | ---------- | ---------- | ---------------------------------------------------- | --------------------------------------------------------------------- |
-| `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove `todo`, `retry`, `new`, `continue`, `contiune`, `blocked-cc`, `blocked-dispatcher`, `done`, `pr`, `failed-cc`, `failed-dispatcher`, `timeout`, and every matched trigger `require_labels` label; add `doing` |
-| `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `todo`, `continue`, `contiune`, `retry`, `new`, `blocked-cc`, `blocked-dispatcher`, `done`, `pr`, `failed-cc`, `failed-dispatcher`, `timeout`, and every matched trigger `require_labels` label; add `doing` |
+| `todo` / `retry` / `new` / `blocked-cc` / `blocked-dispatcher` / trigger `require_labels` | `doing` | dispatcher | dispatcher begins prep in fresh mode | remove entry/failure/timeout labels and every matched trigger `require_labels` label, but preserve `pr`/`finish` unless the frozen request has `force_rerun_pr=true`; a fresh live `pr`/`finish`/closed observation drains the attempt as skipped instead of adding `doing` |
+| `continue` / `contiune` | `doing` | dispatcher | dispatcher begins prep in continue mode | remove `todo`, `continue`, `contiune`, `retry`, `new`, `blocked-cc`, `blocked-dispatcher`, `done`, `pr`, `finish`, `failed-cc`, `failed-dispatcher`, `timeout`, and every matched trigger `require_labels` label; add `doing` |
 | `doing`    | `done`     | subagent   | branch pushed and post-push verification passed (Step 5) | `set_issue_label.sh remove doing` ; `set_issue_label.sh add done`     |
 | `done`     | `pr`       | subagent   | immediately after MR creation / rotation succeeds (Step 7) — `done` is removed and `pr` is added in its place | `set_issue_label.sh add pr` (which also removes `done`); result: `pr` only, `done` absent |
+| `done`     | `finish`   | fixed outer executor | automatic merge was explicitly requested; `merge_mr.sh` exact GET / SHA-fenced PUT / exact GET observed the matching MR merged at the committed SHA | one atomic `set_issue_label.sh add finish` update removes conflicting `pr`/`done`; Phase 6 later independently re-verifies before terminal persistence and callback |
 | `doing`    | `blocked-cc`  | subagent   | CC-side retryable failure during this run (acpx non-timeout failure, NO_CHANGES, push rejected, post-push steps failed); for acpx failures, committable partial work is first staged, committed, and force-pushed to `${WORK_BRANCH}` when possible, but no MR / `pr` is opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-cc`  |
 | `doing`    | `blocked-dispatcher` | dispatcher | dispatcher-synthesized retryable failure (prep failed, launch failed after retry exhaustion, scope/stuck eviction, unparseable reply downgrade, label-sync failure downgrade); no CC run output | `set_issue_label.sh remove doing` ; `set_issue_label.sh add blocked-dispatcher` |
 | `doing`    | `timeout`  | subagent   | `acpx claude exec` exceeded its wall-clock cap; partial work was committed and force-pushed to `${WORK_BRANCH}` but NO MR / `pr` was opened | `set_issue_label.sh remove doing` ; `set_issue_label.sh add timeout`  |
@@ -89,25 +92,27 @@ All transitions use targeted add/remove calls through `scripts/set_issue_label.s
 
 ## Important rules
 
-1. **`pr` replaces `done`, not adds to it.** `done` is a transient intermediate label applied by the subagent in Step 5 after post-push verification. `pr` is applied in Step 7 after MR creation and removes `done` in the same operation. `done` and `pr` MUST NOT coexist in steady state — an issue in the `pr` state no longer carries `done`.
+1. **`pr` or `finish` replaces `done`.** `done` is transient. Ordinary MR creation ends at `pr`; the fixed outer executor writes `finish` only after its exact server-side GET/PUT/GET verification. `pr`, `finish`, and `done` do not coexist in steady state.
 2. **No attempt Wiki evidence.** req_executor must not publish `prompt.txt`, `claude_result.txt`, or `report.html` to project Wiki pages. `scripts/upload_attempt_artifacts.sh` is kept only as a no-op compatibility shim for already-rendered legacy prompts.
-3. **Dispatcher completion requires `pr` (not `done`).** `done` is transient and will be removed. Reconciliation considers an issue complete when the `pr` label is present (and `continue` is absent). `done` alone is NOT a completion signal.
-4. **Never call `glab mr merge`.** The merge request stays open for human review.
+3. **Dispatcher completion requires `pr`, `finish`, or closed state (not `done`).** `done` alone is NOT a completion signal. `open_unfinished` excludes both stable labels.
+4. **Automatic merge is explicit and fail-closed.** The fixed executor may call the exact MR REST merge endpoint only when `auto_merge=true`, with the expected source SHA. Its exact pre-GET, SHA-fenced PUT, and exact post-GET must observe the matching MR merged before the wrapper atomically writes `finish`. Phase 6 subsequently performs a separate bounded read-only verification before terminal state persistence and callback emission; it does not postpone the first `finish` write. A marker or callback alone never authorizes `finish` or a successful terminal callback. An opened MR stays at `pr`; an unknown state preserves existing labels. Direct free-form `glab mr merge` remains forbidden.
 5. **No full-set label overwrite.** Always use targeted add/remove operations through `set_issue_label.sh` (E4/E5 in `glab_commands.md`). A full overwrite via `labels=...` would wipe manually-applied labels (priority, severity, model tier, quality, etc.) the user may have added.
 6. **Workflow-label exclusivity.** Aside from the transient pairs `done + blocked-cc` and `done + blocked-dispatcher`, an issue should carry at most one work-state label at a time. `set_issue_label.sh add <workflow-label>` removes conflicting workflow labels automatically. `model:{tier}` labels are orthogonal and are NOT removed when a work-state label is added (see §Model tier and quality dimensions below).
 7. **Idempotence.** Adding a label that already exists, or removing one that is absent, is a no-op — it is safe to issue these calls without checking first.
-8. **Dispatcher final synchronization.** Phase 6 re-applies the terminal workflow labels from the compact reply as an idempotent safety net: `done` replies must end with `pr` only (no `done`); `blocked` (CC-side) replies must end with `blocked-cc` and no `doing`; `blocked` (dispatcher-side) must end with `blocked-dispatcher` and no `doing`; promoted `failed-cc` replies must end with `failed-cc` and no `blocked-cc` / `doing`; `failed-dispatcher` must end with `failed-dispatcher` and no `blocked-dispatcher` / `doing`; and `timeout` replies must end with `timeout` and no `doing` / `blocked-cc` / `blocked-dispatcher` / `failed-cc` / `failed-dispatcher`.
+8. **Dispatcher final synchronization.** Phase 6 independently re-verifies requested automatic merges after the fixed outer executor may already have written `finish`: exact merged state preserves or idempotently synchronizes `finish` and permits terminal success; exact opened state keeps `pr` and reports failure; unknown state preserves labels and cannot produce a successful callback. Ordinary `done` replies end with `pr`. Blocked, failed, and timeout synchronization otherwise follows the existing side-specific labels.
+9. **Preparation rechecks stable completion at the mutation boundary.** Reconcile evidence is only a snapshot. Before transition, the dispatcher reads the live Issue again; `set_issue_label.sh add doing` also refuses to overwrite a newly arrived `pr`, `finish`, or closed state. Unless `continue` or `force_rerun_pr=true` explicitly authorizes a rerun, such a race drains the pending placeholder as completed/skipped and never starts an executor attempt.
 9. **`timeout` is never auto-retried.** Unlike `blocked-cc` / `blocked-dispatcher`, a `timeout` IID stays in `timeout_iids` until a human reviewer strips the label, adds `retry`, or applies `continue`. Stripping `timeout` or adding `retry` re-enqueues via the regular `user_reopened` path and runs a fresh reset; `continue` resumes from the existing `${WORK_BRANCH}` when available. The agent does NOT promote `timeout` to `failed`; `retry_count` is NOT consumed.
 
-## Issue closure vs `done` / `pr` labels
+## Issue closure vs `done` / `pr` / `finish` labels
 
-These are distinct signals. The agent controls `done` (transient) and `pr` (stable); GitLab controls issue closure.
+These are distinct signals. The agent controls `done` (transient), `pr` (stable review completion), and server-verified `finish`; GitLab controls issue closure.
 
 | Signal              | Who sets it                         | When                                              | Means                                  |
 | ------------------- | ----------------------------------- | ------------------------------------------------- | -------------------------------------- |
 | `done` label        | the subagent (Step 5)               | immediately after post-push verification, before MR creation / rotation | transient: "agent finished solving; MR creation in progress" |
 | `pr` label          | the subagent (Step 7)               | immediately after `create_mr.sh` returns successfully; simultaneously removes `done` | stable: "the MR exists for human review; issue is complete from the agent's perspective" |
-| issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "a human reviewed, approved, and merged" |
+| `finish` label      | fixed outer executor; Phase 6 later re-verifies | first written atomically after exact GET / SHA-fenced PUT / exact GET observes the matching MR merged; independently checked again before terminal persistence/callback | stable: "the requested automatic merge completed" |
+| issue closed (`state=closed`) | GitLab itself (native auto-close) | when the MR is merged                             | "the linked MR was merged" |
 
 GitLab's native auto-close is triggered by the **closing keyword in the MR description**. `scripts/create_mr.sh` writes the description starting with:
 
@@ -122,7 +127,7 @@ When the MR merges, GitLab parses that line and closes the linked issue automati
 - Project → Settings → Merge requests → "Automatically close referenced merge requests" is enabled.
 - The MR's target branch must match the branch where GitLab auto-close behavior is expected. Auto-close does not fire on unrelated target branches.
 
-**The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). Closing is the human reviewer's prerogative via the merge action; the subagent's job ends when `pr` is present.
+**The agent MUST NOT close the issue itself** (no `glab api ... --method PUT ... -f state_event=close`). GitLab closes it through the MR merge, whether that merge is a human review action or an explicitly requested and server-verified automatic merge.
 
 **Approve vs merge.** GitLab's auto-close fires on **merge**, not approve. If your team uses "approve must precede merge", the practical effect is "issue closes after approve+merge", which is what you want. There is no agent-side support for "close on approve only" — that would require webhook plumbing outside this skill.
 

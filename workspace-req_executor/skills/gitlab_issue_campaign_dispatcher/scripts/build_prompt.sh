@@ -35,6 +35,17 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
   "${REPO_PATH:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${WORK_BRANCH:?}" \
   "${BRANCH:?}"
 
+AUTO_MERGE="${AUTO_MERGE:-false}"
+MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
+case "${AUTO_MERGE}" in
+  true|false) ;;
+  *)
+    echo "build_prompt: AUTO_MERGE must be true or false" >&2
+    exit 2
+    ;;
+esac
+: "${MERGE_TARGET_BRANCH:?build_prompt: MERGE_TARGET_BRANCH or BRANCH must be non-empty}"
+
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
   *)
@@ -159,7 +170,9 @@ EOF
 - Output directory:           ${OUTPUT_DIR} (for standalone deliverables that need to be preserved separately — force-added at commit time. Other source-code changes in the repo commit normally and do NOT need to go under this directory)
 ${SHARED_CONFIG_BLOCK}
 - Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
-- Integration / target branch: ${BRANCH}  (where the merge request will be opened against)
+- Processing base branch:       ${BRANCH}
+- Merge-request target branch:  ${MERGE_TARGET_BRANCH}
+- Completion policy:            $([ "${AUTO_MERGE}" = true ] && echo "merge automatically after exact GitLab verification" || echo "leave the merge request open for review")
 
 EOF
 

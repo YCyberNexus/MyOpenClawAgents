@@ -32,7 +32,11 @@ credentials from the private process/deployment environment, and
 | `{ISSUE_LABELS}` | live label snapshot |
 | `{ISSUE_BODY}` | first approximately 4 KB; full prompt is already on disk |
 | `{ISSUE_MODE}` | `fresh` or `continue` |
-| `{BRANCH}` | resolved merge-request target branch |
+| `{BRANCH}` | resolved processing base branch |
+| `{BRANCH_QUOTED}` | shell-safe single-quoted processing base branch |
+| `{AUTO_MERGE}` | `true` only when the user explicitly requested automatic merge |
+| `{MERGE_TARGET_BRANCH}` | resolved merge-request target branch |
+| `{MERGE_TARGET_BRANCH_QUOTED}` | shell-safe single-quoted merge-request target branch |
 | `{WORK_BRANCH}` | fixed issue branch |
 | `{LOCAL_ATTEMPT_BRANCH}` | attempt-local branch |
 | `{REPO_PATH}` | parent checkout |
@@ -46,8 +50,11 @@ credentials from the private process/deployment environment, and
 | `{ACPX_TIMEOUT_SECONDS}` | inner acpx wall-clock cap |
 | `{ACPX_TIMEOUT_MINUTES}` | floor of the acpx cap in minutes |
 
-`{ISSUE_TITLE_QUOTED}` must be shell quoted. `{ISSUE_BODY}` is context only;
-the complete inner prompt is already at `{LOG_DIR}/prompt.txt`.
+`{ISSUE_TITLE_QUOTED}`, `{BRANCH_QUOTED}`, and
+`{MERGE_TARGET_BRANCH_QUOTED}` must be shell quoted. `{ISSUE_BODY}` is context
+only; the complete inner prompt is already at `{LOG_DIR}/prompt.txt`. The raw
+`{BRANCH}` and `{MERGE_TARGET_BRANCH}` forms are context values inside
+`<config>` only and must never be inserted into a shell command.
 
 ## Rendered Prompt
 
@@ -77,6 +84,8 @@ ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}
 BRANCH={BRANCH}
+AUTO_MERGE={AUTO_MERGE}
+MERGE_TARGET_BRANCH={MERGE_TARGET_BRANCH}
 WORK_BRANCH={WORK_BRANCH}
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}
@@ -107,7 +116,8 @@ Body (first approximately 4 KB; full inner prompt is at {LOG_DIR}/prompt.txt):
      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
      REPO_PATH={REPO_PATH} \
      ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
-     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH} \
+     ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH_QUOTED} \
+     AUTO_MERGE={AUTO_MERGE} MERGE_TARGET_BRANCH={MERGE_TARGET_BRANCH_QUOTED} \
      ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
      bash {SCRIPTS_DIR}/run_executor_attempt.sh
 

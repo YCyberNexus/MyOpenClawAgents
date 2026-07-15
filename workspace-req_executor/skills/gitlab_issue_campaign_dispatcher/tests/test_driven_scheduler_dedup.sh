@@ -26,6 +26,8 @@ create_single_fixture() {
   local iid="$3"
   local branch="$4"
   local force_rerun_pr="$5"
+  local auto_merge="${6:-false}"
+  local merge_target_branch="${7:-}"
   local batch_dir="${SCHEDULER_ROOT}/batches/${batch_id}"
 
   mkdir -p "${batch_dir}"
@@ -35,6 +37,8 @@ create_single_fixture() {
     --arg branch "${branch}" \
     --argjson iid "${iid}" \
     --argjson force_rerun_pr "${force_rerun_pr}" \
+    --argjson auto_merge "${auto_merge}" \
+    --arg merge_target_branch "${merge_target_branch}" \
     '{
       version:1,
       batch_id:$batch_id,
@@ -42,8 +46,10 @@ create_single_fixture() {
       project:$project,
       selector:{type:"single",iid:$iid},
       force_rerun_pr:$force_rerun_pr,
+      auto_merge:$auto_merge,
       dispatcher_callback_target:"agent:req_dispatcher:main",
-      branch:$branch
+      branch:$branch,
+      merge_target_branch:(if $merge_target_branch == "" then null else $merge_target_branch end)
     }' >"${batch_dir}/request.json"
   jq -cnS \
     --arg project "${project}" \
@@ -71,13 +77,15 @@ create_single_fixture() {
 }
 
 # A and C have the same complete physical key and identical intent. D has the
-# same physical key but a different branch, while E proves that equal short
-# repo slugs in different groups remain different physical jobs.
+# same physical key but a different branch, E proves that equal short repo
+# slugs in different groups remain different physical jobs, and AUTO_CONFLICT conflicts
+# with E only by automatic-merge intent.
 create_single_fixture A group/repo 7 main false
 create_single_fixture C group/repo 7 main false
 create_single_fixture D group/repo 7 release false
 create_single_fixture E other/repo 7 main false
-jq '.batch_order = ["A","C","D","E"]' \
+create_single_fixture AUTO_CONFLICT other/repo 7 main false true main
+jq '.batch_order = ["A","C","D","E","AUTO_CONFLICT"]' \
   "${SCHEDULER_ROOT}/scheduler_state.json" \
   >"${SCHEDULER_ROOT}/scheduler_state.next.json"
 mv "${SCHEDULER_ROOT}/scheduler_state.next.json" "${SCHEDULER_ROOT}/scheduler_state.json"
@@ -108,6 +116,10 @@ jq -e --arg job_id "${a_job_id}" '
   .memberships["0"].status == "pending"
   and .memberships["0"].blocked_by_job_id == $job_id
 ' "${SCHEDULER_ROOT}/batches/D/state.json" >/dev/null
+jq -e --arg job_id "${e_job_id}" '
+  .memberships["0"].status == "pending"
+  and .memberships["0"].blocked_by_job_id == $job_id
+' "${SCHEDULER_ROOT}/batches/AUTO_CONFLICT/state.json" >/dev/null
 
 declare -A CLAIM_TOKENS=()
 while IFS= read -r reserved_job_id; do

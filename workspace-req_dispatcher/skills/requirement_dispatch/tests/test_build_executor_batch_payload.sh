@@ -16,6 +16,8 @@ build_payload() {
   CALLBACK_NONCE="${CALLBACK_NONCE}" \
   DISPATCHER_CALLBACK_TARGET="${4:-agent:req_dispatcher:main}" \
   TARGET_BRANCH="${3:-}" \
+  AUTO_MERGE="${5:-false}" \
+  MERGE_TARGET_BRANCH="${6:-}" \
   bash "${BUILDER}"
 }
 
@@ -29,6 +31,7 @@ selector_type=range
 iid_min=100
 iid_max=250
 force_rerun_pr=false
+auto_merge=false
 dispatcher_callback_target=agent:req_dispatcher:main
 callback_nonce=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 branch=release/2026.07'
@@ -36,6 +39,48 @@ branch=release/2026.07'
 if [ "${range_payload}" != "${expected_range}" ]; then
   echo "unexpected range batch payload" >&2
   printf 'expected:\n%s\nactual:\n%s\n' "${expected_range}" "${range_payload}" >&2
+  exit 1
+fi
+
+auto_merge_payload="$(build_payload '{"type":"single","iid":312}' false develop '' true release/2026.07)"
+if ! grep -qx 'branch=develop' <<<"${auto_merge_payload}" || \
+   ! grep -qx 'auto_merge=true' <<<"${auto_merge_payload}" || \
+   ! grep -qx 'merge_target_branch=release/2026.07' <<<"${auto_merge_payload}"; then
+  echo "expected automatic merge fields in batch payload" >&2
+  printf '%s\n' "${auto_merge_payload}" >&2
+  exit 1
+fi
+
+common_branch_payload="$(build_payload '{"type":"single","iid":312}' false feature/foo-1.2 '' true feature/foo-1.2)"
+if ! grep -qx 'branch=feature/foo-1.2' <<<"${common_branch_payload}" || \
+   ! grep -qx 'merge_target_branch=feature/foo-1.2' <<<"${common_branch_payload}"; then
+  echo "expected common slash, dash, and dot branch characters to remain valid" >&2
+  printf '%s\n' "${common_branch_payload}" >&2
+  exit 1
+fi
+
+for unsafe_branch in \
+  'feature/`id`' \
+  "feature/'quote" \
+  'feature/"quote' \
+  'feature/<redirect' \
+  'feature/>redirect' \
+  'feature/!history'
+do
+  if build_payload '{"type":"single","iid":312}' false "${unsafe_branch}" \
+      >/dev/null 2>&1; then
+    echo "expected unsafe base branch to fail: ${unsafe_branch}" >&2
+    exit 1
+  fi
+  if build_payload '{"type":"single","iid":312}' false develop '' true \
+      "${unsafe_branch}" >/dev/null 2>&1; then
+    echo "expected unsafe merge target branch to fail: ${unsafe_branch}" >&2
+    exit 1
+  fi
+done
+
+if build_payload '{"type":"single","iid":312}' false develop '' true '' >/dev/null 2>&1; then
+  echo "expected automatic merge without a merge target to fail" >&2
   exit 1
 fi
 

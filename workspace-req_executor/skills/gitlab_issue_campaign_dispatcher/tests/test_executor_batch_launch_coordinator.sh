@@ -405,7 +405,7 @@ write_real_scheduler_job() {
   jq -cnS '{
     version:1,batch_id:"A",correlation_id:"correlation-A",
     project:"group/repo",selector:{type:"single",iid:42},
-    force_rerun_pr:false,
+    force_rerun_pr:false,auto_merge:false,merge_target_branch:null,
     dispatcher_callback_target:"agent:req_dispatcher:main",branch:null
   }' >"${SCHEDULER_ROOT}/batches/A/request.json"
   jq -cnS '{version:1,project:"group/repo",iids:[42]}' \
@@ -427,7 +427,8 @@ write_real_scheduler_job() {
     version:1,round_robin_cursor:null,batch_order:["A"],
     active_jobs:{($job_id):{
       job_id:$job_id,physical_key:"group/repo#42",project:"group/repo",iid:42,
-      branch:null,entry_mode:"auto",force_rerun_pr:false,status:"preparing",
+      branch:null,entry_mode:"auto",force_rerun_pr:false,
+      auto_merge:false,merge_target_branch:null,status:"preparing",
       reservation_seq:1,claim_generation:$generation,claim_token:$token,
       reserved_at:$now,updated_at:$now,
       owner:{batch_id:"A",snapshot_index:0},
