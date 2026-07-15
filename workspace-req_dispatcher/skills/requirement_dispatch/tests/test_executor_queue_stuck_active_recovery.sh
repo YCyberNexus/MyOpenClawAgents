@@ -54,6 +54,7 @@ jq -n --argjson ts "${old_ts}" \
         correlation_id: "corr-42",
         child_session_key: "child-42",
         spawned_at: $ts,
+        stuck_after_minutes: 1,
         req_digest: "stuck requirement"
       }
     }

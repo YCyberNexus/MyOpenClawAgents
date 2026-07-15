@@ -29,7 +29,11 @@ initial_output="$(printf '/acpx-timeout 1h\n' \
 jq -e '
   . == {
     status:"success",acpx_timeout_seconds:3600,
-    previous_acpx_timeout_seconds:3600,active_count:0,
+    previous_acpx_timeout_seconds:3600,
+    executor_agent_timeout_seconds:7200,
+    exec_tool_timeout_seconds:7500,
+    queue_launch_reclaim_seconds:7800,
+    stuck_after_minutes:150,active_count:0,
     applies_to:"future_attempts"
   }
 ' <<<"${initial_output}" >/dev/null
@@ -40,6 +44,10 @@ jq -e '
   .status == "success"
   and .acpx_timeout_seconds == 5400
   and .previous_acpx_timeout_seconds == 3600
+  and .executor_agent_timeout_seconds == 9000
+  and .exec_tool_timeout_seconds == 9300
+  and .queue_launch_reclaim_seconds == 9600
+  and .stuck_after_minutes == 180
   and .active_count == 0
   and .applies_to == "future_attempts"
 ' <<<"${increase_output}" >/dev/null

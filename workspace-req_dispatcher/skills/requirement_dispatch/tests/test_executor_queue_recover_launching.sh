@@ -49,13 +49,13 @@ bash "${SKILL_DIR}/scripts/enqueue_executor_issue.sh" >/dev/null
 
 queue_file="${STATE_ROOT}/_dispatcher/executor_queue.json"
 tmp="$(mktemp "${TEST_ROOT}/queue.XXXXXX")"
-jq '
+jq --argjson launch_started_at "$(( $(date -u +%s) - 120 ))" '
   .active = (.queue[0] + {
     correlation_id: "reqd-77",
     run_id: "executor-execq-1",
     launch_state: "launching",
     launch_attempts: 1,
-    launch_started_at: 1,
+    launch_started_at: $launch_started_at,
     launched_at: null,
     next_retry_after: null,
     launch_error: null
@@ -64,12 +64,38 @@ jq '
 ' "${queue_file}" >"${tmp}"
 mv "${tmp}" "${queue_file}"
 
+preserved="$(
+  STATE_ROOT="${STATE_ROOT}" \
+  OPENCLAW_BIN="${FAKE_OPENCLAW}" \
+  OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
+  EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
+  EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS="1" \
+  DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
+  bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
+)"
+if [ "$(jq -r '.status' <<<"${preserved}")" != "busy" ] \
+    || [ "$(jq -r '.reason' <<<"${preserved}")" != "launch_in_progress" ]; then
+  echo "expected a pre-upgrade active without a budget snapshot to keep the legacy timeout" >&2
+  printf '%s\n' "${preserved}" >&2
+  exit 1
+fi
+if [ -s "${OPENCLAW_CALL_LOG}" ]; then
+  echo "legacy timeout preservation unexpectedly relaunched the active task" >&2
+  exit 1
+fi
+
+tmp="$(mktemp "${TEST_ROOT}/queue.XXXXXX")"
+jq '.active.launch_reclaim_seconds = 1 | .active.stuck_after_minutes = 1' \
+  "${queue_file}" >"${tmp}"
+mv "${tmp}" "${queue_file}"
+
 drain="$(
   STATE_ROOT="${STATE_ROOT}" \
   OPENCLAW_BIN="${FAKE_OPENCLAW}" \
   OPENCLAW_CALL_LOG="${OPENCLAW_CALL_LOG}" \
   EXECUTOR_AGENT_TIMEOUT_SECONDS="600" \
   EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS="1" \
+  STUCK_AFTER_MINUTES="1" \
   DISPATCHER_CALLBACK_TARGET="agent:req_dispatcher:main" \
   bash "${SKILL_DIR}/scripts/drain_executor_queue.sh"
 )"
@@ -95,7 +121,9 @@ if ! grep -q '^correlation_id=reqd-77$' <<<"${message}"; then
 fi
 
 if [ "$(jq -r '.active.launch_attempts' "${queue_file}")" != "2" ] ||
-   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ]; then
+   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ] ||
+   [ "$(jq -r '.active.launch_reclaim_seconds' "${queue_file}")" != "1" ] ||
+   [ "$(jq -r '.active.stuck_after_minutes' "${queue_file}")" != "1" ]; then
   echo "expected active launch_attempts to increment and mark launched" >&2
   cat "${queue_file}" >&2
   exit 1

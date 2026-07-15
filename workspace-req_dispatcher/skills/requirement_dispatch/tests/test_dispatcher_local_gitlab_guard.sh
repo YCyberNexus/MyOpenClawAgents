@@ -13,6 +13,9 @@ WIKI_GITLAB_HOST=tracked-blue.example:30000
 WIKI_GITLAB_API_PROTOCOL=http
 WIKI_GITLAB_TOKEN=tracked-token-must-not-reach-local
 STATE_ROOT=/data/req_dispatcher
+EXECUTOR_SCHEDULER_STATE_FILE=/data/req_executor/_scheduler/scheduler_state.json
+EXECUTOR_ACPX_TIMEOUT_SECONDS=3600
+OPENCLAW_SUBAGENT_TIMEOUT_SECONDS=20400
 EOF
 
 run_source() {

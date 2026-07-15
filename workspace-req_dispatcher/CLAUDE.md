@@ -19,7 +19,8 @@ dispatcher 是 prompt 路由器和 batch 控制面：
 - 旧 I2/FIFO 只为部署升级排空保留。
 - `/slot <正整数>` 只使用 `set_executor_slots.sh` 转发到默认 executor 主 session。
 - `/acpx-timeout <时长>` 只使用 `set_executor_acpx_timeout.sh` 转发到默认
-  executor 主 session。
+  executor 主 session。后续外层预算从 executor scheduler state 派生，OpenClaw
+  全局 timeout 不随命令变更。
 
 它不建 Issue、不改 GitLab、不跑 Issue、不查询 GitLab Issue、不展开 IID snapshot、不管理
 worktree/campaign/物理并发。wiki 是唯一只读 GitLab 入口。
@@ -44,6 +45,8 @@ prepare_executor_issue_payload.sh
 只读取顶层 wrapper 的严格 JSON。
 不得为了调整 slot 或 acpx timeout 修改 tracked 配置；运行时调整只走
 各自的固定 wrapper。
+执行 `submit_executor_batch.sh` 前只用 `get_executor_timeout_budget.sh` 获取本次
+exec 工具 timeout，不得使用固定旧值或历史 turn 缓存。
 
 `DISPATCHER_CALLBACK_TARGET` 为空必须在 ID/intent/network 前拒绝。I1 intent 必须先落盘；旧
 FIFO 非空时不发送。ack 丢失只重投同 batch。receipt immutable 字段冲突 fail closed。
@@ -86,6 +89,9 @@ source scripts/source_dispatcher_env.sh && \
 ```
 
 不依赖上一个 exec 的 `cd/export`。
+
+执行 submit 与周期 tick 还必须在顶层 wrapper 前 source
+`scripts/source_executor_timeout_budget.sh`；回调、建单和控制命令只加载基础配置。
 
 ## No-Fallback
 

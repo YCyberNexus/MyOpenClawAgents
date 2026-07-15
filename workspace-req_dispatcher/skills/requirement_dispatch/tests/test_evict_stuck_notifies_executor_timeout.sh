@@ -37,6 +37,7 @@ jq -n --argjson ts "${old_ts}" \
         correlation_id: "corr-42",
         child_session_key: "child-42",
         spawned_at: $ts,
+        stuck_after_minutes: 1,
         req_digest: "demo requirement"
       },
       "run-git-issuer-origin": {
@@ -53,6 +54,7 @@ jq -n --argjson ts "${old_ts}" \
         correlation_id: null,
         child_session_key: "child-issuer",
         spawned_at: $ts,
+        stuck_after_minutes: 1,
         req_digest: "issuer requirement"
       },
       "run-executor-no-origin": {
@@ -64,7 +66,19 @@ jq -n --argjson ts "${old_ts}" \
         correlation_id: "corr-43",
         child_session_key: "child-43",
         spawned_at: $ts,
+        stuck_after_minutes: 1,
         req_digest: "no origin requirement"
+      },
+      "run-legacy-budget-preserved": {
+        run_id: "run-legacy-budget-preserved",
+        stage: "git_issuer",
+        origin: null,
+        project: null,
+        iid: null,
+        correlation_id: null,
+        child_session_key: null,
+        spawned_at: $ts,
+        req_digest: "pre-upgrade pending without timeout snapshot"
       }
     }
   }' > "${DISPATCHER_DIR}/pending.json"
@@ -117,8 +131,10 @@ DEFAULT_REPLY_AGENT="fallback_agent" \
 REPLY_NOTIFY_TIMEOUT_SECONDS="5" \
 bash "${SKILL_DIR}/scripts/evict_stuck.sh" >/dev/null
 
-if ! jq -e '.pending == {}' "${DISPATCHER_DIR}/pending.json" >/dev/null; then
-  echo "expected evict_stuck.sh to delete all expired pending entries" >&2
+if ! jq -e '
+    (.pending | keys) == ["run-legacy-budget-preserved"]
+  ' "${DISPATCHER_DIR}/pending.json" >/dev/null; then
+  echo "expected eviction to preserve the pre-upgrade pending budget" >&2
   jq . "${DISPATCHER_DIR}/pending.json" >&2
   exit 1
 fi
@@ -193,6 +209,7 @@ jq -n --argjson ts "${old_ts}" \
         correlation_id: "corr-44",
         child_session_key: "child-44",
         spawned_at: $ts,
+        stuck_after_minutes: 1,
         req_digest: "notify failure requirement"
       }
     }
@@ -258,6 +275,7 @@ jq -n --argjson ts "${old_ts}" \
         correlation_id: "corr-45",
         child_session_key: "child-45",
         spawned_at: $ts,
+        stuck_after_minutes: 1,
         req_digest: "openclaw failure requirement"
       }
     }

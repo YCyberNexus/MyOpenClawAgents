@@ -24,7 +24,8 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `/slot <正整数>`：只调 `set_executor_slots.sh`，由它把命令发送到默认 executor 主 session；
   dispatcher 不直接修改调度状态。
 - `/acpx-timeout <时长>`：只调 `set_executor_acpx_timeout.sh`，持久化后续
-  attempt 的 acpx 超时；在途任务不受影响。
+  attempt 的 acpx 超时，并让 dispatcher 后续从 scheduler state 派生外层预算；
+  OpenClaw 全局 timeout 不变，在途任务使用已持久化的创建时预算，不受调低操作影响。
 - I3：首行 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 直接进入路径 D，只调
   `handle_executor_batch_event.sh`；新 batch/single 必须使用带 nonce 与 executor 身份的严格
   `callback_envelope`。旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容同一 handler。
@@ -36,8 +37,11 @@ notification 内部脚本，也不得手写 state。
 slot 与 acpx timeout 调整只能调用各自的顶层 wrapper，不得编辑 executor
 配置或 scheduler JSON。
 
-调用 `submit_executor_batch.sh` 时，OpenClaw exec 工具固定使用 `timeout:21900`、
-`yieldMs:120000`，不能在 shell 中套 `timeout`。若工具转为后台 process，只能 poll 原 session；
+调用 `submit_executor_batch.sh` 前必须先调 `get_executor_timeout_budget.sh`，OpenClaw exec
+工具使用其 `exec_tool_timeout_seconds` 与 `yieldMs:120000`，不能在 shell 中套 `timeout`。
+执行 submit 和周期 tick 的同一个 shell 还必须额外 source
+`source_executor_timeout_budget.sh`；I3 callback 不得 source 它，以免 executor state 故障阻断 ack。
+若工具转为后台 process，只能 poll 原 session；
 被杀、断连或结果不明时停止，等待周期 tick 恢复已经持久化的同一 intent，不得读取 outbox 后
 重新调用 submit wrapper，否则会错误分配第二个 batch。
 

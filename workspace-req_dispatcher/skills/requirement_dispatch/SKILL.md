@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-14.8] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /acpx-timeout 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-15.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /acpx-timeout 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -74,8 +74,11 @@ MESSAGE="<完整原文>" bash scripts/set_executor_acpx_timeout.sh
 
 wrapper 接受 60 秒到 5 小时；裸数字或 `Ns` 表示秒，`Nm` 表示分钟，
 `Nh` 表示小时。它只把规范化后的秒数发送到默认 executor 主 session，
-并只接受固定 wrapper 的严格 JSON。新值仅影响后续 attempt，不取消或改写
-在途任务已固定的 timeout。
+并只接受固定 wrapper 的严格 JSON。scheduler state 更新后，dispatcher 后续
+加载配置时自动派生 executor turn、exec 工具、旧队列回收和 stuck 驱逐预算；
+OpenClaw 全局 `runTimeoutSeconds` 是独立固定部署值，命令不得修改。新值仅影响
+后续 attempt 和后续创建的外层调用，不取消或改写在途任务已固定的 timeout；旧 FIFO
+active 与 pending 会持久化创建时的回收和驱逐预算，调低新值也不得追溯缩短它们。
 
 ## 路径 A：需求接入
 
@@ -124,17 +127,32 @@ repository/wiki/Issue URL 或既有确定性 locator；仓库根 URL 保留完�
 
 ### 4. 执行动作只调用一个 wrapper
 
+执行前先用一个短 Bash 调用读取严格预算对象：
+
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+source scripts/source_dispatcher_env.sh && \
+bash scripts/get_executor_timeout_budget.sh
+```
+
+只接受固定字段 `status,acpx_timeout_seconds,global_subagent_timeout_seconds,
+executor_agent_timeout_seconds,exec_tool_timeout_seconds,
+queue_launch_reclaim_seconds,stuck_after_minutes`，且 `status=success`。不得手写、缓存或
+从历史 turn 猜测预算；读取失败立即停止。
+
 自然语言请求：
 
 ```bash
 cd "<SKILL_DIR 绝对路径>" && \
 source scripts/source_dispatcher_env.sh && \
+source scripts/source_executor_timeout_budget.sh && \
 MESSAGE="<包含明确 project 与 selector 的原文>" \
 ORIGIN_JSON='<capture_origin 输出；无则 null>' \
 bash scripts/submit_executor_batch.sh
 ```
 
-这次 Bash/exec tool call 必须显式使用 `timeout:21900` 与 `yieldMs:120000`；这里的
+这次 Bash/exec tool call 必须显式使用上一步返回的
+`timeout:<exec_tool_timeout_seconds>` 与 `yieldMs:120000`；这里的
 `timeout` 是 OpenClaw `exec` 工具字段，不得在 shell 命令前加 `timeout 120` 等外层截断。
 `submit_executor_batch.sh` 会同步等待 executor，短工具超时可能在 I1 已持久化、executor 已
 受理后杀死调用方。若 exec 返回 process session，只能继续 poll **同一个** session 直到退出；
@@ -147,6 +165,7 @@ intent。禁止再次调用 `submit_executor_batch.sh`，否则会分配第二�
 ```bash
 cd "<SKILL_DIR 绝对路径>" && \
 source scripts/source_dispatcher_env.sh && \
+source scripts/source_executor_timeout_budget.sh && \
 PREPARED_REQUEST_JSON='<prepare_executor_issue_payload.sh 原样 stdout>' \
 ORIGIN_JSON='<capture_origin 输出；无则 null>' \
 bash scripts/submit_executor_batch.sh
@@ -207,6 +226,7 @@ mirror。升级后生成的兼容 single intent 也携带独立 nonce，bridge/p
 ```bash
 cd "<SKILL_DIR 绝对路径>" && \
 source scripts/source_dispatcher_env.sh && \
+source scripts/source_executor_timeout_budget.sh && \
 bash scripts/run_executor_batch_tick.sh
 ```
 
@@ -239,6 +259,9 @@ ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时
 
 把收到的**完整原文**原样交给 handler，不得由 LLM 手工截取第二行，也不得把 callback、nonce
 或中间命令写入 `/tmp`、workspace 或其他临时文件。固定使用 stdin heredoc：
+
+回调路径只加载基础部署配置，不读取 executor scheduler state；timeout state 缺失、损坏或暂时
+不可读时也必须允许 handler 对已经到达的 I3 做认证、持久化和 ack。
 
 ```bash
 cd "<SKILL_DIR 绝对路径>" && \

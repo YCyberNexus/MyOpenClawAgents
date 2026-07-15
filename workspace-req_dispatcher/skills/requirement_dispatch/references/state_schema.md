@@ -224,9 +224,15 @@ drain ledger 证明。nonce_v1 或 `launching` 不能通过旧 I2 清理状态�
   "origin":null,
   "correlation_id":"reqd-23",
   "run_id":"executor-execq-1",
+  "launch_reclaim_seconds":7800,
+  "stuck_after_minutes":150,
   "launch_state":"launching|launched|launch_failed"
 }
 ```
+
+`launch_reclaim_seconds` 与 `stuck_after_minutes` 在该 active 首次启动时按当时的 acpx
+预算固化，后续 `/acpx-timeout` 调低不追溯改写。部署前缺少这两个字段的 active 分别按旧值
+`22200` 秒和 `390` 分钟兼容，避免滚动升级时把在途任务提前回收。
 
 RUN_SINGLE_ISSUE single shim 返回 receipt 后，active 增加 bridge：
 
@@ -268,6 +274,7 @@ completed 后幂等删除对应 pending、清 active，并写 `kind=legacy_batch
       "callback_nonce_sha256":"<sha256|null>",
       "child_session_key":null,
       "spawned_at":1719300000,
+      "stuck_after_minutes":150,
       "req_digest":"string",
       "driven_batch_id":"single-<sha256>",
       "driven_matched_count":1,
@@ -277,6 +284,7 @@ completed 后幂等删除对应 pending、清 active，并写 `kind=legacy_batch
 }
 ```
 
+`stuck_after_minutes` 在 pending 创建时固化；部署前缺少该字段的记录按旧值 `390` 兼容。
 `driven_*` 仅旧 FIFO bridge 可选存在。pending 只保存 nonce 摘要，不保存明文；明文仍留在私有
 old active intent。新 batch 不为每个 IID 创建 dispatcher pending。
 

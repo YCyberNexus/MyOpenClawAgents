@@ -127,7 +127,9 @@ if [ "$(jq -r '.iid' <<<"${drain}")" != "12" ]; then
 fi
 
 if [ "$(jq -r '.active.iid' "${queue_file}")" != "12" ] ||
-   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ]; then
+   [ "$(jq -r '.active.launch_state' "${queue_file}")" != "launched" ] ||
+   [ "$(jq -r '.active.launch_reclaim_seconds' "${queue_file}")" != "7800" ] ||
+   [ "$(jq -r '.active.stuck_after_minutes' "${queue_file}")" != "150" ]; then
   echo "expected active launched item to be iid 12" >&2
   cat "${queue_file}" >&2
   exit 1
@@ -150,7 +152,8 @@ if ! grep -q '^RUN_SINGLE_ISSUE' <<<"${message}" ||
   exit 1
 fi
 
-if [ "$(jq -r '.pending | length' "${pending_file}")" != "1" ]; then
+if [ "$(jq -r '.pending | length' "${pending_file}")" != "1" ] ||
+   [ "$(jq -r '.pending[] | .stuck_after_minutes' "${pending_file}")" != "150" ]; then
   echo "expected one executor pending entry" >&2
   cat "${pending_file}" >&2
   exit 1

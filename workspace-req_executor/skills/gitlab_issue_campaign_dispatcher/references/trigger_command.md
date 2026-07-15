@@ -51,6 +51,10 @@ and return its sole compact JSON object. Bare integers and `Ns` are seconds;
 `acpx_timeout_seconds` in executor-wide scheduler state under the scheduler
 lock. The tracked initialization default is `3600` seconds. Updates apply only
 to future attempts; pending and running attempts keep their spawn-time value.
+The result reports future dispatcher-side budgets derived as agent turn
+`acpx+3600`, exec tool `acpx+3900`, legacy queue reclaim `acpx+4200`, and stuck
+eviction `ceil((acpx+4200)/60)+20`. The command never changes OpenClaw global
+`runTimeoutSeconds`.
 
 ## Scheduled Tick
 

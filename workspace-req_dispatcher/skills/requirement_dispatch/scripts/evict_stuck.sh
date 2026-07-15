@@ -3,7 +3,7 @@
 # 若超时 pending 是当前 executor queue active，也在同一锁内清 active，避免 FIFO 永久卡住。
 # executor 段若携带 origin，则解锁后 best-effort 推 timeout 给用户。
 # 在接入路径开头调用，避免 pending 永久泄漏。覆盖两段（git_issuer/executor），不分 stage 一并扫。
-# 入参（env）：STUCK_AFTER_MINUTES(必，非负整数)
+# 新 pending 在创建时固定 stuck_after_minutes；部署前旧记录使用 390 分钟兼容预算。
 # 语义：ledger 为 at-least-once 审计（见 references/state_schema.md）。删除按"上面确定的同一批 key"
 #   精确删除，保证 ledger 写入集合 == pending 删除集合。stuck_evicted 行从对应 entry 读 .value.stage。
 set -euo pipefail
@@ -12,24 +12,34 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${SCRIPT_DIR}/env_paths.sh"
 ensure_state_dirs
 
-: "${STUCK_AFTER_MINUTES:?STUCK_AFTER_MINUTES required}"
-[[ "${STUCK_AFTER_MINUTES}" =~ ^[0-9]+$ ]] || { echo "STUCK_AFTER_MINUTES must be a non-negative integer: ${STUCK_AFTER_MINUTES}" >&2; exit 1; }
+LEGACY_STUCK_BUDGET_MINUTES="${LEGACY_STUCK_AFTER_MINUTES:-390}"
+[[ "${LEGACY_STUCK_BUDGET_MINUTES}" =~ ^[0-9]+$ ]] \
+  || { echo "LEGACY_STUCK_AFTER_MINUTES must be a non-negative integer: ${LEGACY_STUCK_BUDGET_MINUTES}" >&2; exit 1; }
 NOW="$(date -u +%s)"
 [[ "${NOW}" =~ ^[0-9]+$ ]] || { echo "date -u +%s produced non-integer: ${NOW}" >&2; exit 1; }
-CUTOFF=$(( NOW - STUCK_AFTER_MINUTES * 60 ))
 
 exec 9>"${LOCK_FILE}"
 flock 9
-# 找出过期 entry（spawned_at < CUTOFF），每行一条紧凑 JSON；后续 ledger/delete/notify 都基于同一快照。
+# 按每条 entry 创建时固定的预算找出过期项；后续 ledger/delete/notify 都基于同一快照。
 # jq 失败（如 pending.json 损坏）必须可见，不可被 mapfile 静默吞成空数组。
-expired_raw="$(jq -c --argjson cutoff "${CUTOFF}" \
-  '.pending | to_entries[] | select(.value.spawned_at < $cutoff) |
-   {run_id:.key,
-    stage:(.value.stage // ""),
-    project:(.value.project // null),
-    iid:(.value.iid // null),
-    correlation_id:(.value.correlation_id // null),
-    origin:(.value.origin // null)}' "${PENDING_FILE}")" \
+expired_raw="$(jq -c \
+  --argjson now "${NOW}" \
+  --argjson legacy_stuck "${LEGACY_STUCK_BUDGET_MINUTES}" '
+  def valid_budget: type == "number" and . == floor and . >= 0;
+  if (.pending | type) == "object"
+      and (.pending | to_entries
+        | all((.value.stuck_after_minutes // $legacy_stuck) | valid_budget))
+  then .pending | to_entries[]
+    | select(.value.spawned_at
+      < ($now - ((.value.stuck_after_minutes // $legacy_stuck) * 60)))
+    | {run_id:.key,
+       stage:(.value.stage // ""),
+       project:(.value.project // null),
+       iid:(.value.iid // null),
+       correlation_id:(.value.correlation_id // null),
+       origin:(.value.origin // null)}
+  else error("pending contains an invalid stuck budget") end
+  ' "${PENDING_FILE}")" \
   || { echo "jq read failed on ${PENDING_FILE} (corrupt?)" >&2; exit 1; }
 
 expired=()

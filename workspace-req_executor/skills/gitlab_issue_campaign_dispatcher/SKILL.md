@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-14.16] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot and /acpx-timeout control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-15.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot and /acpx-timeout control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -460,7 +460,10 @@ or `Ns` is seconds; `Nm` is minutes and `Nh` is hours. It persists the
 executor-wide `acpx_timeout_seconds` under the scheduler lock and mirrors the
 value into a recoverable pending scheduler transaction. The new value applies
 only to attempts launched after the update; active attempts keep the timeout
-pinned when they were spawned. The tracked initialization default is one hour.
+pinned when they were spawned. Its strict result also reports the derived
+executor turn, exec tool, legacy queue reclaim, and stuck eviction budgets used
+by req_dispatcher on later calls. It never changes OpenClaw global
+`runTimeoutSeconds`. The tracked initialization default is one hour.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
 the next tick imports it, releases the physical slot, fans out every attached

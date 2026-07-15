@@ -55,7 +55,7 @@ status,batch_id,matched_count,snapshot_digest,scheduler_status
 
 ## Durable scheduler、周期 tick 与 I3
 
-默认部署值为 `EXECUTOR_MAX_CONCURRENCY=3`、`EXECUTOR_ACPX_TIMEOUT_SECONDS=3600` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。可向 req_dispatcher 或 req_executor 发送 `/slot <正整数>` 调整共享物理并发，或发送 `/acpx-timeout <时长>` 调整后续 attempt 的 acpx 上限。超时命令支持裸秒数、`Ns`、`Nm` 与 `Nh`，范围为 60 到 18000 秒，例如 `/acpx-timeout 1h`。新值仅影响后续启动的 attempt，在途任务保留启动时预算。两类运行时值都持久化到共享 scheduler state。在线调低 slot 到小于当前 active 数时不会取消任务，而是停止新 reservation，等待 active 数自然降到新上限。scheduler 持久保存不可变 snapshot、游标与 active jobs，并在多个 runnable batch 间严格 round-robin。单个批次包含 100+ Issue 时，wrapper 每次只返回本 tick 所需的有限 grant/reconcile action，不把完整 IID 列表展开到聊天上下文。
+默认部署值为 `EXECUTOR_MAX_CONCURRENCY=3`、`EXECUTOR_ACPX_TIMEOUT_SECONDS=3600` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。可向 req_dispatcher 或 req_executor 发送 `/slot <正整数>` 调整共享物理并发，或发送 `/acpx-timeout <时长>` 调整后续 attempt 的 acpx 上限。超时命令支持裸秒数、`Ns`、`Nm` 与 `Nh`，范围为 60 到 18000 秒，例如 `/acpx-timeout 1h`。新值仅影响后续启动的 attempt，在途任务保留启动时预算。req_dispatcher 从同一 scheduler state 为后续调用派生 `acpx+3600` 的 executor turn、`acpx+3900` 的 exec 工具、`acpx+4200` 的旧队列回收和 `ceil((acpx+4200)/60)+20` 的 stuck 驱逐；旧 FIFO active/pending 固化创建时预算，调低新值不会追溯驱逐。OpenClaw 全局 timeout 独立保持部署值，不受命令影响。两类运行时值都持久化到共享 scheduler state。在线调低 slot 到小于当前 active 数时不会取消任务，而是停止新 reservation，等待 active 数自然降到新上限。scheduler 持久保存不可变 snapshot、游标与 active jobs，并在多个 runnable batch 间严格 round-robin。单个批次包含 100+ Issue 时，wrapper 每次只返回本 tick 所需的有限 grant/reconcile action，不把完整 IID 列表展开到聊天上下文。
 
 部署周期触发固定为：
 

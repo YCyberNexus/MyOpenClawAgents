@@ -28,6 +28,12 @@ IID="42" \
 CORRELATION_ID="${cid1}" \
 bash "${SKILL_DIR}/scripts/record_pending.sh" >/dev/null
 
+if [ "$(jq -r '.pending["executor-run-1"].stuck_after_minutes' \
+    "${STATE_ROOT}/_dispatcher/pending.json")" != "390" ]; then
+  echo "expected record_pending.sh to persist its creation-time stuck budget" >&2
+  exit 1
+fi
+
 # An executor pending entry is discoverable through the legacy I2 helper only
 # when the same pre-upgrade launched active exists. find_pending.sh atomically
 # projects both records to explicit legacy_pre_upgrade state.

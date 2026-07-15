@@ -21,7 +21,8 @@ executor 物理调度状态。
 - slot 控制：`/slot <正整数>` 只调 `set_executor_slots.sh`，定向发送到默认 executor 主
   session；不直接修改 executor 配置或 scheduler state。
 - acpx timeout 控制：`/acpx-timeout <时长>` 只调
-  `set_executor_acpx_timeout.sh`，只影响后续 attempt。
+  `set_executor_acpx_timeout.sh`，只影响后续 attempt 和后续外层调用；不得修改
+  OpenClaw 全局 timeout，旧 FIFO active/pending 保留创建时预算。
 
 git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理。
 
@@ -49,13 +50,14 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
 12. `/slot` 只调整默认 executor 的共享物理并发上限；所有同 scheduler root 的 batch session
     共同生效，缩容不取消已有任务。
 13. `/acpx-timeout` 只调整默认 executor 后续 attempt 的 acpx 上限；在途
-    attempt 继续使用启动时的固定值。
+    attempt 及旧 FIFO active/pending 继续使用启动或创建时的固定值。
 
 ## No-Fallback（HARD）
 
 - 脚本非零：读错误、分类、停止；不内联重写逻辑、不换临时命令、不手改 state。
-- 调用 `submit_executor_batch.sh` 的 OpenClaw exec 必须用 `timeout:21900`、
-  `yieldMs:120000`，不得用 shell `timeout` 截断。进入后台后只 poll 原 process；若被杀或结果
+- 调用 `submit_executor_batch.sh` 前必须读取 `get_executor_timeout_budget.sh` 的严格结果，
+  OpenClaw exec 使用其中的 `exec_tool_timeout_seconds` 与 `yieldMs:120000`，不得用 shell
+  `timeout` 截断。进入后台后只 poll 原 process；若被杀或结果
   不明，停止并等 tick 恢复同一 outbox，绝不再次提交原 MESSAGE 生成新 batch。
 - `waiting_for_legacy_drain` 与 `retryable_failure` 是 durable 正常分支，不是生成新 ID 的理由。
 - 只认精确 JSON 字段集合；不从 raw output 猜 acceptance/I3。
@@ -99,6 +101,10 @@ cd "<SKILL_DIR 绝对路径>" && \
 source scripts/source_dispatcher_env.sh && \
 <最小 env> bash scripts/<顶层 wrapper>.sh
 ```
+
+执行 submit 与周期 tick 还要在同一个 shell source
+`scripts/source_executor_timeout_budget.sh`；回调、建单和控制命令只加载基础配置，不能被
+executor scheduler state 的可用性阻断。
 
 中断时保留 outbox、receipt、mirror、event ledger、notifications、legacy bridge 与审计证据；
 下一次 tick/duplicate I3 必须恢复。

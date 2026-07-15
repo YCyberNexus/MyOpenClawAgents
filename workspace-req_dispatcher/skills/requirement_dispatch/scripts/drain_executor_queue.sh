@@ -30,11 +30,17 @@ redact_callback_nonce() {
 
 ensure_state_dirs
 
-LAUNCH_RECLAIM_SECONDS="${EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS:-22200}"
+LAUNCH_RECLAIM_SECONDS="${EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS:-7800}"
+STUCK_BUDGET_MINUTES="${STUCK_AFTER_MINUTES:-150}"
+LEGACY_LAUNCH_RECLAIM_SECONDS="${LEGACY_EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS:-22200}"
+LEGACY_STUCK_BUDGET_MINUTES="${LEGACY_STUCK_AFTER_MINUTES:-390}"
 LAUNCH_RETRY_BACKOFF_SECONDS="${EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS:-60}"
 SPAWN_MAX_ATTEMPTS="${EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS:-3}"
 SPAWN_RETRY_SLEEP_SECONDS="${EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS:-2}"
 case "${LAUNCH_RECLAIM_SECONDS}" in *[!0-9]*|"") echo "EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS must be a non-negative integer" >&2; exit 1 ;; esac
+case "${STUCK_BUDGET_MINUTES}" in *[!0-9]*|"") echo "STUCK_AFTER_MINUTES must be a non-negative integer" >&2; exit 1 ;; esac
+case "${LEGACY_LAUNCH_RECLAIM_SECONDS}" in *[!0-9]*|"") echo "LEGACY_EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS must be a non-negative integer" >&2; exit 1 ;; esac
+case "${LEGACY_STUCK_BUDGET_MINUTES}" in *[!0-9]*|"") echo "LEGACY_STUCK_AFTER_MINUTES must be a non-negative integer" >&2; exit 1 ;; esac
 case "${LAUNCH_RETRY_BACKOFF_SECONDS}" in *[!0-9]*|"") echo "EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS must be a non-negative integer" >&2; exit 1 ;; esac
 case "${SPAWN_MAX_ATTEMPTS}" in *[!0-9]*|"") echo "EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS must be a positive integer" >&2; exit 1 ;; esac
 case "${SPAWN_RETRY_SLEEP_SECONDS}" in *[!0-9]*|"") echo "EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS must be a non-negative integer" >&2; exit 1 ;; esac
@@ -51,7 +57,7 @@ write_executor_pending_locked() {
   local active_json="$1"
   local spawned_at="$2"
   local tmp_pending
-  local callback_nonce callback_auth_mode callback_nonce_sha256
+  local callback_nonce callback_auth_mode callback_nonce_sha256 stuck_budget_minutes
 
   callback_nonce="$(jq -r '.callback_nonce // ""' <<<"${active_json}")"
   if [ -n "${callback_nonce}" ]; then
@@ -61,12 +67,19 @@ write_executor_pending_locked() {
     callback_auth_mode=legacy_pre_upgrade
     callback_nonce_sha256=""
   fi
+  stuck_budget_minutes="$(jq -er \
+    --argjson legacy "${LEGACY_STUCK_BUDGET_MINUTES}" '
+    (.stuck_after_minutes // $legacy)
+    | select(type == "number" and . == floor and . >= 0)
+  ' <<<"${active_json}")" \
+    || { echo "drain_executor_queue.sh: active stuck budget is invalid" >&2; return 1; }
 
   tmp_pending="$(mktemp "${DISPATCHER_DIR}/pending.XXXXXX")"
   jq \
     --argjson active "${active_json}" \
     --arg callback_auth_mode "${callback_auth_mode}" \
     --arg callback_nonce_sha256 "${callback_nonce_sha256}" \
+    --argjson stuck_after_minutes "${stuck_budget_minutes}" \
     --argjson ts "${spawned_at}" '
     .pending[$active.run_id] = {
       run_id: $active.run_id,
@@ -79,6 +92,7 @@ write_executor_pending_locked() {
       callback_nonce_sha256: (if $callback_nonce_sha256 == "" then null else $callback_nonce_sha256 end),
       child_session_key: ($active.child_session_key // null),
       spawned_at: $ts,
+      stuck_after_minutes: $stuck_after_minutes,
       req_digest: ($active.req_digest // "")
     }
     ' "${PENDING_FILE}" > "${tmp_pending}"
@@ -109,6 +123,8 @@ claim_or_status() {
     jq \
       --arg cid "${NEW_CORRELATION_ID}" \
       --arg callback_nonce "${callback_nonce}" \
+      --argjson launch_reclaim_seconds "${LAUNCH_RECLAIM_SECONDS}" \
+      --argjson stuck_after_minutes "${STUCK_BUDGET_MINUTES}" \
       --argjson now "${NOW}" '
       (.queue[0]) as $item
       | .queue = (.queue[1:] // [])
@@ -119,6 +135,8 @@ claim_or_status() {
           launch_state: "launching",
           launch_attempts: 1,
           launch_started_at: $now,
+          launch_reclaim_seconds: $launch_reclaim_seconds,
+          stuck_after_minutes: $stuck_after_minutes,
           launched_at: null,
           next_retry_after: null,
           launch_error: null
@@ -139,6 +157,14 @@ claim_or_status() {
   launch_state="$(jq -r '.launch_state // "launched"' <<<"${active}")"
   launch_started_at="$(jq -r '.launch_started_at // 0' <<<"${active}")"
   next_retry_after="$(jq -r '.next_retry_after // 0' <<<"${active}")"
+  if ! active_launch_reclaim_seconds="$(jq -er \
+    --argjson legacy "${LEGACY_LAUNCH_RECLAIM_SECONDS}" '
+    (.launch_reclaim_seconds // $legacy)
+    | select(type == "number" and . == floor and . >= 0)
+  ' <<<"${active}")"; then
+    echo "drain_executor_queue.sh: active launch reclaim budget is invalid" >&2
+    exit 1
+  fi
 
   if [ "${launch_state}" = "launched" ]; then
     flock -u 9
@@ -147,7 +173,8 @@ claim_or_status() {
     return 0
   fi
 
-  if [ "${launch_state}" = "launching" ] && [ $((NOW - launch_started_at)) -lt "${LAUNCH_RECLAIM_SECONDS}" ]; then
+  if [ "${launch_state}" = "launching" ] \
+      && [ $((NOW - launch_started_at)) -lt "${active_launch_reclaim_seconds}" ]; then
     flock -u 9
     jq -nc --argjson active "${public_active}" --argjson queued_count "${queued_count}" \
       '{status:"busy", reason:"launch_in_progress", active:$active, queued_count:$queued_count}'

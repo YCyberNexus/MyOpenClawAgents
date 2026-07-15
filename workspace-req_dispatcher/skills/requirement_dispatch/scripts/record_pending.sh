@@ -24,6 +24,13 @@ IID="${IID:-}"
 CORRELATION_ID="${CORRELATION_ID:-}"
 CHILD_SESSION_KEY="${CHILD_SESSION_KEY:-}"
 REQ_DIGEST="${REQ_DIGEST:-}"
+PENDING_STUCK_AFTER_MINUTES="${STUCK_AFTER_MINUTES:-390}"
+case "${PENDING_STUCK_AFTER_MINUTES}" in
+  ''|*[!0-9]*)
+    echo "STUCK_AFTER_MINUTES must be a non-negative integer" >&2
+    exit 1
+    ;;
+esac
 # IID 给定时必须是正整数（git_issuer IID 无前导零、无符号）。
 if [ -n "${IID}" ]; then
   [[ "${IID}" =~ ^[1-9][0-9]*$ ]] || { echo "IID must be a positive integer (got: ${IID})" >&2; exit 1; }
@@ -48,6 +55,7 @@ jq --arg rid "${RUN_ID}" \
    --arg csk "${CHILD_SESSION_KEY}" \
    --arg cid "${CORRELATION_ID}" \
    --arg dig "${REQ_DIGEST}" \
+   --argjson stuck_after_minutes "${PENDING_STUCK_AFTER_MINUTES}" \
    --argjson ts "${SPAWNED_AT}" \
    '.pending[$rid] = {
       run_id:$rid,
@@ -58,6 +66,7 @@ jq --arg rid "${RUN_ID}" \
       correlation_id:($cid|select(.!="")//null),
       child_session_key:($csk|select(.!="")//null),
       spawned_at:$ts,
+      stuck_after_minutes:$stuck_after_minutes,
       req_digest:$dig
     }' \
    "${PENDING_FILE}" > "${tmp}"

@@ -26,7 +26,9 @@ under one `EXECUTOR_SCHEDULER_ROOT`. Lowering it does not cancel existing work;
 new reservations pause until the active count falls below the new ceiling.
 The executor-wide acpx cap is also shared runtime state. Its tracked default is
 one hour and `/acpx-timeout` may set 60 seconds through 5 hours without editing
-the skill or deployment files.
+the skill or deployment files. req_dispatcher derives future outer deadlines
+from this state; the independent OpenClaw global timeout is never changed by
+the command.
 
 The executor is deliberately thin:
 

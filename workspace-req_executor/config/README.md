@@ -76,6 +76,9 @@ largest allowed `acpx_timeout_seconds + 2400`; the additional budget covers
 the fixed stage/push/MR/label/summary caps inside `run_executor_attempt.sh`.
 Because `/acpx-timeout` allows up to 18000 seconds, keep the global value at
 least `20400` even though the tracked attempt default is now 3600 seconds.
+The runtime command never reads or writes this OpenClaw setting. It only
+persists the executor acpx value; req_dispatcher derives its future agent,
+exec-tool, legacy-reclaim, and stuck-eviction budgets from scheduler state.
 
 The absence of a timeout parameter in the `sessions_spawn` tool call is
 expected and does not mean the global timeout was dropped.
@@ -141,7 +144,7 @@ There is no UI-account pool configuration in this workspace. The issue body is p
 - 私有仓库的 clone、fetch、ls-remote、push 使用普通 `git`，`origin` 采用 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL。Git 子进程与 callback `openclaw` 子进程继承 executor 当前环境，包括按上述优先级选中的 `GITLAB_TOKEN`。
 - 只有升级前已存在于 mode `0700` scheduler 根、同时缺少 executor/nonce 的旧 request/outbox 才会被 executor 显式投影为 `legacy_pre_upgrade` 并沿 raw 八字段 I3 兼容投递。新 intake 缺少认证字段或携带 `callback_auth_mode=legacy_pre_upgrade` 都必须失败，不能由请求输入降级。
 - lock layout 升级由 `${EXECUTOR_SCHEDULER_ROOT}/lock_layout_v2.json` 固定起点。默认 86400 秒兼容窗口内，新进程按旧路径→新路径的固定顺序同时加锁，避免尚在运行的旧 drainer/coordinator 与新进程分裂互斥域；窗口结束后同时锁住两侧再把旧 inode 移到独立锁目录，绝不覆盖 canonical 新锁。确认所有旧进程已停止时可通过进程环境或 local env 将窗口设为 `0` 提前收口。
-- 初始默认 3 个物理槽位由所有 driven batch 共享，可用 `/slot <正整数>` 在线调整并持久化。acpx timeout 初始默认 3600 秒，可用 `/acpx-timeout <时长>` 在线调整并持久化，且只影响后续 attempt。缩容不取消已有任务，只暂停新 reservation 直到 active 数回落。scheduler 持久保存 snapshot 游标与 round-robin 游标；即使单批包含 100+ Issue，也只按严格轮转逐步发放 grant，不把 IID 列表或全部 runtime action 展开到聊天上下文。
+- 初始默认 3 个物理槽位由所有 driven batch 共享，可用 `/slot <正整数>` 在线调整并持久化。acpx timeout 初始默认 3600 秒，可用 `/acpx-timeout <时长>` 在线调整并持久化，且只影响后续 attempt；req_dispatcher 会从该 scheduler state 派生后续 executor turn、exec 工具、旧队列回收和 stuck 驱逐预算，但不会修改 OpenClaw 全局 timeout。缩容不取消已有任务，只暂停新 reservation 直到 active 数回落。scheduler 持久保存 snapshot 游标与 round-robin 游标；即使单批包含 100+ Issue，也只按严格轮转逐步发放 grant，不把 IID 列表或全部 runtime action 展开到聊天上下文。
 - 部署周期触发固定为 `RUN_EXECUTOR_BATCH_TICK`，建议每分钟在 executor main session 唤醒一次。tick 对项目预检已经 `pr`/closed 的 running claim 立即执行同代 fence 与 GitLab 二次核验并生成 `skipped` handoff；对仍无完成证据且超过 lease/ACPX deadline 的丢回调任务继续走 timeout 兜底。tick 还会用 scheduler active job 与未完成 launch coordinator 保护集清理无任何运行标识的旧 driven placeholder，然后恢复 durable handoff/outbox 和未完成协调阶段，再按严格 round-robin 补满空槽；outbox 每 tick 默认最多投递 3 条，失败按持久时间退避，因此大量失败回调不会阻止 reservation；完成数据退出热扫描后仍保留冷归档，它不依赖此前聊天 turn 的内存。
 - 升级时先让 req_dispatcher 排空旧 FIFO。旧 active/queue 非空期间，新 batch 保持 `waiting_for_legacy_drain`，不得与旧 single active 重叠启动；旧队列清空后再由周期 tick 推进新 scheduler。
 - 回滚时先停止新的 batch 入口和周期 `RUN_EXECUTOR_BATCH_TICK`。可以在停用前排空，也可以原样保留 `${EXECUTOR_SCHEDULER_ROOT}` 下的 scheduler state、batch snapshot、handoff 与 callback outbox，等待恢复后继续；不得删除这些 durable runtime 记录。

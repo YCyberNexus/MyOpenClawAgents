@@ -52,12 +52,24 @@ MESSAGE='<完整原文>' bash scripts/set_executor_acpx_timeout.sh
 ```
 
 wrapper 把时长规范化为秒并发送到默认 executor 主 session，只接受严格
-`status,acpx_timeout_seconds,previous_acpx_timeout_seconds,active_count,applies_to`
-成功对象。新值仅影响后续 attempt，不改写在途任务的启动时预算。
+`status,acpx_timeout_seconds,previous_acpx_timeout_seconds,
+executor_agent_timeout_seconds,exec_tool_timeout_seconds,
+queue_launch_reclaim_seconds,stuck_after_minutes,active_count,applies_to`
+成功对象。新值仅影响后续 attempt，不改写在途任务的启动时预算。dispatcher
+后续从 executor scheduler state 派生这些外层值；OpenClaw 全局 timeout 保持
+独立部署值，命令不读取或写入它。旧 FIFO active 与 pending 保存创建时预算，
+调低 timeout 不会让已经在途的旧任务提前回收或驱逐。
 
 ### 自然语言执行
 
+先在加载 `source_dispatcher_env.sh` 的同一环境调用
+`get_executor_timeout_budget.sh`。它会显式读取并严格校验 executor scheduler state；
+state 不存在、不可读或无效时立即停止。把严格结果中的
+`exec_tool_timeout_seconds` 用作下面 Bash 调用的 OpenClaw exec 工具 timeout。
+不得使用固定值或历史缓存。
+
 ```bash
+source scripts/source_executor_timeout_budget.sh && \
 MESSAGE='<原文>' ORIGIN_JSON='<origin 或 null>' \
 bash scripts/submit_executor_batch.sh
 ```
@@ -80,6 +92,7 @@ prepare_executor_issue_payload.sh
 收到 `RUN_EXECUTOR_BATCH_TICK` 或兼容 `RUN_EXECUTOR_QUEUE_DRAIN`：
 
 ```bash
+source scripts/source_executor_timeout_budget.sh && \
 bash scripts/run_executor_batch_tick.sh
 ```
 

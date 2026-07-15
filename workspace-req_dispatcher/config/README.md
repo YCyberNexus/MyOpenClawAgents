@@ -3,6 +3,9 @@
 本目录是 **部署期 pin（deployment-time pins）**：在每台部署 `req_dispatcher` 的 runner 上编辑一次。它们**不**由 trigger 输入生成，agent 运行时也**不**改写它们。
 
 标准入口 `skills/requirement_dispatch/scripts/source_dispatcher_env.sh` 会先加载 tracked `dispatcher.env`，再加载 ignored `dispatcher.local.env`（若存在）。当前部署要求 `WIKI_GITLAB_*` 明文保存在 tracked `dispatcher.env`；本机路径、临时 session 或调试网关仍放在 ignored `dispatcher.local.env`。
+基础配置加载不访问 executor state。只有执行和恢复路径额外 source `source_executor_timeout_budget.sh`，只读 `EXECUTOR_SCHEDULER_STATE_FILE` 并覆盖未来调用的派生外层预算；state 不存在、不可读或无效时失败关闭。I3 callback、建单及 `/slot`、`/acpx-timeout` 控制路径不依赖这次读取，也不会访问或修改 OpenClaw 全局配置。
+
+新部署必须先启动一次 req_executor scheduler/tick，或通过 `/slot`、`/acpx-timeout` 初始化 scheduler state，再开放自然语言执行入口。这样执行路径不会在 state 路径错误时静默使用较短的 tracked 默认值。
 
 ## `dispatcher.env`
 
@@ -10,15 +13,19 @@
 |------|------|------|
 | `GIT_ISSUER_AGENT` | 是 | 下游目标 agent 名。`req_dispatcher` 通过 `run_agent_turn.sh` 调用它，由它完成"需求→issue"。默认 `git_issuer`。 |
 | `STATE_ROOT` | 是 | 运行时 state 根目录。`pending.json` / `executor_queue.json` / `ledger.jsonl` / 锁 / 序号 / 日志都在 `${STATE_ROOT}/_dispatcher/` 下。必须是 server 上 agent 可写的持久目录。 |
-| `STUCK_AFTER_MINUTES` | 是 | stuck/timeout 兜底阈值（分钟）。pending 超过该时长仍没等到终态回调 → 合成失败并 drain，避免 pending 永久泄漏。应覆盖 git_issuer 建 issue 与 executor 单 issue 执行的最长合理时间 + 余量；默认配置为 `390`（6 小时 30 分），覆盖 `/acpx-timeout` 可配置的最大 5 小时和收尾链路。 |
+| `EXECUTOR_SCHEDULER_STATE_FILE` | 是 | req_executor 共享 scheduler state 的绝对路径，蓝区默认 `/data/req_executor/_scheduler/scheduler_state.json`。dispatcher 从其中读取持久化的 `acpx_timeout_seconds`，作为未来外层预算的单一真实来源。104 上两个 agent 必须由可读取该 mode `0600` 文件的同一 service account 运行。 |
+| `EXECUTOR_ACPX_TIMEOUT_SECONDS` | 是 | 已存在的 scheduler state 尚无 `acpx_timeout_seconds` 字段时的初始化回退，默认 `3600`。执行/恢复前 state 文件本身必须存在；运行时 `/acpx-timeout` 不编辑本文件。 |
+| `OPENCLAW_SUBAGENT_TIMEOUT_SECONDS` | 是 | OpenClaw 全局 subagent 固定安全上限，默认 `20400`。只用于预算检查和展示；`/acpx-timeout` 不修改 OpenClaw 全局配置。 |
+| `STUCK_AFTER_MINUTES` | 是 | 新 pending 的 stuck/timeout 预算（分钟）。默认一小时 acpx 对应 `150`；执行/恢复时按 `ceil((acpx+4200)/60)+20` 自动派生，并在创建旧 FIFO active/pending 时固化。部署前无快照记录兼容使用旧值 `390`。 |
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
 | `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。只有用户明确要求处理 issue 时才使用；所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
 | `/slot` 目标 | 自动 | `/slot <正整数>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，调整该 executor 共享 scheduler 的物理并发上限；不按 project 路由表拆分。 |
 | `/acpx-timeout` 目标 | 自动 | `/acpx-timeout <时长>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，持久化 60 到 18000 秒的后续 attempt acpx 上限；支持裸秒数、`Ns`、`Nm`、`Nh`。 |
 | `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
-| `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，默认配置为 `21600`（6 小时）。目标 agent 不等于 `GIT_ISSUER_AGENT` 时按 executor 处理；git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
-| `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` | 否 | executor queue active 卡在 `launching` 多久后可由下一次 drain 复用同一 `run_id` / `correlation_id` 重新启动，默认配置为 `22200`（6 小时 10 分），晚于 6 小时 executor 外层超时和 6 小时 5 分的 exec 工具超时。用于恢复 OpenClaw 会话被用户或运行时中断，同时避免正常长 executor turn 尚未返回时重复启动。 |
+| `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 自动 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，按 `acpx+3600` 派生；默认 `7200`。git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
+| `EXECUTOR_EXEC_TOOL_TIMEOUT_SECONDS` | 自动 | 调用 `submit_executor_batch.sh` 的 OpenClaw exec 工具 timeout，按 `acpx+3900` 派生；默认 `7500`。LLM 必须先调用 `get_executor_timeout_budget.sh` 读取，不得使用固定旧值。 |
+| `EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS` | 自动 | 旧 executor queue active 创建时固化的回收阈值，按 `acpx+4200` 派生；默认 `7800`，始终晚于 executor turn 和 exec 工具 timeout。部署前无快照 active 兼容使用旧值 `22200`。 |
 | `EXECUTOR_QUEUE_LAUNCH_RETRY_BACKOFF_SECONDS` | 否 | `launch_failed` active 下一次允许重试前等待的秒数，默认 `60`。 |
 | `EXECUTOR_QUEUE_SPAWN_MAX_ATTEMPTS` | 否 | 单次 `drain_executor_queue.sh` 对同一 executor payload 的启动尝试次数，默认 `3`。 |
 | `EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS` | 否 | 同一 drain 内相邻启动尝试之间的固定退避秒数，默认 `2`。 |
@@ -47,9 +54,10 @@ OpenClaw 运行时内部应用到 `req_executor` 派发的匿名 subagent，允�
 当前 OpenClaw 2026.4.9 对省略单次 `runTimeoutSeconds` 的 subagent 使用
 `agents.defaults.subagents.runTimeoutSeconds`；不要依赖 `agents.list[]` 里的 agent 级
 同名字段来隔离该超时。全局值必须覆盖所有省略单次参数的直接派发
-agent 中最大的完整执行预算。`req_executor` 默认 acpx 已改为 3600 秒，
+agent 中最大的完整执行预算。`req_executor` 默认 acpx 为 3600 秒，
 但 `/acpx-timeout` 允许调回最大 18000 秒；再加 2400 秒收尾，因此全局兜底
-当前仍应设为 `20400`。`acpx_auto_tester` 会在每次
+仍应独立保持 `20400`。命令只联动 dispatcher 侧外层预算，不读取或写入 OpenClaw
+全局配置。`acpx_auto_tester` 会在每次
 `sessions_spawn` 时显式传 `runTimeoutSeconds`，不使用这个全局默认值。检查配置时必须
 使用网关相同的 service account 和 OpenClaw profile/config path：
 

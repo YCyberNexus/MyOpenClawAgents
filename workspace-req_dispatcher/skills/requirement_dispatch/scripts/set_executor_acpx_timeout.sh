@@ -68,7 +68,9 @@ if ! RESULT_JSON="$(printf '%s' "${TURN_OUTPUT}" | jq -ce \
       and (.worker_result_json | type == "object")
       and (.worker_result_json | keys | sort) == [
         "acpx_timeout_seconds","active_count","applies_to",
-        "previous_acpx_timeout_seconds","status"
+        "exec_tool_timeout_seconds","executor_agent_timeout_seconds",
+        "previous_acpx_timeout_seconds","queue_launch_reclaim_seconds",
+        "status","stuck_after_minutes"
       ]
       and .worker_result_json.status == "success"
       and (.worker_result_json.acpx_timeout_seconds
@@ -77,8 +79,21 @@ if ! RESULT_JSON="$(printf '%s' "${TURN_OUTPUT}" | jq -ce \
         | type == "number" and . == floor and . >= 60 and . <= 18000)
       and (.worker_result_json.active_count
         | type == "number" and . == floor and . >= 0)
+      and (.worker_result_json.executor_agent_timeout_seconds
+        | type == "number" and . == floor)
+      and (.worker_result_json.exec_tool_timeout_seconds
+        | type == "number" and . == floor)
+      and (.worker_result_json.queue_launch_reclaim_seconds
+        | type == "number" and . == floor)
+      and (.worker_result_json.stuck_after_minutes
+        | type == "number" and . == floor and . > 0)
       and .worker_result_json.applies_to == "future_attempts"
       and .worker_result_json.acpx_timeout_seconds == $requested
+      and .worker_result_json.executor_agent_timeout_seconds == ($requested + 3600)
+      and .worker_result_json.exec_tool_timeout_seconds == ($requested + 3900)
+      and .worker_result_json.queue_launch_reclaim_seconds == ($requested + 4200)
+      and .worker_result_json.stuck_after_minutes == (
+        (($requested + 4200 + 59) / 60 | floor) + 20)
     then .worker_result_json
     else error("invalid executor acpx timeout response") end
 ' 2>/dev/null)"; then

@@ -34,7 +34,9 @@ Core contract:
 - `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
   never edit deployment config or scheduler JSON in the orchestrator.
 - `/acpx-timeout` changes the future-attempt acpx cap only through
-  `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap.
+  `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap,
+  future dispatcher outer budgets are derived from scheduler state, and the
+  OpenClaw global timeout remains unchanged.
 - A native completion turn calls its prescribed ingester once and exits on
   rejection; it never reads, edits, patches, or debugs wrapper scripts.
 - The outer subagent receives `references/executor_prompt.md`.

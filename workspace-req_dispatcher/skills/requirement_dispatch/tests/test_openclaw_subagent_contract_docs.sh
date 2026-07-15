@@ -30,8 +30,14 @@ grep -Fq '旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容' "${WORKSPACE_DIR}/AG
   || fail "dispatcher agent rules must preserve the old callback marker"
 grep -Fq 'openclaw agent --timeout' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the req_dispatcher CLI timeout"
-grep -Fq '`timeout:21900` 与 `yieldMs:120000`' "${SKILL_DIR}/SKILL.md" \
-  || fail "dispatcher skill must pin a long OpenClaw exec lifetime for synchronous executor intake"
+grep -Fq '`timeout:<exec_tool_timeout_seconds>` 与 `yieldMs:120000`' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must use the runtime-derived OpenClaw exec lifetime"
+grep -Fq 'get_executor_timeout_budget.sh' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must resolve the timeout budget before executor intake"
+grep -Fq 'source scripts/source_executor_timeout_budget.sh' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher execution and recovery must load the runtime timeout budget"
+grep -Fq '回调路径只加载基础部署配置' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher callback handling must remain independent of executor timeout state"
 grep -Fq '禁止再次调用 `submit_executor_batch.sh`' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must not allocate a second batch after an ambiguous exec result"
 grep -Fq 'agents.defaults.subagents.runTimeoutSeconds' "${WORKSPACE_DIR}/config/README.md" \
@@ -43,20 +49,27 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-14.8' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-15.1' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
 grep -Fq '/acpx-timeout <时长>' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must route runtime acpx timeout commands"
-grep -Fq 'STUCK_AFTER_MINUTES=390' "${WORKSPACE_DIR}/config/dispatcher.env" \
-  || fail "dispatcher stuck eviction must outlive the executor timeout chain"
-grep -Fq 'EXECUTOR_AGENT_TIMEOUT_SECONDS=21600' "${WORKSPACE_DIR}/config/dispatcher.env" \
-  || fail "executor agent turn must outlive the default acpx and finalization budget"
-grep -Fq 'EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS=22200' "${WORKSPACE_DIR}/config/dispatcher.env" \
-  || fail "legacy queue reclaim must outlive the executor agent turn and exec wrapper"
+grep -Fq 'EXECUTOR_SCHEDULER_STATE_FILE=/data/req_executor/_scheduler/scheduler_state.json' \
+  "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "dispatcher must derive timeout budgets from executor scheduler state"
+grep -Fq 'STUCK_AFTER_MINUTES=150' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "default dispatcher stuck eviction must match the one-hour acpx budget"
+grep -Fq 'EXECUTOR_AGENT_TIMEOUT_SECONDS=7200' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "default executor agent turn must match the one-hour acpx budget"
+grep -Fq 'EXECUTOR_EXEC_TOOL_TIMEOUT_SECONDS=7500' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "default exec tool timeout must match the one-hour acpx budget"
+grep -Fq 'EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS=7800' "${WORKSPACE_DIR}/config/dispatcher.env" \
+  || fail "default legacy queue reclaim must match the one-hour acpx budget"
 grep -Fq '`/acpx-timeout` 允许调回最大 18000 秒' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the maximum runtime acpx timeout"
-grep -Fq '当前仍应设为 `20400`' "${WORKSPACE_DIR}/config/README.md" \
+grep -Fq '仍应独立保持 `20400`' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must cover maximum acpx plus finalization in the global subagent timeout"
+grep -Fq '命令不得修改' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must not mutate the OpenClaw global timeout"
 grep -Fq 'openclaw config set agents.defaults.subagents.runTimeoutSeconds 20400 --strict-json' \
   "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must provide the effective OpenClaw timeout fix"

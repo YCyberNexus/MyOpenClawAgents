@@ -29,7 +29,12 @@ else
     status:"success",exit_code:0,
     worker_result_json:{
       status:"success",acpx_timeout_seconds:$timeout,
-      previous_acpx_timeout_seconds:18000,active_count:2,
+      previous_acpx_timeout_seconds:18000,
+      executor_agent_timeout_seconds:($timeout + 3600),
+      exec_tool_timeout_seconds:($timeout + 3900),
+      queue_launch_reclaim_seconds:($timeout + 4200),
+      stuck_after_minutes:(((($timeout + 4200 + 59) / 60) | floor) + 20),
+      active_count:2,
       applies_to:"future_attempts"
     }
   }'
@@ -48,6 +53,10 @@ jq -e '
   .status == "success"
   and .acpx_timeout_seconds == 3600
   and .previous_acpx_timeout_seconds == 18000
+  and .executor_agent_timeout_seconds == 7200
+  and .exec_tool_timeout_seconds == 7500
+  and .queue_launch_reclaim_seconds == 7800
+  and .stuck_after_minutes == 150
   and .active_count == 2
   and .applies_to == "future_attempts"
 ' <<<"${success_output}" >/dev/null
