@@ -5,7 +5,7 @@
 `/slot <正整数>` 只调用 `set_executor_slots.sh`。该 wrapper 在 scheduler lock 下持久化所有
 batch session 共享的物理并发上限；不得由 LLM 修改配置文件或 scheduler JSON。
 
-`/acpx-timeout <时长>` 只调用 `set_executor_acpx_timeout.sh`。该 wrapper 持久化
+`/timeout-executor <时长>` 只调用 `set_executor_acpx_timeout.sh`。该 wrapper 持久化
 后续 attempt 使用的 acpx 上限，并返回 dispatcher 后续使用的派生外层预算；
 在途 attempt 保留启动时固定的超时，OpenClaw 全局 timeout 不变。
 

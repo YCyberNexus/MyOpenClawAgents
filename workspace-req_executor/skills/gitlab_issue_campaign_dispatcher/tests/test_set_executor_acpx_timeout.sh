@@ -24,7 +24,7 @@ DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:main
 DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0
 EOF
 
-initial_output="$(printf '/acpx-timeout 1h\n' \
+initial_output="$(printf '/timeout-executor 1h\n' \
   | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_TIMEOUT}")"
 jq -e '
   . == {
@@ -38,7 +38,7 @@ jq -e '
   }
 ' <<<"${initial_output}" >/dev/null
 
-increase_output="$(printf '/acpx-timeout 90m\n' \
+increase_output="$(printf '/timeout-executor 90m\n' \
   | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_TIMEOUT}")"
 jq -e '
   .status == "success"
@@ -60,12 +60,14 @@ jq -e '.acpx_timeout_seconds == 5400' <<<"$(
 
 before_invalid="$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")"
 for invalid_command in \
-  '/acpx-timeout 59' \
-  '/acpx-timeout 0' \
-  '/acpx-timeout 6h' \
-  '/acpx-timeout 1H' \
-  '/acpx-timeout 1h extra' \
-  $'/acpx-timeout 1h\nextra'
+  '/acpx-timeout 1h' \
+  '/executor-timeout 1h' \
+  '/timeout-executor 59' \
+  '/timeout-executor 0' \
+  '/timeout-executor 6h' \
+  '/timeout-executor 1H' \
+  '/timeout-executor 1h extra' \
+  $'/timeout-executor 1h\nextra'
 do
   invalid_output="$(printf '%s\n' "${invalid_command}" \
     | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_TIMEOUT}")"
@@ -86,7 +88,7 @@ jq -c '
   >"${SCHEDULER_ROOT}/scheduler_state.with-transaction.json"
 mv "${SCHEDULER_ROOT}/scheduler_state.with-transaction.json" \
   "${SCHEDULER_ROOT}/scheduler_state.json"
-transaction_output="$(printf '/acpx-timeout 3600s\n' \
+transaction_output="$(printf '/timeout-executor 3600s\n' \
   | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_TIMEOUT}")"
 jq -e '.active_count == 1 and .acpx_timeout_seconds == 3600' \
   <<<"${transaction_output}" >/dev/null

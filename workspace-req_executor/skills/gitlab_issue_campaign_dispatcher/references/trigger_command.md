@@ -8,7 +8,7 @@ command:
 - `RUN_DRIVEN_ISSUE_BATCH`
 - `RUN_EXECUTOR_BATCH_TICK`
 - `/slot <positive-integer>`
-- `/acpx-timeout <60..18000 seconds|Nm|Nh>`
+- `/timeout-executor <60..18000 seconds|Nm|Nh>`
 - `RUN_SINGLE_ISSUE`
 
 The executor is task-agnostic. It reads the GitLab issue, renders the issue
@@ -42,7 +42,7 @@ default when no runtime value has been set.
 Exact form:
 
 ```text
-/acpx-timeout <60..18000 seconds|Nm|Nh>
+/timeout-executor <60..18000 seconds|Nm|Nh>
 ```
 
 Call `scripts/set_executor_acpx_timeout.sh` with the complete message on stdin
@@ -242,7 +242,7 @@ token, or action evidence fails closed.
 The initial executor-wide concurrency is 3 unless deployment config overrides
 `EXECUTOR_MAX_CONCURRENCY`. `/slot` then persists the runtime ceiling in shared
 scheduler state. `EXECUTOR_ACPX_TIMEOUT_SECONDS` similarly initializes the
-one-hour attempt cap, while `/acpx-timeout` persists later values for future
+one-hour attempt cap, while `/timeout-executor` persists later values for future
 attempts. Multiple projects/batches share those slots. Grant
 order is persisted scheduler order and must be consumed one item at a time;
 project grouping must not reorder it. Explicit process values for

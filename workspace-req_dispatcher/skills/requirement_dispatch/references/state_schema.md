@@ -231,7 +231,7 @@ drain ledger 证明。nonce_v1 或 `launching` 不能通过旧 I2 清理状态�
 ```
 
 `launch_reclaim_seconds` 与 `stuck_after_minutes` 在该 active 首次启动时按当时的 acpx
-预算固化，后续 `/acpx-timeout` 调低不追溯改写。部署前缺少这两个字段的 active 分别按旧值
+预算固化，后续 `/timeout-executor` 调低不追溯改写。部署前缺少这两个字段的 active 分别按旧值
 `22200` 秒和 `390` 分钟兼容，避免滚动升级时把在途任务提前回收。
 
 RUN_SINGLE_ISSUE single shim 返回 receipt 后，active 增加 bridge：

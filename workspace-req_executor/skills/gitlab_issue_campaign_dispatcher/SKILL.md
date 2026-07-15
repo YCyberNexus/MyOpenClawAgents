@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-15.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot and /acpx-timeout control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-15.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, and per-Issue callback outbox delivery. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -20,7 +20,7 @@ allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, sub
   `scripts/run_single_issue_batch.sh`.
 - A message whose first line starts with `/slot` → Path F → only wrapper is
   `scripts/set_executor_slots.sh`; the wrapper validates the complete message.
-- A message whose first line starts with `/acpx-timeout` → Path G → only
+- A message whose first line starts with `/timeout-executor` → Path G → only
   wrapper is `scripts/set_executor_acpx_timeout.sh`; the wrapper validates the
   complete message and changes only future attempts.
 - Exact `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A → first wrapper is
@@ -446,11 +446,11 @@ cancel running or already-reserved jobs; reservation stays at capacity until
 the active count naturally falls below the new value. The LLM never edits
 `scheduler_state.json` or deployment config itself.
 
-### Path G — `/acpx-timeout <duration>` runtime control
+### Path G — `/timeout-executor <duration>` runtime control
 
 ```
 1. cd "${SKILL_DIR}" && bash scripts/set_executor_acpx_timeout.sh <<'TIMEOUT_EOF' → result
-   <verbatim complete /acpx-timeout message>
+   <verbatim complete /timeout-executor message>
    TIMEOUT_EOF
 2. Return the wrapper's sole compact JSON object without prose or Markdown.
 ```

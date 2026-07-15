@@ -43,7 +43,7 @@ EOF
 chmod +x "${FAKE_TURN}"
 
 success_output="$(
-  MESSAGE='/acpx-timeout 1h' \
+  MESSAGE='/timeout-executor 1h' \
   DEFAULT_EXECUTOR_AGENT=req_executor \
   RUN_AGENT_TURN_CMD="${FAKE_TURN}" \
   CAPTURE="${CAPTURE}" \
@@ -64,12 +64,12 @@ jq -e '
   .target_agent == "req_executor"
   and .target_session_key == "agent:req_executor:main"
   and .message_source == "stdin"
-  and .message == "/acpx-timeout 3600"
+  and .message == "/timeout-executor 3600"
 ' "${CAPTURE}" >/dev/null
 
 capture_before="$(jq -cS . "${CAPTURE}")"
 invalid_output="$(
-  MESSAGE='/acpx-timeout 30s' \
+  MESSAGE='/timeout-executor 30s' \
   DEFAULT_EXECUTOR_AGENT=req_executor \
   RUN_AGENT_TURN_CMD="${FAKE_TURN}" \
   CAPTURE="${CAPTURE}" \
@@ -79,8 +79,21 @@ jq -e '.status == "failed"' <<<"${invalid_output}" >/dev/null
 [ "${capture_before}" = "$(jq -cS . "${CAPTURE}")" ] \
   || { echo 'invalid timeout command reached executor transport' >&2; exit 1; }
 
+for legacy_command in '/acpx-timeout 1h' '/executor-timeout 1h'; do
+  legacy_name_output="$(
+    MESSAGE="${legacy_command}" \
+    DEFAULT_EXECUTOR_AGENT=req_executor \
+    RUN_AGENT_TURN_CMD="${FAKE_TURN}" \
+    CAPTURE="${CAPTURE}" \
+    bash "${WRAPPER}"
+  )"
+  jq -e '.status == "failed"' <<<"${legacy_name_output}" >/dev/null
+  [ "${capture_before}" = "$(jq -cS . "${CAPTURE}")" ] \
+    || { echo 'legacy timeout command reached executor transport' >&2; exit 1; }
+done
+
 invalid_response="$(
-  MESSAGE='/acpx-timeout 1h' \
+  MESSAGE='/timeout-executor 1h' \
   DEFAULT_EXECUTOR_AGENT=req_executor \
   RUN_AGENT_TURN_CMD="${FAKE_TURN}" \
   CAPTURE="${CAPTURE}" \

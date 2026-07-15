@@ -18,7 +18,7 @@ exactly one matching wrapper path:
 - `RUN_SINGLE_ISSUE` → Path E, `run_single_issue_batch.sh`.
 - first line beginning with `/slot` → Path F, `set_executor_slots.sh`; the
   wrapper validates the complete message and persists the shared ceiling.
-- first line beginning with `/acpx-timeout` → Path G,
+- first line beginning with `/timeout-executor` → Path G,
   `set_executor_acpx_timeout.sh`; the wrapper persists the cap for future attempts.
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A, `dispatch_prepare_tick.sh`.
 
@@ -33,7 +33,7 @@ Core contract:
   scheduler settings into that command; the wrapper resolves them privately.
 - `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
   never edit deployment config or scheduler JSON in the orchestrator.
-- `/acpx-timeout` changes the future-attempt acpx cap only through
+- `/timeout-executor` changes the future-attempt acpx cap only through
   `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap,
   future dispatcher outer budgets are derived from scheduler state, and the
   OpenClaw global timeout remains unchanged.

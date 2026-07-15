@@ -18,7 +18,7 @@ dispatcher 是 prompt 路由器和 batch 控制面：
 - I3 只使用 `handle_executor_batch_event.sh`；
 - 旧 I2/FIFO 只为部署升级排空保留。
 - `/slot <正整数>` 只使用 `set_executor_slots.sh` 转发到默认 executor 主 session。
-- `/acpx-timeout <时长>` 只使用 `set_executor_acpx_timeout.sh` 转发到默认
+- `/timeout-executor <时长>` 只使用 `set_executor_acpx_timeout.sh` 转发到默认
   executor 主 session。后续外层预算从 executor scheduler state 派生，OpenClaw
   全局 timeout 不随命令变更。
 

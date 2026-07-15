@@ -23,7 +23,7 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `clarify_or_reject`：不调用下游。
 - `/slot <正整数>`：只调 `set_executor_slots.sh`，由它把命令发送到默认 executor 主 session；
   dispatcher 不直接修改调度状态。
-- `/acpx-timeout <时长>`：只调 `set_executor_acpx_timeout.sh`，持久化后续
+- `/timeout-executor <时长>`：只调 `set_executor_acpx_timeout.sh`，持久化后续
   attempt 的 acpx 超时，并让 dispatcher 后续从 scheduler state 派生外层预算；
   OpenClaw 全局 timeout 不变，在途任务使用已持久化的创建时预算，不受调低操作影响。
 - I3：首行 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 直接进入路径 D，只调

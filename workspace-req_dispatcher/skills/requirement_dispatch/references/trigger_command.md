@@ -42,10 +42,10 @@ wrapper 严格校验完整消息，把规范化命令发送到
 用户命令固定为：
 
 ```text
-/acpx-timeout <60..18000 秒|Nm|Nh>
+/timeout-executor <60..18000 秒|Nm|Nh>
 ```
 
-首行以 `/acpx-timeout` 开始时调用：
+首行以 `/timeout-executor` 开始时调用：
 
 ```bash
 MESSAGE='<完整原文>' bash scripts/set_executor_acpx_timeout.sh

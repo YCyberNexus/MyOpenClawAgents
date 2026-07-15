@@ -6,8 +6,8 @@
 - Runtime state is fixed at `${REPO_PATH}/.req_executor/`.
 - `/slot <positive-integer>` updates the physical concurrency ceiling shared by
   every batch session under one executor scheduler root.
-- `/acpx-timeout <duration>` updates the acpx cap for future attempts. Examples:
-  `/acpx-timeout 1h`, `/acpx-timeout 90m`, `/acpx-timeout 3600`. Future
+- `/timeout-executor <duration>` updates the acpx cap for future attempts. Examples:
+  `/timeout-executor 1h`, `/timeout-executor 90m`, `/timeout-executor 3600`. Future
   dispatcher-side outer timeouts follow the persisted value; the OpenClaw
   global timeout remains an independent deployment setting.
 - No project data directory, runtime basename, or UI account-pool fields are part of the current req_executor contract.

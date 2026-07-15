@@ -49,10 +49,13 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-15.1' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-15.3' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
-grep -Fq '/acpx-timeout <时长>' "${SKILL_DIR}/SKILL.md" \
+grep -Fq '/timeout-executor <时长>' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must route runtime acpx timeout commands"
+if grep -Eq '/(acpx-timeout|executor-timeout)' "${SKILL_DIR}/SKILL.md"; then
+  fail "dispatcher skill must not use superseded timeout commands"
+fi
 grep -Fq 'EXECUTOR_SCHEDULER_STATE_FILE=/data/req_executor/_scheduler/scheduler_state.json' \
   "${WORKSPACE_DIR}/config/dispatcher.env" \
   || fail "dispatcher must derive timeout budgets from executor scheduler state"
@@ -64,7 +67,7 @@ grep -Fq 'EXECUTOR_EXEC_TOOL_TIMEOUT_SECONDS=7500' "${WORKSPACE_DIR}/config/disp
   || fail "default exec tool timeout must match the one-hour acpx budget"
 grep -Fq 'EXECUTOR_QUEUE_LAUNCH_RECLAIM_SECONDS=7800' "${WORKSPACE_DIR}/config/dispatcher.env" \
   || fail "default legacy queue reclaim must match the one-hour acpx budget"
-grep -Fq '`/acpx-timeout` 允许调回最大 18000 秒' "${WORKSPACE_DIR}/config/README.md" \
+grep -Fq '`/timeout-executor` 允许调回最大 18000 秒' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must preserve the maximum runtime acpx timeout"
 grep -Fq '仍应独立保持 `20400`' "${WORKSPACE_DIR}/config/README.md" \
   || fail "deployment docs must cover maximum acpx plus finalization in the global subagent timeout"

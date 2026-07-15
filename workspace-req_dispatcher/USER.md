@@ -22,13 +22,16 @@ session 各自设置。在线调低时不会取消已有任务；如果当前 ac
 acpx 超时默认为 1 小时，可在 1 分钟到 5 小时之间在线调整：
 
 ```text
-/acpx-timeout 1h
+/timeout-executor 1h
 ```
 
-也支持 `/acpx-timeout 90m` 或 `/acpx-timeout 3600`。新值只影响后续启动的
+也支持 `/timeout-executor 90m` 或 `/timeout-executor 3600`。新值只影响后续启动的
 attempt，已在运行的任务不会被中途改时。executor turn、exec 工具、旧队列回收与
 stuck 驱逐会按新值自动派生；旧 FIFO active/pending 保留创建时预算，不会因调低新值被
 提前回收。OpenClaw 全局 timeout 保持部署值，不会被该命令修改。
+
+命令使用 `/timeout-executor` 是为了避开 OpenClaw 内置命令的前缀路由；旧名称
+`/acpx-timeout` 和 `/executor-timeout` 均不再接受。
 
 执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
 

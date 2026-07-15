@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-15.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /acpx-timeout 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-15.3] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue 与 OPEN 指定标签 Issue；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -40,7 +40,7 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 5. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
 6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
 7. 首行以 `/slot` 开始：路径 E；由固定 wrapper 校验完整消息。
-8. 首行以 `/acpx-timeout` 开始：路径 F；由固定 wrapper 校验完整消息。
+8. 首行以 `/timeout-executor` 开始：路径 F；由固定 wrapper 校验完整消息。
 9. 其余自然语言需求：路径 A。
 
 禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
@@ -64,7 +64,7 @@ wrapper 会严格校验命令，只把规范化后的 `/slot N` 发送到
 
 ## 路径 F：运行时 acpx timeout 配置
 
-收到 `/acpx-timeout <时长>` 时，只调用：
+收到 `/timeout-executor <时长>` 时，只调用：
 
 ```bash
 cd "<SKILL_DIR 绝对路径>" && \

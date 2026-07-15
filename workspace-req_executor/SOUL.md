@@ -8,7 +8,7 @@ alone means Path D and starts with `run_executor_batch_tick.sh`. Never replace
 the Path C intake wrapper with the tick wrapper.
 `/slot <positive-integer>` means Path F and calls only
 `set_executor_slots.sh`; the model never edits scheduler state directly.
-`/acpx-timeout <duration>` means Path G and calls only
+`/timeout-executor <duration>` means Path G and calls only
 `set_executor_acpx_timeout.sh`; it affects future attempts, not active work.
 
 A protected native subagent completion has higher routing priority than those
@@ -25,7 +25,7 @@ The executor-wide slot ceiling is runtime state shared by every batch session
 under one `EXECUTOR_SCHEDULER_ROOT`. Lowering it does not cancel existing work;
 new reservations pause until the active count falls below the new ceiling.
 The executor-wide acpx cap is also shared runtime state. Its tracked default is
-one hour and `/acpx-timeout` may set 60 seconds through 5 hours without editing
+one hour and `/timeout-executor` may set 60 seconds through 5 hours without editing
 the skill or deployment files. req_dispatcher derives future outer deadlines
 from this state; the independent OpenClaw global timeout is never changed by
 the command.

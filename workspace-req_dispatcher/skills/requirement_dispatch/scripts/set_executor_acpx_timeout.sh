@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate `/acpx-timeout <duration>` and forward it to req_executor main.
+# Validate `/timeout-executor <duration>` and forward it to req_executor main.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -11,7 +11,7 @@ emit_failure() {
 }
 
 if [ "$#" -ne 0 ]; then
-  emit_failure "usage: /acpx-timeout <60..18000 seconds|Nm|Nh>"
+  emit_failure "usage: /timeout-executor <60..18000 seconds|Nm|Nh>"
 fi
 
 if [ -n "${MESSAGE:-}" ]; then
@@ -19,8 +19,8 @@ if [ -n "${MESSAGE:-}" ]; then
 else
   COMMAND_TEXT="$(cat)"
 fi
-if [[ ! "${COMMAND_TEXT}" =~ ^/acpx-timeout[[:blank:]]+([1-9][0-9]*)([smh]?)[[:blank:]]*$ ]]; then
-  emit_failure "usage: /acpx-timeout <60..18000 seconds|Nm|Nh>"
+if [[ ! "${COMMAND_TEXT}" =~ ^/timeout-executor[[:blank:]]+([1-9][0-9]*)([smh]?)[[:blank:]]*$ ]]; then
+  emit_failure "usage: /timeout-executor <60..18000 seconds|Nm|Nh>"
 fi
 VALUE_TEXT="${BASH_REMATCH[1]}"
 UNIT="${BASH_REMATCH[2]}"
@@ -31,7 +31,7 @@ case "${UNIT}" in
   ""|s) MULTIPLIER=1 ;;
   m) MULTIPLIER=60 ;;
   h) MULTIPLIER=3600 ;;
-  *) emit_failure "usage: /acpx-timeout <60..18000 seconds|Nm|Nh>" ;;
+  *) emit_failure "usage: /timeout-executor <60..18000 seconds|Nm|Nh>" ;;
 esac
 ACPX_TIMEOUT_SECONDS=$((VALUE_TEXT * MULTIPLIER))
 if [ "${ACPX_TIMEOUT_SECONDS}" -lt 60 ] \
@@ -43,7 +43,7 @@ fi
 if [[ ! "${DEFAULT_EXECUTOR_AGENT}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ ]]; then
   emit_failure "default executor agent is invalid"
 fi
-CANONICAL_COMMAND="/acpx-timeout ${ACPX_TIMEOUT_SECONDS}"
+CANONICAL_COMMAND="/timeout-executor ${ACPX_TIMEOUT_SECONDS}"
 
 set +e
 TURN_OUTPUT="$({

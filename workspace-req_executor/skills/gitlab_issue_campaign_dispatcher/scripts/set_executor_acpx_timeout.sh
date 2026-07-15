@@ -11,12 +11,12 @@ timeout_failure() {
 }
 
 if [ "$#" -ne 0 ]; then
-  timeout_failure "usage: /acpx-timeout <60..18000 seconds|Nm|Nh>"
+  timeout_failure "usage: /timeout-executor <60..18000 seconds|Nm|Nh>"
 fi
 
 COMMAND_TEXT="$(cat)"
-if [[ ! "${COMMAND_TEXT}" =~ ^/acpx-timeout[[:blank:]]+([1-9][0-9]*)([smh]?)[[:blank:]]*$ ]]; then
-  timeout_failure "usage: /acpx-timeout <60..18000 seconds|Nm|Nh>"
+if [[ ! "${COMMAND_TEXT}" =~ ^/timeout-executor[[:blank:]]+([1-9][0-9]*)([smh]?)[[:blank:]]*$ ]]; then
+  timeout_failure "usage: /timeout-executor <60..18000 seconds|Nm|Nh>"
 fi
 VALUE_TEXT="${BASH_REMATCH[1]}"
 UNIT="${BASH_REMATCH[2]}"
@@ -27,7 +27,7 @@ case "${UNIT}" in
   ""|s) MULTIPLIER=1 ;;
   m) MULTIPLIER=60 ;;
   h) MULTIPLIER=3600 ;;
-  *) timeout_failure "usage: /acpx-timeout <60..18000 seconds|Nm|Nh>" ;;
+  *) timeout_failure "usage: /timeout-executor <60..18000 seconds|Nm|Nh>" ;;
 esac
 ACPX_TIMEOUT_SECONDS=$((VALUE_TEXT * MULTIPLIER))
 if [ "${ACPX_TIMEOUT_SECONDS}" -lt 60 ] \
