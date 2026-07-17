@@ -14,10 +14,12 @@ mkdir -p "${FAKE_BIN}" "${DISPATCHER_DIR}"
 
 {
   printf '%s\n' '#!/usr/bin/env bash'
-  printf '%s\n' 'printf "%s\n" "$*" >> "${OPENCLAW_LOG}"'
+  printf '%s\n' 'message="$(cat)"'
+  printf '%s\n' 'printf -- "--agent %s --session-key %s message=%s\n" "${OPENCLAW_TARGET_AGENT:-}" "${OPENCLAW_TARGET_SESSION_KEY:-}" "${message}" >> "${OPENCLAW_LOG}"'
   printf '%s\n' 'exit "${FAKE_OPENCLAW_RC:-0}"'
 } > "${FAKE_BIN}/openclaw"
 chmod +x "${FAKE_BIN}/openclaw"
+export OPENCLAW_AGENT_TRANSPORT="${FAKE_BIN}/openclaw"
 
 old_ts="$(( $(date -u +%s) - 7200 ))"
 jq -n --argjson ts "${old_ts}" \

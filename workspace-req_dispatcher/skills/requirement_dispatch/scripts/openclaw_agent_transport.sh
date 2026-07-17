@@ -5,8 +5,10 @@
 # stdin via --message-file. 2026.4.9 only exposes --session-id + --message;
 # using the latter would both collapse new custom keys to main and expose the
 # complete message in argv. When the safe CLI surface is unavailable, this
-# wrapper calls the loopback Gateway in-process through the installed OpenClaw
-# package while still reading the request from stdin.
+# wrapper calls the selected Gateway through a helper while still reading the
+# request from stdin. Native calls load the installed OpenClaw package. The
+# explicit protocol-4 branch uses a self-contained adapter for a 2026.6.1
+# remote Gateway without changing the installed 2026.4.9 runtime.
 set -euo pipefail
 umask 077
 
@@ -19,6 +21,8 @@ OPENCLAW_TARGET_SESSION_KEY="${OPENCLAW_TARGET_SESSION_KEY:-}"
 OPENCLAW_TARGET_SESSION_ID="${OPENCLAW_TARGET_SESSION_ID:-}"
 OPENCLAW_RUN_ID="${OPENCLAW_RUN_ID:-req-agent-$(date -u +%s)-$$}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${HOME}/.openclaw}"
+OPENCLAW_FORCE_GATEWAY_HELPER="${OPENCLAW_FORCE_GATEWAY_HELPER:-0}"
+OPENCLAW_GATEWAY_PROTOCOL="${OPENCLAW_GATEWAY_PROTOCOL:-native}"
 
 case "${OPENCLAW_TARGET_AGENT}" in
   *[!A-Za-z0-9_-]*|"")
@@ -29,6 +33,20 @@ esac
 case "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" in
   *[!0-9]*|""|0)
     echo "openclaw_agent_transport: timeout must be a positive integer" >&2
+    exit 64
+    ;;
+esac
+case "${OPENCLAW_FORCE_GATEWAY_HELPER}" in
+  0|1) ;;
+  *)
+    echo "openclaw_agent_transport: OPENCLAW_FORCE_GATEWAY_HELPER must be 0 or 1" >&2
+    exit 64
+    ;;
+esac
+case "${OPENCLAW_GATEWAY_PROTOCOL}" in
+  native|4) ;;
+  *)
+    echo "openclaw_agent_transport: OPENCLAW_GATEWAY_PROTOCOL must be native or 4" >&2
     exit 64
     ;;
 esac
@@ -105,7 +123,9 @@ fi
 exec 9>"${OPENCLAW_SESSION_LOCK_ROOT}/${SESSION_LOCK_DIGEST}.lock"
 flock 9
 
-if [ -n "${OPENCLAW_AGENT_HELP_OVERRIDE:-}" ]; then
+if [ "${OPENCLAW_FORCE_GATEWAY_HELPER}" -eq 1 ]; then
+  AGENT_HELP=""
+elif [ -n "${OPENCLAW_AGENT_HELP_OVERRIDE:-}" ]; then
   AGENT_HELP="${OPENCLAW_AGENT_HELP_OVERRIDE}"
 else
   set +e
@@ -153,13 +173,39 @@ if [ "${USE_SAFE_CLI}" -eq 1 ]; then
   exit $?
 fi
 
-# 2026.4.9 has neither --session-key nor --message-file. Never fall back to
-# --message: callback nonces and tokens would become visible in process argv.
+# 2026.4.9 has neither --session-key nor --message-file. Remote-Gateway callers
+# also force this branch so the CLI cannot reject a remote-only agent or fall
+# back to a local embedded run. Never fall back to --message: callback nonces
+# and tokens would become visible in process argv.
 if [ -n "${OPENCLAW_GATEWAY_HELPER_BIN:-}" ]; then
   helper_cmd=("${OPENCLAW_GATEWAY_HELPER_BIN}")
 else
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  helper_cmd=("${OPENCLAW_NODE_BIN}" "${SCRIPT_DIR}/openclaw_agent_gateway.mjs")
+  if [ "${OPENCLAW_GATEWAY_PROTOCOL}" = 4 ]; then
+    helper_cmd=("${OPENCLAW_NODE_BIN}" "${SCRIPT_DIR}/openclaw_agent_gateway_v4.mjs")
+  else
+    helper_cmd=("${OPENCLAW_NODE_BIN}" "${SCRIPT_DIR}/openclaw_agent_gateway.mjs")
+  fi
+fi
+
+# Replace this wrapper with the helper so the caller's watchdog always targets
+# the process performing the Gateway request, rather than leaving it orphaned.
+if [ "${OPENCLAW_GATEWAY_PROTOCOL}" = 4 ]; then
+  exec "${helper_cmd[@]}" < <(
+    printf '%s' "${MESSAGE}" | jq -Rsc \
+      --arg openclaw_state_dir "${OPENCLAW_STATE_DIR}" \
+      --arg target_agent "${OPENCLAW_TARGET_AGENT}" \
+      --arg session_key "${RESOLVED_SESSION_KEY}" \
+      --arg run_id "${OPENCLAW_RUN_ID}" \
+      --argjson timeout_seconds "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" '{
+        openclaw_state_dir:$openclaw_state_dir,
+        target_agent:$target_agent,
+        session_key:$session_key,
+        message:.,
+        run_id:$run_id,
+        timeout_seconds:$timeout_seconds
+      }'
+  )
 fi
 
 if [[ "${OPENCLAW_BIN}" == */* ]]; then
@@ -172,17 +218,18 @@ if [ -z "${OPENCLAW_BIN_PATH}" ]; then
   exit 67
 fi
 
-jq -nc \
-  --arg openclaw_bin_path "${OPENCLAW_BIN_PATH}" \
-  --arg target_agent "${OPENCLAW_TARGET_AGENT}" \
-  --arg session_key "${RESOLVED_SESSION_KEY}" \
-  --arg message "${MESSAGE}" \
-  --arg run_id "${OPENCLAW_RUN_ID}" \
-  --argjson timeout_seconds "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" '{
-    openclaw_bin_path:$openclaw_bin_path,
-    target_agent:$target_agent,
-    session_key:$session_key,
-    message:$message,
-    run_id:$run_id,
-    timeout_seconds:$timeout_seconds
-  }' | "${helper_cmd[@]}"
+exec "${helper_cmd[@]}" < <(
+  printf '%s' "${MESSAGE}" | jq -Rsc \
+    --arg openclaw_bin_path "${OPENCLAW_BIN_PATH}" \
+    --arg target_agent "${OPENCLAW_TARGET_AGENT}" \
+    --arg session_key "${RESOLVED_SESSION_KEY}" \
+    --arg run_id "${OPENCLAW_RUN_ID}" \
+    --argjson timeout_seconds "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" '{
+      openclaw_bin_path:$openclaw_bin_path,
+      target_agent:$target_agent,
+      session_key:$session_key,
+      message:.,
+      run_id:$run_id,
+      timeout_seconds:$timeout_seconds
+    }'
+)

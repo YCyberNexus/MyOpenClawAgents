@@ -458,6 +458,7 @@ while IFS= read -r event_id; do
     MR_URL="${mr_url}" \
     REASON="${reason}" \
     ORIGIN_JSON="${origin_json}" \
+    NOTIFY_EVENT_ID="${event_id}" \
     STATE_ROOT="${notify_state_root:-${STATE_ROOT}}" \
     "${BASH}" "${NOTIFY_USER_SCRIPT}" >/dev/null
   notify_rc=$?

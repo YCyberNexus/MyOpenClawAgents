@@ -1,0 +1,35 @@
+sequenceDiagram
+    autonumber
+    participant U as 企微用户
+    participant A as 114个人Agent zhujiaye
+    participant D as 104 req_dispatcher
+    participant P as 104 AI Coding流水线
+    participant G as 114 OpenClaw Gateway 2026.6.1
+
+    U->>A: 自然语言需求
+    A->>D: 现有提交通道<br/>自由文本 + origin<br/>目标 agent:req_dispatcher:main
+    D-->>A: 受理回复
+    A-->>U: 已提交，正在执行
+    D->>P: 建单并提交执行
+    P-->>D: I3终态 done/failed/timeout
+
+    D->>G: 建立 wss/ws WebSocket
+    G-->>D: connect.challenge(nonce)
+    D->>G: connect<br/>minProtocol=maxProtocol=4<br/>token + Ed25519设备签名<br/>operator.write
+
+    alt 首次设备未配对
+        G-->>D: PAIRING_REQUIRED + requestId
+        Note over G: 114运维批准设备
+        D->>G: 使用同一设备身份重试connect
+        G-->>D: hello-ok(protocol=4, operator.write)
+    else 设备已配对
+        G-->>D: hello-ok(protocol=4, operator.write)
+    end
+
+    D->>G: agent<br/>agentId=zhujiaye<br/>sessionKey=agent:zhujiaye:main<br/>message=req_result_push<br/>idempotencyKey=稳定SHA-256
+    G-->>D: status=accepted
+    G->>A: 启动个人Agent处理结果信封
+    A->>U: 按origin发送企微终态消息
+    A-->>G: Agent执行完成
+    G-->>D: status=ok
+    Note over D: 写user_notify delivered=true

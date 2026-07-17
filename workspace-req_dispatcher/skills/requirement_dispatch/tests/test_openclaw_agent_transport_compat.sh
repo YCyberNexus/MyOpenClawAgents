@@ -106,6 +106,60 @@ if [ "$(cat "${MODERN_STDIN}")" != "$(printf 'modern message\n%s' "${NONCE}")" ]
   exit 1
 fi
 
+# A remote-only target must bypass even a modern local CLI. Otherwise the CLI
+# may reject the agent against its local registry or fall back to embedded mode.
+: >"${MODERN_ARGS}"
+forced_output="$(
+  printf 'forced helper message\n%s' "${NONCE}" | env \
+    OPENCLAW_BIN="${MODERN_BIN}" \
+    MODERN_ARGS="${MODERN_ARGS}" \
+    OPENCLAW_GATEWAY_HELPER_BIN="${HELPER_BIN}" \
+    HELPER_REQUEST="${HELPER_REQUEST}" \
+    HELPER_COUNT="${HELPER_COUNT}" \
+    OPENCLAW_FORCE_GATEWAY_HELPER=1 \
+    OPENCLAW_TARGET_AGENT=zhujiaye \
+    OPENCLAW_TARGET_SESSION_KEY=agent:zhujiaye:main \
+    OPENCLAW_AGENT_TIMEOUT_SECONDS=45 \
+    OPENCLAW_RUN_ID=forced-remote-1 \
+    "${TRANSPORT}"
+)"
+if [ "${forced_output}" != '{"status":"accepted"}' ] \
+    || [ -s "${MODERN_ARGS}" ] \
+    || [ "$(jq -r '.target_agent' "${HELPER_REQUEST}")" != zhujiaye ] \
+    || [ "$(jq -r '.session_key' "${HELPER_REQUEST}")" != agent:zhujiaye:main ] \
+    || [ "$(jq -r '.message' "${HELPER_REQUEST}")" != "$(printf 'forced helper message\n%s' "${NONCE}")" ]; then
+  echo "forced remote transport did not bypass the local CLI and preserve the request" >&2
+  exit 1
+fi
+
+# Protocol 4 is an isolated remote branch. It must not locate or load the local
+# OpenClaw executable, and its helper request carries only the state directory
+# needed to reuse the stable device identity.
+v4_output="$(
+  printf 'protocol 4 message\n%s' "${NONCE}" | env \
+    OPENCLAW_BIN="${TEST_ROOT}/must-not-exist-openclaw" \
+    OPENCLAW_GATEWAY_HELPER_BIN="${HELPER_BIN}" \
+    HELPER_REQUEST="${HELPER_REQUEST}" \
+    HELPER_COUNT="${HELPER_COUNT}" \
+    OPENCLAW_FORCE_GATEWAY_HELPER=1 \
+    OPENCLAW_GATEWAY_PROTOCOL=4 \
+    OPENCLAW_STATE_DIR="${STATE_DIR}" \
+    OPENCLAW_TARGET_AGENT=zhujiaye \
+    OPENCLAW_TARGET_SESSION_KEY=agent:zhujiaye:main \
+    OPENCLAW_AGENT_TIMEOUT_SECONDS=45 \
+    OPENCLAW_RUN_ID=forced-v4-1 \
+    "${TRANSPORT}"
+)"
+if [ "${v4_output}" != '{"status":"accepted"}' ] \
+    || [ "$(jq -r '.openclaw_state_dir' "${HELPER_REQUEST}")" != "${STATE_DIR}" ] \
+    || jq -e 'has("openclaw_bin_path")' "${HELPER_REQUEST}" >/dev/null \
+    || [ "$(jq -r '.target_agent' "${HELPER_REQUEST}")" != zhujiaye ] \
+    || [ "$(jq -r '.run_id' "${HELPER_REQUEST}")" != forced-v4-1 ] \
+    || [ "$(jq -r '.message' "${HELPER_REQUEST}")" != "$(printf 'protocol 4 message\n%s' "${NONCE}")" ]; then
+  echo "protocol 4 transport was not isolated from the local OpenClaw runtime" >&2
+  exit 1
+fi
+
 old_output="$(
   printf 'old message\n%s' "${NONCE}" | env \
     OPENCLAW_BIN="${OLD_BIN}" \

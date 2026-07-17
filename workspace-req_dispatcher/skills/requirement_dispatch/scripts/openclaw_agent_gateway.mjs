@@ -114,7 +114,7 @@ try {
 } catch (error) {
   const kind = error && typeof error === "object" && error.constructor?.name
     ? error.constructor.name : "GatewayError";
-  fail(`local Gateway request failed (${kind})`, 69);
+  fail(`Gateway request failed (${kind})`, 69);
 }
 
 const payloads = response?.result?.payloads;

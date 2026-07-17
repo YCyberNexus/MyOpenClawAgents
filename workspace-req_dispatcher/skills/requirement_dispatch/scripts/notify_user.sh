@@ -15,7 +15,8 @@
 #     目标 agent 任一为空 → 不推，
 #     但**记一条 ledger 留痕**（user_notify_skipped），exit 0（config：留空则不推用户；
 #     留痕保证「漏推」可审计、不静默丢）。
-#   - 三项均配置 → 拼结构化信封 + 人读文案，用 `openclaw agent run` 投给 114 接收 agent；
+#   - 三项均配置 → 拼结构化信封 + 人读文案，经 stdin-safe Gateway transport
+#     投给 114 接收 agent；transport 强制直连远端 Gateway，不走本地 CLI/embedded fallback。
 #     openclaw 缺失 / 非零退出 / 超时均只记 user_notify_failed，exit 0。
 #   - 缺 EVENT（必填未给）→ exit 1（调用方 bug，与兄弟脚本 :? 惯例一致）。
 #   - 仅「部署配置形态错误」（EVENT 非法 / 超时配置非正整数）→ exit 2，让运维知道配错了
@@ -23,7 +24,7 @@
 #
 # 入参（env）：
 #   EVENT               必填：result | failure
-#   REPLY_GATEWAY_URL  114 OpenClaw 网关 ws:// URL；空＝回落到旧 ZHIBAN_GATEWAY_URL，
+#   REPLY_GATEWAY_URL  114 OpenClaw 网关 WebSocket URL；空＝回落到旧 ZHIBAN_GATEWAY_URL，
 #                      仍空则不推、仅 ledger 留痕。
 #   REPLY_GATEWAY_TOKEN 114 OpenClaw 网关 token；空＝回落到旧 ZHIBAN_GATEWAY_TOKEN，
 #                       仍空则不推、仅 ledger 留痕。
@@ -40,10 +41,17 @@
 #                       只有合法 object 才允许出站推 114。reply_agent 优先作为 114 接收
 #                       结果的 agent 名，其余字段原样留痕。
 #   REPLY_NOTIFY_TIMEOUT_SECONDS
-#                       openclaw 反向投递超时秒数；空＝回落到旧
+#                       114 接收 agent 的执行超时秒数；空＝回落到旧
 #                       ZHIBAN_NOTIFY_TIMEOUT_SECONDS，再空默认 30；须为正整数。
+#   REPLY_NOTIFY_WATCHDOG_GRACE_SECONDS
+#                       握手、终态响应与进程收尾宽限秒数，默认 35；须为不小于 31
+#                       的整数，以覆盖协议适配器内部 30 秒的终态等待宽限。
+#                       外层 watchdog 总预算为执行超时加本宽限。
+#   NOTIFY_EVENT_ID     调用方持久事件 ID。提供时脚本只取其 SHA-256 生成稳定
+#                       idempotencyKey，供 114 在幂等缓存窗口内合并同一通知的恢复重试。
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+OPENCLAW_AGENT_TRANSPORT="${OPENCLAW_AGENT_TRANSPORT:-${SCRIPT_DIR}/openclaw_agent_transport.sh}"
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
 ensure_state_dirs
@@ -58,6 +66,8 @@ GW_URL="${REPLY_GATEWAY_URL:-${ZHIBAN_GATEWAY_URL:-}}"
 GW_TOKEN="${REPLY_GATEWAY_TOKEN:-${ZHIBAN_GATEWAY_TOKEN:-}}"
 DEFAULT_AGENT="${DEFAULT_REPLY_AGENT:-${ZHIBAN_AGENT:-}}"
 NOTIFY_TIMEOUT_SECONDS="${REPLY_NOTIFY_TIMEOUT_SECONDS:-${ZHIBAN_NOTIFY_TIMEOUT_SECONDS:-30}}"
+NOTIFY_WATCHDOG_GRACE_SECONDS="${REPLY_NOTIFY_WATCHDOG_GRACE_SECONDS:-35}"
+NOTIFY_EVENT_ID="${NOTIFY_EVENT_ID:-}"
 STATUS="${STATUS:-}"
 IID="${IID:-}"
 MR_URL="${MR_URL:-}"
@@ -68,10 +78,18 @@ TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 case "${NOTIFY_TIMEOUT_SECONDS}" in
   ''|*[!0-9]*) echo "notify_user: REPLY_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
+case "${NOTIFY_WATCHDOG_GRACE_SECONDS}" in
+  ''|*[!0-9]*) echo "notify_user: REPLY_NOTIFY_WATCHDOG_GRACE_SECONDS must be an integer greater than or equal to 31" >&2; exit 2 ;;
+esac
 case "${NOTIFY_TIMEOUT_SECONDS}" in
   *[1-9]*) ;;
   *) echo "notify_user: REPLY_NOTIFY_TIMEOUT_SECONDS must be a positive integer" >&2; exit 2 ;;
 esac
+if [ "$((10#${NOTIFY_WATCHDOG_GRACE_SECONDS}))" -lt 31 ]; then
+  echo "notify_user: REPLY_NOTIFY_WATCHDOG_GRACE_SECONDS must be an integer greater than or equal to 31" >&2
+  exit 2
+fi
+NOTIFY_WATCHDOG_SECONDS=$((10#${NOTIFY_TIMEOUT_SECONDS} + 10#${NOTIFY_WATCHDOG_GRACE_SECONDS}))
 
 # IID 前缀：有则用 "#<iid>"，无则退化为通用「任务」。文案与设计稿 §4.3 逐字一致。
 issue_ref="任务"
@@ -178,13 +196,44 @@ append_push_failure_ledger() {
      || echo "notify_user: failed to write user_notify_failed ledger (event=${EVENT}) (non-fatal)" >&2
 }
 
+notify_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+if [ -n "${NOTIFY_EVENT_ID}" ]; then
+  if ! NOTIFY_EVENT_DIGEST="$(printf '%s' "${NOTIFY_EVENT_ID}" | notify_sha256)" \
+      || ! [[ "${NOTIFY_EVENT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]; then
+    append_notify_log false
+    append_push_failure_ledger "cannot derive stable notification idempotency key"
+    echo "notify_user: no SHA-256 command for stable notification identity (non-fatal)" >&2
+    exit 0
+  fi
+  NOTIFY_RUN_ID="req-notify-v1-${NOTIFY_EVENT_DIGEST}"
+else
+  NOTIFY_RUN_ID="req-notify-${EVENT}-${IID:-task}-$(date -u +%s)-$$"
+fi
+
 run_openclaw_with_timeout() {
   _start_seconds=${SECONDS}
-  openclaw --gateway-url "${GW_URL}" --gateway-token "${GW_TOKEN}" \
-    agent run "${ENVELOPE}" --agent "${TARGET_AGENT}" >/dev/null &
+  printf '%s' "${ENVELOPE}" | env \
+    OPENCLAW_GATEWAY_URL="${GW_URL}" \
+    OPENCLAW_GATEWAY_TOKEN="${GW_TOKEN}" \
+    OPENCLAW_TARGET_AGENT="${TARGET_AGENT}" \
+    OPENCLAW_TARGET_SESSION_KEY="agent:${TARGET_AGENT}:main" \
+    OPENCLAW_AGENT_TIMEOUT_SECONDS="${NOTIFY_TIMEOUT_SECONDS}" \
+    OPENCLAW_RUN_ID="${NOTIFY_RUN_ID}" \
+    OPENCLAW_FORCE_GATEWAY_HELPER=1 \
+    OPENCLAW_GATEWAY_PROTOCOL=4 \
+    "${OPENCLAW_AGENT_TRANSPORT}" >/dev/null &
   _pid=$!
   (
-    sleep "${NOTIFY_TIMEOUT_SECONDS}"
+    sleep "${NOTIFY_WATCHDOG_SECONDS}"
     kill "${_pid}" >/dev/null 2>&1 || exit 0
     sleep 2
     kill -KILL "${_pid}" >/dev/null 2>&1 || true
@@ -203,7 +252,7 @@ run_openclaw_with_timeout() {
 
   case "${_rc}" in
     137|143)
-      if [ "${_elapsed}" -ge "${NOTIFY_TIMEOUT_SECONDS}" ]; then
+      if [ "${_elapsed}" -ge "${NOTIFY_WATCHDOG_SECONDS}" ]; then
         return 124
       fi
       return "${_rc}"
@@ -212,9 +261,9 @@ run_openclaw_with_timeout() {
   esac
 }
 
-if ! command -v openclaw >/dev/null 2>&1; then
-  append_push_failure_ledger "openclaw not found"
-  echo "notify_user: openclaw not found; skip push (event=${EVENT} iid=${IID:-?})" >&2
+if [ ! -x "${OPENCLAW_AGENT_TRANSPORT}" ]; then
+  append_push_failure_ledger "openclaw agent transport not executable"
+  echo "notify_user: openclaw agent transport not executable; skip push (event=${EVENT} iid=${IID:-?})" >&2
   exit 0
 fi
 

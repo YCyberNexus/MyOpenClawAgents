@@ -561,7 +561,8 @@ STRICT_OPENCLAW_SUCCESS="${TEST_ROOT}/strict-openclaw.success"
 mkdir -p "${STRICT_OPENCLAW_BIN}"
 {
   printf '%s\n' '#!/usr/bin/env bash'
-  printf '%s\n' 'printf "%s\n" "$*" >>"${STRICT_OPENCLAW_LOG}"'
+  printf '%s\n' 'cat >/dev/null'
+  printf '%s\n' 'printf "%s\n" "${OPENCLAW_RUN_ID:?}" >>"${STRICT_OPENCLAW_LOG}"'
   printf '%s\n' '[ -f "${STRICT_OPENCLAW_SUCCESS}" ] || exit 17'
   printf '%s\n' 'exit 0'
 } >"${STRICT_OPENCLAW_BIN}/openclaw"
@@ -569,6 +570,7 @@ chmod +x "${STRICT_OPENCLAW_BIN}/openclaw"
 
 run_strict_notify_drain() {
   PATH="${STRICT_OPENCLAW_BIN}:${PATH}" \
+  OPENCLAW_AGENT_TRANSPORT="${STRICT_OPENCLAW_BIN}/openclaw" \
   STRICT_OPENCLAW_LOG="${STRICT_OPENCLAW_LOG}" \
   STRICT_OPENCLAW_SUCCESS="${STRICT_OPENCLAW_SUCCESS}" \
   STATE_ROOT="${STRICT_STATE_ROOT}" \
@@ -608,8 +610,10 @@ if ! jq -e '
   printf '%s\n' "${strict_success_drain}" >&2
   exit 1
 fi
-if [ "$(wc -l <"${STRICT_OPENCLAW_LOG}" | tr -d ' ')" -ne 2 ]; then
-  echo "expected one failed and one successful production notify attempt" >&2
+if [ "$(wc -l <"${STRICT_OPENCLAW_LOG}" | tr -d ' ')" -ne 2 ] \
+  || [ "$(sort -u "${STRICT_OPENCLAW_LOG}" | wc -l | tr -d ' ')" -ne 1 ] \
+  || ! grep -Eq '^req-notify-v1-[0-9a-f]{64}$' "${STRICT_OPENCLAW_LOG}"; then
+  echo "expected failed and successful retries to share one stable idempotency key" >&2
   exit 1
 fi
 
@@ -662,13 +666,15 @@ mkdir -p "${COLLISION_OPENCLAW_BIN}"
 {
   printf '%s\n' '#!/usr/bin/env bash'
   printf '%s\n' 'set -euo pipefail'
-  printf '%s\n' 'printf "%s\n" "$*" >>"${COLLISION_OPENCLAW_LOG:?COLLISION_OPENCLAW_LOG required}"'
+  printf '%s\n' 'cat >/dev/null'
+  printf '%s\n' 'printf "%s\n" "${OPENCLAW_RUN_ID:?}" >>"${COLLISION_OPENCLAW_LOG:?COLLISION_OPENCLAW_LOG required}"'
   printf '%s\n' 'exit 0'
 } >"${COLLISION_OPENCLAW_BIN}/openclaw"
 chmod +x "${COLLISION_OPENCLAW_BIN}/openclaw"
 
 collision_drain="$(
   PATH="${COLLISION_OPENCLAW_BIN}:${PATH}" \
+  OPENCLAW_AGENT_TRANSPORT="${COLLISION_OPENCLAW_BIN}/openclaw" \
   STATE_ROOT="${COLLISION_STATE_ROOT}" \
   EXECUTOR_BATCH_NOTIFICATION_KEY_HELPER="${COLLISION_HELPER}" \
   COLLISION_HELPER_LOG="${COLLISION_HELPER_LOG}" \
@@ -683,7 +689,9 @@ if ! jq -e '
   .attempted == 2 and .delivered == 2 and .failed == 0
 ' <<<"${collision_drain}" >/dev/null \
   || [ ! -f "${COLLISION_OPENCLAW_LOG}" ] \
-  || [ "$(wc -l <"${COLLISION_OPENCLAW_LOG}" | tr -d ' ')" -ne 2 ]; then
+  || [ "$(wc -l <"${COLLISION_OPENCLAW_LOG}" | tr -d ' ')" -ne 2 ] \
+  || [ "$(sort -u "${COLLISION_OPENCLAW_LOG}" | wc -l | tr -d ' ')" -ne 2 ] \
+  || ! grep -Eq '^req-notify-v1-[0-9a-f]{64}$' "${COLLISION_OPENCLAW_LOG}"; then
   echo "colliding notification keys did not push both events exactly once" >&2
   printf '%s\n' "${collision_drain}" >&2
   exit 1

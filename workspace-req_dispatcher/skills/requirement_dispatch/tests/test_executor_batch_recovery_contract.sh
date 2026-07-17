@@ -620,13 +620,15 @@ fi
 FAKE
 cat >"${FAKE_OPENCLAW_BIN}/openclaw" <<'FAKE'
 #!/usr/bin/env bash
-printf '%s\n' "$*" >>"${CRASH_OPENCLAW_LOG:?}"
+cat >/dev/null
+printf '%s\n' transport-call >>"${CRASH_OPENCLAW_LOG:?}"
 exit 0
 FAKE
 chmod +x "${FAKE_MV_BIN}/mv" "${FAKE_OPENCLAW_BIN}/openclaw"
 
 set +e
 PATH="${FAKE_MV_BIN}:${FAKE_OPENCLAW_BIN}:${PATH}" \
+OPENCLAW_AGENT_TRANSPORT="${FAKE_OPENCLAW_BIN}/openclaw" \
 FAKE_MV_COUNT="${FAKE_MV_COUNT}" \
 CRASH_OPENCLAW_LOG="${CRASH_OPENCLAW_LOG}" \
 STATE_ROOT="${CRASH_ROOT}" \
@@ -653,6 +655,7 @@ fi
 
 recovered_notify="$(
   PATH="${FAKE_OPENCLAW_BIN}:${PATH}" \
+  OPENCLAW_AGENT_TRANSPORT="${FAKE_OPENCLAW_BIN}/openclaw" \
   CRASH_OPENCLAW_LOG="${CRASH_OPENCLAW_LOG}" \
   STATE_ROOT="${CRASH_ROOT}" \
   REPLY_GATEWAY_URL="ws://example.invalid:8080" \

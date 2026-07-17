@@ -99,6 +99,7 @@ for entry in "${notify_timeout_entries[@]}"; do
   iid="$(jq -r 'if .iid == null then "" else (.iid|tostring) end' <<<"${entry}")"
   origin_json="$(jq -c '.origin' <<<"${entry}")"
   if ! EVENT="result" STATUS="timeout" IID="${iid}" ORIGIN_JSON="${origin_json}" \
+       NOTIFY_EVENT_ID="stuck:${rid}" \
        REASON="no callback before stuck_after_minutes" \
        bash "${SCRIPT_DIR}/notify_user.sh"; then
     echo "evict_stuck: notify_user timeout push failed for run_id=${rid} (non-fatal)" >&2
