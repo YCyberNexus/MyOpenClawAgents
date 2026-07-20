@@ -183,7 +183,7 @@ if ! RESOLVED_REPO_PATH="$(
 fi
 REPO_PARENT_EFF="${RESOLVED_REPO_PATH%/*}"
 
-IID_CSV="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | join(",")')"
+IID_CSV="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | map(tostring) | join(",")')"
 IID_MIN="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | min')"
 IID_MAX="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | max')"
 

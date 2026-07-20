@@ -357,7 +357,7 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     --argjson pending "${INITIAL_PENDING_IIDS_JSON}" \
     --argjson grants "${DRIVEN_GRANT_IIDS_JSON}" \
     '($pending + $grants) | unique | sort')"
-  T[issue_iids]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'join(",")')"
+  T[issue_iids]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'map(tostring) | join(",")')"
   T[issue_min_iid]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'min')"
   T[issue_max_iid]="$(printf '%s' "${DRIVEN_SCOPE_IIDS_JSON}" | jq -r 'max')"
 fi
@@ -772,7 +772,7 @@ persist_state "${STATE_JSON}"
 RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
   REPO_PARENT_PATH="${REPO_PARENT_PATH}")
 
-IID_LIST_CSV="$(printf '%s' "${RECONCILE_UNIVERSE_JSON}" | jq -r 'join(",")')"
+IID_LIST_CSV="$(printf '%s' "${RECONCILE_UNIVERSE_JSON}" | jq -r 'map(tostring) | join(",")')"
 RECONCILE_ARGS+=(IID_LIST="${IID_LIST_CSV}")
 
 RECONCILE_OUT="$(mktemp)"

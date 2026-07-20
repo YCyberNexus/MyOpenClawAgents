@@ -179,7 +179,7 @@ case "${SELECTOR_TYPE}" in
     printf 'iid=%s\n' "$(jq -r '.iid' <<<"${SELECTOR_JSON}")"
     ;;
   iid_list)
-    printf 'iids=%s\n' "$(jq -r '.iids | join(",")' <<<"${SELECTOR_JSON}")"
+    printf 'iids=%s\n' "$(jq -r '.iids | map(tostring) | join(",")' <<<"${SELECTOR_JSON}")"
     ;;
   range)
     printf 'iid_min=%s\n' "$(jq -r '.iid_min' <<<"${SELECTOR_JSON}")"

@@ -701,7 +701,7 @@ RECONCILE_ARGS=(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOK
 
 WHITELIST_NONEMPTY="$(printf '%s' "${STATE_JSON}" | jq -r '.issue_iids_whitelist | length')"
 if [ "${WHITELIST_NONEMPTY}" -gt 0 ]; then
-  IID_LIST_CSV="$(printf '%s' "${EFF_UNIVERSE_JSON}" | jq -r 'join(",")')"
+  IID_LIST_CSV="$(printf '%s' "${EFF_UNIVERSE_JSON}" | jq -r 'map(tostring) | join(",")')"
   RECONCILE_ARGS+=(IID_LIST="${IID_LIST_CSV}")
 else
   RECONCILE_ARGS+=(MIN_IID="${T[issue_min_iid]}" MAX_IID="${T[issue_max_iid]}")

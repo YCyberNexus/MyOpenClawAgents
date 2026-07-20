@@ -40,6 +40,20 @@ Codex must not run `rm` in this repository, including `rm -f`, `rm -r`, or
 needed, ask the user to do it manually or use a non-destructive archive/move
 workflow after explicit approval.
 
+## jq 1.5 Compatibility Baseline
+
+All repository-maintained shell scripts, jq filters, tests, and documented jq
+command examples must be compatible with jq 1.5. Do not use command-line
+options, syntax, or builtins introduced in jq 1.6 or later, including `?//`,
+`$ENV`, `walk`, `halt`, `halt_error`, `isempty`, `utf8bytelength`,
+`strflocaltime`, and the SQL-style `INDEX`, `JOIN`, and `IN` builtins.
+
+jq 1.5 `join(...)` requires string elements. Before joining numeric or
+potentially mixed arrays, explicitly normalize the elements with
+`map(tostring)`. Verification for jq-related changes must execute the affected
+filters with an actual jq 1.5 binary; passing with a newer local jq alone is not
+sufficient.
+
 ## Skill Version Bump
 
 Only changes under a `workspace-*` directory require a skill version bump.
