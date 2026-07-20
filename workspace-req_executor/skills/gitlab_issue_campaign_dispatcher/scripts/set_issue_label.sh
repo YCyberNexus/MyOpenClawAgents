@@ -179,15 +179,15 @@ if [ "${OP}" = add ]; then
   # update. Report preservation instead of claiming the requested label was
   # applied. The outer result then cannot falsely advertise a transition.
   if [ "${LABEL}" != finish ] \
-      && jq -e --arg label "${LABEL}" '
-        .state == "closed" and (.labels | index($label)) == null
+      && jq -e --arg wanted_label "${LABEL}" '
+        .state == "closed" and (.labels | index($wanted_label)) == null
       ' <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
     echo "preserve:closed"
     exit 0
   fi
   if [ "${LABEL}" != finish ] \
-      && jq -e --arg label "${LABEL}" '
-        (.labels | index($label)) == null
+      && jq -e --arg wanted_label "${LABEL}" '
+        (.labels | index($wanted_label)) == null
         and (.labels | index("finish")) != null
       ' \
         <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
@@ -195,17 +195,17 @@ if [ "${OP}" = add ]; then
     exit 0
   fi
   if [ "${LABEL}" != pr ] && [ "${LABEL}" != finish ] \
-      && jq -e --arg label "${LABEL}" '
-        (.labels | index($label)) == null
+      && jq -e --arg wanted_label "${LABEL}" '
+        (.labels | index($wanted_label)) == null
         and (.labels | index("pr")) != null
       ' \
         <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
     echo "preserve:pr"
     exit 0
   fi
-  if ! jq -e --arg label "${LABEL}" --arg conflicts "${CONFLICT_LABELS}" '
+  if ! jq -e --arg wanted_label "${LABEL}" --arg conflicts "${CONFLICT_LABELS}" '
       . as $issue
-      | ($issue.labels | index($label)) != null
+      | ($issue.labels | index($wanted_label)) != null
       and ($conflicts == ""
         or all($conflicts | split(",")[];
           . as $conflict | ($issue.labels | index($conflict)) == null))
@@ -216,8 +216,8 @@ if [ "${OP}" = add ]; then
   [ -z "${CONFLICT_LABELS}" ] \
     || echo "remove_conflicts:${CONFLICT_LABELS}"
 else
-  if ! jq -e --arg label "${LABEL}" '
-      (.labels | index($label)) == null
+  if ! jq -e --arg wanted_label "${LABEL}" '
+      (.labels | index($wanted_label)) == null
     ' <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
     echo "set_issue_label: GitLab did not apply remove ${LABEL}" >&2
     exit 4

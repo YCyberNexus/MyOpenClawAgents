@@ -277,12 +277,12 @@ write_internal_registry() {
     --arg key "${INTERNAL_CHILD_KEY}" \
     --arg session_id "${INTERNAL_SESSION_ID}" \
     --arg session_file "${INTERNAL_SESSION_FILE}" \
-    --arg label "${INTERNAL_LABEL}" \
+    --arg task_label "${INTERNAL_LABEL}" \
     --arg status "${status}" '{
       ($key):{
         sessionId:$session_id,
         sessionFile:$session_file,
-        label:$label,
+        label:$task_label,
         status:$status,
         startedAt:1,
         endedAt:4,
@@ -478,12 +478,12 @@ make_611_event() {
     --arg result "${result}" \
     --arg run_id "${run_id}" \
     --arg child_key "${child_key}" \
-    --arg label "${label}" '{
+    --arg task_label "${label}" '{
       type:"task_completion",
       source:"subagent",
       childSessionKey:$child_key,
       childRunId:$run_id,
-      taskLabel:$label,
+      taskLabel:$task_label,
       status:"completed",
       result:$result,
       inputProvenance:{

@@ -224,7 +224,7 @@ case "${SELECTOR_TYPE}" in
     if [ -z "${LABEL//[[:space:]]/}" ]; then
       batch_die "label must not be empty"
     fi
-    SELECTOR_JSON="$(jq -cnS --arg label "${LABEL}" '{type:"open_label",label:$label}')"
+    SELECTOR_JSON="$(jq -cnS --arg selector_label "${LABEL}" '{type:"open_label",label:$selector_label}')"
     ;;
   *)
     batch_die "unsupported selector_type: ${SELECTOR_TYPE}"

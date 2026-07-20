@@ -43,7 +43,7 @@ if [ "${2:-}" = --method ]; then
     done
     labels="$(jq -c --arg remove_labels "${remove_labels}" --arg add_label "${add_label}" '
       ($remove_labels | split(",") | map(select(length > 0))) as $removed
-      | map(select(. as $label | ($removed | index($label)) == null))
+      | map(select(. as $candidate_label | ($removed | index($candidate_label)) == null))
       | if $add_label != "" and index($add_label) == null
         then . + [$add_label] else . end
     ' <<<"${labels}")"
@@ -103,6 +103,30 @@ closed_out="$(
   || fail "a closed Issue was allowed to transition to doing"
 [ "$(wc -l <"${GLAB_LOG}" | tr -d ' ')" = 1 ] \
   || fail "closed-state guard issued a mutating GitLab call"
+
+: >"${GLAB_LOG}"
+remove_retry_out="$(
+  PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
+  GLAB_LABELS_JSON='["retry","custom"]' ISSUE_IID=42 \
+    bash "${FIXTURE_SCRIPTS}/set_issue_label.sh" remove retry
+)" || fail "retry removal failed"
+[ "${remove_retry_out}" = 'remove:retry' ] \
+  || fail "retry removal was not confirmed from the GitLab response"
+[ "$(wc -l <"${GLAB_LOG}" | tr -d ' ')" = 1 ] \
+  || fail "retry removal performed an unexpected GitLab call"
+
+: >"${GLAB_LOG}"
+doing_out="$(
+  PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
+  GLAB_LABELS_JSON='["retry","custom"]' ISSUE_IID=42 \
+    bash "${FIXTURE_SCRIPTS}/set_issue_label.sh" add doing
+)" || fail "retry-to-doing transition failed"
+grep -Fq 'add:doing' <<<"${doing_out}" \
+  || fail "retry-to-doing transition was not confirmed"
+[ "$(wc -l <"${GLAB_LOG}" | tr -d ' ')" = 2 ] \
+  || fail "retry-to-doing transition did not perform one read and one update"
+grep -Fq 'retry' "${GLAB_LOG}" \
+  || fail "retry-to-doing transition did not remove the retry label"
 
 : >"${GLAB_LOG}"
 pr_out="$(

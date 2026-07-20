@@ -113,7 +113,7 @@ elif [ "${IS_HISTORY}" = true ]; then
       ]; true) as $run_id
     | one_string([
         $root.childLabel, $root.taskLabel, $root.label
-      ]; false) as $label
+      ]; false) as $child_label
     | one_string([$root.status, $root.runStatus, $root.run_status]; true) as $status
     | (if $root.source != "sessions_history" then
         error("history source is not trusted")
@@ -147,7 +147,7 @@ elif [ "${IS_HISTORY}" = true ]; then
         child_session_key:$child_key,
         run_id:$run_id,
         announce_id:"",
-        label:$label,
+        label:$child_label,
         runtime_status:$status,
         assistant_text:$assistant_text
       }
@@ -190,7 +190,7 @@ else
     | one_string([
         $event.taskLabel, $event.childLabel, $event.label,
         $root.taskLabel, $root.childLabel, $root.label
-      ]; false) as $label
+      ]; false) as $child_label
     | one_string([$event.status, $event.runStatus, $event.run_status]; true) as $status
     | one_string([$event.result, $event.finalAssistantText, $event.final_assistant_text]; true) as $result
     | (if ($root.inputProvenance != null) and ($root.input_provenance != null)
@@ -218,7 +218,7 @@ else
         child_session_key:$child_key,
         run_id:$run_id,
         announce_id:$announce_id,
-        label:$label,
+        label:$child_label,
         runtime_status:$status,
         assistant_text:$result
       }

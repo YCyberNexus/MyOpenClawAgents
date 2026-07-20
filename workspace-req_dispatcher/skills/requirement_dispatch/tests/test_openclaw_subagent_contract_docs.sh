@@ -49,7 +49,7 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-20.1' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-20.3' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
 [ "$(cat "${WORKSPACE_DIR}/HEARTBEAT.md")" = 'RUN_EXECUTOR_BATCH_TICK' ] \
   || fail "dispatcher deployment artifact must keep batch recovery heartbeat active"

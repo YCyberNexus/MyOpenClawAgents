@@ -596,7 +596,7 @@ collect_selector_evidence() {
 
   while IFS= read -r label; do
     [ -n "${label}" ] || continue
-    jq -ncS --arg label "${label}" '{type:"open_label",label:$label}'
+    jq -ncS --arg selector_label "${label}" '{type:"open_label",label:$selector_label}'
   done < <(extract_open_label_evidence "${text}")
 
   if has_open_unfinished_selector "${text}"; then
