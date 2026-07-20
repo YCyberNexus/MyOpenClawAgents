@@ -44,6 +44,12 @@ workspace-req_dispatcher/.claude/.review-baseline
 workspace-req_executor/.claude/.review-done-sha
 workspace-req_executor/.claude/.review-baseline
 
+# Required OpenClaw recovery triggers are deployment configuration. Keep these
+# two fixed heartbeat files versioned even when a workstation excludes generic
+# workspace runtime files in .git/info/exclude.
+!workspace-req_dispatcher/HEARTBEAT.md
+!workspace-req_executor/HEARTBEAT.md
+
 # OpenClaw local workspace runtime state (generated on first local agent run)
 workspace-*/.openclaw/
 workspace-*/memory/

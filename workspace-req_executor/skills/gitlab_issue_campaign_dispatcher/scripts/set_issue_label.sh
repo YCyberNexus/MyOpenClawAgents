@@ -108,6 +108,7 @@ case "${OP}" in
     ;;
 esac
 
+CONFLICT_LABELS=""
 if [ "${OP}" = "add" ]; then
   # Re-read stable terminal evidence at the mutation boundary so a reconcile
   # failure or a pr/finish/closed race cannot let a late ordinary transition
@@ -134,7 +135,8 @@ if [ "${OP}" = "add" ]; then
       echo "preserve:finish"
       exit 0
     fi
-    if jq -e '(.labels | index("pr")) != null' \
+    if [ "${LABEL}" != pr ] \
+        && jq -e '(.labels | index("pr")) != null' \
         <<<"${CURRENT_LABELS_JSON}" >/dev/null; then
       echo "preserve:pr"
       exit 0
@@ -147,18 +149,79 @@ if [ "${OP}" = "add" ]; then
   done < <(workflow_conflicts_for_add "${LABEL}")
   if [ "${#CONFLICTS[@]}" -gt 0 ]; then
     CONFLICT_LABELS="$(join_by_comma "${CONFLICTS[@]}")"
-    glab api --method PUT \
+    UPDATED_ISSUE_JSON="$(glab api --method PUT \
       "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
       -f "remove_labels=${CONFLICT_LABELS}" \
-      -f "${FIELD}=${LABEL}" >/dev/null
-    echo "remove_conflicts:${CONFLICT_LABELS}"
-    echo "${OP}:${LABEL}"
-    exit 0
+      -f "${FIELD}=${LABEL}")"
+  else
+    UPDATED_ISSUE_JSON="$(glab api --method PUT \
+      "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
+      -f "${FIELD}=${LABEL}")"
   fi
+else
+  UPDATED_ISSUE_JSON="$(glab api --method PUT \
+    "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
+    -f "${FIELD}=${LABEL}")"
 fi
 
-glab api --method PUT \
-  "projects/${PROJECT_URI}/issues/${ISSUE_IID}" \
-  -f "${FIELD}=${LABEL}" >/dev/null
+if ! jq -e '
+    type == "object"
+    and (.labels | type == "array")
+    and all(.labels[]; type == "string")
+    and ((.state // "opened") | type == "string")
+  ' <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
+  echo "set_issue_label: updated Issue response is invalid" >&2
+  exit 3
+fi
+
+if [ "${OP}" = add ]; then
+  # A stable completion/closure may win the race between the pre-read and the
+  # update. Report preservation instead of claiming the requested label was
+  # applied. The outer result then cannot falsely advertise a transition.
+  if [ "${LABEL}" != finish ] \
+      && jq -e --arg label "${LABEL}" '
+        .state == "closed" and (.labels | index($label)) == null
+      ' <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
+    echo "preserve:closed"
+    exit 0
+  fi
+  if [ "${LABEL}" != finish ] \
+      && jq -e --arg label "${LABEL}" '
+        (.labels | index($label)) == null
+        and (.labels | index("finish")) != null
+      ' \
+        <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
+    echo "preserve:finish"
+    exit 0
+  fi
+  if [ "${LABEL}" != pr ] && [ "${LABEL}" != finish ] \
+      && jq -e --arg label "${LABEL}" '
+        (.labels | index($label)) == null
+        and (.labels | index("pr")) != null
+      ' \
+        <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
+    echo "preserve:pr"
+    exit 0
+  fi
+  if ! jq -e --arg label "${LABEL}" --arg conflicts "${CONFLICT_LABELS}" '
+      . as $issue
+      | ($issue.labels | index($label)) != null
+      and ($conflicts == ""
+        or all($conflicts | split(",")[];
+          . as $conflict | ($issue.labels | index($conflict)) == null))
+    ' <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
+    echo "set_issue_label: GitLab did not apply add ${LABEL} atomically" >&2
+    exit 4
+  fi
+  [ -z "${CONFLICT_LABELS}" ] \
+    || echo "remove_conflicts:${CONFLICT_LABELS}"
+else
+  if ! jq -e --arg label "${LABEL}" '
+      (.labels | index($label)) == null
+    ' <<<"${UPDATED_ISSUE_JSON}" >/dev/null; then
+    echo "set_issue_label: GitLab did not apply remove ${LABEL}" >&2
+    exit 4
+  fi
+fi
 
 echo "${OP}:${LABEL}"

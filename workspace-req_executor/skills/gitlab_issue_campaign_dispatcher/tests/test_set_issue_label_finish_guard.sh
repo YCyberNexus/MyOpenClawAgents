@@ -30,6 +30,26 @@ if [ "${1:-}" != api ]; then
   exit 90
 fi
 if [ "${2:-}" = --method ]; then
+  labels="${GLAB_LABELS_JSON:-[]}"
+  state="${GLAB_STATE:-opened}"
+  if [ "${GLAB_UPDATE_STALE:-0}" != 1 ]; then
+    add_label=""
+    remove_labels=""
+    for arg in "$@"; do
+      case "${arg}" in
+        add_labels=*) add_label="${arg#add_labels=}" ;;
+        remove_labels=*) remove_labels="${arg#remove_labels=}" ;;
+      esac
+    done
+    labels="$(jq -c --arg remove_labels "${remove_labels}" --arg add_label "${add_label}" '
+      ($remove_labels | split(",") | map(select(length > 0))) as $removed
+      | map(select(. as $label | ($removed | index($label)) == null))
+      | if $add_label != "" and index($add_label) == null
+        then . + [$add_label] else . end
+    ' <<<"${labels}")"
+  fi
+  jq -cn --argjson labels "${labels}" --arg state "${state}" \
+    '{labels:$labels,state:$state}'
   exit 0
 fi
 jq -cn --argjson labels "${GLAB_LABELS_JSON:-[]}" \
@@ -101,6 +121,24 @@ if grep -Fq 'custom' "${GLAB_LOG}"; then
 fi
 
 : >"${GLAB_LOG}"
+existing_pr_out="$(
+  PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
+  GLAB_LABELS_JSON='["pr","done","custom"]' ISSUE_IID=42 \
+    bash "${FIXTURE_SCRIPTS}/set_issue_label.sh" add pr
+)" || fail "existing pr convergence failed"
+grep -Fq 'add:pr' <<<"${existing_pr_out}" \
+  || fail "existing pr short-circuited before conflict cleanup"
+[ "$(wc -l <"${GLAB_LOG}" | tr -d ' ')" = 2 ] \
+  || fail "existing pr convergence did not perform one read and one update"
+grep -Fq -- '-f remove_labels=' "${GLAB_LOG}" \
+  || fail "existing pr convergence omitted conflict removal"
+grep -Fq 'done' "${GLAB_LOG}" \
+  || fail "existing pr convergence did not remove residual done"
+if grep -Fq 'custom' "${GLAB_LOG}"; then
+  fail "existing pr convergence attempted to remove a custom label"
+fi
+
+: >"${GLAB_LOG}"
 finish_add_out="$(
   PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" ISSUE_IID=42 \
     bash "${FIXTURE_SCRIPTS}/set_issue_label.sh" add finish
@@ -111,5 +149,19 @@ grep -Fq 'add:finish' <<<"${finish_add_out}" \
   || fail "finish transition performed an unnecessary pre-read"
 grep -Fq -- '-f add_labels=finish' "${GLAB_LOG}" \
   || fail "finish update omitted add_labels=finish"
+
+: >"${GLAB_LOG}"
+set +e
+PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
+GLAB_LABELS_JSON='["doing","custom"]' GLAB_UPDATE_STALE=1 ISSUE_IID=42 \
+  bash "${FIXTURE_SCRIPTS}/set_issue_label.sh" add blocked-cc \
+  >"${TEST_ROOT}/stale.stdout" 2>"${TEST_ROOT}/stale.stderr"
+stale_rc=$?
+set -e
+[ "${stale_rc}" -eq 4 ] \
+  || fail "an unapplied workflow-label update was reported as success"
+grep -Fq 'did not apply add blocked-cc atomically' \
+  "${TEST_ROOT}/stale.stderr" \
+  || fail "an unapplied workflow-label update lacked a precise error"
 
 echo "ok finish cannot be downgraded by a late workflow transition"

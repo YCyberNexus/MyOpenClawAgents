@@ -546,7 +546,11 @@ partial_shared_output="$(
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "shared partial-work salvage wrapper failed"
 printf '%s\n' "${partial_shared_output}" | tail -n 1 \
-  | jq -e '.status == "blocked"' >/dev/null \
+  | jq -e '
+      .status == "blocked"
+      and .labels_added == ["blocked-cc"]
+      and .labels_removed == ["doing"]
+    ' >/dev/null \
   || fail "shared partial-work salvage did not remain blocked"
 jq -e 'has("mr_finalization") | not' \
   "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
@@ -554,6 +558,11 @@ jq -e 'has("mr_finalization") | not' \
 if grep -Eq '^(commit|verify:|mr-pending-checkpoint|mr:)' "${ORDER_LOG}" \
     || grep -Fq 'mr:' "${ORDER_LOG}"; then
   fail "shared partial-work failure published code or reached MR finalization"
+fi
+grep -Fxq 'label:add:blocked-cc' "${ORDER_LOG}" \
+  || fail "blocked failure did not use one atomic terminal-label transition"
+if grep -Fq 'label:remove:doing' "${ORDER_LOG}"; then
+  fail "blocked failure still used an interruptible two-call label transition"
 fi
 
 : >"${ORDER_LOG}"

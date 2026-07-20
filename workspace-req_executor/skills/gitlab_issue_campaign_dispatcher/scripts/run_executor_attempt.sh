@@ -274,6 +274,7 @@ SUMMARY_POSTED=false
 SUPPRESS_SUCCESS_SUMMARY=false
 LABELS_ADDED='[]'
 LABELS_REMOVED='[]'
+LAST_LABEL_PRESERVED=false
 STEP_STDOUT=""
 STEP_STDERR=""
 STEP_RC=0
@@ -516,10 +517,15 @@ run_bounded_step() {
 
 sync_label() {
   local op="$1" label="$2"
+  LAST_LABEL_PRESERVED=false
   run_bounded_step "label-${op}-${label}" 120 \
     bash "${SCRIPT_DIR}/set_issue_label.sh" "${op}" "${label}"
   if [ "${STEP_RC}" -ne 0 ]; then
     return "${STEP_RC}"
+  fi
+  if printf '%s\n' "${STEP_STDOUT}" | grep -Eq '^preserve:(closed|finish|pr)$'; then
+    LAST_LABEL_PRESERVED=true
+    return 0
   fi
   if [ "${op}" = add ]; then
     LABELS_ADDED="$(append_json_string "${LABELS_ADDED}" "${label}")"
@@ -530,17 +536,13 @@ sync_label() {
 
 sync_failure_labels() {
   local terminal_label="$1" error_text=""
-  if ! sync_label remove doing; then
-    error_text="$(last_error_line "${STEP_STDERR}" "remove doing failed rc=${STEP_RC}")"
-  fi
+  # Adding a workflow terminal label removes `doing` and every conflicting
+  # workflow label in the same GitLab update. Keep the failure transition
+  # atomic so an interrupted two-call sequence cannot leave `doing` behind.
   if ! sync_label add "${terminal_label}"; then
-    local add_error
-    add_error="$(last_error_line "${STEP_STDERR}" "add ${terminal_label} failed rc=${STEP_RC}")"
-    if [ -n "${error_text}" ]; then
-      error_text="${error_text}; ${add_error}"
-    else
-      error_text="${add_error}"
-    fi
+    error_text="$(last_error_line "${STEP_STDERR}" "add ${terminal_label} failed rc=${STEP_RC}")"
+  elif [ "${LAST_LABEL_PRESERVED}" != true ]; then
+    LABELS_REMOVED="$(append_json_string "${LABELS_REMOVED}" doing)"
   fi
   [ -z "${error_text}" ] || append_reason "${terminal_label} label sync failed: ${error_text}"
 }

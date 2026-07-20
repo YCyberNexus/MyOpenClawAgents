@@ -1653,57 +1653,26 @@ phase6_sync_labels() {
   fi
   case "${final_status}" in
     done)
-      # C: pr 替换 done —— 终态只留 pr。
-      _label_op "${iid}" remove doing              || rc=$?
-      _label_op "${iid}" remove blocked-cc         || rc=$?
-      _label_op "${iid}" remove blocked-dispatcher || rc=$?
-      _label_op "${iid}" remove failed-cc          || rc=$?
-      _label_op "${iid}" remove failed-dispatcher  || rc=$?
-      _label_op "${iid}" remove blocked            || rc=$?
-      _label_op "${iid}" remove failed             || rc=$?
-      _label_op "${iid}" remove timeout            || rc=$?
-      _label_op "${iid}" add pr                    || rc=$?
-      _label_op "${iid}" remove done               || rc=$?
+      # set_issue_label.sh atomically adds the terminal label and removes all
+      # conflicting workflow labels, including doing and legacy residues.
+      _label_op "${iid}" add pr || rc=$?
       ;;
     blocked)
-      _label_op "${iid}" remove doing              || rc=$?
-      _label_op "${iid}" remove timeout            || rc=$?
-      _label_op "${iid}" remove failed-cc          || rc=$?
-      _label_op "${iid}" remove failed-dispatcher  || rc=$?
-      _label_op "${iid}" remove failed             || rc=$?
-      _label_op "${iid}" remove blocked            || rc=$?
       if [ "${block_side}" = "cc" ]; then
-        _label_op "${iid}" remove blocked-dispatcher || rc=$?
-        _label_op "${iid}" add blocked-cc            || rc=$?
+        _label_op "${iid}" add blocked-cc || rc=$?
       else
-        _label_op "${iid}" remove blocked-cc         || rc=$?
-        _label_op "${iid}" add blocked-dispatcher    || rc=$?
+        _label_op "${iid}" add blocked-dispatcher || rc=$?
       fi
       ;;
     failed)
-      _label_op "${iid}" remove doing              || rc=$?
-      _label_op "${iid}" remove blocked-cc         || rc=$?
-      _label_op "${iid}" remove blocked-dispatcher || rc=$?
-      _label_op "${iid}" remove blocked            || rc=$?
-      _label_op "${iid}" remove failed             || rc=$?
-      _label_op "${iid}" remove timeout            || rc=$?
       if [ "${block_side}" = "cc" ]; then
-        _label_op "${iid}" remove failed-dispatcher || rc=$?
-        _label_op "${iid}" add failed-cc            || rc=$?
+        _label_op "${iid}" add failed-cc || rc=$?
       else
-        _label_op "${iid}" remove failed-cc         || rc=$?
-        _label_op "${iid}" add failed-dispatcher    || rc=$?
+        _label_op "${iid}" add failed-dispatcher || rc=$?
       fi
       ;;
     timeout)
-      _label_op "${iid}" remove doing              || rc=$?
-      _label_op "${iid}" remove blocked-cc         || rc=$?
-      _label_op "${iid}" remove blocked-dispatcher || rc=$?
-      _label_op "${iid}" remove blocked            || rc=$?
-      _label_op "${iid}" remove failed-cc          || rc=$?
-      _label_op "${iid}" remove failed-dispatcher  || rc=$?
-      _label_op "${iid}" remove failed             || rc=$?
-      _label_op "${iid}" add timeout               || rc=$?
+      _label_op "${iid}" add timeout || rc=$?
       ;;
     *)
       echo "phase6_sync_labels: unsupported final_status=${final_status}" >&2

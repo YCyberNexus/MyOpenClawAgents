@@ -47,6 +47,8 @@ grep -Fq 'Exact `RUN_DRIVEN_ISSUE_BATCH` → Path C' "${SKILL_DIR}/SKILL.md" \
   || fail "executor skill must route batch intake before heartbeat tick"
 grep -Fq '`RUN_DRIVEN_ISSUE_BATCH` is never a heartbeat tick' "${WORKSPACE_DIR}/AGENTS.md" \
   || fail "executor bootstrap rules must distinguish batch intake from tick"
+[ "$(cat "${WORKSPACE_DIR}/HEARTBEAT.md")" = 'RUN_EXECUTOR_BATCH_TICK' ] \
+  || fail "executor deployment artifact must keep durable-result recovery heartbeat active"
 
 for forbidden in \
   'sessions_spawn(payload=' \
