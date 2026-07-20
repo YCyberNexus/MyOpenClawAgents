@@ -187,6 +187,52 @@ IID_CSV="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | join(",")')"
 IID_MIN="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | min')"
 IID_MAX="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | max')"
 
+# Dependency branch planning needs the complete immutable membership of each
+# represented batch, not merely the IIDs that won a physical slot this round.
+# Keep this planning scope separate from issue_iids: only grants are executable.
+# A bounded scope preserves the scheduler's small-topup contract; a dependent
+# encountered in a larger/incomplete scope fails closed in the project layer.
+DEPENDENCY_SCOPE_MAX_IIDS="${DEPENDENCY_SCOPE_MAX_IIDS:-200}"
+EXECUTOR_SCHEDULER_ROOT="${EXECUTOR_SCHEDULER_ROOT:-/data/req_executor/_scheduler}"
+BATCHES_ROOT="${BATCHES_ROOT:-${EXECUTOR_SCHEDULER_ROOT}/batches}"
+case "${DEPENDENCY_SCOPE_MAX_IIDS}" in
+  ''|*[!0-9]*) die "DEPENDENCY_SCOPE_MAX_IIDS must be a positive integer" ;;
+esac
+[ "${DEPENDENCY_SCOPE_MAX_IIDS}" -ge 1 ] \
+  || die "DEPENDENCY_SCOPE_MAX_IIDS must be >= 1"
+DEPENDENCY_SCOPES_JSON='[]'
+while IFS= read -r dependency_batch_id; do
+  [[ "${dependency_batch_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]] \
+    || die "grant batch_id is not a safe path component"
+  dependency_snapshot_file="${BATCHES_ROOT}/${dependency_batch_id}/snapshot.json"
+  [ -f "${dependency_snapshot_file}" ] && [ ! -L "${dependency_snapshot_file}" ] \
+    || die "dependency planning snapshot is missing for batch ${dependency_batch_id}"
+  if ! dependency_snapshot="$(jq -ce \
+      --arg project "${PROJECT_FULL}" '
+      if type == "object" and .version == 1 and .project == $project
+        and (.iids | type == "array" and length > 0)
+        and (all(.iids[]; type == "number" and . == floor and . > 0))
+        and ((.iids | length) == (.iids | unique | length))
+      then . else error("invalid dependency planning snapshot") end
+    ' "${dependency_snapshot_file}" 2>/dev/null)"; then
+    die "dependency planning snapshot is invalid for batch ${dependency_batch_id}"
+  fi
+  dependency_scope_count="$(jq -r '.iids | length' <<<"${dependency_snapshot}")"
+  dependency_scope_complete=true
+  dependency_scope_iids="$(jq -c '.iids' <<<"${dependency_snapshot}")"
+  if [ "${dependency_scope_count}" -gt "${DEPENDENCY_SCOPE_MAX_IIDS}" ]; then
+    dependency_scope_complete=false
+    dependency_scope_iids="$(printf '%s' "${REQUEST_JSON}" | jq -c \
+      --arg batch_id "${dependency_batch_id}" \
+      '[.grants[] | select(.batch_id == $batch_id) | .iid] | unique | sort')"
+  fi
+  DEPENDENCY_SCOPES_JSON="$(printf '%s' "${DEPENDENCY_SCOPES_JSON}" | jq -c \
+    --arg scope_id "${dependency_batch_id}" \
+    --argjson complete "${dependency_scope_complete}" \
+    --argjson iids "${dependency_scope_iids}" \
+    '. + [{scope_id:$scope_id,complete:$complete,iids:$iids}]')"
+done < <(printf '%s' "${REQUEST_JSON}" | jq -r '.grants[].batch_id' | sort -u)
+
 export PROJECT="${PROJECT_SLUG}"
 export GROUP="${GROUP_EFF}"
 export GITLAB_TOKEN="${GITLAB_TOKEN_EFF}"
@@ -205,6 +251,7 @@ scheduling_mode=quota_carryover
 blocked_policy=skip_and_retry
 dispatch_mode=driven_topup
 driven_request_json=${REQUEST_JSON}
+dependency_scopes_json=${DEPENDENCY_SCOPES_JSON}
 project=${PROJECT_SLUG}
 group=${GROUP_EFF}
 issue_iids=${IID_CSV}

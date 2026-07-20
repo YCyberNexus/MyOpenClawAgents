@@ -116,6 +116,22 @@ count=0
 count=$((count + 1))
 printf "%s" "${count}" >"${RESERVE_COUNT_FILE}"
 printf "reserve:%s\n" "${count}" >>"${ORDER_LOG}"
+if [ "${REFILL_BUDGET_TEST:-0}" = 1 ]; then
+  snapshot_index=$((count - 1))
+  iid=$((100 + count))
+  jq -cn --arg count "${count}" \
+    --argjson snapshot_index "${snapshot_index}" \
+    --argjson iid "${iid}" "{
+      status:\"ready\",
+      grants:[{
+        job_id:(\"B:snapshot-\" + \$count),batch_id:\"B\",
+        snapshot_index:\$snapshot_index,project:\"group/repo\",iid:\$iid,
+        branch:null,entry_mode:\"auto\",force_rerun_pr:false
+      }],
+      active_count:1,available_slots:1
+    }"
+  exit 0
+fi
 case "${count}" in
   1)
     jq -cn "{
@@ -148,6 +164,16 @@ jobs="$(jq -r ".grants | map(.job_id) | join(\",\")" <<<"${request}")"
 sha42="$(printf "%064d" 42)"
 sha44="$(printf "%064d" 44)"
 printf "topup:%s\n" "${jobs}" >>"${ORDER_LOG}"
+if [ "${REFILL_BUDGET_TEST:-0}" = 1 ]; then
+  jq -cn --argjson grant "$(jq -c '.grants[0]' <<<"${request}")" "{
+    status:\"no_eligible_iids\",dispatch_entries:[],pending_iids:[],
+    skipped_entries:[(\$grant | {
+      job_id,batch_id,snapshot_index,project,iid,
+      status:\"skipped\",reason:\"closed\"
+    })]
+  }"
+  exit 0
+fi
 case "${jobs}" in
   A:snapshot-0,A:snapshot-1)
     jq -cn "{
@@ -162,7 +188,8 @@ case "${jobs}" in
       pending_iids:[],
       skipped_entries:[{
         job_id:\"A:snapshot-1\",batch_id:\"A\",snapshot_index:1,
-        project:\"group/repo\",iid:43,status:\"skipped\",reason:\"closed\"
+        project:\"group/repo\",iid:43,status:\"skipped\",
+        reason:\"${FAKE_SKIP_REASON:-dependency_cycle}\"
       }]
     }"
     ;;
@@ -185,7 +212,8 @@ esac
 
 write_fake import_driven_skipped.sh '
 entry="$(cat)"
-printf "skip:%s\n" "$(jq -r .job_id <<<"${entry}")" >>"${ORDER_LOG}"
+printf "skip:%s:%s\n" "$(jq -r .job_id <<<"${entry}")" \
+  "$(jq -r .reason <<<"${entry}")" >>"${ORDER_LOG}"
 jq -cn --arg job_id "$(jq -r .job_id <<<"${entry}")" "{status:\"imported\",job_id:\$job_id}"
 '
 
@@ -232,6 +260,21 @@ if [ "${DRIVEN_RESULT_RECONCILE:-0}" = 1 ]; then
   printf "result:%s:%s:%s\n" \
     "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
     "${DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
+  if [ "${RESULT_TEST_SHARED_MR_PENDING:-0}" = 1 ]; then
+    jq -e --argjson iid "${IID}" \
+      ".iid == \$iid and .status == \"blocked\"" \
+      <<<"${worker_result}" >/dev/null
+    jq -cn --argjson iid "${IID}" \
+      "{
+        callback_status:\"handled\",iid:\$iid,attempt_number:6,
+        terminal_status:\"blocked\",merge_request_url:\"\",
+        block_reason:\"shared MR marker is pending\",
+        cleanup:{action:\"skip\",target:\"\",reason:\"claim retained for shared MR recovery\"},
+        remaining_pending_iids:[\$iid],campaign_status:\"running\",
+        chat_summary:\"shared MR finalization retained\"
+      }"
+    exit 0
+  fi
   jq -e --argjson iid "${IID}" \
     ".iid == \$iid and .status == \"done\"" <<<"${worker_result}" >/dev/null
   if [ "${RESULT_TEST_RELEASE:-0}" = 1 ]; then
@@ -305,6 +348,55 @@ jq -cn --argjson iid "${IID}" \
   "{callback_status:\"handled\",iid:\$iid,terminal_status:\"timeout\"}"
 '
 
+write_fake recover_shared_mr_finalization.sh '
+printf "shared-mr-recovery:%s:%s:%s:%s:%s\n" \
+  "${PROJECT}" "${GROUP}" "${ISSUE_IID}" "${ATTEMPT_NUMBER}" \
+  "${WORK_BRANCH}" >>"${ORDER_LOG}"
+issue_state="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/issues/issue-${ISSUE_IID}/state.json"
+commit_sha="$(jq -r ".mr_finalization.commit_sha" "${issue_state}")"
+intent_id="$(jq -r ".mr_finalization.intent_id" "${issue_state}")"
+target_branch="$(jq -r ".mr_finalization.target_branch" "${issue_state}")"
+shared_role="$(jq -r ".mr_finalization.shared_branch_role" "${issue_state}")"
+dependency_base_sha="$(jq -r ".dependency_base_sha // \"\"" "${issue_state}")"
+mr_action=created
+[ "${shared_role}" != tail ] || mr_action=reused
+printf -v attempt_padded "%03d" "${ATTEMPT_NUMBER}"
+marker_dir="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/.worktrees/issue-${ISSUE_IID}/.req_executor/issue-${ISSUE_IID}/log/attempt-${attempt_padded}"
+mkdir -p "${marker_dir}"
+jq -n \
+  --argjson issue_iid "${ISSUE_IID}" \
+  --argjson attempt_number "${ATTEMPT_NUMBER}" \
+  --arg source_branch "${WORK_BRANCH}" \
+  --arg target_branch "${target_branch}" \
+  --arg dependency_base_sha "${dependency_base_sha}" \
+  --arg sha "${commit_sha}" \
+  --arg intent_id "${intent_id}" \
+  --arg mr_action "${mr_action}" "{
+    version:1,iid:17,
+    web_url:\"https://gitlab.example.test/group/repo/-/merge_requests/17\",
+    source_branch:\$source_branch,target_branch:\$target_branch,
+    dependency_base_sha:\$dependency_base_sha,sha:\$sha,
+    shared_mr_intent_id:\$intent_id,
+    observed_state:\"opened\",outcome:\"opened\",verified:true,
+    mr_action:\$mr_action,issue_iid:\$issue_iid,
+    attempt_number:\$attempt_number,auto_merge:false,
+    merge_attempted:false,merge_api_succeeded:false,
+    reason:\"shared MR verified open\"
+  }" >"${marker_dir}/mr_result.json"
+chmod 600 "${marker_dir}/mr_result.json"
+jq -cn \
+  --argjson iid "${ISSUE_IID}" \
+  --argjson attempt_number "${ATTEMPT_NUMBER}" \
+  --arg commit_sha "${commit_sha}" \
+  --arg intent_id "${intent_id}" \
+  --arg mr_action "${mr_action}" "{
+    status:\"verified_open\",iid:\$iid,attempt_number:\$attempt_number,
+    commit_sha:\$commit_sha,intent_id:\$intent_id,
+    merge_request_url:\"https://gitlab.example.test/group/repo/-/merge_requests/17\",
+    mr_action:\$mr_action
+  }"
+'
+
 printf '%s' 'secret-free spawn bootstrap for issue 42' >"${TEST_ROOT}/payload-42.txt"
 printf '%s' 'secret-free spawn bootstrap for issue 44' >"${TEST_ROOT}/payload-44.txt"
 
@@ -316,6 +408,9 @@ run_tick() {
   TEST_ROOT="${TEST_ROOT}" \
   SCHEDULER_ROOT="${SCHEDULER_ROOT}" \
   RESERVE_COUNT_FILE="${RESERVE_COUNT_FILE}" \
+  REFILL_BUDGET_TEST="${REFILL_BUDGET_TEST:-0}" \
+  EXECUTOR_REFILL_ROUND_LIMIT="${EXECUTOR_REFILL_ROUND_LIMIT:-32}" \
+  EXECUTOR_TOPUP_PHASE_SECONDS="${EXECUTOR_TOPUP_PHASE_SECONDS:-90}" \
   PATH="${FAKE_BIN}:${PATH}" \
   SCHEDULER_ENV_CMD="${FAKE_BIN}/scheduler_env.sh" \
   RESOLVE_REPO_CMD="${FAKE_BIN}/resolve_driven_repo_path.sh" \
@@ -324,13 +419,25 @@ run_tick() {
   RECONCILE_COUNTS_CMD="${FAKE_BIN}/reconcile_driven_terminal_counts.sh" \
   REAP_PLACEHOLDERS_CMD="${FAKE_BIN}/reap_driven_orphan_placeholders.sh" \
   EXPIRE_RUNNING_CMD="${FAKE_BIN}/expire_running.sh" \
-  RESERVE_CMD="${FAKE_BIN}/reserve_driven_batch_items.sh" \
+  RECOVER_SHARED_MR_CMD="${TEST_RECOVER_SHARED_MR_CMD:-${FAKE_BIN}/recover_shared_mr_finalization.sh}" \
+  RESERVE_CMD="${TEST_RESERVE_CMD:-${FAKE_BIN}/reserve_driven_batch_items.sh}" \
   TOPUP_CMD="${FAKE_BIN}/dispatch_driven_topup.sh" \
   IMPORT_SKIP_CMD="${FAKE_BIN}/import_driven_skipped.sh" \
   RECORD_LAUNCH_CMD="${FAKE_BIN}/record_driven_batch_launch.sh" \
   BIND_CLAIM_CMD="${FAKE_BIN}/bind_driven_claim.sh" \
     bash "${TICK_SCRIPT}"
 }
+
+set +e
+invalid_recovery_command_output="$(
+  TEST_RECOVER_SHARED_MR_CMD=relative/recover-shared-mr run_tick 2>&1
+)"
+invalid_recovery_command_rc=$?
+set -e
+[ "${invalid_recovery_command_rc}" -eq 2 ] \
+  && grep -q 'RECOVER_SHARED_MR_CMD must be absolute' \
+    <<<"${invalid_recovery_command_output}" \
+  || fail "relative shared MR recovery command was not rejected"
 
 archive_launch_actions() {
   local label="$1"
@@ -339,6 +446,55 @@ archive_launch_actions() {
       "${SCHEDULER_ROOT}/launch_actions-${label}"
   fi
 }
+
+# Every child process started while holding the agent-wide tick lock is
+# bounded by the remaining phase deadline. A hung reserve process must be
+# killed, report a retryable tick failure, and release the lock for the next
+# invocation.
+write_fake hanging_reserve.sh '
+sleep 30
+'
+hanging_started_at="$(date +%s)"
+hanging_reserve_output="$(
+  EXECUTOR_TOPUP_PHASE_SECONDS=1 \
+  TEST_RESERVE_CMD="${FAKE_BIN}/hanging_reserve.sh" run_tick
+)" || fail "hung reserve boundary tick crashed"
+hanging_elapsed=$(( $(date +%s) - hanging_started_at ))
+[ "${hanging_elapsed}" -le 5 ] \
+  || fail "hung reserve held the global tick lock for ${hanging_elapsed}s"
+jq -e '
+  .status == "tick_failed"
+  and .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "reservation" and .status == "timeout")] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "topup_budget" and .reason == "child_timeout")] | length) == 1
+' <<<"${hanging_reserve_output}" >/dev/null \
+  || fail "hung reserve did not fail safely within the outer deadline"
+
+# A stream of distinct skip jobs must not drain an arbitrarily large batch
+# while the agent-wide topup lock is held. Two refill rounds means exactly
+# three reservations including the initial one; the following normal tick also
+# proves that the bounded tick released its lock for retry.
+refill_budget_output="$(
+  REFILL_BUDGET_TEST=1 EXECUTOR_REFILL_ROUND_LIMIT=2 run_tick
+)" || fail "bounded skip-refill tick failed"
+[ "$(cat "${RESERVE_COUNT_FILE}")" = 3 ] \
+  || fail "skip-refill round limit did not bound reserve calls"
+[ "$(grep -c '^topup:B:snapshot-' "${ORDER_LOG}")" -eq 3 ] \
+  && [ "$(grep -c '^skip:B:snapshot-' "${ORDER_LOG}")" -eq 3 ] \
+  || fail "bounded skip-refill tick did not process exactly three jobs"
+jq -e '
+  .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "topup_budget"
+    and .status == "partial"
+    and .reason == "refill_round_limit"
+    and .refill_round_limit == 2
+    and .refill_rounds == 2
+    and .items_processed == 3)] | length) == 1
+' <<<"${refill_budget_output}" >/dev/null \
+  || fail "skip-refill budget was not reported as bounded partial work"
 
 tick_output="$(run_tick)" || fail "fixed executor batch tick failed"
 
@@ -349,7 +505,7 @@ outbox
 reap:
 reserve:1
 topup:A:snapshot-0,A:snapshot-1
-skip:A:snapshot-1
+skip:A:snapshot-1:dependency_cycle
 reserve:2
 topup:A:snapshot-2
 record:preparing:A:snapshot-0
@@ -652,7 +808,7 @@ EOF
 chmod +x "${FAKE_BIN}/dispatch_driven_topup.sh"
 running_without_pending_output="$(run_tick)" \
   || fail "running job without project pending tick failed"
-grep -q '^skip:A:snapshot-0$' "${ORDER_LOG}" \
+grep -q '^skip:A:snapshot-0:closed$' "${ORDER_LOG}" \
   || fail "running job without an exact project pending entry leaked its scheduler slot"
 jq -e '
   .spawn_grants == []
@@ -962,6 +1118,9 @@ post_acpx_output="$(
   NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
     SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
 )" || fail "post-acpx watchdog tick failed"
+if grep -q '^shared-mr-recovery:' "${ORDER_LOG}"; then
+  fail "ordinary post-acpx watchdog invoked shared MR-only recovery"
+fi
 jq -e '
   .status == "cleanup_required"
   and .spawn_grants == []
@@ -978,6 +1137,146 @@ jq -e '
   and (tostring | contains("post-acpx-private-claim") | not)
 ' <<<"${post_acpx_output}" >/dev/null \
   || fail "post-acpx marker did not return one exact cleanup action"
+
+# A shared-branch wrapper can die after its exact push checkpoint but before
+# create_mr.sh persists mr_result.json. The heartbeat must run only the fixed
+# MR finalizer, then reconcile the marker under the existing scheduler claim.
+# Once the verified marker exists, a later heartbeat skips the MR call and
+# consumes that same marker directly.
+SHARED_DEPENDENCY_SHA='9999999999999999999999999999999999999999'
+SHARED_COMMIT_SHA='cccccccccccccccccccccccccccccccccccccccc'
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":6,
+    "claim_token":"shared-mr-private-claim","finalization":null,
+    "auto_merge":false,"merge_target_branch":"main",
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<EOF
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":6,"attempt_number":6,
+  "run_id":"run-42-shared-mr","child_session_key":"agent:req_executor:subagent:42",
+  "auto_merge":false,"branch":"main","merge_target_branch":"main",
+  "work_branch":"issue/9+42","branch_members":[9,42],
+  "shared_branch_role":"tail","dependency_iid":9,
+  "dependency_branch":"issue/9+42",
+  "dependency_base_sha":"${SHARED_DEPENDENCY_SHA}"
+}}}
+EOF
+SHARED_ISSUE_DIR="${PROJECT_RUNTIME}/issues/issue-42"
+mkdir -p "${SHARED_ISSUE_DIR}"
+cat >"${SHARED_ISSUE_DIR}/attempt_state.json" <<EOF
+{
+  "iid":42,"attempt_number":6,"issue_title":"共享分支尾节点",
+  "mode_actual":"fresh","auto_merge":false,"merge_target_branch":"main",
+  "work_branch":"issue/9+42","branch_members":[9,42],
+  "shared_branch_role":"tail","dependency_iid":9,
+  "dependency_branch":"issue/9+42",
+  "dependency_base_sha":"${SHARED_DEPENDENCY_SHA}"
+}
+EOF
+cat >"${SHARED_ISSUE_DIR}/state.json" <<EOF
+{
+  "iid":42,"work_branch":"issue/9+42","branch_members":[9,42],
+  "shared_branch_role":"tail","dependency_iid":9,
+  "dependency_branch":"issue/9+42",
+  "dependency_base_sha":"${SHARED_DEPENDENCY_SHA}",
+  "dependency_history_verified":true,
+  "work_branch_sha":"${SHARED_COMMIT_SHA}",
+  "mr_finalization":{
+    "status":"pending","source_attempt_number":6,
+    "work_branch":"issue/9+42","branch_members":[9,42],
+    "shared_branch_role":"tail","commit_sha":"${SHARED_COMMIT_SHA}",
+    "intent_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "target_branch":"main"
+  }
+}
+EOF
+chmod 600 "${SHARED_ISSUE_DIR}/attempt_state.json" \
+  "${SHARED_ISSUE_DIR}/state.json"
+SHARED_MR_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-006"
+mkdir -p "${SHARED_MR_LOG_DIR}"
+cat >"${SHARED_MR_LOG_DIR}/acpx_terminal.json" <<'EOF'
+{"version":1,"iid":42,"attempt_number":6,"exit_code":0,"completed_at_epoch":100}
+EOF
+cat >"${SHARED_MR_LOG_DIR}/worker_result.json" <<EOF
+{
+  "iid":42,"attempt_number":6,"status":"blocked","mode_actual":"fresh",
+  "work_branch":"issue/9+42","local_branch":"issue/42-att006",
+  "commit_sha":"${SHARED_COMMIT_SHA}","merge_request_url":"",
+  "mr_action":"none","wiki_url":"","labels_added":[],
+  "labels_removed":[],"summary_posted":false,
+  "block_reason":"shared MR marker is pending",
+  "log_dir":"${SHARED_MR_LOG_DIR}"
+}
+EOF
+shared_mr_recovery_out="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  RESULT_TEST_SHARED_MR_PENDING=1 MARKER_TEST_STATUS=marker_not_ready \
+  SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "shared MR-only recovery tick failed"
+grep -Eq '^result:A:snapshot-0:6:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "shared durable worker result did not enter claim-fenced Phase 6"
+grep -q '^shared-mr-recovery:repo:group:42:6:issue/9+42$' "${ORDER_LOG}" \
+  || fail "retained shared durable result starved the exact MR-only recovery command"
+shared_result_line="$(grep -n '^result:A:snapshot-0:6:' "${ORDER_LOG}" | cut -d: -f1)"
+shared_recovery_line="$(grep -n '^shared-mr-recovery:' "${ORDER_LOG}" | cut -d: -f1)"
+shared_marker_line="$(grep -n '^marker:A:snapshot-0:6:' "${ORDER_LOG}" | cut -d: -f1)"
+[ "${shared_result_line}" -lt "${shared_recovery_line}" ] \
+  && [ "${shared_recovery_line}" -lt "${shared_marker_line}" ] \
+  || fail "retained durable result did not flow through MR-only recovery before marker reconciliation"
+if grep -q 'shared-mr-private-claim' "${ORDER_LOG}" \
+    || grep -q 'shared-mr-private-claim' <<<"${shared_mr_recovery_out}"; then
+  fail "shared MR-only recovery exposed the private claim token"
+fi
+jq -e '
+  .status == "cleanup_required"
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "handled")] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_shared_mr_recovery"
+    and .job_id == "A:snapshot-0"
+    and .status == "verified_open")] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_marker_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "marker_not_ready")] | length) == 1
+' <<<"${shared_mr_recovery_out}" >/dev/null \
+  || fail "shared MR-only recovery did not retain the claim for marker retry"
+mv "${SHARED_MR_LOG_DIR}/worker_result.json" \
+  "${SHARED_MR_LOG_DIR}/worker_result.consumed.json"
+
+shared_mr_marker_out="$(
+  NOW_EPOCH=2001 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  MARKER_TEST_STATUS=done MARKER_TEST_RELEASE=1 \
+  SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "shared verified-marker reconciliation tick failed"
+if grep -q '^shared-mr-recovery:' "${ORDER_LOG}"; then
+  fail "an already verified shared marker repeated the MR-only recovery call"
+fi
+grep -Eq '^marker:A:snapshot-0:6:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "verified shared marker did not enter ordinary claim-fenced reconciliation"
+jq -e '
+  .status == "cleanup_required"
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_shared_mr_recovery")] | length) == 0
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_marker_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "handled"
+    and .terminal_status == "done")] | length) == 1
+' <<<"${shared_mr_marker_out}" >/dev/null \
+  || fail "verified shared marker was not consumed without another MR call"
+jq -e '.active_jobs["A:snapshot-0"] == null' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "successful shared marker reconciliation did not release the scheduler job"
 
 # Automatic-merge post-acpx stalls are reconciled from the exact MR marker
 # before cleanup. A finish-label failure remains blocked/pending; the next tick
@@ -1047,5 +1346,289 @@ jq -e '
 jq -e '.active_jobs["A:snapshot-0"] == null' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
   || fail "successful marker retry did not release the scheduler job"
+
+# A dependency-waiting grant must be returned to the scheduler without a spawn.
+# Use the real reserve/record scripts at max concurrency 1 so the next direct
+# reservation proves that deferred C no longer prevents ordinary A from running.
+DEPENDENCY_TMP_PARENT="${TMPDIR:-/tmp}"
+DEPENDENCY_TMP_PARENT="${DEPENDENCY_TMP_PARENT%/}"
+DEPENDENCY_TEST_ROOT="$(mktemp -d \
+  "${DEPENDENCY_TMP_PARENT}/req-executor-dependency-tick.XXXXXX")"
+DEPENDENCY_CONFIG_DIR="${DEPENDENCY_TEST_ROOT}/dependency-tick-config"
+DEPENDENCY_SCHEDULER_ROOT="${DEPENDENCY_TEST_ROOT}/dependency-tick-scheduler"
+DEPENDENCY_ORDER_LOG="${DEPENDENCY_TEST_ROOT}/dependency-tick-order.log"
+mkdir -p "${DEPENDENCY_CONFIG_DIR}" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/batches/C" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/batches/A" \
+  "${DEPENDENCY_TEST_ROOT}/repos/group/repo/.git"
+cat >"${DEPENDENCY_CONFIG_DIR}/gitlab.env" <<'EOF'
+GITLAB_HOST=gitlab.example.test
+GITLAB_API_PROTOCOL=https
+GITLAB_TOKEN=tick-dependency-fixture-secret
+EOF
+cat >"${DEPENDENCY_CONFIG_DIR}/campaign_defaults.env" <<EOF
+REPO_PARENT_PATH=${DEPENDENCY_TEST_ROOT}/repos
+EXECUTOR_SCHEDULER_ROOT=${DEPENDENCY_SCHEDULER_ROOT}
+EXECUTOR_MAX_CONCURRENCY=1
+EOF
+CONFIG_DIR="${DEPENDENCY_CONFIG_DIR}" \
+  bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+
+for dependency_batch_spec in 'C 30' 'A 10'; do
+  dependency_batch_id="${dependency_batch_spec%% *}"
+  dependency_iid="${dependency_batch_spec#* }"
+  dependency_batch_dir="${DEPENDENCY_SCHEDULER_ROOT}/batches/${dependency_batch_id}"
+  jq -cnS \
+    --arg batch_id "${dependency_batch_id}" \
+    --argjson iid "${dependency_iid}" '{
+      version:1,
+      batch_id:$batch_id,
+      correlation_id:("correlation-" + $batch_id),
+      project:"group/repo",
+      selector:{type:"single",iid:$iid},
+      force_rerun_pr:false,
+      auto_merge:false,
+      dispatcher_callback_target:"agent:req_dispatcher:main",
+      branch:null,
+      merge_target_branch:null
+    }' >"${dependency_batch_dir}/request.json"
+  jq -cnS --argjson iid "${dependency_iid}" \
+    '{version:1,project:"group/repo",iids:[$iid]}' \
+    >"${dependency_batch_dir}/snapshot.json"
+  jq -cnS --arg batch_id "${dependency_batch_id}" '{
+    version:1,
+    terminal_counts_version:1,
+    batch_id:$batch_id,
+    status:"queued",
+    matched_count:1,
+    terminal_count:0,
+    done_count:0,
+    failed_count:0,
+    timeout_count:0,
+    skipped_count:0,
+    next_snapshot_index:0,
+    request_digest:"fixture-request",
+    snapshot_digest:"fixture-snapshot",
+    memberships:{}
+  }' >"${dependency_batch_dir}/state.json"
+done
+jq '.batch_order = ["C","A"]' \
+  "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.next.json"
+mv "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json"
+
+write_fake dependency_deferred_topup.sh '
+request="$(cat)"
+jq -e "
+  .owner_id == \"executor-agent-scheduler-v1\"
+  and [.grants[] | {job_id,batch_id,snapshot_index,project,iid}]
+    == [{job_id:\"C:snapshot-0\",batch_id:\"C\",snapshot_index:0,
+         project:\"group/repo\",iid:30}]
+" <<<"${request}" >/dev/null
+printf "%s\n" dependency-topup:C:snapshot-0 >>"${DEPENDENCY_ORDER_LOG}"
+active_status="$(jq -r ".active_jobs[\"C:snapshot-0\"].status // \"\"" \
+  "${SCHEDULER_ROOT}/scheduler_state.json")"
+if [ "${active_status}" = running ]; then
+  jq -cn "{
+    status:\"dependency_waiting\",
+    dispatch_entries:[],
+    skipped_entries:[],
+    deferred_entries:[{
+      status:\"deferred\",
+      job_id:\"C:snapshot-0\",
+      batch_id:\"C\",
+      snapshot_index:0,
+      project:\"group/repo\",
+      iid:30,
+      dependency_iid:null,
+      dependency_branch:null,
+      reason:\"dependency_graph_scope_incomplete\"
+    }]
+  }"
+else
+  jq -cn "{
+    status:\"dependency_waiting\",
+    dispatch_entries:[],
+    skipped_entries:[],
+    deferred_entries:[{
+      status:\"deferred\",
+      job_id:\"C:snapshot-0\",
+      batch_id:\"C\",
+      snapshot_index:0,
+      project:\"group/repo\",
+      iid:30,
+      dependency_iid:9,
+      dependency_branch:\"issue/9+30\",
+      reason:\"dependency_not_completed\"
+    }]
+  }"
+fi
+'
+write_fake dependency_record_wrapper.sh '
+printf "dependency-record:%s:%s:%s:%s\n" \
+  "${ACTION:-${STATUS:-}}" "${JOB_ID}" \
+  "${CLAIM_GENERATION:-}" "${CLAIM_TOKEN:-}" \
+  >>"${DEPENDENCY_ORDER_LOG}"
+exec bash "${REAL_RECORD_CMD}"
+'
+
+run_dependency_fixture_tick() {
+  CONFIG_DIR="${DEPENDENCY_CONFIG_DIR}" \
+  TEST_ROOT="${DEPENDENCY_TEST_ROOT}" \
+  SCHEDULER_ROOT="${DEPENDENCY_SCHEDULER_ROOT}" \
+  ORDER_LOG="${DEPENDENCY_ORDER_LOG}" \
+  DEPENDENCY_ORDER_LOG="${DEPENDENCY_ORDER_LOG}" \
+  REAL_RECORD_CMD="${SKILL_DIR}/scripts/record_driven_batch_launch.sh" \
+  DRIVEN_PREPARING_LEASE_SECONDS=1 \
+  PATH="${FAKE_BIN}:${PATH}" \
+  SCHEDULER_ENV_CMD="${SKILL_DIR}/scripts/scheduler_env.sh" \
+  RESOLVE_REPO_CMD="${FAKE_BIN}/resolve_driven_repo_path.sh" \
+  DRAIN_HANDOFF_CMD="${FAKE_BIN}/drain_driven_handoff_intents.sh" \
+  DRAIN_OUTBOX_CMD="${FAKE_BIN}/drain_driven_outbox.sh" \
+  RECONCILE_COUNTS_CMD="${FAKE_BIN}/reconcile_driven_terminal_counts.sh" \
+  REAP_PLACEHOLDERS_CMD="${FAKE_BIN}/reap_driven_orphan_placeholders.sh" \
+  EXPIRE_RUNNING_CMD="${FAKE_BIN}/expire_running.sh" \
+  RESERVE_CMD="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh" \
+  TOPUP_CMD="${FAKE_BIN}/dependency_deferred_topup.sh" \
+  IMPORT_SKIP_CMD="${FAKE_BIN}/import_driven_skipped.sh" \
+  RECORD_LAUNCH_CMD="${FAKE_BIN}/dependency_record_wrapper.sh" \
+  BIND_CLAIM_CMD="${FAKE_BIN}/bind_driven_claim.sh" \
+    bash "${TICK_SCRIPT}"
+}
+
+# Exercise the lease-recovery shape: reserve C, create generation 1, then let
+# that preparing claim expire. The tick's real reserve step must recover the
+# job as tokenless reserved generation 1 before dependency deferral releases it.
+dependency_initial_reserve="$(
+  CONFIG_DIR="${DEPENDENCY_CONFIG_DIR}" NOW_EPOCH=1 \
+    DRIVEN_PREPARING_LEASE_SECONDS=1 \
+    bash "${SKILL_DIR}/scripts/reserve_driven_batch_items.sh"
+)" || fail "dependency fixture initial reservation failed"
+jq -e '.grants[0].job_id == "C:snapshot-0"' \
+  <<<"${dependency_initial_reserve}" >/dev/null \
+  || fail "dependency fixture did not reserve C first"
+
+# A migrated legacy running job has no secret claim token. Dependency waiting
+# must not weaken the claim fence to release it as retry_wait; report the
+# recovery requirement and leave the exact legacy job untouched.
+cp "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.before-legacy.json"
+cp "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.before-legacy.json"
+jq '
+  .active_jobs["C:snapshot-0"].status = "running"
+  | .active_jobs["C:snapshot-0"].claim_generation = 0
+  | .active_jobs["C:snapshot-0"].claim_token = null
+  | .active_jobs["C:snapshot-0"].legacy_running = true
+' "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.legacy.json"
+mv "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.legacy.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json"
+jq '
+  .memberships["0"].status = "running"
+  | .status = "running"
+' "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.json" \
+  >"${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.legacy.json"
+mv "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.legacy.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.json"
+: >"${DEPENDENCY_ORDER_LOG}"
+legacy_dependency_output="$(run_dependency_fixture_tick)" \
+  || fail "legacy dependency deferral tick crashed"
+jq -e '
+  .status == "tick_failed"
+  and .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "dependency_defer"
+    and .job_id == "C:snapshot-0"
+    and .status == "legacy_running_recovery_required")] | length) == 1
+' <<<"${legacy_dependency_output}" >/dev/null \
+  || fail "legacy running dependency weakened the claim fence"
+if grep -q '^dependency-record:' "${DEPENDENCY_ORDER_LOG}"; then
+  fail "legacy running dependency called the ordinary deferral recorder"
+fi
+jq -e '
+  .active_jobs["C:snapshot-0"].status == "running"
+  and .active_jobs["C:snapshot-0"].legacy_running == true
+  and .active_jobs["C:snapshot-0"].claim_generation == 0
+  and .active_jobs["C:snapshot-0"].claim_token == null
+' "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "legacy running dependency job was mutated without a claim fence"
+cp "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.before-legacy.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json"
+cp "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.before-legacy.json" \
+  "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.json"
+dependency_expiring_claim="$(
+  CONFIG_DIR="${DEPENDENCY_CONFIG_DIR}" JOB_ID='C:snapshot-0' \
+    STATUS=preparing NOW_EPOCH=2 DRIVEN_PREPARING_LEASE_SECONDS=1 \
+    bash "${SKILL_DIR}/scripts/record_driven_batch_launch.sh"
+)" || fail "dependency fixture preparing claim failed"
+jq -e '
+  .job_status == "preparing"
+  and .claim_generation == 1
+  and (.claim_token | type == "string" and length > 0)
+' <<<"${dependency_expiring_claim}" >/dev/null \
+  || fail "dependency fixture did not create generation-1 preparing claim"
+
+: >"${DEPENDENCY_ORDER_LOG}"
+dependency_tick_output="$(run_dependency_fixture_tick)" \
+  || fail "dependency-deferred executor tick failed"
+jq -e '
+  .status == "idle"
+  and .spawn_grants == []
+  and .reconcile_actions == []
+  and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "project_topup"
+    and .project == "group/repo"
+    and .deferred_count == 1)] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "dependency_defer"
+    and .job_id == "C:snapshot-0"
+    and .project == "group/repo"
+    and .iid == 30
+    and .dependency_iid == 9
+    and .reason == "dependency_not_completed"
+    and .status == "released")] | length) == 1
+' <<<"${dependency_tick_output}" >/dev/null \
+  || fail "dependency-deferred tick did not return one released no-spawn result: ${dependency_tick_output}"
+[ "$(grep -c '^dependency-record:dependency_deferred:C:snapshot-0:1:$' \
+    "${DEPENDENCY_ORDER_LOG}")" -eq 1 ] \
+  || fail "tick did not fence the recovered reserved dependency generation"
+if grep -q '^record:preparing:' "${DEPENDENCY_ORDER_LOG}"; then
+  fail "dependency-deferred tick attempted a preparing claim"
+fi
+jq -e '
+  (.active_jobs | has("C:snapshot-0") | not)
+  and (.active_jobs | length) == 0
+' "${DEPENDENCY_SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "dependency-deferred tick retained the active C job"
+jq -e '
+  .status == "queued"
+  and .terminal_count == 0
+  and .done_count == 0
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
+  and .memberships["0"].status == "retry_wait"
+  and .memberships["0"].defer_count == 1
+  and (.memberships["0"] | has("job_id") | not)
+' "${DEPENDENCY_SCHEDULER_ROOT}/batches/C/state.json" >/dev/null \
+  || fail "dependency-deferred tick did not park C as non-terminal retry_wait"
+[ ! -e "${SPAWN_SENTINEL}" ] \
+  || fail "dependency-deferred tick called sessions_spawn"
+
+dependency_after_tick_reserve="$(
+  CONFIG_DIR="${DEPENDENCY_CONFIG_DIR}" NOW_EPOCH=3000 \
+    bash "${SKILL_DIR}/scripts/reserve_driven_batch_items.sh"
+)" || fail "post-deferral reservation failed"
+jq -e '
+  [.grants[] | {batch_id,iid,job_id}] == [
+    {batch_id:"A",iid:10,job_id:"A:snapshot-0"}
+  ]
+  and .active_count == 1
+  and .available_slots == 0
+' <<<"${dependency_after_tick_reserve}" >/dev/null \
+  || fail "deferred C still occupied the single slot: ${dependency_after_tick_reserve}"
 
 echo "ok executor batch tick is recovery-first and returns strict spawn grants"

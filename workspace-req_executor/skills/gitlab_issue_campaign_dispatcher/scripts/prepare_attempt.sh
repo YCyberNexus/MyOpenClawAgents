@@ -2,9 +2,10 @@
 # prepare_attempt.sh — ensure a per-issue linked git worktree exists for
 # this IID and put it on the right starting point for the current attempt.
 #
-# Strategy A — single fixed remote branch ${WORK_BRANCH} ("issue/<iid>").
-# Each attempt gets its own LOCAL branch (${LOCAL_ATTEMPT_BRANCH},
-# "${WORK_BRANCH}-att${PADDED}") checked out into a SHARED per-issue
+# Strategy A — single fixed remote branch ${WORK_BRANCH}; either `issue/<iid>`
+# or a frozen two-Issue `issue/<head>+<tail>` branch.
+# Each attempt gets an IID-local branch (${LOCAL_ATTEMPT_BRANCH},
+# `issue/<current iid>-att${PADDED}`) checked out into a SHARED per-issue
 # linked worktree at ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}
 # (note: NO -att-<NNN> suffix). On attempt 1 this script creates the
 # worktree via `git worktree add -B`. On attempt N>1 it force-switches
@@ -23,12 +24,15 @@
 # Modes (env var ISSUE_MODE):
 #   fresh     — first attempt for this IID; base on origin/${BRANCH}, where
 #               BRANCH is explicit trigger input or the resolved origin/HEAD.
-#   continue  — base attempt on origin/${WORK_BRANCH} if it exists, else
-#               the latest local prior attempt branch if one exists, else
-#               downgrade to fresh (and use origin/${BRANCH}). This mode
-#               is used only when the live issue label requests continue.
-#               After the base checkout, `.claude/` is refreshed from the
-#               latest origin/${BRANCH} when that path exists.
+#   continue  — when the dispatcher has preflighted a recoverable C history,
+#               base the attempt on its exact CONTINUE_BASE_SHA. Otherwise try
+#               origin/${WORK_BRANCH}, then the latest local prior attempt
+#               branch, and finally downgrade to fresh on origin/${BRANCH}.
+#               CONTINUE_BASE_REQUIRED=true requires that pinned SHA plus its
+#               exact source ref and makes disappearance/movement a hard
+#               failure before the SHA is checked out.
+#               After the base checkout, Claude execution-control paths are
+#               refreshed from the latest origin/${CONFIG_BRANCH:-$BRANCH}.
 #
 # Legacy-path salvage:
 #   On the first run after the per-(IID,attempt) worktree scheme was
@@ -62,9 +66,11 @@
 #   physically deleted but also do not contaminate the reset run.
 #
 # Shared config freshness:
-#   If `.claude/` exists on BRANCH, every attempt refreshes it from the
-#   just-fetched origin/${BRANCH} after the base checkout and before acpx
-#   runs. Repositories without `.claude/` skip this step.
+#   Agent execution-control paths (every `.claude/`, `CLAUDE.md`,
+#   `CLAUDE.local.md`, `.mcp.json`, and `.acpxrc.json` in the tree) are
+#   refreshed only from CONFIG_BRANCH (default BRANCH) after the base checkout
+#   and before acpx runs. A dependency may change the business-code baseline,
+#   but never those control files.
 #
 # What this script does NOT do:
 #   - It does NOT mutate the parent checkout at ${REPO_PATH}. Only
@@ -82,6 +88,8 @@
 #   REPO_PATH, ISSUE_IID, ISSUE_MODE,
 #   ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR, LOG_DIR,
 #   ATTEMPT_NUMBER_PADDED, WORK_BRANCH, LOCAL_ATTEMPT_BRANCH
+# Optional shared-tail inputs:
+#   SHARED_BRANCH_ROLE, EXPECTED_COMMIT_PARENT_SHA
 #
 # Output (to stdout, two lines):
 #   <actual-mode>           "fresh" or "continue"
@@ -102,6 +110,61 @@ GIT_NETWORK_GUARD_CONTEXT=prepare_attempt
   "${ATTEMPT_DIR:?}" "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${LOG_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
   "${WORK_BRANCH:?}" "${LOCAL_ATTEMPT_BRANCH:?}"
 BRANCH="${BRANCH:-}"
+CONFIG_BRANCH="${CONFIG_BRANCH:-}"
+DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+SHARED_BRANCH_ROLE="${SHARED_BRANCH_ROLE:-}"
+EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
+CONTINUE_BASE_REQUIRED="${CONTINUE_BASE_REQUIRED:-false}"
+CONTINUE_BASE_SHA="${CONTINUE_BASE_SHA:-}"
+CONTINUE_BASE_REF="${CONTINUE_BASE_REF:-}"
+case "${CONTINUE_BASE_REQUIRED}" in
+  true|false) ;;
+  *)
+    echo "prepare_attempt: CONTINUE_BASE_REQUIRED must be true or false" >&2
+    exit 2
+    ;;
+esac
+if [ -n "${CONTINUE_BASE_SHA}" ] \
+    && ! [[ "${CONTINUE_BASE_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "prepare_attempt: CONTINUE_BASE_SHA must be a full hexadecimal Git object ID" >&2
+  exit 2
+fi
+if [ "${CONTINUE_BASE_REQUIRED}" = true ] \
+    && { [ -z "${CONTINUE_BASE_SHA}" ] \
+      || [ -z "${CONTINUE_BASE_REF}" ]; }; then
+  echo "prepare_attempt: required continue base must include its pinned SHA and source ref" >&2
+  exit 2
+fi
+if [ -n "${CONTINUE_BASE_REF}" ] \
+    && ! git check-ref-format "${CONTINUE_BASE_REF}" >/dev/null 2>&1; then
+  echo "prepare_attempt: CONTINUE_BASE_REF must be a valid full Git ref" >&2
+  exit 2
+fi
+if [ -n "${DEPENDENCY_BASE_SHA}" ] \
+    && ! [[ "${DEPENDENCY_BASE_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "prepare_attempt: DEPENDENCY_BASE_SHA must be a full hexadecimal Git object ID" >&2
+  exit 2
+fi
+case "${SHARED_BRANCH_ROLE}" in
+  ''|head|tail) ;;
+  *)
+    echo "prepare_attempt: SHARED_BRANCH_ROLE must be empty, head, or tail" >&2
+    exit 2
+    ;;
+esac
+if [ -n "${EXPECTED_COMMIT_PARENT_SHA}" ] \
+    && ! [[ "${EXPECTED_COMMIT_PARENT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "prepare_attempt: EXPECTED_COMMIT_PARENT_SHA must be a full hexadecimal Git object ID" >&2
+  exit 2
+fi
+if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
+  if [ -z "${DEPENDENCY_BASE_SHA}" ] \
+      || [ -z "${EXPECTED_COMMIT_PARENT_SHA}" ] \
+      || [ "${DEPENDENCY_BASE_SHA,,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
+    echo "prepare_attempt: shared tail requires its frozen dependency SHA as EXPECTED_COMMIT_PARENT_SHA" >&2
+    exit 2
+  fi
+fi
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -119,62 +182,226 @@ flock 8
 # Refresh refs. clone_or_pull.sh has already fetched, but do it again
 # defensively in case this script is run standalone.
 cd "${REPO_PATH}"
-git_network_guard_run "${REPO_PATH}" fetch --prune origin >&2
+GIT_NO_REPLACE_OBJECTS=1 git_network_guard_run "${REPO_PATH}" fetch \
+  --prune --no-tags --refmap= origin \
+  '+refs/heads/*:refs/remotes/origin/*' >&2
 if [ -z "${BRANCH}" ]; then
   BRANCH="$(resolve_origin_default_branch "${REPO_PATH}")" || {
     echo "prepare_attempt: unable to resolve origin/HEAD default branch" >&2
     exit 5
   }
 fi
+if [ -z "${CONFIG_BRANCH}" ]; then
+  CONFIG_BRANCH="${BRANCH}"
+fi
+
+if [ "${CONTINUE_BASE_REQUIRED}" = true ]; then
+  expected_remote_continue_ref="refs/remotes/origin/${WORK_BRANCH}"
+  expected_local_continue_prefix="refs/heads/issue/${ISSUE_IID}-att"
+  continue_ref_allowed=false
+  if [ "${CONTINUE_BASE_REF}" = "${expected_remote_continue_ref}" ]; then
+    continue_ref_allowed=true
+  elif [[ "${CONTINUE_BASE_REF}" == "${expected_local_continue_prefix}"* ]]; then
+    continue_ref_suffix="${CONTINUE_BASE_REF#${expected_local_continue_prefix}}"
+    if [[ "${continue_ref_suffix}" =~ ^[0-9]+$ ]]; then
+      continue_ref_allowed=true
+    fi
+  fi
+  if [ "${continue_ref_allowed}" != true ]; then
+    echo "prepare_attempt: CONTINUE_BASE_REF is not an allowed ref for ${WORK_BRANCH}" >&2
+    exit 2
+  fi
+
+  current_continue_sha="$(GIT_NO_REPLACE_OBJECTS=1 git rev-parse --verify \
+    "${CONTINUE_BASE_REF}^{commit}" 2>/dev/null || true)"
+  if [ -z "${current_continue_sha}" ] \
+      || [ "${current_continue_sha,,}" != "${CONTINUE_BASE_SHA,,}" ]; then
+    echo "prepare_attempt: continue source ref disappeared or moved after dependency preflight" >&2
+    exit 5
+  fi
+fi
+
+FRESH_BASE_REF="origin/${BRANCH}"
+if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
+  resolved_dependency_sha="$(GIT_NO_REPLACE_OBJECTS=1 git rev-parse --verify \
+    "${DEPENDENCY_BASE_SHA}^{commit}" 2>/dev/null || true)"
+  if [ -z "${resolved_dependency_sha}" ] \
+      || [ "${resolved_dependency_sha,,}" != "${DEPENDENCY_BASE_SHA,,}" ]; then
+    echo "prepare_attempt: pinned dependency commit is unavailable: ${DEPENDENCY_BASE_SHA}" >&2
+    exit 5
+  fi
+  FRESH_BASE_REF="${DEPENDENCY_BASE_SHA}"
+fi
 
 # Resolve the actual base ref.
 # Fresh mode bases on BRANCH. Continue mode tries
 # WORK_BRANCH first; if missing, fall back to the latest local prior
 # attempt branch; if that is missing too, downgrade to fresh on BRANCH.
-BASE_REF="origin/${BRANCH}"
+BASE_REF="${FRESH_BASE_REF}"
 ACTUAL_MODE="${ISSUE_MODE}"
 if [ "${ACTUAL_MODE}" = "continue" ]; then
-  set +e
-  git_network_guard_run "${REPO_PATH}" \
-    ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
-    >/dev/null
-  ls_remote_status=$?
-  set -e
-  case "${ls_remote_status}" in
-    0)
-      BASE_REF="origin/${WORK_BRANCH}"
-      ;;
-    2)
-      PREVIOUS_LOCAL_BRANCH=""
-      prev=$((ATTEMPT_NUMBER - 1))
-      while [ "${prev}" -ge 1 ]; do
-        prev_padded="$(printf '%03d' "${prev}")"
-        candidate="${WORK_BRANCH}-att${prev_padded}"
-        if git rev-parse --verify --quiet \
-            "refs/heads/${candidate}" >/dev/null; then
-          PREVIOUS_LOCAL_BRANCH="${candidate}"
-          break
+  if [ "${CONTINUE_BASE_REQUIRED}" = true ]; then
+    # The dispatcher already selected and authenticated the exact pushed (or
+    # last verified local) C commit. Never reselect a branch here: doing so
+    # could choose a newer unverified local attempt or a remotely moved head.
+    BASE_REF="${CONTINUE_BASE_SHA}"
+  else
+    set +e
+    remote_work_branch_rows="$(git_network_guard_run "${REPO_PATH}" \
+      ls-remote --exit-code --heads origin "${WORK_BRANCH}" \
+      2>/dev/null)"
+    ls_remote_status=$?
+    set -e
+    case "${ls_remote_status}" in 0|2) ;; *) exit "${ls_remote_status}" ;; esac
+    remote_work_branch_tips="$(awk \
+      -v expected_ref="refs/heads/${WORK_BRANCH}" \
+      '$2 == expected_ref {print $1}' <<<"${remote_work_branch_rows}")"
+    remote_work_branch_count="$(awk 'NF {count++} END {print count+0}' \
+      <<<"${remote_work_branch_tips}")"
+    if [ "${remote_work_branch_count}" -gt 1 ]; then
+      echo "prepare_attempt: remote returned duplicate exact work-branch refs" >&2
+      exit 5
+    fi
+    case "${remote_work_branch_count}" in
+      1)
+        BASE_REF="origin/${WORK_BRANCH}"
+        ;;
+      0)
+        PREVIOUS_LOCAL_BRANCH=""
+        prev=$((ATTEMPT_NUMBER - 1))
+        while [ "${prev}" -ge 1 ]; do
+          prev_padded="$(printf '%03d' "${prev}")"
+          candidate="issue/${ISSUE_IID}-att${prev_padded}"
+          if GIT_NO_REPLACE_OBJECTS=1 git rev-parse --verify --quiet \
+              "refs/heads/${candidate}" >/dev/null; then
+            PREVIOUS_LOCAL_BRANCH="${candidate}"
+            break
+          fi
+          prev=$((prev - 1))
+        done
+        if [ -n "${PREVIOUS_LOCAL_BRANCH}" ]; then
+          BASE_REF="${PREVIOUS_LOCAL_BRANCH}"
+        else
+          ACTUAL_MODE=fresh
+          BASE_REF="${FRESH_BASE_REF}"
         fi
-        prev=$((prev - 1))
-      done
-      if [ -n "${PREVIOUS_LOCAL_BRANCH}" ]; then
-        BASE_REF="${PREVIOUS_LOCAL_BRANCH}"
-      else
-        ACTUAL_MODE=fresh
-        BASE_REF="origin/${BRANCH}"
-      fi
-      ;;
-    *) exit "${ls_remote_status}" ;;
-  esac
+        ;;
+      *) exit 5 ;;
+    esac
+  fi
 fi
 
 # Sanity check the resolved BASE_REF actually exists. If BRANCH is
 # missing on the remote, fail loudly — there is no further fallback.
-if ! git rev-parse --verify --quiet "${BASE_REF}" >/dev/null; then
+if ! GIT_NO_REPLACE_OBJECTS=1 git rev-parse --verify --quiet \
+    "${BASE_REF}" >/dev/null; then
   echo "prepare_attempt: base ref ${BASE_REF} does not exist on origin" >&2
   echo "Check that the resolved target branch '${BRANCH}' exists on the remote." >&2
   exit 5
 fi
+RESOLVED_BASE_SHA="$(GIT_NO_REPLACE_OBJECTS=1 \
+  git rev-parse --verify "${BASE_REF}^{commit}")"
+if [ "${ACTUAL_MODE}" = "continue" ] \
+    && [ "${CONTINUE_BASE_REQUIRED}" = true ] \
+    && [ "${RESOLVED_BASE_SHA,,}" != "${CONTINUE_BASE_SHA,,}" ]; then
+  echo "prepare_attempt: continue base changed after dependency preflight" >&2
+  exit 5
+fi
+if [ "${ACTUAL_MODE}" = "continue" ] \
+    && [ -n "${DEPENDENCY_BASE_SHA}" ] \
+    && ! GIT_NO_REPLACE_OBJECTS=1 git merge-base --is-ancestor \
+      "${DEPENDENCY_BASE_SHA}" "${RESOLVED_BASE_SHA}" >/dev/null 2>&1; then
+  echo "prepare_attempt: persisted dependency is not an ancestor of the continue base" >&2
+  exit 5
+fi
+
+materialize_git() {
+  # Repository/Issue content must never select a checkout hook, fsmonitor
+  # command, or user/system attributes file while the outer process still has
+  # scheduler/GitLab authority. Repository .gitattributes remain in force, but
+  # dependency baselines containing an external filter attribute are rejected
+  # below before any blob is materialized.
+  env GIT_ATTR_NOSYSTEM=1 GIT_NO_REPLACE_OBJECTS=1 git \
+    -c core.hooksPath=/dev/null \
+    -c core.fsmonitor=false \
+    -c core.attributesFile=/dev/null \
+    -c submodule.recurse=false \
+    "$@"
+}
+
+reject_dependency_checkout_filters() {
+  local base_sha="$1" attributes_path attributes_entry attributes_mode
+  local attributes_payload attributes_line attribute_index
+  local info_attributes_path
+  local -a attribute_tokens
+
+  [ -n "${DEPENDENCY_BASE_SHA}" ] || return 0
+
+  attributes_payload_has_filter() {
+    local payload="$1"
+
+    while IFS= read -r attributes_line || [ -n "${attributes_line}" ]; do
+      [[ "${attributes_line}" == \#* ]] && continue
+      read -r -a attribute_tokens <<<"${attributes_line}"
+      for ((attribute_index = 1;
+            attribute_index < ${#attribute_tokens[@]};
+            attribute_index++)); do
+        case "${attribute_tokens[attribute_index]}" in
+          filter|-filter|!filter|filter=*) return 0 ;;
+        esac
+      done
+    done <<<"${payload}"
+    return 1
+  }
+
+  info_attributes_path="$(git rev-parse --git-path info/attributes)"
+  case "${info_attributes_path}" in
+    /*) ;;
+    *) info_attributes_path="${REPO_PATH}/${info_attributes_path}" ;;
+  esac
+  if [ -L "${info_attributes_path}" ] \
+      || { [ -e "${info_attributes_path}" ] \
+        && [ ! -f "${info_attributes_path}" ]; }; then
+    echo "prepare_attempt: repository info/attributes must be a regular file" >&2
+    exit 7
+  fi
+  if [ -f "${info_attributes_path}" ]; then
+    attributes_payload="$(<"${info_attributes_path}")"
+    if attributes_payload_has_filter "${attributes_payload}"; then
+      echo "prepare_attempt: repository info/attributes checkout filters are not allowed" >&2
+      exit 7
+    fi
+  fi
+
+  while IFS= read -r -d '' attributes_path; do
+    case "${attributes_path}" in
+      .gitattributes|*/.gitattributes) ;;
+      *) continue ;;
+    esac
+    attributes_entry="$(GIT_NO_REPLACE_OBJECTS=1 \
+      git ls-tree "${base_sha}" -- "${attributes_path}")"
+    attributes_mode="${attributes_entry%% *}"
+    case "${attributes_mode}" in
+      100644|100755) ;;
+      *)
+        echo "prepare_attempt: dependency .gitattributes must be a regular file: ${attributes_path}" >&2
+        exit 7
+        ;;
+    esac
+    if ! attributes_payload="$(GIT_NO_REPLACE_OBJECTS=1 git cat-file blob \
+        "${base_sha}:${attributes_path}")"; then
+      echo "prepare_attempt: unable to inspect dependency attributes: ${attributes_path}" >&2
+      exit 7
+    fi
+    if attributes_payload_has_filter "${attributes_payload}"; then
+      echo "prepare_attempt: dependency checkout filters are not allowed: ${attributes_path}" >&2
+      exit 7
+    fi
+  done < <(GIT_NO_REPLACE_OBJECTS=1 \
+    git ls-tree -r --name-only -z "${base_sha}")
+}
+
+reject_dependency_checkout_filters "${RESOLVED_BASE_SHA}"
 
 # ─── Identify legacy worktree paths whose untracked scratch must be
 #     salvaged before they get deregistered ───────────────────────────
@@ -323,6 +550,80 @@ mkdir -p "${ATTEMPT_DIR}"
 
 ISSUE_WORKTREE_RUNTIME_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}"
 
+# The dependency commit is business-code input. It must never be able to turn
+# the fixed worktree-local runtime directory into an alias for the durable
+# parent checkout (for example by committing `.req_executor` as a symlink).
+# Validate every existing ancestor before any snapshot/move/rsync/mkdir that
+# touches the runtime tree. The lexical equality checks also ensure a future
+# env_paths change cannot silently widen this boundary.
+validate_runtime_path_boundary() {
+  local expected_runtime="${WORKTREE_DIR}/${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"
+  local expected_output="${expected_runtime}/output"
+  local expected_log="${expected_runtime}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
+  local root_real component component_real path_component log_component
+
+  if [ "${ISSUE_WORKTREE_RUNTIME_DIR}" != "${expected_runtime}" ] \
+      || [ "${OUTPUT_DIR}" != "${expected_output}" ] \
+      || [ "${LOG_DIR}" != "${expected_log}" ]; then
+    echo "prepare_attempt: runtime path derivation escaped the fixed worktree layout" >&2
+    return 1
+  fi
+  if [ ! -d "${WORKTREE_DIR}" ] || [ -L "${WORKTREE_DIR}" ]; then
+    echo "prepare_attempt: worktree root must be a real directory" >&2
+    return 1
+  fi
+  root_real="$(cd -P "${WORKTREE_DIR}" 2>/dev/null && pwd -P)" || {
+    echo "prepare_attempt: unable to canonicalize worktree root" >&2
+    return 1
+  }
+
+  component="${WORKTREE_DIR}"
+  for path_component in \
+      "${REQ_EXECUTOR_DIR}" "issue-${ISSUE_IID}" output; do
+    component="${component}/${path_component}"
+    if [ -L "${component}" ]; then
+      echo "prepare_attempt: runtime ancestor must not be a symlink: ${component}" >&2
+      return 1
+    fi
+    if [ -e "${component}" ]; then
+      if [ ! -d "${component}" ]; then
+        echo "prepare_attempt: runtime ancestor must be a directory: ${component}" >&2
+        return 1
+      fi
+      component_real="$(cd -P "${component}" 2>/dev/null && pwd -P)" || return 1
+      case "${component_real}" in
+        "${root_real}"/*) ;;
+        *)
+          echo "prepare_attempt: runtime ancestor resolves outside the worktree: ${component}" >&2
+          return 1
+          ;;
+      esac
+    fi
+  done
+
+  component="${expected_runtime}/log"
+  for log_component in "${component}" "${component}/attempt-${ATTEMPT_NUMBER_PADDED}"; do
+    if [ -L "${log_component}" ]; then
+      echo "prepare_attempt: log ancestor must not be a symlink: ${log_component}" >&2
+      return 1
+    fi
+    if [ -e "${log_component}" ]; then
+      if [ ! -d "${log_component}" ]; then
+        echo "prepare_attempt: log ancestor must be a directory: ${log_component}" >&2
+        return 1
+      fi
+      component_real="$(cd -P "${log_component}" 2>/dev/null && pwd -P)" || return 1
+      case "${component_real}" in
+        "${root_real}"/*) ;;
+        *)
+          echo "prepare_attempt: log ancestor resolves outside the worktree: ${log_component}" >&2
+          return 1
+          ;;
+      esac
+    fi
+  done
+}
+
 snapshot_issue_runtime_tree() {
   local dst="$1"
   if [ ! -d "${ISSUE_WORKTREE_RUNTIME_DIR}" ]; then
@@ -355,7 +656,8 @@ PRESERVED_ATTEMPT_ROOT="${WORKTREES_ROOT}/.preserved-attempts/issue-${ISSUE_IID}
 archive_switch_backup() {
   local src="$1"
   local label="$2"
-  if [ -z "${src}" ] || [ ! -d "${src}" ]; then
+  if [ -z "${src}" ] \
+      || { [ ! -e "${src}" ] && [ ! -L "${src}" ]; }; then
     return 0
   fi
   mkdir -p "${PRESERVED_ATTEMPT_ROOT}"
@@ -391,50 +693,148 @@ archive_fresh_active_runtime_tree() {
 }
 
 refresh_shared_config_from_branch() {
-  local config_ref="origin/${BRANCH}"
-  local candidate_paths=(".claude")
+  local config_ref="origin/${CONFIG_BRANCH}"
+  local dependency_control_paths=()
   local config_paths=()
-  local path
+  local path trusted_path path_is_trusted control_counter=0
+  local config_entry config_mode
+
+  is_execution_control_path() {
+    local candidate="$1"
+    case "${candidate}" in
+      .claude|*/.claude|.claude/*|*/.claude/*|CLAUDE.md|*/CLAUDE.md|\
+      CLAUDE.local.md|*/CLAUDE.local.md|.mcp.json|*/.mcp.json|\
+      .acpxrc.json|*/.acpxrc.json)
+        return 0
+        ;;
+      *) return 1 ;;
+    esac
+  }
+
+  if ! GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+      cat-file -e "${config_ref}^{commit}" 2>/dev/null; then
+    echo "prepare_attempt: trusted config ref ${config_ref} is unavailable" >&2
+    exit 7
+  fi
+
+  # Remember which control paths came from the selected business-code
+  # baseline. Paths absent from CONFIG_BRANCH are replaced with inert regular
+  # placeholders below, rather than left as deletions that stage_and_guard.sh
+  # must reject.
+  while IFS= read -r -d '' path; do
+    if is_execution_control_path "${path}"; then
+      dependency_control_paths+=("${path}")
+    fi
+  done < <(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" \
+    ls-tree -r --name-only -z HEAD)
+
+  # A dependency branch is an untrusted business-code input, not an execution
+# policy source. Move every current Claude control path out of the active
+# worktree first, including nested and untracked paths, then restore only the
+# trusted CONFIG_BRANCH copies. This also prevents a prior attempt from
+# persisting newly-created control files across continue. `find` never follows
+# symlinks, and the private runtime subtree is excluded from the walk.
+  while IFS= read -r -d '' path; do
+    control_counter=$((control_counter + 1))
+    archive_switch_backup "${path}" \
+      "execution-control-${control_counter}-before-attempt-${ATTEMPT_NUMBER_PADDED}"
+  done < <(find -P "${WORKTREE_DIR}" \
+    -path "${WORKTREE_DIR}/${REQ_EXECUTOR_DIR}" -prune -o \
+    \( -name .claude -print0 -prune \) -o \
+    \( -name CLAUDE.md -o -name CLAUDE.local.md -o -name .mcp.json \
+       -o -name .acpxrc.json \) -print0)
 
   # A task-agnostic issue executor may run against repos that do not carry
-  # `.claude/`. Missing optional config is skipped with a warning rather than
-  # fatal.
-  for path in "${candidate_paths[@]}"; do
-    if git -C "${REPO_PATH}" \
-        cat-file -e "${config_ref}:${path}" 2>/dev/null; then
+# execution-control files. Enumerate the trusted tree with NUL delimiters so
+# nested paths and legal whitespace cannot be misparsed.
+  while IFS= read -r -d '' path; do
+    if is_execution_control_path "${path}"; then
+      config_entry="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+        ls-tree "${config_ref}" -- "${path}")"
+      config_mode="${config_entry%% *}"
+      case "${config_mode}" in
+        100644|100755) ;;
+        *)
+          echo "prepare_attempt: trusted execution-control path must be a regular file: ${path}" >&2
+          exit 7
+          ;;
+      esac
       config_paths+=("${path}")
-    else
-      echo "prepare_attempt: shared config path ${path} not present on ${config_ref}; skipping its refresh" >&2
     fi
-  done
+  done < <(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+    ls-tree -r --name-only -z "${config_ref}")
 
   if [ "${#config_paths[@]}" -eq 0 ]; then
-    echo "prepare_attempt: no shared config paths present on ${config_ref}; nothing to refresh" >&2
-    return 0
+    echo "prepare_attempt: no shared control paths present on ${config_ref}; using inert placeholders for dependency-only controls" >&2
+  else
+    # A prior claude_settings_path override may have marked
+    # .claude/settings.json skip-worktree. Clear that bit for tracked config
+    # paths before overlaying origin/${CONFIG_BRANCH}, otherwise explicit
+    # config updates can be ignored.
+    local tracked_config_paths
+    if tracked_config_paths="$(git -C "${WORKTREE_DIR}" \
+        ls-files -- "${config_paths[@]}")" \
+       && [ -n "${tracked_config_paths}" ]; then
+      while IFS= read -r path || [ -n "${path}" ]; do
+        [ -n "${path}" ] || continue
+        materialize_git -C "${WORKTREE_DIR}" update-index \
+          --no-skip-worktree -- "${path}" 2>/dev/null || true
+      done <<<"${tracked_config_paths}"
+    fi
+
+    echo "prepare_attempt: refreshing shared control paths from ${config_ref}: ${config_paths[*]}" >&2
+    materialize_git -C "${WORKTREE_DIR}" checkout \
+      --no-recurse-submodules "${config_ref}" -- "${config_paths[@]}" >&2
+    # `git checkout <tree> -- <path>` stages those paths. Leave them unstaged
+    # so stage_and_guard.sh captures the full pre-stage diff/evidence before
+    # commit.
+    materialize_git -C "${WORKTREE_DIR}" reset \
+      -q -- "${config_paths[@]}" 2>/dev/null || true
   fi
 
-  # A prior claude_settings_path override may have marked .claude/settings.json
-  # skip-worktree. Clear that bit for tracked config paths before overlaying
-  # origin/${BRANCH}, otherwise explicit config updates can be ignored.
-  local tracked_config_paths
-  if tracked_config_paths="$(git -C "${WORKTREE_DIR}" \
-      ls-files -- "${config_paths[@]}")" \
-     && [ -n "${tracked_config_paths}" ]; then
-    while IFS= read -r path || [ -n "${path}" ]; do
-      [ -n "${path}" ] || continue
-      git -C "${WORKTREE_DIR}" update-index \
-        --no-skip-worktree -- "${path}" 2>/dev/null || true
-    done <<<"${tracked_config_paths}"
-  fi
-
-  echo "prepare_attempt: refreshing shared config paths from ${config_ref}: ${config_paths[*]}" >&2
-  git -C "${WORKTREE_DIR}" checkout \
-    "${config_ref}" -- "${config_paths[@]}" >&2
-  # `git checkout <tree> -- <path>` stages those paths. Leave them unstaged so
-  # stage_and_guard.sh captures the full pre-stage diff/evidence before commit.
-  git -C "${WORKTREE_DIR}" reset \
-    -q -- "${config_paths[@]}" 2>/dev/null || true
+  # A dependency-only control path cannot remain active, but simply moving it
+  # away would look like a forbidden destructive deletion. Replace it with an
+  # inert regular file; the eventual C commit sanitizes that inherited path.
+  for path in "${dependency_control_paths[@]:-}"; do
+    [ -n "${path}" ] || continue
+    path_is_trusted=false
+    for trusted_path in "${config_paths[@]:-}"; do
+      if [ "${path}" = "${trusted_path}" ] \
+          || { [[ "${path}" = .claude || "${path}" = */.claude ]] \
+            && [[ "${trusted_path}" = "${path}/"* ]]; }; then
+        path_is_trusted=true
+        break
+      fi
+    done
+    if [ "${path_is_trusted}" = true ]; then
+      continue
+    fi
+    mkdir -p "$(dirname "${WORKTREE_DIR}/${path}")"
+    case "${path}" in
+      *.json) printf '{}\n' >"${WORKTREE_DIR}/${path}" ;;
+      *) printf '\n' >"${WORKTREE_DIR}/${path}" ;;
+    esac
+    chmod 600 "${WORKTREE_DIR}/${path}" 2>/dev/null || true
+    echo "prepare_attempt: replaced dependency-only execution control path with an inert file: ${path}" >&2
+  done
 }
+
+if [ "${WORKTREE_REUSE}" = true ] \
+    && ! validate_runtime_path_boundary; then
+  # A prior rejected base can leave a registered worktree whose runtime path
+  # is a symlink or other unsafe shape. Never inspect/snapshot that runtime,
+  # but do preserve the whole worktree for forensics and recreate from the new
+  # verified BASE_REF so a later safe retry is not permanently wedged.
+  echo "prepare_attempt: unsafe reusable runtime; archiving worktree before safe recreate" >&2
+  WORKTREE_RECREATE_BACKUP="${WORKTREE_DIR}.recreate-backup.$$"
+  mv "${WORKTREE_DIR}" "${WORKTREE_RECREATE_BACKUP}"
+  if worktree_registered; then
+    git worktree remove --force \
+      "${WORKTREE_DIR}" >/dev/null 2>&1 || true
+  fi
+  git worktree prune >&2
+  WORKTREE_REUSE=false
+fi
 
 if [ "${WORKTREE_REUSE}" = true ]; then
   if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
@@ -448,8 +848,9 @@ if [ "${WORKTREE_REUSE}" = true ]; then
   # archives it outside the active worktree. Prior local attempt branches
   # (e.g. ${WORK_BRANCH}-att001) remain in the registry for audit; only the
   # worktree's HEAD moves.
-  git -C "${WORKTREE_DIR}" checkout \
-    -B "${LOCAL_ATTEMPT_BRANCH}" "${BASE_REF}" --force >&2
+  materialize_git -C "${WORKTREE_DIR}" checkout \
+    --no-recurse-submodules -B "${LOCAL_ATTEMPT_BRANCH}" \
+    "${BASE_REF}" --force >&2
 else
   # First attempt for this IID (or recovery from a broken state). Create
   # the shared per-issue linked worktree branched from ${BASE_REF}. This
@@ -457,10 +858,28 @@ else
   # OUTPUT_DIR is force-added by stage_and_guard.sh after the run; LOG_DIR and
   # generic logs/ directories stay local and are removed from the index.
   mkdir -p "$(dirname "${WORKTREE_DIR}")"
-  git worktree add \
+  materialize_git worktree add \
     -B "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}" "${BASE_REF}" >&2
 fi
+validate_runtime_path_boundary || exit 7
 refresh_shared_config_from_branch
+if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
+  if [ "${ACTUAL_MODE}" = continue ]; then
+    # Continue resumes C's published tree, but the shared branch contract keeps
+    # exactly one replaceable C commit above frozen A. Move only the local
+    # attempt branch/index back to A and leave the working tree intact, turning
+    # all prior C content plus this attempt's later edits into one aggregate
+    # worktree diff. EXPECTED_WORK_BRANCH_SHA remains the independent C lease.
+    materialize_git -C "${WORKTREE_DIR}" reset --mixed \
+      --no-recurse-submodules "${EXPECTED_COMMIT_PARENT_SHA}" >&2
+  fi
+  prepared_parent_sha="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" \
+    rev-parse --verify HEAD^{commit})"
+  if [ "${prepared_parent_sha,,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
+    echo "prepare_attempt: shared tail local branch is not based on its frozen commit parent" >&2
+    exit 5
+  fi
+fi
 if [ "${ACTUAL_MODE}" = "continue" ]; then
   restore_issue_runtime_tree "${STALE_SWITCH_BACKUP}"
   restore_issue_runtime_tree "${WORKTREE_SWITCH_BACKUP}"
@@ -501,6 +920,9 @@ mkdir -p "${OUTPUT_DIR}"
 #     from origin/${BRANCH} for every attempt.
 salvage_into_worktree() {
   local src="$1"
+  local runtime_source_unsafe=false
+  local runtime_component="${src}"
+  local runtime_part
   if [ -z "${src}" ] || [ ! -d "${src}" ]; then
     return 0
   fi
@@ -509,10 +931,36 @@ salvage_into_worktree() {
     exit 6
   fi
   echo "prepare_attempt: salvaging untracked scratch from ${src} into ${WORKTREE_DIR}" >&2
-  rsync -rltD --ignore-existing \
-    --exclude='/.git' \
-    --exclude='/.claude' \
-    "${src}/" "${WORKTREE_DIR}/"
+  for runtime_part in "${REQ_EXECUTOR_DIR}" "issue-${ISSUE_IID}"; do
+    runtime_component="${runtime_component}/${runtime_part}"
+    if [ -L "${runtime_component}" ] \
+        || { [ -e "${runtime_component}" ] \
+          && [ ! -d "${runtime_component}" ]; }; then
+      runtime_source_unsafe=true
+      break
+    fi
+  done
+  if [ "${runtime_source_unsafe}" = true ]; then
+    echo "prepare_attempt: unsafe backup runtime excluded from salvage: ${src}/${REQ_EXECUTOR_DIR}" >&2
+    rsync -rltD --ignore-existing \
+      --exclude='/.git' \
+      --exclude="/${REQ_EXECUTOR_DIR}" \
+      --exclude='.claude/' \
+      --exclude='CLAUDE.md' \
+      --exclude='CLAUDE.local.md' \
+      --exclude='.mcp.json' \
+      --exclude='.acpxrc.json' \
+      "${src}/" "${WORKTREE_DIR}/"
+  else
+    rsync -rltD --ignore-existing \
+      --exclude='/.git' \
+      --exclude='.claude/' \
+      --exclude='CLAUDE.md' \
+      --exclude='CLAUDE.local.md' \
+      --exclude='.mcp.json' \
+      --exclude='.acpxrc.json' \
+      "${src}/" "${WORKTREE_DIR}/"
+  fi
 }
 
 if [ "${ACTUAL_MODE}" = "continue" ]; then
@@ -526,6 +974,10 @@ if [ "${ACTUAL_MODE}" = "continue" ]; then
     fi
   fi
 fi
+
+# A backup/legacy source is untrusted too. Recheck after salvage before any
+# runtime mkdir/move so a copied top-level symlink cannot redirect state.
+validate_runtime_path_boundary || exit 7
 
 # Now that any meaningful scratch has been salvaged, drop the
 # pre-recreate backups and archive every leftover switch backup / legacy

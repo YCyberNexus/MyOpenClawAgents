@@ -60,6 +60,14 @@ fi
 if ! printf '%s\n' "${rendered_block}" | grep -Fq "run_executor_attempt.sh"; then
   fail "outer executor prompt no longer delegates the whole attempt to run_executor_attempt.sh"
 fi
+if ! printf '%s\n' "${rendered_block}" \
+    | grep -Fq 'REPO_PARENT_PATH= REPO_PATH={REPO_PATH} \'; then
+  fail "outer executor prompt must clear an inherited clone parent before using its fixed repo path"
+fi
+if ! printf '%s\n' "${rendered_block}" \
+    | grep -Fq 'EXPECTED_COMMIT_PARENT_SHA={EXPECTED_COMMIT_PARENT_SHA} \'; then
+  fail "outer executor prompt must keep the commit parent separate from the remote push lease"
+fi
 if [ ! -x "${ATTEMPT_WRAPPER}" ]; then
   fail "run_executor_attempt.sh is missing or not executable"
 fi
@@ -71,6 +79,16 @@ fi
 if printf '%s\n' "${rendered_block}" | grep -Eq '(^|[[:space:]])GITLAB_TOKEN='; then
   fail "outer executor prompt must not pass the GitLab token to executor scripts"
 fi
+
+for issue_controlled_placeholder in \
+  '{ISSUE_TITLE}' '{ISSUE_TITLE_QUOTED}' '{ISSUE_URL}' \
+  '{ISSUE_LABELS}' '{ISSUE_BODY}' '<issue>'
+do
+  if printf '%s\n' "${rendered_block}" \
+      | grep -Fq "${issue_controlled_placeholder}"; then
+    fail "outer executor prompt exposes Issue-controlled text: ${issue_controlled_placeholder}"
+  fi
+done
 
 if ! grep -Fq "GitLab credentials are never rendered into this payload" \
     "${PROMPT_TEMPLATE}"; then
@@ -88,9 +106,12 @@ do
   fi
 done
 
-if ! grep -Fq 'acpx --auth-policy skip claude exec -f "${prompt_file}"' "${RUN_SCRIPT}"; then
-  fail "run_acpx_attempt.sh acpx invocation changed unexpectedly"
-fi
+grep -Fq '"${ACPX_EXECUTABLE}" --auth-policy skip claude exec -f "${prompt_file}"' \
+  "${RUN_SCRIPT}" \
+  || fail "run_acpx_attempt.sh no longer uses its pinned acpx executable"
+grep -Fq '"${TIMEOUT_EXECUTABLE}" --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s"' \
+  "${RUN_SCRIPT}" \
+  || fail "run_acpx_attempt.sh no longer uses its pinned timeout executable"
 
 for old_inner_term in \
   "Hu""lat materials" \

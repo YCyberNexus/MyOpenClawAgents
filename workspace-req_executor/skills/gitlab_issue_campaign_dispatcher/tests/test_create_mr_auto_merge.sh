@@ -108,6 +108,7 @@ jq -e '
   .version == 1 and .iid == 7 and .issue_iid == 42
   and .attempt_number == 1 and .mr_action == "created"
   and .source_branch == "issue/42" and .target_branch == "release"
+  and .dependency_base_sha == ""
   and .sha == "0123456789abcdef0123456789abcdef01234567"
   and .verified == true and .outcome == "merged"
   and .observed_state == "merged" and .auto_merge == true

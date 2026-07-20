@@ -177,6 +177,9 @@ matching issues are not added.
 scheduler persists and compares both fields as part of physical-job intent, so
 conflicting merge policies cannot attach to the same running Issue. Legacy
 requests and scheduler records missing the fields normalize to `false/null`.
+This intake validation does not override dependency planning: if an Issue is
+later frozen into `issue/A+C`, either member carrying `auto_merge=true` is
+rejected as `shared_branch_auto_merge_unsupported` before execution.
 
 `batch_id` is idempotent: the same canonical request replays the existing
 batch, while the same ID with different bytes fails closed. The external I1

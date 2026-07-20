@@ -1729,9 +1729,11 @@ jq -cn \
   --arg web_url "${MERGE_REQUEST_URL}" \
   --arg source_branch "${WORK_BRANCH}" \
   --arg target_branch "${MERGE_TARGET_BRANCH}" \
+  --arg dependency_base_sha "${DEPENDENCY_BASE_SHA:-}" \
   --arg sha "${COMMIT_SHA}" '{
     version:1,iid:$iid,web_url:$web_url,
-    source_branch:$source_branch,target_branch:$target_branch,sha:$sha,
+    source_branch:$source_branch,target_branch:$target_branch,
+    dependency_base_sha:$dependency_base_sha,sha:$sha,
     observed_state:"merged",outcome:"merged",verified:true,
     merge_attempted:false,merge_api_succeeded:false,reason:"verified_merged"
   }'
@@ -1979,6 +1981,65 @@ if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
   mv "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" \
     "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs-live-completed"
 fi
+
+# A shared MR checkpoint must never enter the ordinary completed-ghost drain.
+# Even if GitLab already shows `pr`/closed and the native callback is failure-
+# shaped, a temporarily missing exact marker retains the same claim for the
+# heartbeat's MR-only recovery path.
+cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
+jq '.pending_subagents["42"] += {
+  auto_merge:false,merge_target_branch:"main",
+  work_branch:"issue/42+43",branch_members:[42,43],
+  shared_branch_role:"head",dependency_iid:null,
+  dependency_branch:null,dependency_base_sha:null
+}' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.shared-pending"
+mv "${FOLLOWUP_STATE}.shared-pending" "${FOLLOWUP_STATE}"
+jq -cn '{
+  iid:42,status:"doing",work_branch:"issue/42+43",
+  branch_members:[42,43],shared_branch_role:"head",
+  dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
+  dependency_pinned_attempt_number:1,dependency_history_verified:true,
+  work_branch_sha:"0123456789abcdef0123456789abcdef01234567",
+  mr_finalization:{
+    status:"pending",source_attempt_number:1,
+    work_branch:"issue/42+43",branch_members:[42,43],
+    shared_branch_role:"head",
+    commit_sha:"0123456789abcdef0123456789abcdef01234567",
+    intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    target_branch:"main"
+  }
+}' >"${FOLLOWUP_REPO}/.req_executor/issues/issue-42/state.json"
+chmod 600 "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/state.json"
+: >"${FOLLOWUP_LABEL_LOG}"
+shared_failure_reply="$(jq -cn '{
+  iid:42,attempt_number:1,status:"blocked",mode_actual:"fresh",
+  work_branch:"issue/42+43",local_branch:"issue/42-att001",
+  commit_sha:"0123456789abcdef0123456789abcdef01234567",
+  merge_request_url:"",mr_action:"none",wiki_url:"",
+  labels_added:[],labels_removed:[],summary_posted:false,
+  block_reason:"native callback arrived before shared MR marker",
+  log_dir:"/tmp/shared-marker-pending",block_side:"dispatcher"
+}')"
+shared_ghost_out="$(printf '%s' "${shared_failure_reply}" | \
+  PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
+  GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  CALLBACK_RUN_ID=run-42 \
+  CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
+  RECONCILE_LIVE_COMPLETED=true \
+  bash "${FOLLOWUP_SCRIPTS}/dispatch_followup.sh")"
+jq -e '
+  .callback_status == "handled" and .terminal_status == "blocked"
+  and (.remaining_pending_iids | index(42) != null)
+' <<<"${shared_ghost_out}" >/dev/null \
+  || fail "shared failure callback was drained by the completed-ghost path"
+jq -e '
+  .pending_subagents["42"].mr_finalization_retry == true
+  and .pending_subagents["42"].mr_finalization_retry_attempt == 1
+' "${FOLLOWUP_STATE}" >/dev/null \
+  || fail "shared failure callback did not preserve the exact MR recovery claim"
+[ ! -s "${FOLLOWUP_LABEL_LOG}" ] \
+  || fail "shared marker-pending callback mutated workflow labels"
 
 cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 : >"${FOLLOWUP_IMPORT_LOG}"

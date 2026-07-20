@@ -27,12 +27,246 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${BASH_SOURCE[0]}" in
+  /*) ;;
+  *)
+    echo "run_acpx_attempt.sh: script must be invoked by absolute path" >&2
+    exit 2
+    ;;
+esac
+SCRIPT_DIR_INPUT="${BASH_SOURCE[0]%/*}"
+SCRIPT_DIR="$(cd "${SCRIPT_DIR_INPUT}" && pwd -P)"
+
+# Establish a minimum-trust PATH before sourcing env_paths.sh. That bootstrap
+# performs mkdir/config/auth setup and therefore must not resolve utilities
+# from the dependency worktree. This first pass uses Bash builtins only; a
+# second pass below rechecks every entry against env_paths.sh's final REPO_PATH.
+bootstrap_sanitize_runtime_path() {
+  local raw_path="$1" entry canonical_entry sanitized=""
+  local input_repo="${REPO_PATH:-}" canonical_input_repo=""
+  local -a path_entries
+
+  if [ -n "${input_repo}" ] && [[ "${input_repo}" = /* ]] \
+      && [ -d "${input_repo}" ]; then
+    canonical_input_repo="$(cd "${input_repo}" && pwd -P)" || return 1
+  fi
+  IFS=: read -r -a path_entries <<<"${raw_path}"
+  for entry in "${path_entries[@]}"; do
+    if [ -z "${entry}" ] || [[ "${entry}" != /* ]]; then
+      return 1
+    fi
+    [ -d "${entry}" ] || continue
+    canonical_entry="$(cd "${entry}" && pwd -P)" || return 1
+    case "${canonical_entry}/" in
+      *"/.req_executor/.worktrees/"*) return 1 ;;
+    esac
+    if [ -n "${canonical_input_repo}" ]; then
+      case "${canonical_entry}/" in
+        "${canonical_input_repo}/"*) return 1 ;;
+      esac
+    fi
+    if [ -z "${sanitized}" ]; then
+      sanitized="${canonical_entry}"
+    else
+      sanitized="${sanitized}:${canonical_entry}"
+    fi
+  done
+  [ -n "${sanitized}" ] || return 1
+  printf '%s\n' "${sanitized}"
+}
+
+if ! BOOTSTRAP_RUNTIME_PATH="$(bootstrap_sanitize_runtime_path "${PATH}")"; then
+  echo "run_acpx_attempt.sh: PATH must contain only trusted absolute directories before bootstrap" >&2
+  exit 2
+fi
+PATH="${BOOTSTRAP_RUNTIME_PATH}"
+export PATH
+
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
 
+canonicalize_executable() {
+  local target="$1" link_target="" hop=0 target_dir=""
+
+  while [ -L "${target}" ]; do
+    hop=$((hop + 1))
+    [ "${hop}" -le 40 ] || return 1
+    link_target="$(readlink "${target}")" || return 1
+    if [[ "${link_target}" = /* ]]; then
+      target="${link_target}"
+    else
+      target="$(dirname "${target}")/${link_target}"
+    fi
+  done
+  [ -f "${target}" ] && [ -x "${target}" ] || return 1
+  target_dir="$(cd "$(dirname "${target}")" && pwd -P)" || return 1
+  printf '%s/%s\n' "${target_dir}" "$(basename "${target}")"
+}
+
+sanitize_runtime_path() {
+  local raw_path="$1" entry canonical_entry sanitized=""
+  local -a path_entries
+
+  IFS=: read -r -a path_entries <<<"${raw_path}"
+  for entry in "${path_entries[@]}"; do
+    # Empty/relative PATH entries resolve against WORKTREE_DIR after `cd` and
+    # would let dependency content replace acpx, timeout, node, or a shebang
+    # interpreter. Treat them as a configuration error, not as entries to
+    # silently normalize.
+    if [ -z "${entry}" ] || [[ "${entry}" != /* ]]; then
+      return 1
+    fi
+    case "${entry}/" in
+      "${REPO_PATH}/"*) return 1 ;;
+    esac
+    [ -d "${entry}" ] || continue
+    canonical_entry="$(cd "${entry}" && pwd -P)" || return 1
+    case "${canonical_entry}/" in
+      "${canonical_repo_path}/"*) return 1 ;;
+    esac
+    if [ -z "${sanitized}" ]; then
+      sanitized="${canonical_entry}"
+    else
+      sanitized="${sanitized}:${canonical_entry}"
+    fi
+  done
+  [ -n "${sanitized}" ] || return 1
+  printf '%s\n' "${sanitized}"
+}
+
 : "${ISSUE_IID:?run_acpx_attempt.sh: ISSUE_IID must be set}"
 : "${ATTEMPT_NUMBER:?run_acpx_attempt.sh: ATTEMPT_NUMBER must be set}"
+DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+CLAUDE_CODE_SAFE_MODE_EFFECTIVE="${CLAUDE_CODE_SAFE_MODE:-}"
+CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-}"
+CLAUDE_AGENT_ACP_ROOT_EFFECTIVE="${CLAUDE_AGENT_ACP_ROOT:-}"
+CLAUDE_AGENT_ACP_PINNED_VERSION=0.37.0
+CLAUDE_AGENT_ACP_EXECUTABLE=""
+ACPX_EMPTY_MCP_CONFIG="${SCRIPT_DIR}/../references/acpx_empty_mcp.json"
+
+if [ ! -d "${REPO_PATH}/.git" ]; then
+  echo "run_acpx_attempt.sh: REPO_PATH is not a git checkout: ${REPO_PATH}" >&2
+  exit 2
+fi
+canonical_repo_path="$(cd "${REPO_PATH}" && pwd -P)"
+if ! TRUSTED_RUNTIME_PATH="$(sanitize_runtime_path "${PATH}")"; then
+  echo "run_acpx_attempt.sh: PATH must contain only absolute directories outside REPO_PATH" >&2
+  exit 2
+fi
+PATH="${TRUSTED_RUNTIME_PATH}"
+export PATH
+if ! TIMEOUT_EXECUTABLE="$(
+    canonicalize_executable "$(command -v timeout 2>/dev/null || true)"
+  )"; then
+  echo "run_acpx_attempt.sh: GNU coreutils 'timeout' is required but missing on trusted PATH" >&2
+  exit 2
+fi
+if ! ACPX_EXECUTABLE="$(
+    canonicalize_executable "$(command -v acpx 2>/dev/null || true)"
+  )"; then
+  echo "run_acpx_attempt.sh: acpx is required but missing on trusted PATH" >&2
+  exit 2
+fi
+for runtime_executable in "${TIMEOUT_EXECUTABLE}" "${ACPX_EXECUTABLE}"; do
+  case "${runtime_executable}/" in
+    "${canonical_repo_path}/"*)
+      echo "run_acpx_attempt.sh: runtime executables must be outside REPO_PATH" >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
+  # A dependency commit is business input, not a project policy source. Claude
+  # safe mode disables project/local CLAUDE memory, hooks, MCP, plugins and
+  # related customizations, including transitive commands referenced by an
+  # otherwise trusted settings file. Authentication and model selection remain
+  # available, so user-provider credentials still work through acpx.
+  CLAUDE_CODE_SAFE_MODE_EFFECTIVE=1
+
+  # acpx's Claude ACP adapter may bundle an older Claude Code binary that
+  # silently ignores CLAUDE_CODE_SAFE_MODE. Bind the adapter to a separately
+  # installed executable and verify the actual capability before any model
+  # process starts. A missing or incompatible executable fails closed for
+  # dependency-based attempts instead of trusting a version assumption.
+  if [ -z "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ]; then
+    CLAUDE_CODE_EXECUTABLE_EFFECTIVE="$(command -v claude 2>/dev/null || true)"
+  fi
+  if [ -z "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ] \
+      || [[ "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" != /* ]] \
+      || [ ! -x "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ]; then
+    echo "run_acpx_attempt.sh: dependency attempts require an absolute executable CLAUDE_CODE_EXECUTABLE" >&2
+    exit 2
+  fi
+  if ! CLAUDE_CODE_EXECUTABLE_EFFECTIVE="$(
+      canonicalize_executable "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
+    )"; then
+    echo "run_acpx_attempt.sh: unable to canonicalize CLAUDE_CODE_EXECUTABLE" >&2
+    exit 2
+  fi
+  case "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}/" in
+    "${canonical_repo_path}/"*)
+      echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE must be outside REPO_PATH" >&2
+      exit 2
+      ;;
+  esac
+  set +e
+  claude_help="$(env \
+    -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
+    -u GLAB_TOKEN -u GITLAB_PRIVATE_TOKEN -u PRIVATE_TOKEN \
+    -u OAUTH_TOKEN -u CI_JOB_TOKEN -u JOB_TOKEN -u WIKI_GITLAB_TOKEN \
+    CLAUDE_CODE_SAFE_MODE=1 \
+    "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" --help 2>&1)"
+  claude_help_rc=$?
+  set -e
+  if [ "${claude_help_rc}" -ne 0 ] \
+      || [[ "${claude_help}" != *"--safe-mode"* ]]; then
+    echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE does not support --safe-mode" >&2
+    exit 2
+  fi
+
+  # Never let acpx resolve its Claude adapter through the dependency checkout.
+  # Otherwise a dependency-owned .acpxrc.json can replace the command and a
+  # dependency-owned .npmrc can steer acpx's npm-exec fallback. Require one
+  # exact preinstalled package outside the repository and pass its executable
+  # through acpx's CLI override, which wins over project configuration.
+  if [ -z "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" ] \
+      || [[ "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" != /* ]] \
+      || [ ! -d "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" ]; then
+    echo "run_acpx_attempt.sh: dependency attempts require an absolute preinstalled CLAUDE_AGENT_ACP_ROOT" >&2
+    exit 2
+  fi
+  CLAUDE_AGENT_ACP_ROOT_EFFECTIVE="$(
+    cd "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" && pwd -P
+  )"
+  case "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}/" in
+    "${canonical_repo_path}/"*)
+      echo "run_acpx_attempt.sh: CLAUDE_AGENT_ACP_ROOT must be outside REPO_PATH" >&2
+      exit 2
+      ;;
+  esac
+  adapter_manifest="${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}/package.json"
+  CLAUDE_AGENT_ACP_EXECUTABLE="${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}/dist/index.js"
+  if [ ! -f "${adapter_manifest}" ] || [ -L "${adapter_manifest}" ] \
+      || [ ! -f "${CLAUDE_AGENT_ACP_EXECUTABLE}" ] \
+      || [ -L "${CLAUDE_AGENT_ACP_EXECUTABLE}" ] \
+      || [ ! -x "${CLAUDE_AGENT_ACP_EXECUTABLE}" ] \
+      || ! jq -e --arg version "${CLAUDE_AGENT_ACP_PINNED_VERSION}" '
+        .name == "@agentclientprotocol/claude-agent-acp"
+        and .version == $version
+        and .bin["claude-agent-acp"] == "dist/index.js"
+      ' "${adapter_manifest}" >/dev/null 2>&1; then
+    echo "run_acpx_attempt.sh: CLAUDE_AGENT_ACP_ROOT is not the pinned claude-agent-acp package" >&2
+    exit 2
+  fi
+  if [ ! -f "${ACPX_EMPTY_MCP_CONFIG}" ] \
+      || [ -L "${ACPX_EMPTY_MCP_CONFIG}" ] \
+      || ! jq -e 'keys == ["mcpServers"] and .mcpServers == []' \
+        "${ACPX_EMPTY_MCP_CONFIG}" >/dev/null 2>&1; then
+    echo "run_acpx_attempt.sh: trusted empty ACPx MCP configuration is unavailable" >&2
+    exit 2
+  fi
+fi
 
 # Wall-clock cap; defaults to 3600s (1h) to match acpx_timeout_seconds.
 ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-3600}"
@@ -43,11 +277,6 @@ case "${ACPX_TIMEOUT_SECONDS}" in
 esac
 if [ "${ACPX_TIMEOUT_SECONDS}" -lt 60 ]; then
   echo "run_acpx_attempt.sh: ACPX_TIMEOUT_SECONDS must be >= 60, got ${ACPX_TIMEOUT_SECONDS}" >&2
-  exit 2
-fi
-
-if [ ! -d "${REPO_PATH}/.git" ]; then
-  echo "run_acpx_attempt.sh: REPO_PATH is not a git checkout: ${REPO_PATH}" >&2
   exit 2
 fi
 
@@ -74,11 +303,6 @@ if [ ! -f "${prompt_file}" ]; then
   exit 2
 fi
 
-if ! command -v timeout >/dev/null 2>&1; then
-  echo "run_acpx_attempt.sh: GNU coreutils 'timeout' is required but missing on PATH" >&2
-  exit 2
-fi
-
 # Mode-bit heal lives in the dispatcher: _dispatch_lib.sh::ensure_safety_bin_executable
 # runs once per scheduled tick. If this assertion ever trips, the heal didn't run for
 # this tick — investigate dispatch_prepare_tick.sh / deployment sync, not this script.
@@ -99,10 +323,24 @@ done
   printf 'TASK_OUTPUT_DIR=%s\n' "${OUTPUT_DIR}"
   printf 'PATH_PREFIX=%s\n' "${safety_bin}"
   printf 'ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s\n' "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
+  printf 'CLAUDE_CODE_SAFE_MODE=%s\n' "${CLAUDE_CODE_SAFE_MODE_EFFECTIVE}"
+  if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
+    printf 'CLAUDE_CODE_EXECUTABLE=%s\n' "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
+    printf 'CLAUDE_AGENT_ACP_EXECUTABLE=%s\n' "${CLAUDE_AGENT_ACP_EXECUTABLE}"
+  fi
   printf 'timeout=%ss (kill-after=30s)\n' "${ACPX_TIMEOUT_SECONDS}"
-  printf 'command=ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s timeout --kill-after=30s %ss acpx --auth-policy skip claude exec -f %s\n' \
-    "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
-    "${ACPX_TIMEOUT_SECONDS}" "${prompt_file}"
+  if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
+    printf 'command=ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --agent %s --mcp-config %s --approve-all --non-interactive-permissions deny --auth-policy skip exec -f %s\n' \
+      "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
+      "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
+      "${ACPX_EXECUTABLE}" "${CLAUDE_AGENT_ACP_EXECUTABLE}" \
+      "${ACPX_EMPTY_MCP_CONFIG}" "${prompt_file}"
+  else
+    printf 'command=ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --auth-policy skip claude exec -f %s\n' \
+      "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
+      "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
+      "${ACPX_EXECUTABLE}" "${prompt_file}"
+  fi
 } > "${LOG_DIR}/acpx_command.txt"
 
 cd "${WORKTREE_DIR}"
@@ -163,14 +401,33 @@ cleanup() {
 
 set +e
 set -m
+acpx_runtime_env=(
+  "ACPX_CLAUDE_INCLUDE_USER_SETTINGS=${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
+  "CLAUDE_CODE_SAFE_MODE=${CLAUDE_CODE_SAFE_MODE_EFFECTIVE}"
+)
+if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
+  acpx_runtime_env+=(
+    "CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
+  )
+  acpx_command=(
+    "${ACPX_EXECUTABLE}" --agent "${CLAUDE_AGENT_ACP_EXECUTABLE}"
+    --mcp-config "${ACPX_EMPTY_MCP_CONFIG}"
+    --approve-all --non-interactive-permissions deny
+    --auth-policy skip exec -f "${prompt_file}"
+  )
+else
+  acpx_command=(
+    "${ACPX_EXECUTABLE}" --auth-policy skip claude exec -f "${prompt_file}"
+  )
+fi
 env -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
   -u GLAB_TOKEN -u GITLAB_PRIVATE_TOKEN -u PRIVATE_TOKEN \
   -u OAUTH_TOKEN -u CI_JOB_TOKEN -u JOB_TOKEN -u WIKI_GITLAB_TOKEN \
-  ACPX_CLAUDE_INCLUDE_USER_SETTINGS="${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
+  "${acpx_runtime_env[@]}" \
   PATH="${safety_bin}:${PATH}" \
   TASK_OUTPUT_DIR="${OUTPUT_DIR}" \
-  timeout --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s" \
-  acpx --auth-policy skip claude exec -f "${prompt_file}" \
+  "${TIMEOUT_EXECUTABLE}" --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s" \
+  "${acpx_command[@]}" \
   1>"${stdout_log}" 2>"${stderr_log}" &
 acpx_pgid=$!
 # Arm the trap only AFTER acpx_pgid is captured, so cleanup() can never run

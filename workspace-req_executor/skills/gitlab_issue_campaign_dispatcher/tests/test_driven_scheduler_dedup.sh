@@ -814,4 +814,248 @@ jq -e '
   ]
 ' <<<"${after_fence_terminal}" >/dev/null
 
+# Dependency deferral is a non-terminal slot release. It parks both the owner
+# and same-intent attached memberships, lets ordinary pending/lazy work win the
+# next reservation, then returns the deferred work under a new job generation.
+SCHEDULER_ROOT="${TEST_ROOT}/dependency-defer-scheduler"
+CONFIG_DIR="${TEST_ROOT}/dependency-defer-config"
+mkdir -p "${CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=1' \
+  >"${CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_single_fixture C group/dependency 30 main false
+create_single_fixture C_ATTACH group/dependency 30 main false
+create_single_fixture A group/dependency 10 main false
+jq '.batch_order = ["C","C_ATTACH","A"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+
+dependency_first_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=500 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,iid,job_id}] == [
+    {batch_id:"C",iid:30,job_id:"C:snapshot-0"}
+  ]
+  and .active_count == 1
+  and .available_slots == 0
+' <<<"${dependency_first_reserve}" >/dev/null
+jq -e '
+  .active_jobs["C:snapshot-0"].status == "reserved"
+  and [.active_jobs["C:snapshot-0"].memberships[].batch_id]
+    == ["C","C_ATTACH"]
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+jq -e '
+  .memberships["0"].status == "attached"
+  and .memberships["0"].job_id == "C:snapshot-0"
+' "${SCHEDULER_ROOT}/batches/C_ATTACH/state.json" >/dev/null
+
+reserved_dependency_defer="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0' \
+    ACTION=dependency_deferred NOW_EPOCH=501 bash "${RECORD}"
+)"
+jq -e '
+  .status == "recorded"
+  and .job_id == "C:snapshot-0"
+  and .job_status == "retry_wait"
+  and .active_count == 0
+  and .should_spawn == false
+  and .claim_generation == null
+  and .claim_token == null
+' <<<"${reserved_dependency_defer}" >/dev/null
+jq -e '.active_jobs | has("C:snapshot-0") | not' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+for deferred_batch in C C_ATTACH; do
+  jq -e '
+    .status == "queued"
+    and .terminal_count == 0
+    and .done_count == 0
+    and .failed_count == 0
+    and .timeout_count == 0
+    and .skipped_count == 0
+    and .memberships["0"].status == "retry_wait"
+    and .memberships["0"].defer_count == 1
+    and (.memberships["0"] | has("job_id") | not)
+    and (.memberships["0"] | has("blocked_by_job_id") | not)
+  ' "${SCHEDULER_ROOT}/batches/${deferred_batch}/state.json" >/dev/null
+done
+
+# C's retry_wait membership must yield the only slot to later ordinary work.
+dependency_later_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=502 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,iid,job_id}] == [
+    {batch_id:"A",iid:10,job_id:"A:snapshot-0"}
+  ]
+  and .active_count == 1
+  and .available_slots == 0
+' <<<"${dependency_later_reserve}" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID='A:snapshot-0' STATUS=terminal \
+  TERMINAL_STATUS=done NOW_EPOCH=503 bash "${RECORD}" >/dev/null
+
+dependency_retry_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=504 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,iid,job_id}] == [
+    {batch_id:"C",iid:30,job_id:"C:snapshot-0::defer-1"}
+  ]
+  and .active_count == 1
+' <<<"${dependency_retry_reserve}" >/dev/null
+jq -e '
+  .active_jobs["C:snapshot-0::defer-1"].status == "reserved"
+  and [.active_jobs["C:snapshot-0::defer-1"].memberships[].batch_id]
+    == ["C","C_ATTACH"]
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+for deferred_batch in C C_ATTACH; do
+  jq -e '
+    .memberships["0"].defer_count == 1
+    and .memberships["0"].job_id == "C:snapshot-0::defer-1"
+    and (.memberships["0"].status == "reserved"
+      or .memberships["0"].status == "attached")
+  ' "${SCHEDULER_ROOT}/batches/${deferred_batch}/state.json" >/dev/null
+done
+
+# A running deferral is claim-fenced. A bad token cannot mutate durable state;
+# the exact current claim releases the job and increments each membership once.
+dependency_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-1' \
+    STATUS=preparing NOW_EPOCH=505 bash "${RECORD}"
+)"
+dependency_claim_token="$(jq -r '.claim_token' <<<"${dependency_claim}")"
+dependency_claim_generation="$(jq -r '.claim_generation' <<<"${dependency_claim}")"
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-1' STATUS=spawned \
+  CLAIM_TOKEN="${dependency_claim_token}" NOW_EPOCH=506 \
+  bash "${RECORD}" >/dev/null
+dependency_running_scheduler_before="$(jq -cS . \
+  "${SCHEDULER_ROOT}/scheduler_state.json")"
+dependency_running_c_before="$(jq -cS . \
+  "${SCHEDULER_ROOT}/batches/C/state.json")"
+set +e
+bad_running_defer="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-1' \
+    ACTION=dependency_deferred \
+    CLAIM_GENERATION="${dependency_claim_generation}" \
+    CLAIM_TOKEN='wrong-dependency-claim' NOW_EPOCH=507 \
+    bash "${RECORD}" 2>&1
+)"
+bad_running_defer_rc=$?
+set -e
+if [ "${bad_running_defer_rc}" -ne 3 ]; then
+  echo "running dependency defer with a bad claim exited ${bad_running_defer_rc}: ${bad_running_defer}" >&2
+  exit 1
+fi
+[ "$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")" \
+    = "${dependency_running_scheduler_before}" ] || {
+  echo "rejected running dependency defer changed scheduler state" >&2
+  exit 1
+}
+[ "$(jq -cS . "${SCHEDULER_ROOT}/batches/C/state.json")" \
+    = "${dependency_running_c_before}" ] || {
+  echo "rejected running dependency defer changed batch state" >&2
+  exit 1
+}
+
+running_dependency_defer="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-1' \
+    ACTION=dependency_deferred \
+    CLAIM_GENERATION="${dependency_claim_generation}" \
+    CLAIM_TOKEN="${dependency_claim_token}" NOW_EPOCH=508 \
+    bash "${RECORD}"
+)"
+jq -e '
+  .job_status == "retry_wait"
+  and .active_count == 0
+  and .should_spawn == false
+  and .claim_generation == null
+  and .claim_token == null
+' <<<"${running_dependency_defer}" >/dev/null
+jq -e '.active_jobs | has("C:snapshot-0::defer-1") | not' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+for deferred_batch in C C_ATTACH; do
+  jq -e '
+    .status == "queued"
+    and .terminal_count == 0
+    and .done_count == 0
+    and .failed_count == 0
+    and .timeout_count == 0
+    and .skipped_count == 0
+    and .memberships["0"].status == "retry_wait"
+    and .memberships["0"].defer_count == 2
+    and (.memberships["0"] | has("job_id") | not)
+  ' "${SCHEDULER_ROOT}/batches/${deferred_batch}/state.json" >/dev/null
+done
+
+# An expired preparing lease becomes tokenless reserved while retaining its
+# positive generation. Dependency deferral must require that exact generation:
+# a stale generation is read-only, and the current one releases the slot.
+dependency_expired_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=509 \
+    DRIVEN_PREPARING_LEASE_SECONDS=1 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {job_id,iid}] == [
+    {job_id:"C:snapshot-0::defer-2",iid:30}
+  ]
+' <<<"${dependency_expired_reserve}" >/dev/null
+dependency_expiring_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-2' \
+    STATUS=preparing NOW_EPOCH=510 DRIVEN_PREPARING_LEASE_SECONDS=1 \
+    bash "${RECORD}"
+)"
+dependency_expiring_generation="$(jq -r '.claim_generation' \
+  <<<"${dependency_expiring_claim}")"
+CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=512 \
+  DRIVEN_PREPARING_LEASE_SECONDS=1 bash "${RESERVE}" >/dev/null
+jq -e \
+  --argjson generation "${dependency_expiring_generation}" '
+  .active_jobs["C:snapshot-0::defer-2"].status == "reserved"
+  and .active_jobs["C:snapshot-0::defer-2"].claim_generation == $generation
+  and .active_jobs["C:snapshot-0::defer-2"].claim_token == null
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+dependency_expired_scheduler_before="$(jq -cS . \
+  "${SCHEDULER_ROOT}/scheduler_state.json")"
+set +e
+bad_expired_defer="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-2' \
+    ACTION=dependency_deferred \
+    CLAIM_GENERATION="$((dependency_expiring_generation + 1))" NOW_EPOCH=513 \
+    bash "${RECORD}" 2>&1
+)"
+bad_expired_defer_rc=$?
+set -e
+if [ "${bad_expired_defer_rc}" -ne 3 ]; then
+  echo "recovered dependency defer with stale generation exited ${bad_expired_defer_rc}: ${bad_expired_defer}" >&2
+  exit 1
+fi
+[ "$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")" \
+    = "${dependency_expired_scheduler_before}" ] || {
+  echo "stale recovered dependency generation changed scheduler state" >&2
+  exit 1
+}
+expired_dependency_defer="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='C:snapshot-0::defer-2' \
+    ACTION=dependency_deferred \
+    CLAIM_GENERATION="${dependency_expiring_generation}" NOW_EPOCH=514 \
+    bash "${RECORD}"
+)"
+jq -e '
+  .job_status == "retry_wait"
+  and .active_count == 0
+  and .claim_generation == null
+  and .claim_token == null
+' <<<"${expired_dependency_defer}" >/dev/null
+for deferred_batch in C C_ATTACH; do
+  jq -e '
+    .memberships["0"].status == "retry_wait"
+    and .memberships["0"].defer_count == 3
+  ' "${SCHEDULER_ROOT}/batches/${deferred_batch}/state.json" >/dev/null
+done
+
 echo 'ok driven scheduler dedup'

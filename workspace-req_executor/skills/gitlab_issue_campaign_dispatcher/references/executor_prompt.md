@@ -26,18 +26,20 @@ credentials from the private process/deployment environment, and
 | `{ISSUE_IID}` | current IID |
 | `{ATTEMPT_NUMBER}` | allocated attempt number |
 | `{ATTEMPT_NUMBER_PADDED}` | zero-padded attempt number |
-| `{ISSUE_TITLE}` | live issue title for context only |
-| `{ISSUE_TITLE_QUOTED}` | shell-safe single-quoted issue title |
-| `{ISSUE_URL}` | pinned GitLab issue URL |
-| `{ISSUE_LABELS}` | live label snapshot |
-| `{ISSUE_BODY}` | first approximately 4 KB; full prompt is already on disk |
 | `{ISSUE_MODE}` | `fresh` or `continue` |
 | `{BRANCH}` | resolved processing base branch |
 | `{BRANCH_QUOTED}` | shell-safe single-quoted processing base branch |
+| `{CONFIG_BRANCH}` | trusted branch supplying `.claude/` runtime config |
+| `{DEPENDENCY_IID}` | prerequisite IID, or empty when none applies |
+| `{DEPENDENCY_BRANCH}` | shared `issue/A+C` branch for C, legacy ordinary dependency branch, or empty |
+| `{DEPENDENCY_BASE_SHA}` | immutable prerequisite commit used by fresh checkout, or empty |
 | `{AUTO_MERGE}` | `true` only when the user explicitly requested automatic merge |
 | `{MERGE_TARGET_BRANCH}` | resolved merge-request target branch |
 | `{MERGE_TARGET_BRANCH_QUOTED}` | shell-safe single-quoted merge-request target branch |
-| `{WORK_BRANCH}` | fixed issue branch |
+| `{WORK_BRANCH}` | fixed `issue/<iid>` branch or frozen shared `issue/A+C` branch |
+| `{WORK_BRANCH_QUOTED}` | shell-safe single-quoted work branch |
+| `{EXPECTED_WORK_BRANCH_SHA}` | exact old shared-branch tip used only for the explicit push lease, or empty for a new/ordinary branch |
+| `{EXPECTED_COMMIT_PARENT_SHA}` | exact commit required as the new shared commit's only parent, or empty for an ordinary branch |
 | `{LOCAL_ATTEMPT_BRANCH}` | attempt-local branch |
 | `{REPO_PATH}` | parent checkout |
 | `{WORKTREE_DIR}` | shared per-IID linked worktree |
@@ -50,9 +52,10 @@ credentials from the private process/deployment environment, and
 | `{ACPX_TIMEOUT_SECONDS}` | inner acpx wall-clock cap |
 | `{ACPX_TIMEOUT_MINUTES}` | floor of the acpx cap in minutes |
 
-`{ISSUE_TITLE_QUOTED}`, `{BRANCH_QUOTED}`, and
-`{MERGE_TARGET_BRANCH_QUOTED}` must be shell quoted. `{ISSUE_BODY}` is context
-only; the complete inner prompt is already at `{LOG_DIR}/prompt.txt`. The raw
+`{BRANCH_QUOTED}`, `{WORK_BRANCH_QUOTED}`, and
+`{MERGE_TARGET_BRANCH_QUOTED}` must be shell quoted. The
+Issue title/body/URL/labels are deliberately absent from this outer payload;
+only the inner acpx prompt reads the private Issue snapshot. The raw
 `{BRANCH}` and `{MERGE_TARGET_BRANCH}` forms are context values inside
 `<config>` only and must never be inserted into a shell command.
 
@@ -65,7 +68,7 @@ You are the focused outer executor for GitLab issue #{ISSUE_IID} of {GROUP}/{PRO
 The dispatcher already prepared the worktree, prompt, branches, and private
 runtime state. Run exactly one fixed wrapper. That wrapper owns setup, the
 one-shot run_acpx_attempt.sh invocation, staging, commit/push, post-push
-verification, label transitions, MR creation, summary, and durable compact
+verification, label transitions, MR creation or exact shared-MR reuse, summary, and durable compact
 result persistence. Do not perform any of those steps yourself.
 
 DO NOT load any SKILL.md, SOUL.md, AGENTS.md, or other workspace rules.
@@ -84,9 +87,15 @@ ATTEMPT_NUMBER={ATTEMPT_NUMBER}
 ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
 ISSUE_MODE={ISSUE_MODE}
 BRANCH={BRANCH}
+CONFIG_BRANCH={CONFIG_BRANCH}
+DEPENDENCY_IID={DEPENDENCY_IID}
+DEPENDENCY_BRANCH={DEPENDENCY_BRANCH}
+DEPENDENCY_BASE_SHA={DEPENDENCY_BASE_SHA}
 AUTO_MERGE={AUTO_MERGE}
 MERGE_TARGET_BRANCH={MERGE_TARGET_BRANCH}
 WORK_BRANCH={WORK_BRANCH}
+EXPECTED_WORK_BRANCH_SHA={EXPECTED_WORK_BRANCH_SHA}
+EXPECTED_COMMIT_PARENT_SHA={EXPECTED_COMMIT_PARENT_SHA}
 LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
 REPO_PATH={REPO_PATH}
 WORKTREE_DIR={WORKTREE_DIR}
@@ -97,16 +106,6 @@ SCRIPTS={SCRIPTS_DIR}
 ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
 </config>
 
-<issue>
-IID: #{ISSUE_IID}
-Title: {ISSUE_TITLE}
-URL: {ISSUE_URL}
-Labels: {ISSUE_LABELS}
-Mode: {ISSUE_MODE}
-Body (first approximately 4 KB; full inner prompt is at {LOG_DIR}/prompt.txt):
-{ISSUE_BODY}
-</issue>
-
 <instructions>
 1. Make one Bash tool call with a PTY. Use a tool command timeout of at least
    `{ACPX_TIMEOUT_SECONDS} + 2400` seconds so the wrapper's internal acpx and
@@ -114,9 +113,14 @@ Body (first approximately 4 KB; full inner prompt is at {LOG_DIR}/prompt.txt):
 
    PROJECT={PROJECT} GROUP={GROUP} \
      ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
-     REPO_PATH={REPO_PATH} \
-     ISSUE_TITLE={ISSUE_TITLE_QUOTED} \
+     REPO_PARENT_PATH= REPO_PATH={REPO_PATH} \
      ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH_QUOTED} \
+     WORK_BRANCH={WORK_BRANCH_QUOTED} \
+     EXPECTED_WORK_BRANCH_SHA={EXPECTED_WORK_BRANCH_SHA} \
+     EXPECTED_COMMIT_PARENT_SHA={EXPECTED_COMMIT_PARENT_SHA} \
+     DEPENDENCY_IID={DEPENDENCY_IID} \
+     DEPENDENCY_BRANCH={DEPENDENCY_BRANCH} \
+     DEPENDENCY_BASE_SHA={DEPENDENCY_BASE_SHA} \
      AUTO_MERGE={AUTO_MERGE} MERGE_TARGET_BRANCH={MERGE_TARGET_BRANCH_QUOTED} \
      ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS} \
      bash {SCRIPTS_DIR}/run_executor_attempt.sh

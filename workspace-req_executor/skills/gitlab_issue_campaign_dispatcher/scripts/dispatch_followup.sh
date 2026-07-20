@@ -264,6 +264,17 @@ if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ]; then
 fi
 
 PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
+PENDING_SHARED_BRANCH="$(jq -r '
+  (.work_branch | type == "string"
+    and test("^issue/[1-9][0-9]*\\+[1-9][0-9]*$"))
+  and (.branch_members | type == "array" and length == 2)
+  and (.shared_branch_role == "head" or .shared_branch_role == "tail")
+' <<<"${PENDING_ENTRY}")"
+PENDING_MR_RECOVERY=false
+if [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ] \
+    || [ "${PENDING_SHARED_BRANCH}" = true ]; then
+  PENDING_MR_RECOVERY=true
+fi
 
 # Positive completion recovery is intentionally independent of the running
 # lease. The scheduler first observed `pr`, `finish`, or closed through the
@@ -324,8 +335,16 @@ fi
 # reply: timeout when the run consumed its time budget, blocked otherwise.
 RAW_REPLY="$(cat)"
 
-recover_current_auto_merge_reply() {
+recover_current_mr_reply() {
   local marker=""
+  if [ "${PENDING_SHARED_BRANCH}" = true ]; then
+    marker="$(phase6_read_shared_branch_marker \
+      "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}" 2>/dev/null || true)"
+    [ -n "${marker}" ] || return 1
+    phase6_reply_from_shared_branch_marker \
+      "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}"
+    return
+  fi
   # Marker reconcile is an optimistic probe that may run while create_mr.sh is
   # still between its initial identity write and the bounded merge helper. Do
   # not classify that in-progress marker as an opened failure. Native terminal
@@ -343,36 +362,45 @@ recover_current_auto_merge_reply() {
     "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}"
 }
 
-# A verified merge whose finish transition failed is durably marked on the
+# A verified MR whose `pr` or `finish` transition failed is durably marked on the
 # pending claim. Override even a non-empty killed/failure callback with the
 # exact marker recovery path: cleanup of the stalled native child must not be
 # able to terminate or downgrade this label-only retry. The live MR is still
 # independently re-verified on every retry.
-FINISH_LABEL_RETRY_ACTIVE=false
+COMPLETION_LABEL_RETRY_ACTIVE=false
+COMPLETION_LABEL_RETRY_KIND=""
+COMPLETION_LABEL_RETRY_ATTEMPT=""
 if [ "$(jq -r '.finish_label_retry // false' <<<"${PENDING_ENTRY}")" = true ]; then
-  FINISH_LABEL_RETRY_ATTEMPT="$(jq -r \
+  COMPLETION_LABEL_RETRY_KIND=finish
+  COMPLETION_LABEL_RETRY_ATTEMPT="$(jq -r \
     '.finish_label_retry_attempt // empty' <<<"${PENDING_ENTRY}")"
-  if [[ "${FINISH_LABEL_RETRY_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] \
-      && [ "${FINISH_LABEL_RETRY_ATTEMPT}" -eq "${PENDING_ATTEMPT}" ]; then
-    FINISH_LABEL_RETRY_ACTIVE=true
+elif [ "$(jq -r '.mr_label_retry // false' <<<"${PENDING_ENTRY}")" = true ]; then
+  COMPLETION_LABEL_RETRY_KIND=pr
+  COMPLETION_LABEL_RETRY_ATTEMPT="$(jq -r \
+    '.mr_label_retry_attempt // empty' <<<"${PENDING_ENTRY}")"
+fi
+if [ -n "${COMPLETION_LABEL_RETRY_KIND}" ]; then
+  if [[ "${COMPLETION_LABEL_RETRY_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] \
+      && [ "${COMPLETION_LABEL_RETRY_ATTEMPT}" -eq "${PENDING_ATTEMPT}" ]; then
+    COMPLETION_LABEL_RETRY_ACTIVE=true
   else
     wrapper_log followup \
-      "ignored stale/invalid finish-label retry fence iid=${IID} pending_attempt=${PENDING_ATTEMPT} retry_attempt=${FINISH_LABEL_RETRY_ATTEMPT:-missing}"
+      "ignored stale/invalid completion-label retry fence iid=${IID} pending_attempt=${PENDING_ATTEMPT} retry_attempt=${COMPLETION_LABEL_RETRY_ATTEMPT:-missing} kind=${COMPLETION_LABEL_RETRY_KIND}"
   fi
 fi
-if [ "${FINISH_LABEL_RETRY_ACTIVE}" = true ]; then
-  RECOVERED_AUTO_MERGE_REPLY="$(recover_current_auto_merge_reply \
+if [ "${COMPLETION_LABEL_RETRY_ACTIVE}" = true ]; then
+  RECOVERED_AUTO_MERGE_REPLY="$(recover_current_mr_reply \
     2>/dev/null || true)"
   if [ -n "${RECOVERED_AUTO_MERGE_REPLY}" ]; then
     RAW_REPLY="${RECOVERED_AUTO_MERGE_REPLY}"
     wrapper_log followup \
-      "recovered durable finish-label retry iid=${IID} attempt=${PENDING_ATTEMPT}"
+      "recovered durable completion-label retry iid=${IID} attempt=${PENDING_ATTEMPT} kind=${COMPLETION_LABEL_RETRY_KIND}"
   else
     jq -nc --argjson iid "${IID}" --argjson attempt_number "${PENDING_ATTEMPT}" '{
       callback_status:"marker_not_ready",
       iid:$iid,
       attempt_number:$attempt_number,
-      chat_summary:("finish-label retry marker is not ready for #" + ($iid|tostring))
+      chat_summary:("completion-label retry marker is not ready for #" + ($iid|tostring))
     }'
     exit 0
   fi
@@ -393,13 +421,13 @@ RAW_REPLY_STATUS="$(jq -r '
 if { [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
       || [ "${RAW_REPLY_STATUS}" != done ]; } \
     && [ "${RESULT_RECONCILE}" != 1 ] \
-    && [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ]; then
-  RECOVERED_AUTO_MERGE_REPLY="$(recover_current_auto_merge_reply \
+    && [ "${PENDING_MR_RECOVERY}" = true ]; then
+  RECOVERED_AUTO_MERGE_REPLY="$(recover_current_mr_reply \
     2>/dev/null || true)"
   if [ -n "${RECOVERED_AUTO_MERGE_REPLY}" ]; then
     RAW_REPLY="${RECOVERED_AUTO_MERGE_REPLY}"
     wrapper_log followup \
-      "recovered auto-merge marker iid=${IID} attempt=${PENDING_ATTEMPT} before empty-result synthesis"
+      "recovered exact MR marker iid=${IID} attempt=${PENDING_ATTEMPT} before empty-result synthesis"
   fi
 fi
 
@@ -412,12 +440,12 @@ fi
 if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
     && { [ "${MARKER_RECONCILE}" = 1 ] \
       || { [ "${COMPLETED_RECONCILE}" = 1 ] \
-        && [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ]; }; }; then
+        && [ "${PENDING_MR_RECOVERY}" = true ]; }; }; then
   jq -nc --argjson iid "${IID}" --argjson attempt_number "${PENDING_ATTEMPT}" '{
     callback_status:"marker_not_ready",
     iid:$iid,
     attempt_number:$attempt_number,
-    chat_summary:("trusted automatic-merge marker is not ready for #" + ($iid|tostring))
+    chat_summary:("trusted MR marker is not ready for #" + ($iid|tostring))
   }'
   exit 0
 fi
@@ -488,7 +516,6 @@ fi
 # override so a late `done` can be drained without downgrading it to `pr`.
 REPLY_STATUS="$(printf '%s' "${REPLY_JSON}" | jq -r '.status')"
 TRUSTED_COMPLETION_OVERRIDE=""
-PENDING_AUTO_MERGE="$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")"
 LIVE_COMPLETED_EVIDENCE=false
 if [ -n "${RECON_EVIDENCE_PATH}" ] \
     && phase6_evidence_shows_completed \
@@ -496,22 +523,23 @@ if [ -n "${RECON_EVIDENCE_PATH}" ] \
   LIVE_COMPLETED_EVIDENCE=true
 fi
 if [ "${REPLY_STATUS}" = done ] \
-    && [ "${PENDING_AUTO_MERGE}" != true ] \
+    && [ "${PENDING_MR_RECOVERY}" != true ] \
     && [ "${LIVE_COMPLETED_EVIDENCE}" = true ] \
     && phase6_evidence_has_finish "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
   TRUSTED_COMPLETION_OVERRIDE=preserve
   wrapper_log followup \
     "preserving live finish for ordinary late done iid=${IID} attempt=${REPLY_ATTEMPT}"
 fi
-if [ "${PENDING_AUTO_MERGE}" = true ] \
+if [ "${PENDING_MR_RECOVERY}" = true ] \
     && [ "${LIVE_COMPLETED_EVIDENCE}" = true ]; then
-  # Auto-merge outcomes must be resolved by the exact marker/MR path, never by
-  # the generic live-completed skip. Preserve the live completion label if the
-  # callback itself is failure-shaped and no stronger exact outcome is found.
+  # Automatic-merge and shared-branch outcomes must be resolved by the exact
+  # marker/MR path, never by the generic live-completed skip. Preserve the live
+  # completion label if the callback is failure-shaped and no stronger exact
+  # outcome is found.
   TRUSTED_COMPLETION_OVERRIDE=preserve
 fi
 if [ "${REPLY_STATUS}" != "done" ] \
-   && [ "${PENDING_AUTO_MERGE}" != true ] \
+   && [ "${PENDING_MR_RECOVERY}" != true ] \
    && [ "${LIVE_COMPLETED_EVIDENCE}" = true ]; then
   if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ] && [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
     # A scheduler-owned running claim still needs its exact terminal I3 even

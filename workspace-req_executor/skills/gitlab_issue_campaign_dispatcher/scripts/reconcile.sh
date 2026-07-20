@@ -28,6 +28,7 @@
 #       "state":             "opened" | "closed" | null,
 #       "labels":            [...] | null,
 #       "title":             "..."  | null,
+#       "description":       "..."  | null, # dependency graph input only
 #       "has_done_pr":       bool,   # labels include `pr` (pr 替换 done 后，有 pr 即完成)
 #       "has_finish":        bool,   # labels include `finish` (matching MR was independently verified merged)
 #       "is_closed_on_gitlab": bool,  # state is "closed"
@@ -129,6 +130,7 @@ for iid in "${IIDS[@]}"; do
         state: $issue.state,
         labels: $labels,
         title: $issue.title,
+        description: ($issue.description // ""),
         has_done_pr: $done_with_pr,
         has_finish: $has_finish,
         is_closed_on_gitlab: $closed,
@@ -156,7 +158,7 @@ for iid in "${IIDS[@]}"; do
         missing: false
       }')"
   else
-    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, has_done_pr:false, has_finish:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, has_blocked:false, has_failed:false, user_reopened:false, needs_continue:false, model_tier:null, missing:true}')"
+    digest="$(jq -nc --argjson iid "${iid}" '{iid:$iid, state:null, labels:null, title:null, description:null, has_done_pr:false, has_finish:false, is_closed_on_gitlab:false, is_done_on_gitlab:false, has_timeout:false, has_retry:false, has_blocked:false, has_failed:false, user_reopened:false, needs_continue:false, model_tier:null, missing:true}')"
   fi
   if [ "${first}" -eq 1 ]; then first=0; else printf ",\n" >> "${OUT_FILE}"; fi
   printf "  %s" "${digest}" >> "${OUT_FILE}"

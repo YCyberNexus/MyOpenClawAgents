@@ -21,6 +21,7 @@ RECORD_LAUNCH_CMD="${RECORD_LAUNCH_CMD:-${SCRIPT_DIR}/record_driven_batch_launch
 BIND_CLAIM_CMD="${BIND_CLAIM_CMD:-${SCRIPT_DIR}/bind_driven_claim.sh}"
 RESUME_SPAWN_CMD="${RESUME_SPAWN_CMD:-${SCRIPT_DIR}/record_executor_batch_spawn.sh}"
 EXPIRE_RUNNING_CMD="${EXPIRE_RUNNING_CMD:-${SCRIPT_DIR}/dispatch_followup.sh}"
+RECOVER_SHARED_MR_CMD="${RECOVER_SHARED_MR_CMD:-${SCRIPT_DIR}/recover_shared_mr_finalization.sh}"
 DEFER_DRIVEN_CALLBACK_DELIVERY="${DEFER_DRIVEN_CALLBACK_DELIVERY:-0}"
 
 tick_die() {
@@ -71,6 +72,7 @@ do
   validate_command "${command_spec%%:*}" "${command_spec#*:}"
 done
 validate_bash_script EXPIRE_RUNNING_CMD "${EXPIRE_RUNNING_CMD}"
+validate_bash_script RECOVER_SHARED_MR_CMD "${RECOVER_SHARED_MR_CMD}"
 case "${DEFER_DRIVEN_CALLBACK_DELIVERY}" in
   0|1) ;;
   *) tick_die "DEFER_DRIVEN_CALLBACK_DELIVERY must be 0 or 1" ;;
@@ -192,6 +194,182 @@ append_operation() {
     '. + [$operation]' <<<"${OPERATIONS}")"
 }
 
+tick_file_mode() {
+  local path="$1" mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "${path}" 2>/dev/null
+  fi
+}
+
+tick_file_owner() {
+  local path="$1" owner
+  if owner="$(stat -f '%u' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${owner}"
+  else
+    stat -c '%u' "${path}" 2>/dev/null
+  fi
+}
+
+tick_read_private_json() {
+  local path="$1" bytes mode owner
+  [ -f "${path}" ] && [ ! -L "${path}" ] || return 1
+  mode="$(tick_file_mode "${path}")" || return 1
+  owner="$(tick_file_owner "${path}")" || return 1
+  bytes="$(wc -c <"${path}" 2>/dev/null | tr -d '[:space:]')"
+  [ "${mode}" = 600 ] && [ "${owner}" = "$(id -u)" ] \
+    && [[ "${bytes}" =~ ^[1-9][0-9]*$ ]] \
+    && [ "${bytes}" -le 65536 ] || return 1
+  jq -ce 'if type == "object" then . else error("not an object") end' \
+    "${path}" 2>/dev/null
+}
+
+# Return the exact pending checkpoint only when both private state files and
+# the scheduler-owned pending entry describe the same two-Issue branch
+# attempt. This prefilter keeps ordinary branches and stale attempts away from
+# the MR-only recovery command; that command independently repeats the fixed
+# identity checks before touching GitLab.
+post_acpx_shared_mr_checkpoint() {
+  local pending="$1" issue_state_file="$2" attempt_state_file="$3"
+  local iid="$4" attempt_number="$5" work_branch="$6"
+  local issue_state attempt_state
+  issue_state="$(tick_read_private_json "${issue_state_file}")" || return 1
+  attempt_state="$(tick_read_private_json "${attempt_state_file}")" || return 1
+  jq -nce \
+    --argjson pending "${pending}" \
+    --argjson issue_state "${issue_state}" \
+    --argjson attempt_state "${attempt_state}" \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
+    --arg work_branch "${work_branch}" '
+      ($pending.branch_members // null) as $members
+      | ($pending.merge_target_branch // $pending.branch // "") as $target
+      | ($issue_state.mr_finalization // null) as $finalization
+      | if ($pending | type) == "object"
+        and $pending.auto_merge == false
+        and ($members | type == "array" and length == 2)
+        and all($members[]; type == "number" and . == floor and . > 0)
+        and $members[0] != $members[1]
+        and ($members | index($iid) != null)
+        and $work_branch == ("issue/" + ($members[0] | tostring)
+          + "+" + ($members[1] | tostring))
+        and $pending.work_branch == $work_branch
+        and $pending.shared_branch_role ==
+          (if $iid == $members[0] then "head" else "tail" end)
+        and ($target | type == "string" and length > 0)
+        and $attempt_state.iid == $iid
+        and $attempt_state.attempt_number == $attempt_number
+        and ($attempt_state.issue_title | type == "string" and length > 0)
+        and ($attempt_state.mode_actual == "fresh"
+          or $attempt_state.mode_actual == "continue")
+        and $attempt_state.auto_merge == false
+        and $attempt_state.work_branch == $work_branch
+        and $attempt_state.branch_members == $members
+        and $attempt_state.shared_branch_role == $pending.shared_branch_role
+        and $attempt_state.merge_target_branch == $target
+        and $issue_state.iid == $iid
+        and $issue_state.work_branch == $work_branch
+        and $issue_state.branch_members == $members
+        and $issue_state.shared_branch_role == $pending.shared_branch_role
+        and $issue_state.dependency_history_verified == true
+        and ($issue_state.work_branch_sha | type == "string"
+          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+        and ($finalization | type == "object")
+        and ($finalization | keys | sort) == ([
+          "branch_members","commit_sha","intent_id","shared_branch_role",
+          "source_attempt_number","status","target_branch","work_branch"
+        ] | sort)
+        and $finalization.status == "pending"
+        and $finalization.source_attempt_number == $attempt_number
+        and $finalization.work_branch == $work_branch
+        and $finalization.branch_members == $members
+        and $finalization.shared_branch_role == $pending.shared_branch_role
+        and ($finalization.commit_sha | type == "string"
+          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+        and ($finalization.intent_id | type == "string"
+          and test("^[0-9a-f]{64}$"))
+        and (($finalization.commit_sha | ascii_downcase)
+          == ($issue_state.work_branch_sha | ascii_downcase))
+        and $finalization.target_branch == $target
+        and (if $pending.shared_branch_role == "head" then
+          ($pending.dependency_iid // null) == null
+          and ($pending.dependency_branch // null) == null
+          and ($pending.dependency_base_sha // null) == null
+          and ($attempt_state.dependency_iid // null) == null
+          and ($attempt_state.dependency_branch // null) == null
+          and ($attempt_state.dependency_base_sha // null) == null
+          and ($issue_state.dependency_iid // null) == null
+          and ($issue_state.dependency_branch // null) == null
+          and ($issue_state.dependency_base_sha // null) == null
+        else
+          $pending.dependency_iid == $members[0]
+          and $pending.dependency_branch == $work_branch
+          and ($pending.dependency_base_sha | type == "string"
+            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+          and $attempt_state.dependency_iid == $pending.dependency_iid
+          and $attempt_state.dependency_branch == $pending.dependency_branch
+          and (($attempt_state.dependency_base_sha | ascii_downcase)
+            == ($pending.dependency_base_sha | ascii_downcase))
+          and $issue_state.dependency_iid == $pending.dependency_iid
+          and $issue_state.dependency_branch == $pending.dependency_branch
+          and (($issue_state.dependency_base_sha | ascii_downcase)
+            == ($pending.dependency_base_sha | ascii_downcase))
+        end)
+      then $finalization else error("shared checkpoint mismatch") end
+    ' 2>/dev/null
+}
+
+# A pending checkpoint can coexist briefly with a marker whose exact MR
+# identity is known but whose prior observation is opened, closed, or unknown.
+# Avoid a second finalization call: Phase 6 always performs the fresh live read
+# and alone decides whether to complete, terminate, or retain the claim.
+post_acpx_shared_mr_marker_ready() {
+  local marker_file="$1" pending="$2" checkpoint="$3"
+  local iid="$4" attempt_number="$5" marker
+  marker="$(tick_read_private_json "${marker_file}")" || return 1
+  jq -nce \
+    --argjson marker "${marker}" \
+    --argjson pending "${pending}" \
+    --argjson checkpoint "${checkpoint}" \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" '
+      ($pending.merge_target_branch // $pending.branch // "") as $target
+      | ($pending.dependency_base_sha // "") as $dependency_sha
+      | if ($marker | keys | sort) == ([
+          "attempt_number","auto_merge","dependency_base_sha","iid",
+          "issue_iid","merge_api_succeeded","merge_attempted","mr_action",
+          "observed_state","outcome","reason","sha","source_branch",
+          "shared_mr_intent_id","target_branch","verified","version","web_url"
+        ] | sort)
+        and $marker.version == 1
+        and $marker.issue_iid == $iid
+        and $marker.attempt_number == $attempt_number
+        and $marker.auto_merge == false
+        and $marker.source_branch == $checkpoint.work_branch
+        and $marker.target_branch == $target
+        and (($marker.dependency_base_sha | ascii_downcase)
+          == ($dependency_sha | ascii_downcase))
+        and (($marker.sha | ascii_downcase)
+          == ($checkpoint.commit_sha | ascii_downcase))
+        and $marker.shared_mr_intent_id == $checkpoint.intent_id
+        and ($marker.iid | type == "number" and . == floor and . > 0)
+        and ($marker.web_url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/"
+            + ($marker.iid | tostring) + "/?$"))
+        and (if $checkpoint.shared_branch_role == "head"
+          then $marker.mr_action == "created"
+          else $marker.mr_action == "reused" end)
+        and ($marker.verified | type == "boolean")
+        and ($marker.outcome | type == "string")
+        and ($marker.observed_state | type == "string")
+        and $marker.merge_attempted == false
+        and $marker.merge_api_succeeded == false
+        and ($marker.reason | type == "string" and length > 0)
+      then true else error("shared marker not ready") end
+    ' >/dev/null 2>&1
+}
+
 set +e
 RECONCILE_COUNTS_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RECONCILE_COUNTS_CMD}" 2>/dev/null)"
 RECONCILE_COUNTS_RC=$?
@@ -241,17 +419,24 @@ if [ "${HAD_FAILURE}" = true ]; then
 fi
 
 project_context() {
-  local project="$1" group slug resolved repo_parent
+  local project="$1" resolve_timeout="${2:-10}"
+  local group slug resolved repo_parent
   if ! [[ "${project}" =~ ^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$ ]]; then
     return 2
   fi
+  case "${resolve_timeout}" in
+    ''|*[!0-9]*) return 2 ;;
+  esac
+  [ "${resolve_timeout}" -ge 1 ] && [ "${resolve_timeout}" -le 10 ] \
+    || return 2
   group="${project%/*}"
   slug="${project##*/}"
   resolved="$(PROJECT_FULL="${project}" \
     REPO_PARENT_PATH="${REPO_PARENT_BASE}" \
     GITLAB_API_PROTOCOL="${GITLAB_API_PROTOCOL}" \
     GITLAB_HOST="${GITLAB_HOST}" \
-    bash "${RESOLVE_REPO_CMD}")" || return 2
+    timeout --kill-after=1s "${resolve_timeout}s" \
+      bash "${RESOLVE_REPO_CMD}")" || return 2
   repo_parent="${resolved%/*}"
   jq -cn \
     --arg project "${project}" \
@@ -328,6 +513,11 @@ while IFS= read -r post_job; do
   post_attempt="$(jq -r '.attempt_number' <<<"${post_pending}")"
   post_run_id="$(jq -r '.run_id' <<<"${post_pending}")"
   post_child_session_key="$(jq -r '.child_session_key' <<<"${post_pending}")"
+  post_work_branch="$(jq -r --argjson iid "${post_iid}" \
+    '.work_branch // ("issue/" + ($iid | tostring))' <<<"${post_pending}")"
+  if ! git check-ref-format --branch "${post_work_branch}" >/dev/null 2>&1; then
+    continue
+  fi
   printf -v post_attempt_padded '%03d' "${post_attempt}"
   post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log/attempt-${post_attempt_padded}"
   post_result_file="${post_log_dir}/worker_result.json"
@@ -368,7 +558,7 @@ while IFS= read -r post_job; do
     post_result_json="$(jq -ce \
       --argjson iid "${post_iid}" \
       --argjson attempt "${post_attempt}" \
-      --arg work_branch "issue/${post_iid}" \
+      --arg work_branch "${post_work_branch}" \
       --arg local_branch "issue/${post_iid}-att${post_attempt_padded}" \
       --arg log_dir "${post_log_dir}" \
       --argjson acpx_exit "$(jq -r '.exit_code' <<<"${post_marker_json}")" '
@@ -390,7 +580,8 @@ while IFS= read -r post_job; do
         and (.commit_sha | type == "string"
           and (length == 0 or test("^[0-9a-fA-F]{7,64}$")))
         and (.merge_request_url | type == "string")
-        and (.mr_action == "created" or .mr_action == "rotated" or .mr_action == "none")
+        and (.mr_action == "created" or .mr_action == "rotated"
+          or .mr_action == "reused" or .mr_action == "none")
         and .wiki_url == ""
         and (.labels_added | type == "array" and all(.[]; type == "string"))
         and (.labels_removed | type == "array" and all(.[]; type == "string"))
@@ -404,6 +595,7 @@ while IFS= read -r post_job; do
     ' "${post_result_file}" 2>/dev/null || true)"
   fi
   if [ -n "${post_result_json}" ]; then
+    post_result_claim_retained=false
     post_token_sha256="$(printf '%s' "$(jq -r '.claim_token' <<<"${post_job}")" | dlc_sha256)" \
       || tick_die "unable to hash durable-result claim fence"
     set +e
@@ -427,6 +619,12 @@ while IFS= read -r post_job; do
           then . else error("invalid durable result reconcile envelope") end
         ' <<<"${post_reconcile_output}" 2>/dev/null)"; then
       post_reconcile_status="$(jq -r '.callback_status' <<<"${post_reconcile_json}")"
+      if [ "${post_reconcile_status}" = handled ] \
+          && jq -e --argjson iid "${post_iid}" '
+            .remaining_pending_iids | index($iid) != null
+          ' <<<"${post_reconcile_json}" >/dev/null 2>&1; then
+        post_result_claim_retained=true
+      fi
       append_operation "$(jq -cn \
         --arg job_id "${post_job_id}" \
         --arg status "${post_reconcile_status}" '{
@@ -454,7 +652,10 @@ while IFS= read -r post_job; do
       }')"
       HAD_FAILURE=true
     fi
-    continue
+    # Phase 6 deliberately retains the same claim for finish/pr label retries
+    # and for a shared MR pending checkpoint. Do not let the durable worker
+    # result shadow the marker/MR-only recovery section on every later tick.
+    [ "${post_result_claim_retained}" = true ] || continue
   fi
 
   if [ -z "${post_marker_json}" ]; then
@@ -477,7 +678,83 @@ while IFS= read -r post_job; do
     || tick_die "unable to hash post-acpx claim fence"
   post_recovery_handled=false
   post_auto_merge="$(jq -r '.auto_merge // false' <<<"${post_pending}")"
-  if [ "${post_auto_merge}" = true ]; then
+  post_shared_branch="$(jq -r '
+    (.work_branch | type == "string"
+      and test("^issue/[1-9][0-9]*\\+[1-9][0-9]*$"))
+    and (.branch_members | type == "array" and length == 2)
+    and (.shared_branch_role == "head" or .shared_branch_role == "tail")
+  ' <<<"${post_pending}")"
+  if [ "${post_shared_branch}" = true ]; then
+    post_issue_state_file="${post_repo}/.req_executor/issues/issue-${post_iid}/state.json"
+    post_attempt_state_file="${post_repo}/.req_executor/issues/issue-${post_iid}/attempt_state.json"
+    post_shared_checkpoint=""
+    if post_shared_checkpoint="$(post_acpx_shared_mr_checkpoint \
+        "${post_pending}" "${post_issue_state_file}" \
+        "${post_attempt_state_file}" "${post_iid}" "${post_attempt}" \
+        "${post_work_branch}")" \
+        && ! post_acpx_shared_mr_marker_ready "${post_log_dir}/mr_result.json" \
+          "${post_pending}" "${post_shared_checkpoint}" \
+          "${post_iid}" "${post_attempt}"; then
+      set +e
+      post_shared_recovery_output="$(
+        PROJECT="$(jq -r '.slug' <<<"${post_context}")" \
+        GROUP="$(jq -r '.group' <<<"${post_context}")" \
+        GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
+        REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${post_context}")" \
+        ISSUE_IID="${post_iid}" ATTEMPT_NUMBER="${post_attempt}" \
+        WORK_BRANCH="${post_work_branch}" \
+          timeout --kill-after=30s 300s \
+            bash "${RECOVER_SHARED_MR_CMD}" 2>/dev/null
+      )"
+      post_shared_recovery_rc=$?
+      set -e
+      if [ "${post_shared_recovery_rc}" -eq 0 ] \
+          && post_shared_recovery_json="$(jq -ce \
+            --argjson iid "${post_iid}" \
+            --argjson attempt_number "${post_attempt}" \
+            --arg commit_sha "$(jq -r '.commit_sha' \
+              <<<"${post_shared_checkpoint}")" \
+            --arg shared_role "$(jq -r '.shared_branch_role' \
+              <<<"${post_shared_checkpoint}")" \
+            --arg intent_id "$(jq -r '.intent_id' \
+              <<<"${post_shared_checkpoint}")" '
+            if type == "object"
+              and (keys | sort) == ([
+                "attempt_number","commit_sha","iid","intent_id","merge_request_url",
+                "mr_action","status"
+              ] | sort)
+              and .status == "verified_open"
+              and .iid == $iid
+              and .attempt_number == $attempt_number
+              and ((.commit_sha | ascii_downcase)
+                == ($commit_sha | ascii_downcase))
+              and .intent_id == $intent_id
+              and (.merge_request_url | type == "string"
+                and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
+              and (if $shared_role == "head"
+                then .mr_action == "created" else .mr_action == "reused" end)
+            then . else error("invalid shared MR recovery envelope") end
+          ' <<<"${post_shared_recovery_output}" 2>/dev/null)"; then
+        append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+          operation:"post_acpx_shared_mr_recovery",job_id:$job_id,
+          status:"verified_open"
+        }')"
+      elif [ "${post_shared_recovery_rc}" -ne 0 ]; then
+        append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+          operation:"post_acpx_shared_mr_recovery",job_id:$job_id,
+          status:"not_ready"
+        }')"
+      else
+        append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+          operation:"post_acpx_shared_mr_recovery",job_id:$job_id,
+          status:"failed"
+        }')"
+        HAD_FAILURE=true
+      fi
+    fi
+  fi
+  if [ "${post_auto_merge}" = true ] \
+      || [ "${post_shared_branch}" = true ]; then
     set +e
     post_marker_reconcile_output="$(printf '' | \
       PROJECT="$(jq -r '.slug' <<<"${post_context}")" \
@@ -903,6 +1180,30 @@ resume_durable_launch_actions
 # finalize that skip against the scheduler claim. Callback delivery and other
 # independently fenced recovery phases above must not hold this lock because
 # they can wait on network transports for minutes.
+EXECUTOR_TOPUP_ITEM_LIMIT="${EXECUTOR_TOPUP_ITEM_LIMIT:-256}"
+EXECUTOR_REFILL_ROUND_LIMIT="${EXECUTOR_REFILL_ROUND_LIMIT:-32}"
+EXECUTOR_TOPUP_PHASE_SECONDS="${EXECUTOR_TOPUP_PHASE_SECONDS:-90}"
+case "${EXECUTOR_TOPUP_ITEM_LIMIT}" in
+  ''|*[!0-9]*) tick_die "EXECUTOR_TOPUP_ITEM_LIMIT must be an integer" ;;
+esac
+case "${EXECUTOR_REFILL_ROUND_LIMIT}" in
+  ''|*[!0-9]*) tick_die "EXECUTOR_REFILL_ROUND_LIMIT must be an integer" ;;
+esac
+case "${EXECUTOR_TOPUP_PHASE_SECONDS}" in
+  ''|*[!0-9]*) tick_die "EXECUTOR_TOPUP_PHASE_SECONDS must be an integer" ;;
+esac
+if [ "${EXECUTOR_TOPUP_ITEM_LIMIT}" -lt 1 ] \
+    || [ "${EXECUTOR_TOPUP_ITEM_LIMIT}" -gt 256 ]; then
+  tick_die "EXECUTOR_TOPUP_ITEM_LIMIT must be between 1 and 256"
+fi
+if [ "${EXECUTOR_REFILL_ROUND_LIMIT}" -lt 1 ] \
+    || [ "${EXECUTOR_REFILL_ROUND_LIMIT}" -gt 32 ]; then
+  tick_die "EXECUTOR_REFILL_ROUND_LIMIT must be between 1 and 32"
+fi
+if [ "${EXECUTOR_TOPUP_PHASE_SECONDS}" -lt 1 ] \
+    || [ "${EXECUTOR_TOPUP_PHASE_SECONDS}" -gt 120 ]; then
+  tick_die "EXECUTOR_TOPUP_PHASE_SECONDS must be between 1 and 120"
+fi
 EXECUTOR_TICK_LOCK_FILE="${EXECUTOR_SCHEDULER_ROOT}/executor_batch_tick.lock"
 exec {EXECUTOR_TICK_LOCK_FD}>"${EXECUTOR_TICK_LOCK_FILE}"
 chmod 600 "${EXECUTOR_TICK_LOCK_FILE}" 2>/dev/null \
@@ -920,6 +1221,37 @@ if ! flock -n -x "${EXECUTOR_TICK_LOCK_FD}"; then
   }'
   exit 0
 fi
+TOPUP_PHASE_DEADLINE_SECONDS=$((SECONDS + EXECUTOR_TOPUP_PHASE_SECONDS))
+TOPUP_ITEMS_PROCESSED=0
+REFILL_ROUNDS=0
+TOPUP_PHASE_EXHAUSTED=false
+TOPUP_BUDGET_RECORDED=false
+
+record_topup_budget() {
+  local reason="$1"
+  [ "${TOPUP_BUDGET_RECORDED}" = false ] || return 0
+  append_operation "$(jq -cn \
+    --arg reason "${reason}" \
+    --argjson item_limit "${EXECUTOR_TOPUP_ITEM_LIMIT}" \
+    --argjson items_processed "${TOPUP_ITEMS_PROCESSED}" \
+    --argjson round_limit "${EXECUTOR_REFILL_ROUND_LIMIT}" \
+    --argjson refill_rounds "${REFILL_ROUNDS}" '{
+      operation:"topup_budget",status:"partial",reason:$reason,
+      item_limit:$item_limit,items_processed:$items_processed,
+      refill_round_limit:$round_limit,refill_rounds:$refill_rounds
+    }')"
+  TOPUP_BUDGET_RECORDED=true
+}
+
+remaining_topup_seconds() {
+  local cap="$1" remaining=0
+  remaining=$((TOPUP_PHASE_DEADLINE_SECONDS - SECONDS))
+  [ "${remaining}" -gt 0 ] || return 1
+  if [ "${remaining}" -gt "${cap}" ]; then
+    remaining="${cap}"
+  fi
+  printf '%s\n' "${remaining}"
+}
 
 # Reap only project placeholders whose exact scheduler job is absent from both
 # current active_jobs and every unfinished launch coordinator. This runs under
@@ -929,16 +1261,30 @@ fi
 # exact job-id protection therefore closes the cross-state observation window.
 reap_project_orphan_placeholders() {
   local project="$1" context protected_job_ids action_file action_json
-  local project_repo reap_input reap_output reap_rc reap_json
+  local project_repo reap_input reap_output reap_rc reap_json reap_timeout
+  local lock_timeout context_timeout
   local reap_status reaped_count protected_count unresolved_count
   local -a action_files=()
 
-  context="$(project_context "${project}")" || return 2
+  if ! context_timeout="$(remaining_topup_seconds 10)"; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    return 2
+  fi
+  context="$(project_context "${project}" "${context_timeout}")" || return 2
   project_repo="$(jq -r '.repo_path' <<<"${context}")"
   [ -d "${project_repo}/.git" ] || return 0
 
+  if ! lock_timeout="$(remaining_topup_seconds 5)"; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    return 2
+  fi
   exec {ORPHAN_SNAPSHOT_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-  flock -x "${ORPHAN_SNAPSHOT_LOCK_FD}"
+  if ! flock -w "${lock_timeout}" -x "${ORPHAN_SNAPSHOT_LOCK_FD}"; then
+    exec {ORPHAN_SNAPSHOT_LOCK_FD}>&-
+    return 2
+  fi
   protected_job_ids="$(jq -ce '
     [.active_jobs[].job_id]
     | unique | sort
@@ -976,15 +1322,30 @@ reap_project_orphan_placeholders() {
 
   reap_input="$(jq -cn --argjson protected_job_ids "${protected_job_ids}" \
     '{protected_job_ids:$protected_job_ids}')"
+  if ! reap_timeout="$(remaining_topup_seconds 15)"; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    return 0
+  fi
   set +e
   reap_output="$(printf '%s' "${reap_input}" | \
     PROJECT="$(jq -r '.slug' <<<"${context}")" \
     GROUP="$(jq -r '.group' <<<"${context}")" \
     GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
     REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${context}")" \
-      bash "${REAP_PLACEHOLDERS_CMD}" 2>/dev/null)"
+      timeout --kill-after=1s "${reap_timeout}s" \
+        bash "${REAP_PLACEHOLDERS_CMD}" 2>/dev/null)"
   reap_rc=$?
   set -e
+  if [ "${reap_rc}" -eq 124 ] || [ "${reap_rc}" -eq 137 ]; then
+    append_operation "$(jq -cn --arg project "${project}" '{
+      operation:"orphan_placeholder_reap",project:$project,status:"timeout"
+    }')"
+    HAD_FAILURE=true
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget child_timeout
+    return 0
+  fi
   if [ "${reap_rc}" -ne 0 ] || ! reap_json="$(printf '%s' "${reap_output}" | jq -ce '
       if type == "object"
         and (.status == "reaped" or .status == "lock_held")
@@ -1025,6 +1386,11 @@ reap_project_orphan_placeholders() {
 
 while IFS= read -r orphan_project; do
   [ -n "${orphan_project}" ] || continue
+  if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    break
+  fi
   if ! reap_project_orphan_placeholders "${orphan_project}"; then
     append_operation "$(jq -cn --arg project "${orphan_project}" '{
       operation:"orphan_placeholder_reap",project:$project,status:"invalid_project"
@@ -1048,11 +1414,25 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
     "${SERIAL_GATE_ACTION_FILES[@]}" | LC_ALL=C sort))
   unset IFS
   for serial_action_file in "${SERIAL_GATE_ACTION_FILES[@]}"; do
+  if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    break
+  fi
   serial_job_id="$(jq -er '
     if type == "object" and (.job_id | type == "string" and length > 0)
     then .job_id else error("missing job_id") end
   ' "${serial_action_file}")" || tick_die "durable launch action is invalid"
-  dlc_open "${serial_job_id}"
+  if ! serial_lock_timeout="$(remaining_topup_seconds 5)" \
+      || ! DLC_LOCK_WAIT_SECONDS="${serial_lock_timeout}" \
+        dlc_open "${serial_job_id}"; then
+    append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+      operation:"launch_coordinator",job_id:$job_id,status:"lock_timeout"
+    }')"
+    HAD_FAILURE=true
+    SERIAL_LAUNCH_GATE_CLOSED=true
+    break
+  fi
   if [ "${DLC_ACTION_FILE}" != "${serial_action_file}" ]; then
     dlc_close
     tick_die "durable launch action path does not match job identity"
@@ -1064,8 +1444,28 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
   serial_stage="$(jq -r '.stage' <<<"${serial_action}")"
   case "${serial_stage}" in
     action_emitted)
+      if ! serial_state_lock_timeout="$(remaining_topup_seconds 5)"; then
+        dlc_close
+        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+          operation:"spawn_reconcile",job_id:$job_id,status:"lock_timeout"
+        }')"
+        HAD_FAILURE=true
+        SERIAL_LAUNCH_GATE_CLOSED=true
+        record_topup_budget deadline
+        break
+      fi
       exec {SERIAL_GATE_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-      flock -x "${SERIAL_GATE_STATE_LOCK_FD}"
+      if ! flock -w "${serial_state_lock_timeout}" -x \
+          "${SERIAL_GATE_STATE_LOCK_FD}"; then
+        exec {SERIAL_GATE_STATE_LOCK_FD}>&-
+        dlc_close
+        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+          operation:"spawn_reconcile",job_id:$job_id,status:"lock_timeout"
+        }')"
+        HAD_FAILURE=true
+        SERIAL_LAUNCH_GATE_CLOSED=true
+        break
+      fi
       serial_scheduler_job="$(jq -c --arg job_id "${serial_job_id}" \
         '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
       flock -u "${SERIAL_GATE_STATE_LOCK_FD}"
@@ -1151,10 +1551,19 @@ fi
 
 # Phase C: lease recovery + strict round-robin reservation. A hard reserve
 # failure is terminal for this tick because no safe grant set exists.
-set +e
-RESERVE_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE_CMD}" 2>/dev/null)"
-RESERVE_RC=$?
-set -e
+RESERVE_OUTPUT=""
+RESERVE_RC=124
+if RESERVE_TIMEOUT="$(remaining_topup_seconds 15)"; then
+  set +e
+  RESERVE_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" \
+    timeout --kill-after=1s "${RESERVE_TIMEOUT}s" \
+      bash "${RESERVE_CMD}" 2>/dev/null)"
+  RESERVE_RC=$?
+  set -e
+else
+  TOPUP_PHASE_EXHAUSTED=true
+  record_topup_budget deadline
+fi
 if [ "${RESERVE_RC}" -ne 0 ] || ! RESERVE_JSON="$(printf '%s' "${RESERVE_OUTPUT}" | jq -ce '
     if type == "object"
       and (.status == "ready" or .status == "idle" or .status == "at_capacity")
@@ -1165,7 +1574,15 @@ if [ "${RESERVE_RC}" -ne 0 ] || ! RESERVE_JSON="$(printf '%s' "${RESERVE_OUTPUT}
         or (.max_concurrency | type == "number" and . == floor and . > 0))
     then . else error("invalid reserve envelope") end
   ' 2>/dev/null)"; then
-  append_operation "$(jq -cn '{operation:"reservation",status:"failed"}')"
+  RESERVE_FAILURE_STATUS=failed
+  if [ "${RESERVE_RC}" -eq 124 ] || [ "${RESERVE_RC}" -eq 137 ]; then
+    RESERVE_FAILURE_STATUS=timeout
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget child_timeout
+  fi
+  append_operation "$(jq -cn --arg status "${RESERVE_FAILURE_STATUS}" '{
+    operation:"reservation",status:$status
+  }')"
   jq -cn --argjson operations "${OPERATIONS}" '{
     status:"tick_failed",spawn_grants:[],reconcile_actions:[],
     cleanup_actions:[],
@@ -1188,8 +1605,27 @@ append_operation "$(jq -cn --argjson reserve "${RESERVE_JSON}" '{
 # Running physical jobs already occupy a global slot. Re-present them to their
 # project campaign so a prior blocked/retry terminal can prepare its next
 # attempt without consuming a new reservation or creating another physical job.
+if ! active_lock_timeout="$(remaining_topup_seconds 5)"; then
+  active_lock_timeout=1
+  TOPUP_PHASE_EXHAUSTED=true
+  record_topup_budget deadline
+fi
 exec {ACTIVE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-flock -x "${ACTIVE_LOCK_FD}"
+if ! flock -w "${active_lock_timeout}" -x "${ACTIVE_LOCK_FD}"; then
+  exec {ACTIVE_LOCK_FD}>&-
+  append_operation "$(jq -cn '{
+    operation:"active_continuation_snapshot",status:"lock_timeout"
+  }')"
+  flock -u "${EXECUTOR_TICK_LOCK_FD}"
+  exec {EXECUTOR_TICK_LOCK_FD}>&-
+  jq -cn --argjson operations "${OPERATIONS}" '{
+    status:"tick_failed",spawn_grants:[],reconcile_actions:[],
+    cleanup_actions:[],operation_results:$operations,
+    max_launch_retries:3,backoff_seconds:2,
+    chat_summary:"executor active-continuation snapshot timed out"
+  }'
+  exit 0
+fi
 ACTIVE_CONTINUATIONS="$(jq -ce '
   [.active_jobs[]
     | select(.status == "running" and (.finalization // null) == null)
@@ -1209,33 +1645,57 @@ ACTIVE_CONTINUATIONS="$(jq -ce '
 flock -u "${ACTIVE_LOCK_FD}"
 exec {ACTIVE_LOCK_FD}>&-
 
-CANDIDATES="$(jq -cn \
+CANDIDATES_ALL="$(jq -cn \
   --argjson reserved "$(jq -c '.grants' <<<"${RESERVE_JSON}")" \
   --argjson continuations "${ACTIVE_CONTINUATIONS}" '
   reduce ($reserved + $continuations)[] as $grant ([];
     if any(.[]; .job_id == $grant.job_id) then . else . + [$grant] end)
 ')"
+CANDIDATES="$(jq -c --argjson limit "${EXECUTOR_TOPUP_ITEM_LIMIT}" \
+  '.[:$limit]' <<<"${CANDIDATES_ALL}")"
+TOPUP_ITEMS_PROCESSED="$(jq -r 'length' <<<"${CANDIDATES}")"
+if [ "$(jq -r 'length' <<<"${CANDIDATES_ALL}")" \
+    -gt "${TOPUP_ITEMS_PROCESSED}" ]; then
+  record_topup_budget item_limit
+fi
 
 TOPUP_ENTRIES='[]'
 SKIPPED_ENTRIES='[]'
+DEFERRED_ENTRIES='[]'
 PROJECT_PENDING_ENTRIES='[]'
 topup_candidate_set() {
   local candidate_set="$1"
   local candidate_projects project project_grants context topup_request
-  local topup_output topup_rc topup_json project_pending_iids
+  local topup_output topup_rc topup_json project_pending_iids topup_timeout
+  local context_timeout
 
   candidate_projects="$(jq -c '[.[].project] | unique' <<<"${candidate_set}")"
   while IFS= read -r project; do
     [ -n "${project}" ] || continue
+    if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
+    if ! context_timeout="$(remaining_topup_seconds 10)"; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
     project_grants="$(jq -c --arg project "${project}" \
       '[.[] | select(.project == $project)]' <<<"${candidate_set}")"
-    context="$(project_context "${project}")" || {
+    context="$(project_context "${project}" "${context_timeout}")" || {
       append_operation "$(jq -cn --arg project "${project}" '{
         operation:"project_topup",project:$project,status:"invalid_project"
       }')"
       HAD_FAILURE=true
       continue
     }
+    if ! topup_timeout="$(remaining_topup_seconds 75)"; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
     topup_request="$(jq -cn --arg owner_id executor-agent-scheduler-v1 \
       --argjson grants "${project_grants}" '{owner_id:$owner_id,grants:$grants}')"
 
@@ -1247,10 +1707,21 @@ topup_candidate_set() {
       EXECUTOR_MAX_CONCURRENCY="${EXECUTOR_MAX_CONCURRENCY}" \
       EXECUTOR_ACPX_TIMEOUT_SECONDS="${EXECUTOR_ACPX_TIMEOUT_SECONDS:-3600}" \
       EXECUTOR_RUNNING_LEASE_SECONDS="${EXECUTOR_RUNNING_LEASE_SECONDS}" \
-      bash "${TOPUP_CMD}" 2>/dev/null)"
+      timeout --kill-after=1s "${topup_timeout}s" \
+        bash "${TOPUP_CMD}" 2>/dev/null)"
     topup_rc=$?
     set -e
-    if [ "${topup_rc}" -ne 0 ] || ! topup_json="$(printf '%s' "${topup_output}" | jq -ce '
+    if [ "${topup_rc}" -eq 124 ] || [ "${topup_rc}" -eq 137 ]; then
+      append_operation "$(jq -cn --arg project "${project}" '{
+        operation:"project_topup",project:$project,status:"timeout"
+      }')"
+      HAD_FAILURE=true
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget project_timeout
+      break
+    fi
+    if [ "${topup_rc}" -ne 0 ] || ! topup_json="$(printf '%s' "${topup_output}" | jq -ce \
+      --argjson project_grants "${project_grants}" '
         if type == "object"
           and (.status | type == "string")
           and (.dispatch_entries | type == "array")
@@ -1261,6 +1732,61 @@ topup_candidate_set() {
             and (.expected_task_bytes | type == "number"
               and . == floor and . > 0)))
           and ((.skipped_entries // []) | type == "array")
+          and ((.deferred_entries // []) | type == "array")
+          and (all((.deferred_entries // [])[];
+            type == "object"
+            and (keys | sort) == [
+              "batch_id","dependency_branch","dependency_iid","iid",
+              "job_id","project","reason","snapshot_index","status"
+            ]
+            and .status == "deferred"
+            and (.job_id | type == "string" and length > 0)
+            and (.batch_id | type == "string" and length > 0)
+            and (.project | type == "string" and length > 0)
+            and (.iid | type == "number" and . == floor and . > 0)
+            and (. as $deferred
+              | (((($deferred.reason == "dependency_preflight_deferred")
+                      or ($deferred.reason == "dependency_graph_preflight_deferred")
+                      or ($deferred.reason == "dependency_graph_scope_incomplete")
+                      or ($deferred.reason == "shared_branch_head_continue_unsupported"))
+                    and $deferred.dependency_iid == null
+                    and $deferred.dependency_branch == null)
+                or (($deferred.dependency_iid | type) == "number"
+                  and $deferred.dependency_iid ==
+                    ($deferred.dependency_iid | floor)
+                  and $deferred.dependency_iid > 0
+                  and $deferred.dependency_iid != $deferred.iid
+                  and (($deferred.reason == "dependency_not_completed")
+                    or ($deferred.reason == "dependency_branch_missing")
+                    or ($deferred.reason == "dependency_commit_unverified")
+                    or ($deferred.reason == "dependency_not_in_merge_target")
+                    or ($deferred.reason == "dependency_cycle_check_deferred"))
+                  and (($deferred.dependency_branch ==
+                        ("issue/" + ($deferred.dependency_iid | tostring)))
+                    or ($deferred.dependency_branch ==
+                        ("issue/" + ($deferred.dependency_iid | tostring)
+                          + "+" + ($deferred.iid | tostring)))))))
+            and (.snapshot_index | type == "number"
+              and . == floor and . >= 0)
+            and (.reason == "dependency_preflight_deferred"
+              or .reason == "dependency_graph_preflight_deferred"
+              or .reason == "dependency_graph_scope_incomplete"
+              or .reason == "shared_branch_head_continue_unsupported"
+              or .reason == "dependency_not_completed"
+              or .reason == "dependency_branch_missing"
+              or .reason == "dependency_commit_unverified"
+              or .reason == "dependency_not_in_merge_target"
+              or .reason == "dependency_cycle_check_deferred")
+            and (. as $deferred | any($project_grants[];
+              .job_id == $deferred.job_id
+              and .batch_id == $deferred.batch_id
+              and .snapshot_index == $deferred.snapshot_index
+              and .project == $deferred.project
+              and .iid == $deferred.iid))))
+          and (((.dispatch_entries // []) + (.skipped_entries // [])
+              + (.deferred_entries // []) | map(.job_id)) as $job_ids
+            | (all($job_ids[]; type == "string" and length > 0))
+              and (($job_ids | length) == ($job_ids | unique | length)))
           and (if ((.skipped_entries // []) | length) > 0 then
             (.pending_iids | type == "array")
             and (all(.pending_iids[];
@@ -1280,9 +1806,11 @@ topup_candidate_set() {
       --arg project "${project}" \
       --arg status "$(jq -r '.status' <<<"${topup_json}")" \
       --argjson dispatch_count "$(jq -r '.dispatch_entries | length' <<<"${topup_json}")" \
-      --argjson skipped_count "$(jq -r '(.skipped_entries // []) | length' <<<"${topup_json}")" '{
+      --argjson skipped_count "$(jq -r '(.skipped_entries // []) | length' <<<"${topup_json}")" \
+      --argjson deferred_count "$(jq -r '(.deferred_entries // []) | length' <<<"${topup_json}")" '{
       operation:"project_topup",project:$project,status:$status,
-      dispatch_count:$dispatch_count,skipped_count:$skipped_count
+      dispatch_count:$dispatch_count,skipped_count:$skipped_count,
+      deferred_count:$deferred_count
     }')"
     TOPUP_ENTRIES="$(jq -cn \
       --argjson current "${TOPUP_ENTRIES}" \
@@ -1291,6 +1819,10 @@ topup_candidate_set() {
     SKIPPED_ENTRIES="$(jq -cn \
       --argjson current "${SKIPPED_ENTRIES}" \
       --argjson additions "$(jq -c '.skipped_entries // []' <<<"${topup_json}")" \
+      '$current + $additions')"
+    DEFERRED_ENTRIES="$(jq -cn \
+      --argjson current "${DEFERRED_ENTRIES}" \
+      --argjson additions "$(jq -c '.deferred_entries // []' <<<"${topup_json}")" \
       '$current + $additions')"
     if [ "$(jq -r '(.skipped_entries // []) | length' <<<"${topup_json}")" -gt 0 ]; then
       project_pending_iids="$(jq -c '.pending_iids' <<<"${topup_json}")"
@@ -1307,9 +1839,14 @@ topup_candidate_set() {
 
 seed_topup_actions() {
   local candidate_set="$1"
-  local grant job_id project iid entries entry_count entry action now
+  local grant job_id project iid entries entry_count entry action now dlc_timeout
   while IFS= read -r grant; do
     [ -n "${grant}" ] || continue
+    if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
     job_id="$(jq -r '.job_id' <<<"${grant}")"
     project="$(jq -r '.project' <<<"${grant}")"
     iid="$(jq -r '.iid' <<<"${grant}")"
@@ -1325,7 +1862,16 @@ seed_topup_actions() {
       continue
     fi
     entry="$(jq -c '.[0]' <<<"${entries}")"
-    dlc_open "${job_id}"
+    if ! dlc_timeout="$(remaining_topup_seconds 5)" \
+        || ! DLC_LOCK_WAIT_SECONDS="${dlc_timeout}" dlc_open "${job_id}"; then
+      append_operation "$(jq -cn --arg job_id "${job_id}" '{
+        operation:"launch_coordinator",job_id:$job_id,status:"lock_timeout"
+      }')"
+      HAD_FAILURE=true
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget lock_timeout
+      break
+    fi
     action="$(dlc_read)" || {
       dlc_close
       tick_die "durable launch action is invalid"
@@ -1439,10 +1985,20 @@ fi
 reconcile_running_preflight_completion() {
   local job_id="$1" project="$2" iid="$3"
   local current_job claim_generation claim_token_sha256 context
-  local completion_output completion_rc completion_json
+  local completion_output completion_rc completion_json completion_timeout
+  local completion_lock_timeout context_timeout
 
+  if ! completion_lock_timeout="$(remaining_topup_seconds 5)"; then
+    jq -cn '{status:"deadline"}'
+    return 0
+  fi
   exec {COMPLETION_SNAPSHOT_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-  flock -x "${COMPLETION_SNAPSHOT_LOCK_FD}"
+  if ! flock -w "${completion_lock_timeout}" -x \
+      "${COMPLETION_SNAPSHOT_LOCK_FD}"; then
+    exec {COMPLETION_SNAPSHOT_LOCK_FD}>&-
+    jq -cn '{status:"lock_held"}'
+    return 0
+  fi
   current_job="$(jq -c --arg job_id "${job_id}" \
     '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
   flock -u "${COMPLETION_SNAPSHOT_LOCK_FD}"
@@ -1470,7 +2026,16 @@ reconcile_running_preflight_completion() {
   claim_token_sha256="$(printf '%s' \
     "$(jq -r '.claim_token' <<<"${current_job}")" | dlc_sha256)" \
     || return 2
-  context="$(project_context "${project}")" || return 2
+  if ! context_timeout="$(remaining_topup_seconds 10)"; then
+    jq -cn '{status:"deadline"}'
+    return 0
+  fi
+  context="$(project_context "${project}" "${context_timeout}")" || return 2
+
+  if ! completion_timeout="$(remaining_topup_seconds 15)"; then
+    jq -cn '{status:"deadline"}'
+    return 0
+  fi
 
   set +e
   completion_output="$(printf '' | \
@@ -1482,9 +2047,14 @@ reconcile_running_preflight_completion() {
     DRIVEN_RECONCILE_JOB_ID="${job_id}" \
     DRIVEN_RECONCILE_CLAIM_GENERATION="${claim_generation}" \
     DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${claim_token_sha256}" \
-      bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
+      timeout --kill-after=1s "${completion_timeout}s" \
+        bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
   completion_rc=$?
   set -e
+  if [ "${completion_rc}" -eq 124 ] || [ "${completion_rc}" -eq 137 ]; then
+    jq -cn '{status:"timeout"}'
+    return 0
+  fi
   if [ "${completion_rc}" -ne 0 ] || ! completion_json="$(printf '%s' "${completion_output}" | jq -ce \
       --argjson iid "${iid}" '
       if type == "object"
@@ -1524,10 +2094,15 @@ reconcile_running_preflight_completion() {
 import_candidate_skips() {
   local candidate_set="$1"
   local grant job_id project iid skipped skipped_count skip_output skip_rc skip_status
-  local completion_result completion_status completion_terminal_status
+  local completion_result completion_status completion_terminal_status skip_timeout
   LAST_IMPORTED_SKIP_COUNT=0
   while IFS= read -r grant; do
     [ -n "${grant}" ] || continue
+    if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
     job_id="$(jq -r '.job_id' <<<"${grant}")"
     project="$(jq -r '.project' <<<"${grant}")"
     iid="$(jq -r '.iid' <<<"${grant}")"
@@ -1580,6 +2155,17 @@ import_candidate_skips() {
               operation:"running_preflight_skip",job_id:$job_id,status:$status
             }')"
             ;;
+          deadline|timeout)
+            append_operation "$(jq -cn \
+              --arg job_id "${job_id}" \
+              --arg status "${completion_status}" '{
+              operation:"running_preflight_skip",job_id:$job_id,status:$status
+            }')"
+            HAD_FAILURE=true
+            TOPUP_PHASE_EXHAUSTED=true
+            record_topup_budget child_timeout
+            break
+            ;;
           *)
             append_operation "$(jq -cn --arg job_id "${job_id}" '{
               operation:"running_preflight_skip",job_id:$job_id,status:"failed"
@@ -1597,9 +2183,16 @@ import_candidate_skips() {
       HAD_FAILURE=true
       continue
     fi
+    if ! skip_timeout="$(remaining_topup_seconds 15)"; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
     set +e
     skip_output="$(printf '%s' "$(jq -c '.[0]' <<<"${skipped}")" | \
-      CONFIG_DIR="${CONFIG_DIR}" bash "${IMPORT_SKIP_CMD}" 2>/dev/null)"
+      CONFIG_DIR="${CONFIG_DIR}" \
+      timeout --kill-after=1s "${skip_timeout}s" \
+        bash "${IMPORT_SKIP_CMD}" 2>/dev/null)"
     skip_rc=$?
     set -e
     if [ "${skip_rc}" -eq 0 ] && skip_status="$(jq -er '
@@ -1612,10 +2205,18 @@ import_candidate_skips() {
       }')"
       LAST_IMPORTED_SKIP_COUNT=$((LAST_IMPORTED_SKIP_COUNT + 1))
     else
-      append_operation "$(jq -cn --arg job_id "${job_id}" '{
-        operation:"synthetic_skip",job_id:$job_id,status:"failed"
+      skip_failure_status=failed
+      if [ "${skip_rc}" -eq 124 ] || [ "${skip_rc}" -eq 137 ]; then
+        skip_failure_status=timeout
+        TOPUP_PHASE_EXHAUSTED=true
+        record_topup_budget child_timeout
+      fi
+      append_operation "$(jq -cn --arg job_id "${job_id}" \
+        --arg status "${skip_failure_status}" '{
+        operation:"synthetic_skip",job_id:$job_id,status:$status
       }')"
       HAD_FAILURE=true
+      [ "${TOPUP_PHASE_EXHAUSTED}" = false ] || break
     fi
   done < <(jq -c '.[]' <<<"${candidate_set}")
 }
@@ -1624,11 +2225,38 @@ import_candidate_skips "${CANDIDATES}"
 
 # A successful synthetic terminal frees a physical slot immediately. Re-run
 # the strict scheduler reservation and project preflight in the same tick until
-# a refill round contains no further skip. Novel-job checking prevents a broken
-# importer/reserver pair from spinning on the same grant forever.
+# a refill round contains no further skip. The outer deadline, round cap, and
+# item cap keep this agent-wide lock independent of the total batch size;
+# unprocessed reserved jobs are safely re-emitted on the next tick. Novel-job
+# checking still prevents a broken importer/reserver pair from spinning on the
+# same grant forever.
 while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
+  if [ "${TOPUP_PHASE_EXHAUSTED}" = true ]; then
+    break
+  fi
+  if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    break
+  fi
+  if [ "${REFILL_ROUNDS}" -ge "${EXECUTOR_REFILL_ROUND_LIMIT}" ]; then
+    record_topup_budget refill_round_limit
+    break
+  fi
+  if [ "${TOPUP_ITEMS_PROCESSED}" -ge "${EXECUTOR_TOPUP_ITEM_LIMIT}" ]; then
+    record_topup_budget item_limit
+    break
+  fi
+  REFILL_ROUNDS=$((REFILL_ROUNDS + 1))
+  if ! REFILL_TIMEOUT="$(remaining_topup_seconds 15)"; then
+    TOPUP_PHASE_EXHAUSTED=true
+    record_topup_budget deadline
+    break
+  fi
   set +e
-  REFILL_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE_CMD}" 2>/dev/null)"
+  REFILL_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" \
+    timeout --kill-after=1s "${REFILL_TIMEOUT}s" \
+      bash "${RESERVE_CMD}" 2>/dev/null)"
   REFILL_RC=$?
   set -e
   if [ "${REFILL_RC}" -ne 0 ] || ! REFILL_JSON="$(printf '%s' "${REFILL_OUTPUT}" | jq -ce '
@@ -1641,7 +2269,15 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
           or (.max_concurrency | type == "number" and . == floor and . > 0))
       then . else error("invalid refill envelope") end
     ' 2>/dev/null)"; then
-    append_operation "$(jq -cn '{operation:"reservation",status:"refill_failed"}')"
+    REFILL_FAILURE_STATUS=refill_failed
+    if [ "${REFILL_RC}" -eq 124 ] || [ "${REFILL_RC}" -eq 137 ]; then
+      REFILL_FAILURE_STATUS=refill_timeout
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget child_timeout
+    fi
+    append_operation "$(jq -cn --arg status "${REFILL_FAILURE_STATUS}" '{
+      operation:"reservation",status:$status
+    }')"
     HAD_FAILURE=true
     break
   fi
@@ -1656,16 +2292,26 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
   }')"
   REFILL_GRANTS="$(jq -c '.grants' <<<"${REFILL_JSON}")"
   [ "$(jq -r 'length' <<<"${REFILL_GRANTS}")" -gt 0 ] || break
-  NOVEL_REFILL_GRANTS="$(jq -cn \
+  NOVEL_REFILL_GRANTS_ALL="$(jq -cn \
     --argjson existing "${CANDIDATES}" \
     --argjson refill "${REFILL_GRANTS}" '
     [$refill[] | select(.job_id as $job_id
       | any($existing[]; .job_id == $job_id) | not)]
   ')"
-  if [ "$(jq -r 'length' <<<"${NOVEL_REFILL_GRANTS}")" -eq 0 ]; then
+  if [ "$(jq -r 'length' <<<"${NOVEL_REFILL_GRANTS_ALL}")" -eq 0 ]; then
     append_operation "$(jq -cn '{operation:"reservation",status:"duplicate_refill"}')"
     HAD_FAILURE=true
     break
+  fi
+  REFILL_ITEM_REMAINING=$((EXECUTOR_TOPUP_ITEM_LIMIT - TOPUP_ITEMS_PROCESSED))
+  NOVEL_REFILL_GRANTS="$(jq -c \
+    --argjson limit "${REFILL_ITEM_REMAINING}" \
+    '.[:$limit]' <<<"${NOVEL_REFILL_GRANTS_ALL}")"
+  NOVEL_REFILL_COUNT="$(jq -r 'length' <<<"${NOVEL_REFILL_GRANTS}")"
+  TOPUP_ITEMS_PROCESSED=$((TOPUP_ITEMS_PROCESSED + NOVEL_REFILL_COUNT))
+  if [ "$(jq -r 'length' <<<"${NOVEL_REFILL_GRANTS_ALL}")" \
+      -gt "${NOVEL_REFILL_COUNT}" ]; then
+    record_topup_budget item_limit
   fi
   CANDIDATES="$(jq -cn \
     --argjson existing "${CANDIDATES}" \
@@ -1677,6 +2323,164 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
   fi
   import_candidate_skips "${NOVEL_REFILL_GRANTS}"
 done
+
+# Dependency waiting is non-terminal workflow ordering. Release its physical
+# scheduler job only after skip refills are complete, so the newly free slot is
+# not immediately re-reserved by the same tick. record_driven_batch_launch.sh
+# atomically parks every membership in retry_wait and deletes the active job;
+# deferred retries receive a new job-id generation when reserved later.
+release_dependency_deferrals() {
+  local deferred job_id project iid dependency_iid reason current_job
+  local job_status claim_generation claim_token record_output record_rc
+  local defer_status record_timeout defer_lock_timeout
+
+  while IFS= read -r deferred; do
+    [ -n "${deferred}" ] || continue
+    if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
+    job_id="$(jq -r '.job_id' <<<"${deferred}")"
+    project="$(jq -r '.project' <<<"${deferred}")"
+    iid="$(jq -r '.iid' <<<"${deferred}")"
+    dependency_iid="$(jq -r '.dependency_iid' <<<"${deferred}")"
+    reason="$(jq -r '.reason' <<<"${deferred}")"
+
+    if ! defer_lock_timeout="$(remaining_topup_seconds 5)"; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
+    exec {DEFER_SNAPSHOT_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+    if ! flock -w "${defer_lock_timeout}" -x "${DEFER_SNAPSHOT_LOCK_FD}"; then
+      exec {DEFER_SNAPSHOT_LOCK_FD}>&-
+      append_operation "$(jq -cn \
+        --arg job_id "${job_id}" --arg project "${project}" \
+        --argjson iid "${iid}" --argjson dependency_iid "${dependency_iid}" \
+        --arg reason "${reason}" '{
+        operation:"dependency_defer",job_id:$job_id,project:$project,
+        iid:$iid,dependency_iid:$dependency_iid,reason:$reason,
+        status:"lock_timeout"
+      }')"
+      HAD_FAILURE=true
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget lock_timeout
+      break
+    fi
+    current_job="$(jq -c --arg job_id "${job_id}" \
+      '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
+    flock -u "${DEFER_SNAPSHOT_LOCK_FD}"
+    exec {DEFER_SNAPSHOT_LOCK_FD}>&-
+
+    if ! jq -e \
+        --arg job_id "${job_id}" \
+        --arg project "${project}" \
+        --argjson iid "${iid}" '
+        type == "object"
+        and .job_id == $job_id
+        and .project == $project
+        and .iid == $iid
+        and (.status == "reserved" or .status == "running")
+        and (.finalization // null) == null
+        and (.claim_generation | type == "number" and . == floor and . >= 0)
+        and ((.claim_token == null)
+          or (.claim_token | type == "string" and length > 0))
+      ' <<<"${current_job}" >/dev/null; then
+      append_operation "$(jq -cn \
+        --arg job_id "${job_id}" --arg project "${project}" \
+        --argjson iid "${iid}" --argjson dependency_iid "${dependency_iid}" \
+        --arg reason "${reason}" '{
+        operation:"dependency_defer",job_id:$job_id,project:$project,
+        iid:$iid,dependency_iid:$dependency_iid,reason:$reason,
+        status:"stale_scheduler"
+      }')"
+      HAD_FAILURE=true
+      continue
+    fi
+
+    job_status="$(jq -r '.status' <<<"${current_job}")"
+    claim_generation="$(jq -r '.claim_generation' <<<"${current_job}")"
+    claim_token="$(jq -r '.claim_token // empty' <<<"${current_job}")"
+    if [ "${job_status}" = running ] \
+        && [ "${claim_generation}" -eq 0 ] \
+        && [ -z "${claim_token}" ]; then
+      # A migrated legacy running job has no secret claim fence. It may only
+      # be terminally reconciled by the legacy recovery path; never weaken the
+      # CAS contract to make a new non-terminal dependency deferral succeed.
+      append_operation "$(jq -cn \
+        --arg job_id "${job_id}" --arg project "${project}" \
+        --argjson iid "${iid}" --argjson dependency_iid "${dependency_iid}" \
+        --arg reason "${reason}" '{
+        operation:"dependency_defer",job_id:$job_id,project:$project,
+        iid:$iid,dependency_iid:$dependency_iid,reason:$reason,
+        status:"legacy_running_recovery_required"
+      }')"
+      HAD_FAILURE=true
+      continue
+    fi
+    if ! record_timeout="$(remaining_topup_seconds 15)"; then
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget deadline
+      break
+    fi
+    set +e
+    if [ "${job_status}" = running ]; then
+      record_output="$(CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${job_id}" \
+        ACTION=dependency_deferred \
+        CLAIM_GENERATION="${claim_generation}" CLAIM_TOKEN="${claim_token}" \
+        timeout --kill-after=1s "${record_timeout}s" \
+          bash "${RECORD_LAUNCH_CMD}" 2>/dev/null)"
+      record_rc=$?
+    elif [ "${claim_generation}" -gt 0 ]; then
+      # A recovered preparing lease is reserved and tokenless but keeps its
+      # positive generation. Pass that exact fence so the recorder can reject
+      # a stale snapshot if another claim transition wins the scheduler lock.
+      record_output="$(CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${job_id}" \
+        ACTION=dependency_deferred \
+        CLAIM_GENERATION="${claim_generation}" \
+        timeout --kill-after=1s "${record_timeout}s" \
+          bash "${RECORD_LAUNCH_CMD}" 2>/dev/null)"
+      record_rc=$?
+    else
+      record_output="$(CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${job_id}" \
+        ACTION=dependency_deferred \
+        timeout --kill-after=1s "${record_timeout}s" \
+          bash "${RECORD_LAUNCH_CMD}" 2>/dev/null)"
+      record_rc=$?
+    fi
+    set -e
+    if [ "${record_rc}" -eq 0 ] \
+        && printf '%s' "${record_output}" | jq -e '
+          type == "object"
+          and .status == "recorded"
+          and .job_status == "retry_wait"
+          and .should_spawn == false
+          and .claim_generation == null
+          and .claim_token == null
+        ' >/dev/null 2>&1; then
+      defer_status="released"
+    else
+      defer_status="failed"
+      HAD_FAILURE=true
+    fi
+    if [ "${record_rc}" -eq 124 ] || [ "${record_rc}" -eq 137 ]; then
+      defer_status="timeout"
+      TOPUP_PHASE_EXHAUSTED=true
+      record_topup_budget child_timeout
+    fi
+    append_operation "$(jq -cn \
+      --arg job_id "${job_id}" --arg project "${project}" \
+      --argjson iid "${iid}" --argjson dependency_iid "${dependency_iid}" \
+      --arg reason "${reason}" --arg status "${defer_status}" '{
+      operation:"dependency_defer",job_id:$job_id,project:$project,
+      iid:$iid,dependency_iid:$dependency_iid,reason:$reason,status:$status
+    }')"
+    [ "${TOPUP_PHASE_EXHAUSTED}" = false ] || break
+  done < <(jq -c '.[]' <<<"${DEFERRED_ENTRIES}")
+}
+
+release_dependency_deferrals
 
 flock -u "${EXECUTOR_TICK_LOCK_FD}"
 exec {EXECUTOR_TICK_LOCK_FD}>&-
@@ -1694,6 +2498,11 @@ while IFS= read -r grant; do
   if [ "${skipped_count}" -gt 1 ]; then
     continue
   elif [ "${skipped_count}" -eq 1 ]; then
+    continue
+  fi
+
+  if jq -e --arg job_id "${job_id}" \
+      'any(.[]; .job_id == $job_id)' <<<"${DEFERRED_ENTRIES}" >/dev/null; then
     continue
   fi
 

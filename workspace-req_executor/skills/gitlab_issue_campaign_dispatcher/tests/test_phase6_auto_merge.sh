@@ -30,13 +30,15 @@ jq -cn \
   --arg web_url "${MERGE_REQUEST_URL}" \
   --arg source_branch "${WORK_BRANCH}" \
   --arg target_branch "${MERGE_TARGET_BRANCH}" \
+  --arg dependency_base_sha "${DEPENDENCY_BASE_SHA:-}" \
   --arg sha "${COMMIT_SHA}" \
   --arg observed_state "${observed_state}" \
   --arg outcome "${outcome}" \
   --argjson verified "${verified}" \
   --arg reason "${reason}" '{
     version:1,iid:$iid,web_url:$web_url,
-    source_branch:$source_branch,target_branch:$target_branch,sha:$sha,
+    source_branch:$source_branch,target_branch:$target_branch,
+    dependency_base_sha:$dependency_base_sha,sha:$sha,
     observed_state:$observed_state,outcome:$outcome,verified:$verified,
     merge_attempted:false,merge_api_succeeded:false,reason:$reason
   }'
@@ -119,6 +121,7 @@ write_marker() {
     version:1,iid:$iid,
     web_url:("https://gitlab.example.test/group/repo/-/merge_requests/" + ($iid|tostring)),
     source_branch:("issue/" + ($iid|tostring)),target_branch:"release",
+    dependency_base_sha:"",
     sha:"0123456789abcdef0123456789abcdef01234567",
     observed_state:"merged",outcome:"merged",verified:true,
     merge_attempted:true,merge_api_succeeded:true,reason:"verified_merged",
@@ -271,12 +274,48 @@ jq -e '
 ' <<<"${timeout_out}" >/dev/null || fail "verification timeout did not fail closed"
 [ ! -s "${LABEL_LOG}" ] || fail "verification timeout changed live labels"
 
+# Version-1 markers written before dependency support omitted the new field.
+# They remain recoverable only for a non-dependent pending entry; the same
+# legacy shape must fail closed when pending state requires a dependency SHA.
+: >"${LABEL_LOG}"
+export VERIFY_SCENARIO=merged
+write_marker 16
+legacy_marker_path="${WORKTREES_ROOT}/issue-16/.req_executor/issue-16/log/attempt-001/mr_result.json"
+jq 'del(.dependency_base_sha)' "${legacy_marker_path}" \
+  >"${legacy_marker_path}.legacy"
+mv "${legacy_marker_path}.legacy" "${legacy_marker_path}"
+chmod 600 "${legacy_marker_path}"
+legacy_marker_out="$(phase6_process "$(make_state 16)" "$(make_reply 16)" false)" \
+  || fail "legacy non-dependent marker recovery failed"
+jq -e '.final_status == "done"' <<<"${legacy_marker_out}" >/dev/null \
+  || fail "legacy non-dependent marker was not normalized during upgrade"
+
+: >"${LABEL_LOG}"
+write_marker 17
+dependent_legacy_marker_path="${WORKTREES_ROOT}/issue-17/.req_executor/issue-17/log/attempt-001/mr_result.json"
+jq 'del(.dependency_base_sha)' "${dependent_legacy_marker_path}" \
+  >"${dependent_legacy_marker_path}.legacy"
+mv "${dependent_legacy_marker_path}.legacy" "${dependent_legacy_marker_path}"
+chmod 600 "${dependent_legacy_marker_path}"
+dependent_state="$(make_state 17 | jq -c '
+  .pending_subagents["17"] += {
+    dependency_iid:9,dependency_branch:"issue/9",
+    dependency_base_sha:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }')"
+dependent_legacy_out="$(phase6_process "${dependent_state}" "$(make_reply 17)" false)" \
+  || fail "dependent legacy-marker rejection path failed"
+jq -e '
+  .final_status == "failed"
+  and (.final_reply.block_reason | contains("trusted current-attempt MR marker"))
+' <<<"${dependent_legacy_out}" >/dev/null \
+  || fail "dependent attempt accepted a marker without dependency identity"
+
 # Rolling-upgrade evidence may expose only the raw label array. It must still
 # protect finish from both regressing failures and a late ordinary done->pr.
-legacy_finish_evidence='[{"iid":16,"labels":["finish"],"is_done_on_gitlab":false,"has_done_pr":false}]'
-phase6_evidence_shows_completed 16 "${legacy_finish_evidence}" \
+legacy_finish_evidence='[{"iid":18,"labels":["finish"],"is_done_on_gitlab":false,"has_done_pr":false}]'
+phase6_evidence_shows_completed 18 "${legacy_finish_evidence}" \
   || fail "legacy raw finish label was not recognized as completed"
-phase6_evidence_has_finish 16 "${legacy_finish_evidence}" \
+phase6_evidence_has_finish 18 "${legacy_finish_evidence}" \
   || fail "legacy raw finish label did not activate downgrade protection"
 
 echo "ok Phase 6 independently verifies automatic merges before finish"

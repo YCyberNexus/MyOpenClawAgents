@@ -186,9 +186,12 @@ else
   STATUS="${STATUS_INPUT}"
 fi
 case "${STATUS}" in
-  preparing|spawned|launch_failed|terminal) ;;
-  *) record_die "STATUS/ACTION must be preparing, spawned, recovered_spawned, launch_failed, recovered_launch_failed, or terminal" ;;
+  preparing|spawned|launch_failed|dependency_deferred|terminal) ;;
+  *) record_die "STATUS/ACTION must be preparing, spawned, recovered_spawned, launch_failed, recovered_launch_failed, dependency_deferred, or terminal" ;;
 esac
+if [ "${STATUS}" = dependency_deferred ] && [ "${ACTION_MODE}" != true ]; then
+  record_die "dependency_deferred is accepted only through ACTION"
+fi
 if [ "${STATUS}" = terminal ]; then
   case "${TERMINAL_STATUS_INPUT}" in
     done|failed|timeout|skipped) ;;
@@ -512,6 +515,7 @@ else
         || record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3
       ;;
     launch_failed:preparing) ;;
+    dependency_deferred:reserved|dependency_deferred:running) ;;
     terminal:reserved|terminal:preparing|terminal:running) ;;
     *) record_die "invalid job status transition: ${CURRENT_STATUS} -> ${STATUS}" 3 ;;
   esac
@@ -530,7 +534,7 @@ else
           record_die "CLAIM_TOKEN does not match current claim: ${JOB_ID}" 3
       fi
       ;;
-    launch_failed|terminal)
+    launch_failed|dependency_deferred|terminal)
       if [ "${RECOVERED_LAUNCH_FAILED}" = true ]; then
         [ "${CURRENT_STATUS}" = reserved ] \
           && [ "${CURRENT_CLAIM_GENERATION}" -eq "${CLAIM_GENERATION_INPUT}" ] \
@@ -545,6 +549,11 @@ else
           [ "${CLAIM_GENERATION_INPUT}" -eq "${CURRENT_CLAIM_GENERATION}" ] \
             || record_die "CLAIM_GENERATION does not match current claim: ${JOB_ID}" 3
         fi
+      elif [ "${STATUS}" = dependency_deferred ]; then
+        # Checked against the exact reserved generation below. A preparing
+        # lease recovery deliberately clears its token but retains a positive
+        # generation so stale callbacks remain fenced.
+        :
       elif [ "${CURRENT_CLAIM_GENERATION}" -ne 0 ] || [ -n "${CLAIM_TOKEN_INPUT}" ]; then
         record_die "reserved job has no current claim: ${JOB_ID}" 3
       fi
@@ -552,10 +561,32 @@ else
   esac
 fi
 
+if [ "${STATUS}" = dependency_deferred ]; then
+  if [ "${CURRENT_STATUS}" = reserved ]; then
+    [ -z "${CURRENT_CLAIM_TOKEN}" ] \
+      && [ -z "${CLAIM_TOKEN_INPUT}" ] || \
+      record_die "reserved dependency_deferred requires a tokenless reserved job" 3
+    if [ "${CURRENT_CLAIM_GENERATION}" -eq 0 ]; then
+      [ -z "${CLAIM_GENERATION_INPUT}" ] || \
+        record_die "generation-0 dependency_deferred must omit CLAIM_GENERATION" 3
+    else
+      [ "${CLAIM_GENERATION_INPUT}" = "${CURRENT_CLAIM_GENERATION}" ] || \
+        record_die "recovered reserved dependency_deferred requires the exact current generation" 3
+    fi
+  else
+    [ "${CURRENT_STATUS}" = running ] \
+      && [ -n "${CURRENT_CLAIM_TOKEN}" ] \
+      && [ "${CLAIM_TOKEN_INPUT}" = "${CURRENT_CLAIM_TOKEN}" ] \
+      && [ "${CLAIM_GENERATION_INPUT}" = "${CURRENT_CLAIM_GENERATION}" ] || \
+      record_die "running dependency_deferred requires the exact current claim" 3
+  fi
+fi
+
 case "${STATUS}" in
   preparing) NEXT_JOB_STATUS=preparing ;;
   spawned) NEXT_JOB_STATUS=running ;;
   launch_failed) NEXT_JOB_STATUS=launch_failed ;;
+  dependency_deferred) NEXT_JOB_STATUS=retry_wait ;;
   terminal) NEXT_JOB_STATUS=terminal ;;
 esac
 
@@ -647,10 +678,20 @@ while IFS=$'\t' read -r batch_id snapshot_index; do
         | .status = "running"
       ' <<<"${batch_state}")"
     fi
-  elif [ "${STATUS}" = launch_failed ]; then
+  elif [ "${STATUS}" = launch_failed ] \
+      || [ "${STATUS}" = dependency_deferred ]; then
+    retry_membership_status="pending"
+    [ "${STATUS}" = dependency_deferred ] \
+      && retry_membership_status="retry_wait"
     batch_state="$(jq -c \
-      --arg index "${snapshot_index}" '
-      .memberships[$index].status = "pending"
+      --arg index "${snapshot_index}" \
+      --arg membership_status "${retry_membership_status}" \
+      --argjson is_dependency_deferred "$([ "${STATUS}" = dependency_deferred ] && echo true || echo false)" '
+      .memberships[$index].status = $membership_status
+      | if $is_dependency_deferred
+          then .memberships[$index].defer_count =
+            ((.memberships[$index].defer_count // 0) + 1)
+          else . end
       | del(.memberships[$index].job_id, .memberships[$index].blocked_by_job_id)
       | if ([.memberships[]
           | select(.status == "reserved"
@@ -776,6 +817,8 @@ elif [ "${STATUS}" = launch_failed ]; then
     atomic_write_json "$(launch_failed_receipt_file "${JOB_ID}")" \
       "${LAUNCH_FAILED_RECEIPT}"
   fi
+elif [ "${STATUS}" = dependency_deferred ]; then
+  SCHEDULER_STATE="$(jq -c --arg job_id "${JOB_ID}" 'del(.active_jobs[$job_id])' <<<"${SCHEDULER_STATE}")"
 else
   SCHEDULER_STATE="$(jq -c --arg job_id "${JOB_ID}" 'del(.active_jobs[$job_id])' <<<"${SCHEDULER_STATE}")"
 fi

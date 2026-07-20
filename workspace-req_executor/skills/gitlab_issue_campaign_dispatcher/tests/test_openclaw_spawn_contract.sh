@@ -22,6 +22,13 @@ grep -Fq 'sessions_yield' "${SKILL_DIR}/SKILL.md" \
   || fail "successful spawns must yield for native completion delivery"
 grep -Fq 'ingest_subagent_completion.sh' "${SKILL_DIR}/SKILL.md" \
   || fail "native completion must use the authenticated ingester"
+grep -Fq 'env -u PROJECT -u GROUP -u PROJECT_FULL' "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion must clear ambient project routing"
+grep -Fq -- '-u PROJECT_URI -u REPO_PATH' "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion must clear ambient repo routing"
+if grep -Fq -- '-u REPO_PARENT_PATH' "${SKILL_DIR}/SKILL.md"; then
+  fail "native completion must preserve the deployment clone-root override"
+fi
 grep -Fq 'openclaw_4_9_terminal_reference' "${SKILL_DIR}/SKILL.md" \
   || fail "4.9 native completion must use the terminal reference selector"
 grep -Fq 'priority than every command first-line route' "${SKILL_DIR}/SKILL.md" \

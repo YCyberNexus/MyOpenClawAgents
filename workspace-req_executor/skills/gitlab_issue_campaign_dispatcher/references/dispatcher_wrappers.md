@@ -11,6 +11,12 @@ Owns scheduled preparation:
 - loads and persists `.req_executor/_dispatcher/campaign_state.json`
 - reconciles GitLab labels
 - forms the eligible IID batch
+- uses frozen-scope graph evidence only for topology already visible, without
+  changing or delaying an ordinary A
+- when C declares A, migrates completed `issue/<A>` at the exact A SHA onto
+  `issue/<A>+<C>` through a replayable branch/MR transaction
+- defers C until A's stable `pr`/`finish`, migrated shared branch, durable
+  commit SHA, replacement MR identity, and campaign `pending` drain all agree
 - allocates attempt numbers
 - prepares per-IID worktrees
 - builds `${LOG_DIR}/prompt.txt`
@@ -18,6 +24,47 @@ Owns scheduled preparation:
 - emits `dispatch_entries[]` for `sessions_spawn`
 
 It does not read runtime basename, data directory, or account-pool trigger fields.
+Dependency planning and waiting happen before allocation and placeholder
+persistence, so they do not consume retry/attempt budget. Version 1 supports
+only a two-node one-to-one A -> C pair. Fan-out, a longer chain, cycles,
+duplicate persisted membership, a changed edge, or a changed target fail
+closed. An incomplete frozen scope does not block an ordinary A; a later C may
+bind an already-completed A from the same batch or an earlier campaign.
+
+The project envelope exposes `dependency_waiting[]` with `iid`,
+`dependency_iid`, `branch`, and a stable reason. Before an IID is known, scope
+or API uncertainty uses null dependency fields. Once known, C waits on
+`dependency_not_completed`, `dependency_branch_migration_pending`, or
+`dependency_commit_unverified` for the shared `issue/A+C` branch. Bounded API
+or parser uncertainty remains non-terminal. Driven mode returns deterministic
+failures as exact `skipped_entries[]`, allowing the scheduler to terminalize
+the physical job after project state is durable. Driven
+mode also returns exact scheduler identities in `deferred_entries[]`; the
+agent-wide tick releases those jobs only after bounded ordinary skip/refill
+processing. One topup transaction is limited to 256 candidates, 32 refill
+rounds, a 90-second phase deadline, and a 75-second project-wrapper timeout;
+all child commands and nested locks use the remaining phase budget, and
+remaining reserved jobs are retried by the next tick. A migrated
+`legacy_running` job cannot take the non-terminal deferral path because it has
+no secret claim token; the wrapper reports `legacy_running_recovery_required`
+without mutating it.
+The fresh C worktree is based on A's verified immutable SHA while direct control
+paths at any depth (`.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`,
+`.acpxrc.json`) come from the original trusted `CONFIG_BRANCH`. Ordinary
+business scripts remain part of the baseline; this overlay is not an OS
+sandbox. A and C keep different IID-local attempt branches but push to the same
+frozen remote branch. C receives A's SHA as both dependency baseline and exact
+lease; its commit must have exactly that one parent. Continue may resume only
+when durable state binds the exact shared branch, members, roles, dependency
+tuple, resume ref, and resume SHA. Missing, legacy, dependency-free-tail, or
+mismatched metadata fails closed; current Issue text never rewrites ancestry.
+
+A initially creates an ordinary A-only MR. The late-binding transaction closes
+that MR and creates the only open shared replacement containing closing
+references for both members; the closed old IID remains as audit history. C
+requires the exact replacement MR URL/IID persisted by A and reuses it without
+close/create rotation. Shared groups reject `auto_merge=true`; ordinary
+non-dependent jobs retain the existing automatic-merge verification path.
 
 ## `dispatch_record_spawn.sh`
 
@@ -52,6 +99,14 @@ token. Its scheduler transaction both removes the active job and writes a
 token-hash-bound tombstone. If no active job remains, only the exact same
 job/generation/token/action may replay successfully; a current active claim is
 always authoritative over an older tombstone.
+
+`ACTION=dependency_deferred` is scheduler-internal and fail-closed. A reserved
+job accepts only claim generation zero with no token; a running job requires
+its exact positive generation and private token. The same transaction removes
+the active job, changes every owning or attached membership to `retry_wait`,
+clears physical-job links, increments `defer_count`, and leaves terminal
+counters unchanged. The next reservation receives a defer-generation job-ID
+suffix so stale claims cannot collide with it.
 
 ## `ingest_subagent_completion.sh` and `dispatch_followup.sh`
 

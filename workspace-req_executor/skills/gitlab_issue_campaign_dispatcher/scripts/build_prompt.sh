@@ -57,9 +57,27 @@ esac
 mkdir -p "${LOG_DIR}"
 PROMPT_FILE="${LOG_DIR}/prompt.txt"
 
-# 1. Issue body.
-ISSUE_JSON="$(glab api \
-  "projects/${PROJECT_URI}/issues/${ISSUE_IID}")"
+# 1. Issue body. The dispatcher passes the exact live Issue snapshot used for
+# dependency selection so a body edit between preflight and prompt rendering
+# cannot change the requested baseline. Standalone callers retain the original
+# live API fallback.
+ISSUE_JSON_FILE="${ISSUE_JSON_FILE:-}"
+if [ -n "${ISSUE_JSON_FILE}" ]; then
+  case "${ISSUE_JSON_FILE}" in
+    /*) ;;
+    *) echo "build_prompt: ISSUE_JSON_FILE must be absolute" >&2; exit 2 ;;
+  esac
+  if [ ! -f "${ISSUE_JSON_FILE}" ] || [ -L "${ISSUE_JSON_FILE}" ] \
+      || [ ! -r "${ISSUE_JSON_FILE}" ]; then
+    echo "build_prompt: ISSUE_JSON_FILE must be a readable regular non-symlink file" >&2
+    exit 2
+  fi
+  ISSUE_JSON="$(jq -ce 'if type == "object" then . else error("invalid") end' \
+    "${ISSUE_JSON_FILE}")"
+else
+  ISSUE_JSON="$(glab api \
+    "projects/${PROJECT_URI}/issues/${ISSUE_IID}")"
+fi
 ISSUE_TITLE="$(echo "${ISSUE_JSON}" | jq -r '.title // ""')"
 ISSUE_DESC="$(echo "${ISSUE_JSON}" | jq -r '.description // ""')"
 
@@ -169,7 +187,7 @@ EOF
 - Repository cwd:             ${WORKTREE_DIR} (shared per-issue linked git worktree)
 - Output directory:           ${OUTPUT_DIR} (for standalone deliverables that need to be preserved separately — force-added at commit time. Other source-code changes in the repo commit normally and do NOT need to go under this directory)
 ${SHARED_CONFIG_BLOCK}
-- Working branch (local):     attempt-local branch in this worktree, will be force-pushed to origin/${WORK_BRANCH}
+- Working branch (local):     IID-local attempt branch in this worktree, will be pushed to origin/${WORK_BRANCH}
 - Processing base branch:       ${BRANCH}
 - Merge-request target branch:  ${MERGE_TARGET_BRANCH}
 - Completion policy:            $([ "${AUTO_MERGE}" = true ] && echo "merge automatically after exact GitLab verification" || echo "leave the merge request open for review")
@@ -182,9 +200,9 @@ EOF
 - Modify whatever files in the repository the issue requires. If the issue produces standalone artifacts (spec / report / test files), put those under \`${OUTPUT_DIR}\`; otherwise edit source files directly where they live, and note in your final summary which files you changed.
 - Modify content under ${WORKTREE_DIR} only. Do NOT write outside this worktree.
 - Use the issue description and reviewer comments as the task prompt. Do not assume any project-specific testing framework or material directory unless the issue explicitly names one.
-- The dispatcher's runtime state and other issues' subtrees live OUTSIDE this worktree (in the parent checkout's \`.req_executor/_dispatcher/\` and \`.req_executor/issues/\`) and are not visible to you here.
+- Do not inspect or modify dispatcher runtime state, the parent checkout, or another Issue's worktree/state. Those paths are outside the current Issue's authorized work scope even if the host process can technically reach them.
 - Destructive deletion is forbidden. Do NOT call \`rm\`, \`/bin/rm\`, \`git rm\`, \`unlink\`, \`find -delete\`, or script file deletion through Python, Node, or another runtime. Do not delete files or directories for cleanup. If the issue seems to require deleting something, leave it in place and explain the blocker in your final summary.
-- Git ownership is split deliberately. You may use only read-only Git inspection such as \`git status\`, \`git diff\`, \`git log\`, \`git show\`, and \`git ls-files\`. Do NOT run \`git add\`, \`git commit\`, \`git push\`, \`git fetch\`, \`git pull\`, \`git reset\`, \`git checkout\`, \`git switch\`, \`git restore\`, \`git clean\`, \`git worktree\`, \`git branch\` mutations, or any other Git command that changes refs, the index, remotes, or working-tree state. The outer fixed executor pipeline owns stage, commit, push, and merge-request creation after you return.
+- Git ownership is split deliberately. You may use only read-only Git inspection such as \`git status\`, \`git diff\`, \`git log\`, \`git show\`, and \`git ls-files\`. Do NOT run \`git add\`, \`git commit\`, \`git push\`, \`git fetch\`, \`git pull\`, \`git reset\`, \`git checkout\`, \`git switch\`, \`git restore\`, \`git clean\`, \`git worktree\`, \`git branch\` mutations, or any other Git command that changes refs, the index, remotes, or working-tree state. The outer fixed executor pipeline owns stage, commit, push, and merge-request creation or reuse after you return.
 - Do NOT run \`glab\` in any form. GitLab reads and mutations are owned by the outer fixed executor scripts; do not inspect credentials, remotes, auth state, issues, merge requests, or labels yourself.
 - Do not ask the user any questions. Make the best reasonable decisions.
 - When you finish, summarize briefly what you did$([ "${ISSUE_MODE}" = "continue" ] && echo " differently from the prior run").

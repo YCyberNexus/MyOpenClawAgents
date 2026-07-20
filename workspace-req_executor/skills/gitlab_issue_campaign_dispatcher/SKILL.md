@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-15.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists and explicit automatic merge intent, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; ordinary or still-open MRs remain at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-20.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -52,6 +52,121 @@ the target branch and archive the preserved subtree outside the active
 worktree).
 See [`references/paths.md`](references/paths.md) for the complete layout.
 
+## Issue dependency branch baseline
+
+An Issue may declare one same-project prerequisite on its own description line:
+
+```text
+依赖 Issue #123
+```
+
+Accepted compatibility forms include `依赖于 #123`, `依赖于 Issue #123`, `前置 Issue: #123`,
+`Depends on #123`, `Blocked by #123`, `dependency: #123`, and
+`depends_on: 123`. Inline prose is deliberately ignored. Multiple distinct
+dependencies, an invalid target, and a self-dependency fail closed through the
+normal per-Issue dispatcher-blocked path.
+
+An ordinary A never infers a future reverse edge. It starts on `issue/A`, makes
+one commit, and creates its ordinary A-only MR. The dispatcher binds A -> C
+only when C itself is processed and C's declaration is parsed. A and C may be
+in the same frozen batch or different campaigns. Frozen-scope discovery may
+reject topology that is already visible, but an incomplete scope never blocks
+a dependency-free A and an already-completed A need not belong to C's current
+scope.
+Lookup/parse timeouts use `dependency_graph_preflight_deferred`,
+`dependency_preflight_deferred`, or `dependency_cycle_check_deferred` and retry
+on a later tick. Deterministic topology/parser failures persist the normal
+dispatcher-blocked state and, in driven mode, emit an exact scheduler
+`skipped_entries[]` handoff.
+
+The current version supports exactly one two-node, one-to-one group A -> C.
+A must have no prerequisite, A must have exactly one dependent, and C must not
+have a dependent. Fan-out fails as `shared_branch_fanout_unsupported`; longer
+chains fail as `shared_branch_chain_unsupported`; cycles,
+overlapping group membership, changed declarations, and changed targets also
+fail closed. The frozen remote source branch and normal fresh topology are:
+
+```text
+branch: issue/<A IID>+<C IID>
+history: target -> commit(A) -> commit(C)
+```
+
+A and C keep IID-local branches `issue/<iid>-attNNN` and separate worktrees,
+while an unrelated B remains on `issue/<B IID>` and may run alongside A. A
+first publishes `issue/A`. C remains deferred without consuming an attempt,
+label mutation, project placeholder, or agent-wide slot until A has a stable
+`pr` or `finish`, no conflicting workflow label, no current campaign pending
+claim, and durable `status:"done"` state whose ordinary branch, commit SHA, and
+unique open MR identity all match live GitLab state. An A from the current
+campaign may also appear in `completed_iids`; an A from an earlier campaign is
+authorized by the stronger private-state, exact-ref, and live-MR checks.
+
+GitLab cannot update an MR source branch or atomically rename a branch. The
+fixed `migrate_shared_dependency_head.sh` therefore writes a private
+`branch_migration.status:"pending"` checkpoint, creates `issue/A+C` at A's
+exact SHA with an empty expected lease, closes A's old MR, creates one
+intent-owned replacement MR containing `Closes #A` and `Closes #C`, deletes
+`issue/A` with an exact SHA lease, and rewrites A as the shared head. Every
+step is replayable. A transient stop never reruns or recommits A and never
+creates a duplicate replacement MR. Steady state has one open shared MR, while
+GitLab history retains the closed ordinary MR plus the open replacement MR.
+
+C receives A's full SHA as both `DEPENDENCY_BASE_SHA` and
+`EXPECTED_WORK_BRANCH_SHA`. Its new commit must have exactly one parent and that
+parent must equal A's SHA. Updating the shared ref uses the explicit lease
+`--force-with-lease=refs/heads/issue/A+C:<A SHA>`; a missing or moved ref fails
+closed. The migration's shared-ref creation uses an empty expected lease, and every push
+publishes and re-reads the immutable SHA captured immediately after the commit,
+never a later mutable local ref. The migration creates the only open shared MR with both `Closes #A` and `Closes #C`. After C
+pushes, it must reuse the exact replacement MR URL/IID persisted by A; it never closes
+or creates another MR. A's private state and the replacement MR description share one random
+64-hex `intent_id`; live verification also requires the current token author
+and both exact closing lines. The shared target is frozen, and any shared member with
+`auto_merge=true` fails as `shared_branch_auto_merge_unsupported`.
+
+The A migration uses its `branch_migration` checkpoint. After C pushes and
+verifies the remote tip, the fixed wrapper persists an exact
+`mr_finalization.status:"pending"` checkpoint before MR reuse. A bounded
+in-wrapper retry and the heartbeat's MR-only recovery may then reuse and verify
+the owned replacement MR for that already-pushed SHA without running acpx,
+stage, commit, or push again. A private current-
+attempt marker may carry verified-open state or identity-only evidence; it must
+always bind the role-specific `created|reused` action, intent, and exact
+branch/target/SHA. Phase 6 performs a fresh exact GitLab read plus an open-source-
+branch uniqueness read before it promotes the Issue binding to `verified_open`.
+A closed, moved, retargeted, or foreign identity fails closed; unavailable
+GitLab retains the claim, while ambiguous or truncated source history becomes
+an immediate terminal `failed-dispatcher` conflict. Phase 6 and C's release gate each
+perform fresh exact GitLab reads; any historical MR without one exact open,
+owned identity blocks recovery and can never authorize a replacement. C cannot
+start from a URL, callback, label, historical state, or unverified marker alone.
+A failed final `pr` label write
+also retains the same claim for a marker-only retry.
+
+Fresh business code comes from the pinned baseline SHA, but direct
+execution-control paths at any depth (`.claude/`, `CLAUDE.md`,
+`CLAUDE.local.md`, `.mcp.json`, and `.acpxrc.json`) are refreshed only from the
+original trusted `CONFIG_BRANCH`. Materialization disables Git hooks,
+fsmonitor, external attributes, and submodule recursion, and rejects checkout
+filter attributes. Fetches use explicit full refspecs with an empty refmap, and
+commit/tree/ancestry/materialization reads disable Git replace objects. The runtime requires a repository-external
+`CLAUDE_CODE_EXECUTABLE` with `--safe-mode` plus the exact external
+`@agentclientprotocol/claude-agent-acp` 0.37.0 package at
+`CLAUDE_AGENT_ACP_ROOT`. The fixed adapter, empty MCP config, safe mode, and
+permission flags narrow the launch path but do not create an OS sandbox;
+ordinary business scripts still run with the executor UID's authority.
+
+`continue` may resume only an exact remote shared tip or IID-local attempt ref
+whose SHA and complete dependency/work-branch identity match durable state.
+A shared tail can never normalize to a dependency-free history, a shared head
+can never acquire a dependency tuple, and a fresh C lease must equal A's pinned
+SHA. Missing, legacy, partial, moved, or rewritten state fails closed rather
+than being reconstructed from current Issue text. An already-published shared
+head cannot enter the ordinary code-changing continue path. A shared-tail
+continue uses the old C tip only as the explicit push lease, resets the new
+commit's sole parent to A's pinned SHA, and therefore replaces C1 with C2 rather
+than appending a third commit.
+
 ## Three task layers you MUST NOT confuse (read this first)
 
 Per IID, the wrapper produces three distinct task layers. Mixing them bypasses
@@ -61,7 +176,7 @@ the fixed executor boundary.
 | -- | -- | -- |
 | Secret-free spawn bootstrap | `${LOG_DIR}/spawn_payload.txt` | This is the **only** content sent as `sessions_spawn(task=...)`. It contains only issue/job identity plus the absolute manifest path, SHA-256, byte count, and fail-closed validation instructions. |
 | Private outer executor payload | `${LOG_DIR}/executor_payload.txt`, described by mode-600 `${LOG_DIR}/spawn_manifest.json` | Rendered from [`references/executor_prompt.md`](references/executor_prompt.md). The manifest identity fields `project`, `job_id`, `iid`, and `attempt_number` are top-level fields; there is no nested `identity` object. After validating manifest identity, mode, SHA-256, and byte count, the OUTER subagent makes one long `run_executor_attempt.sh` call and echoes its final compact JSON. Neither file contains a GitLab token. |
-| Inner Claude Code prompt | `${LOG_DIR}/prompt.txt` | Written by `build_prompt.sh`; only `acpx claude exec -f` reads it. It tells the INNER session what issue work to implement. |
+| Inner Claude Code prompt | `${LOG_DIR}/prompt.txt` | Written by `build_prompt.sh`; the fixed acpx invocation reads it. Dependency attempts use the pinned raw Claude ACP adapter instead of project/npm agent resolution. It tells the INNER session what issue work to implement. |
 
 **HARD RULE: neither `${LOG_DIR}/prompt.txt` nor
 `${LOG_DIR}/executor_payload.txt` is ever sent directly to `sessions_spawn`.**
@@ -179,10 +294,16 @@ script returns, state is durable and the next IID can be spawned.
      durable launch action, child label, pending IID, and terminal status.
    - OpenClaw 2026.6.11: pass the complete structured `task_completion` event
      JSON, including `inputProvenance`, preserved as one JSON object.
-   Run `cd "${SKILL_DIR}" && bash scripts/ingest_subagent_completion.sh` in
-   the same Bash call. Do not inject project or GitLab routing env: the
-   ingester recovers the project from the scheduler's durable launch action
-   and resolves the configured local/deployment tuple itself.
+   Run the following in the same Bash call, with the selected object on stdin:
+     `cd "${SKILL_DIR}" && env -u PROJECT -u GROUP -u PROJECT_FULL
+      -u PROJECT_URI -u REPO_PATH
+      bash scripts/ingest_subagent_completion.sh`
+   The `env -u` list is mandatory. Keep the gateway-level `REPO_PARENT_PATH`:
+   it is a trusted deployment override used consistently by intake, tick, and
+   completion routing, not caller-selected callback evidence. Do not inject
+   project routing env or clear the configured GitLab credential/target env;
+   the ingester recovers the project from the scheduler's durable launch
+   action and resolves the configured local/deployment tuple itself.
    # The ingester binds the authenticated run id, child session key, label,
    # IID, and attempt before dispatch_followup.sh can mutate Phase 6 state.
 3. if envelope.cleanup.action == "kill":
@@ -259,6 +380,15 @@ non-advancing/unsafe cursors and bounded-scan overflow, requires two consecutive
 normalized full scans to agree before freezing, OPEN filtering, immutable snapshot creation,
 batch idempotency, strict round-robin reservation, live preflight, claim
 allocation and binding, claim-0 skips, project handoff import, and outbox drain.
+The agent-wide topup transaction processes at most 256 candidate jobs and 32
+skip-refill rounds under a 90-second phase deadline; each project topup process
+also has a 75-second wall-clock cap. Every child process and nested scheduler or
+launch-coordinator lock uses the smaller of its own cap and the remaining phase
+budget. Reaching an outer budget releases the lock and leaves unprocessed
+reserved jobs for the next tick.
+Dependency-only deferrals are transactionally returned to `retry_wait` after
+ordinary skip/refill processing. They do not retain a physical slot, and normal
+pending/lazy snapshot work is reserved before retrying those deferred entries.
 The external I1 shape is the selector and callback-routing schema documented in
 `references/trigger_command.md`. The wrapper resolves `GITLAB_TOKEN` using the
 standard source precedence and injects it privately into fixed outer scripts.
@@ -391,6 +521,19 @@ window it scans only hot and unresolved batches on ordinary heartbeats and
 runs a daily full audit. Normal reservation requires
 `terminal_counts_version=1`, so a late legacy transaction cannot be consumed
 in the gap after reconciliation.
+Project topup may return a strictly identified `deferred_entries[]` item when a
+fresh Issue dependency is not ready. Before the declaration is available,
+`dependency_iid` and `dependency_branch` are null and the reason is
+`dependency_preflight_deferred`; known dependencies retain their exact IID and
+branch. After bounded skip refill is complete, the tick
+claim-fences the exact reserved or running job, atomically moves every attached
+membership to `retry_wait`, removes the active job, and leaves all terminal
+counters unchanged. A later reservation uses a defer-generation suffix in the
+physical job ID, preventing a stale claim or callback from targeting the new
+reservation. A migrated `legacy_running` job has no secret claim token and is
+therefore never relaxed into this non-terminal transition; it remains unchanged
+and reports `legacy_running_recovery_required` for the existing terminal
+recovery path.
 Before those phases it also checks expired running jobs using the exact current
 job/generation/token digest and the project-persisted ACPX deadline. Only a due,
 matching claim can synthesize `timeout` through the normal durable handoff; a

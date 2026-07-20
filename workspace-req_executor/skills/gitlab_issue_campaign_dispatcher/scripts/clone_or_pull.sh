@@ -130,7 +130,9 @@ cd "${REPO_PATH}"
 git_network_guard_assert_repo_rewrite_context "${REPO_PATH}"
 git remote set-url origin "${AUTHED_REMOTE_URL}" >&2
 git_network_guard_harden_repo "${REPO_PATH}"
-git_network_guard_run "${REPO_PATH}" fetch --prune origin >&2
+GIT_NO_REPLACE_OBJECTS=1 git_network_guard_run "${REPO_PATH}" fetch \
+  --prune --no-tags --refmap= origin \
+  '+refs/heads/*:refs/remotes/origin/*' >&2
 if [ -z "${BRANCH}" ]; then
   BRANCH="$(resolve_origin_default_branch "${REPO_PATH}")" || {
     echo "clone_or_pull: unable to resolve origin/HEAD default branch" >&2

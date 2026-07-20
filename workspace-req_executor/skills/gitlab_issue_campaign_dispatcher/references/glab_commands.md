@@ -91,7 +91,15 @@ glab api --method PUT \
 
 ### G6 — Look up open MRs for the work branch (subagent)
 
-Used by `scripts/create_mr.sh` to list any open MRs pointing at the work branch before rotation. **Both** `fresh` and `continue` modes close every prior open MR and then create a fresh one each attempt (Strategy A — one open MR per issue at any moment, rotated per attempt). The returned JSON drives both the close loop (G10) and the final MR-URL extraction (`.[0].web_url`).
+Used by `scripts/create_mr.sh` to list open MRs for the work branch. Ordinary
+branches use the result for rotation. During late binding,
+`migrate_shared_dependency_head.sh` requires exactly one open ordinary
+`issue/A` MR, then requires empty all-state `issue/A+C` history before creating
+the replacement. Recovery may reuse only the one intent-owned exact open
+replacement and never replaces closed or moved shared history. C requires
+exactly one entry whose URL/IID matches A's migrated durable state, then reuses
+it without mutation. The final exact MR
+verification still reads source, target, and SHA through G14.
 
 ```bash
 glab mr list \
@@ -104,7 +112,13 @@ Returns a JSON array. Do not add `--state opened`: runner-installed `glab 1.93.0
 
 ### G7 — Create a merge request (subagent)
 
-Wrapped by `scripts/create_mr.sh`. Called once per attempt in **both** modes, after G10 has closed every prior open MR (if any). There is no fresh-mode reuse path — every attempt produces a new MR object.
+Wrapped by `scripts/create_mr.sh`. Ordinary branches call it once per attempt
+after G10 closes prior open MRs. A initially uses this ordinary path on
+`issue/A` with only `Closes #A`. When C is later discovered,
+`migrate_shared_dependency_head.sh` calls the same fixed `glab mr create`
+surface to create the `issue/A+C` replacement containing `Closes #A`,
+`Closes #C`, the migration intent marker, and the superseded old MR IID. C
+must reuse that replacement and must not call G7.
 
 ```bash
 glab mr create \
@@ -140,7 +154,12 @@ The `-F body=@<file>` form uploads the file contents as the form field, which av
 
 ### G10 — Close (without merging) an existing MR (subagent)
 
-Used by `scripts/create_mr.sh` in **both** modes to close every prior open MR for the work branch before creating a fresh one. Closing is NOT merging — the integration branch is unaffected; the closed MR remains in GitLab as historical record.
+Used by `scripts/create_mr.sh` for ordinary branch rotation. It is also used
+once by `migrate_shared_dependency_head.sh` to close A's exact verified
+ordinary MR before creating the shared replacement. The migration checkpoint
+makes that close replay-safe; it never closes the replacement. C reuses the
+exact replacement identity persisted by A. Closing is not merging; the target
+branch remains unaffected.
 
 ```bash
 glab mr close <mr_iid> --repo "${PROJECT_FULL}"

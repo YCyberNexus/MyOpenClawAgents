@@ -77,6 +77,9 @@
 #   REPO_PATH        final clone target path. Compatibility input only when
 #                    REPO_PARENT_PATH is unset; normally exported by this file.
 #   REQ_EXECUTOR_DIR fixed agent runtime directory name (.req_executor)
+#   WORK_BRANCH     trusted canonical source branch selected by the dispatcher;
+#                   either issue/<current IID> or a two-member dependency
+#                   branch issue/<head IID>+<tail IID> containing current IID
 #
 # Outputs (exported into the calling shell): see lists above. Plus:
 #   GITLAB_HOST, GITLAB_API_PROTOCOL    (loaded via glab_auth.sh)
@@ -88,6 +91,7 @@
 set -euo pipefail
 
 : "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
+WORK_BRANCH_INPUT="${WORK_BRANCH:-}"
 
 # Optional trigger field `repo_path` lets the orchestrator place clones under
 # a parent directory other than `/data`. The trigger value is forwarded as
@@ -211,7 +215,21 @@ if [ -n "${ISSUE_IID:-}" ]; then
 
   export ISSUE_ROOT="${ISSUES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
-  export WORK_BRANCH="issue/${ISSUE_IID}"
+  if [ -z "${WORK_BRANCH_INPUT}" ]; then
+    WORK_BRANCH_INPUT="issue/${ISSUE_IID}"
+  fi
+  if [ "${WORK_BRANCH_INPUT}" = "issue/${ISSUE_IID}" ]; then
+    :
+  elif [[ "${WORK_BRANCH_INPUT}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]] \
+      && [ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ] \
+      && { [ "${ISSUE_IID}" = "${BASH_REMATCH[1]}" ] \
+        || [ "${ISSUE_IID}" = "${BASH_REMATCH[2]}" ]; }; then
+    :
+  else
+    echo "env_paths.sh: WORK_BRANCH must be issue/<current IID> or a two-member issue/<head IID>+<tail IID> branch containing the current IID" >&2
+    return 2 2>/dev/null || exit 2
+  fi
+  export WORK_BRANCH="${WORK_BRANCH_INPUT}"
 
   # One-time migration: older deployments placed per-issue subtrees directly
   # under ${RESULT_ROOT} (legacy issue-<iid>/) before the issues/
@@ -262,7 +280,10 @@ if [ -n "${ISSUE_IID:-}" ]; then
   export LOG_DIR="${WORKTREE_DIR}/${ATTEMPT_LOG_REL}"
   export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
   export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
-  export LOCAL_ATTEMPT_BRANCH="${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}"
+  # A and its dependent share one remote branch, but their linked worktrees
+  # must never try to check out the same local branch. Keep the local audit ref
+  # owned by the current IID while WORK_BRANCH names the shared remote ref.
+  export LOCAL_ATTEMPT_BRANCH="issue/${ISSUE_IID}-att${ATTEMPT_NUMBER_PADDED}"
 
   # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR
   # are created inside prepare_attempt.sh after `git worktree add`

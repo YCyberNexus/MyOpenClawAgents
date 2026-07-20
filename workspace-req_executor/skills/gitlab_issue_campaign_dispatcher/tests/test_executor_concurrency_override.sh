@@ -31,7 +31,12 @@ TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-concurrency.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 CAPTURE="${TEST_ROOT}/trigger.txt"
 PREPARE="${TEST_ROOT}/prepare.sh"
-mkdir -p "${CONFIG_DIR}" "${TEST_ROOT}/repos"
+PROCESS_TOPUP_SCHEDULER="${TEST_ROOT}/process-topup-scheduler"
+mkdir -p "${CONFIG_DIR}" "${TEST_ROOT}/repos" \
+  "${PROCESS_TOPUP_SCHEDULER}/batches/A"
+
+jq -nc '{version:1,project:"group/repo",iids:[42]}' \
+  >"${PROCESS_TOPUP_SCHEDULER}/batches/A/snapshot.json"
 
 cat >"${CONFIG_DIR}/gitlab.env" <<'EOF'
 GITLAB_HOST=gitlab.example.test
@@ -69,14 +74,14 @@ request='{"owner_id":"executor-agent-scheduler-v1","grants":[{"job_id":"A:snapsh
 printf '%s' "${request}" | \
   CONFIG_DIR="${CONFIG_DIR}" \
   REPO_PARENT_PATH="${TEST_ROOT}/repos" \
-  EXECUTOR_SCHEDULER_ROOT="${TEST_ROOT}/process-topup-scheduler" \
+  EXECUTOR_SCHEDULER_ROOT="${PROCESS_TOPUP_SCHEDULER}" \
   EXECUTOR_MAX_CONCURRENCY=5 \
   EXECUTOR_RUNNING_LEASE_SECONDS=333 \
   GITLAB_HOST=gitlab.process.test \
   GITLAB_API_PROTOCOL=http \
   GITLAB_TOKEN=topup-process-token \
   EXPECTED_REPO_PARENT="${TEST_ROOT}/repos/group" \
-  EXPECTED_SCHEDULER_ROOT="${TEST_ROOT}/process-topup-scheduler" \
+  EXPECTED_SCHEDULER_ROOT="${PROCESS_TOPUP_SCHEDULER}" \
   EXPECTED_MAX_CONCURRENCY=5 \
   EXPECTED_RUNNING_LEASE=333 \
   EXPECTED_GITLAB_HOST=gitlab.process.test \

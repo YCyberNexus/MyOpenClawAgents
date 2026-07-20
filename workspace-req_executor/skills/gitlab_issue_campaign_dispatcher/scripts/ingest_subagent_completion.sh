@@ -851,17 +851,26 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
     GITLAB_PROTOCOL_RESOLVED="${GITLAB_API_PROTOCOL}"
     GITLAB_TOKEN_RESOLVED="${GITLAB_TOKEN}"
 
-    if ! REPO_PARENT_EFFECTIVE="$(
-      unset REPO_PARENT_PATH
-      # shellcheck disable=SC1090
-      source "${DEFAULT_CONFIG}"
-      if [ -f "${LOCAL_CONFIG}" ]; then
+    if [ "${CALLER_EXPLICIT_ROUTE}" != true ] \
+        && [ "${CALLER_REPO_PARENT_SET}" = x ] \
+        && [ -n "${CALLER_REPO_PARENT}" ]; then
+      # In native durable routing this is the deployment's process-level clone
+      # root, not user-selected callback data.  It has the same precedence as
+      # scheduler_env.sh and must survive local/config fallback resolution.
+      REPO_PARENT_EFFECTIVE="${CALLER_REPO_PARENT}"
+    else
+      if ! REPO_PARENT_EFFECTIVE="$(
+        unset REPO_PARENT_PATH
         # shellcheck disable=SC1090
-        source "${LOCAL_CONFIG}"
+        source "${DEFAULT_CONFIG}"
+        if [ -f "${LOCAL_CONFIG}" ]; then
+          # shellcheck disable=SC1090
+          source "${LOCAL_CONFIG}"
+        fi
+        printf '%s' "${REPO_PARENT_PATH:-/data}"
+      )"; then
+        reject_completion invalid_campaign_config
       fi
-      printf '%s' "${REPO_PARENT_PATH:-/data}"
-    )"; then
-      reject_completion invalid_campaign_config
     fi
 
     if ! RESOLVED_REPO_PATH="$(
@@ -873,7 +882,13 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
     )"; then
       reject_completion invalid_routed_repo_path
     fi
-    if [ "${CALLER_REPO_PARENT_SET}" = x ]; then
+    # A native completion has no caller-selected project route.  Long-lived
+    # gateway processes can still contribute deployment-wide REPO_* defaults;
+    # those ambient values are not callback evidence and must not veto the
+    # scheduler's authenticated per-project route.  Keep the conflict checks
+    # for legacy/direct callers that explicitly supplied PROJECT or GROUP.
+    if [ "${CALLER_EXPLICIT_ROUTE}" = true ] \
+        && [ "${CALLER_REPO_PARENT_SET}" = x ]; then
       CALLER_REPO_PARENT_NORMALIZED="${CALLER_REPO_PARENT}"
       while [ "${CALLER_REPO_PARENT_NORMALIZED}" != "/" ] \
           && [[ "${CALLER_REPO_PARENT_NORMALIZED}" == */ ]]; do
@@ -884,7 +899,8 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
         reject_completion explicit_repo_parent_conflicts_with_durable_route
       fi
     fi
-    if [ "${CALLER_REPO_PATH_SET}" = x ] \
+    if [ "${CALLER_EXPLICIT_ROUTE}" = true ] \
+        && [ "${CALLER_REPO_PATH_SET}" = x ] \
         && [ "${CALLER_REPO_PATH}" != "${RESOLVED_REPO_PATH}" ]; then
       reject_completion explicit_repo_path_conflicts_with_durable_route
     fi

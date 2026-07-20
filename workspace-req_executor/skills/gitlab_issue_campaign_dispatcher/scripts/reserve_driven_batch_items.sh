@@ -811,12 +811,15 @@ while [ "${batch_order_length}" -gt 0 ]; do
     # pending and still-lazy snapshot indices in order, but stop after the first
     # attach or grant so each batch still advances at most once per round.
     mapfile -t CANDIDATE_INDICES < <(jq -r '
-      ([.memberships | to_entries[]
+      (([.memberships | to_entries[]
           | select(.value.status == "pending")
           | (.key | tonumber)]
         + [range(.next_snapshot_index; .matched_count)])
-      | unique
-      | sort
+        | unique | sort) as $primary
+      | ([.memberships | to_entries[]
+          | select(.value.status == "retry_wait")
+          | (.key | tonumber)] | unique | sort) as $deferred
+      | (if ($primary | length) > 0 then $primary else $deferred end)
       | .[]
     ' <<<"${batch_state}")
     [ "${#CANDIDATE_INDICES[@]}" -gt 0 ] || continue
@@ -826,6 +829,13 @@ while [ "${batch_order_length}" -gt 0 ]; do
         --arg index "${pending_index}" \
         '.memberships | has($index) | not' \
         <<<"${batch_state}")"
+      candidate_defer_count="$(jq -r \
+        --arg index "${pending_index}" \
+        '.memberships[$index].defer_count // 0' \
+        <<<"${batch_state}")"
+      case "${candidate_defer_count}" in
+        ''|*[!0-9]*) reserve_die "invalid defer_count: ${batch_id}/${pending_index}" 3 ;;
+      esac
       iid="$(jq -r --argjson index "${pending_index}" '.iids[$index]' <<<"${snapshot_json}")"
 
       matching_jobs="$(jq -c \
@@ -864,13 +874,14 @@ while [ "${batch_order_length}" -gt 0 ]; do
             --argjson snapshot_index "${pending_index}" \
             --argjson iid "${iid}" \
             --arg job_id "${active_job_id}" \
+            --argjson defer_count "${candidate_defer_count}" \
             --argjson candidate_is_new "${candidate_is_new}" '
             .memberships[$index] = {
               snapshot_index:$snapshot_index,
               iid:$iid,
               status:"pending",
               blocked_by_job_id:$job_id
-            }
+            } + (if $defer_count > 0 then {defer_count:$defer_count} else {} end)
             | if $candidate_is_new then .next_snapshot_index += 1 else . end
           ' <<<"${batch_state}")"
           BATCH_STATES["${batch_id}"]="${batch_state}"
@@ -883,13 +894,14 @@ while [ "${batch_order_length}" -gt 0 ]; do
           --argjson snapshot_index "${pending_index}" \
           --argjson iid "${iid}" \
           --arg job_id "${active_job_id}" \
+          --argjson defer_count "${candidate_defer_count}" \
           --argjson candidate_is_new "${candidate_is_new}" '
           .memberships[$index] = {
             snapshot_index:$snapshot_index,
             iid:$iid,
             status:"attached",
             job_id:$job_id
-          }
+          } + (if $defer_count > 0 then {defer_count:$defer_count} else {} end)
           | if $candidate_is_new then .next_snapshot_index += 1 else . end
           | .status = "running"
         ' <<<"${batch_state}")"
@@ -916,13 +928,14 @@ while [ "${batch_order_length}" -gt 0 ]; do
             --argjson snapshot_index "${pending_index}" \
             --argjson iid "${iid}" \
             --arg job_id "${active_job_id}" \
+            --argjson defer_count "${candidate_defer_count}" \
             --argjson candidate_is_new "${candidate_is_new}" '
             .memberships[$index] = {
               snapshot_index:$snapshot_index,
               iid:$iid,
               status:"pending",
               blocked_by_job_id:$job_id
-            }
+            } + (if $defer_count > 0 then {defer_count:$defer_count} else {} end)
             | if $candidate_is_new then .next_snapshot_index += 1 else . end
           ' <<<"${batch_state}")"
           BATCH_STATES["${batch_id}"]="${batch_state}"
@@ -940,6 +953,9 @@ while [ "${batch_order_length}" -gt 0 ]; do
       fi
 
     job_id="${batch_id}:snapshot-${pending_index}"
+    if [ "${candidate_defer_count}" -gt 0 ]; then
+      job_id+="::defer-${candidate_defer_count}"
+    fi
     if jq -e --arg job_id "${job_id}" '.active_jobs[$job_id] != null' \
       <<<"${SCHEDULER_STATE}" >/dev/null; then
       reserve_die "generated job_id already exists: ${job_id}" 3
@@ -952,13 +968,14 @@ while [ "${batch_order_length}" -gt 0 ]; do
       --argjson snapshot_index "${pending_index}" \
       --argjson iid "${iid}" \
       --arg job_id "${job_id}" \
+      --argjson defer_count "${candidate_defer_count}" \
       --argjson candidate_is_new "${candidate_is_new}" '
       .memberships[$index] = {
         snapshot_index:$snapshot_index,
         iid:$iid,
         status:"reserved",
         job_id:$job_id
-      }
+      } + (if $defer_count > 0 then {defer_count:$defer_count} else {} end)
       | if $candidate_is_new then .next_snapshot_index += 1 else . end
       | .status = "running"
     ' <<<"${batch_state}")"

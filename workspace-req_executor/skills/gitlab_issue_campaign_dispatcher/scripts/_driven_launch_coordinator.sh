@@ -95,7 +95,15 @@ dlc_runtime_child_label() {
 
 dlc_open() {
   local job_id="$1"
-  local digest
+  local digest lock_wait="${DLC_LOCK_WAIT_SECONDS:-}"
+  local lock_deadline=0 lock_remaining=0
+  if [ -n "${lock_wait}" ]; then
+    case "${lock_wait}" in
+      *[!0-9]*|'') return 2 ;;
+    esac
+    [ "${lock_wait}" -gt 0 ] || return 2
+    lock_deadline=$((SECONDS + lock_wait))
+  fi
   digest="$(printf '%s' "${job_id}" | dlc_sha256)" || return $?
   DLC_ACTION_FILE="${DLC_ROOT}/${digest}.json"
   DLC_ARCHIVE_FILE="${DLC_ARCHIVE_ROOT}/${digest}.json"
@@ -104,10 +112,36 @@ dlc_open() {
   if [ "${LEGACY_LOCK_COMPAT_ACTIVE:-false}" = true ]; then
     DLC_LEGACY_ACTION_LOCK="${DLC_ROOT}/.${digest}.lock"
     exec {DLC_LEGACY_ACTION_LOCK_FD}>"${DLC_LEGACY_ACTION_LOCK}"
-    flock -x "${DLC_LEGACY_ACTION_LOCK_FD}"
+    if [ -n "${lock_wait}" ]; then
+      lock_remaining=$((lock_deadline - SECONDS))
+      [ "${lock_remaining}" -gt 0 ] \
+        && flock -w "${lock_remaining}" -x \
+          "${DLC_LEGACY_ACTION_LOCK_FD}" || {
+        exec {DLC_LEGACY_ACTION_LOCK_FD}>&-
+        unset DLC_LEGACY_ACTION_LOCK_FD
+        return 75
+      }
+    else
+      flock -x "${DLC_LEGACY_ACTION_LOCK_FD}"
+    fi
   fi
   exec {DLC_ACTION_LOCK_FD}>"${DLC_ACTION_LOCK}"
-  flock -x "${DLC_ACTION_LOCK_FD}"
+  if [ -n "${lock_wait}" ]; then
+    lock_remaining=$((lock_deadline - SECONDS))
+    [ "${lock_remaining}" -gt 0 ] \
+      && flock -w "${lock_remaining}" -x "${DLC_ACTION_LOCK_FD}" || {
+      exec {DLC_ACTION_LOCK_FD}>&-
+      unset DLC_ACTION_LOCK_FD
+      if [ -n "${DLC_LEGACY_ACTION_LOCK_FD:-}" ]; then
+        flock -u "${DLC_LEGACY_ACTION_LOCK_FD}" 2>/dev/null || true
+        exec {DLC_LEGACY_ACTION_LOCK_FD}>&-
+        unset DLC_LEGACY_ACTION_LOCK_FD
+      fi
+      return 75
+    }
+  else
+    flock -x "${DLC_ACTION_LOCK_FD}"
+  fi
   if [ ! -f "${DLC_ACTION_FILE}" ] && [ -f "${DLC_ARCHIVE_FILE}" ]; then
     mv "${DLC_ARCHIVE_FILE}" "${DLC_ACTION_FILE}"
   fi

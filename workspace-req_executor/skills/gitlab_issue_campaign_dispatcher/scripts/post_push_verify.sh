@@ -8,7 +8,7 @@
 #
 # Required env vars:
 #   WORKTREE_DIR    repo root cwd
-#   WORK_BRANCH     "issue/<iid>"
+#   WORK_BRANCH     `issue/<iid>` or frozen shared `issue/<head>+<tail>`
 #   BRANCH          integration / target branch
 #   ISSUE_IID       current issue IID (kept for log correlation)
 #
@@ -28,7 +28,11 @@ GIT_NETWORK_GUARD_CONTEXT=post_push_verify
 : "${WORKTREE_DIR:?}" "${WORK_BRANCH:?}" "${BRANCH:?}" "${ISSUE_IID:?}"
 
 cd "${WORKTREE_DIR}"
-git_network_guard_run "${WORKTREE_DIR}" fetch origin "${WORK_BRANCH}" >&2
-git_network_guard_run "${WORKTREE_DIR}" fetch origin "${BRANCH}" >&2
+GIT_NO_REPLACE_OBJECTS=1 git_network_guard_run "${WORKTREE_DIR}" fetch \
+  --no-tags --refmap= origin \
+  "+refs/heads/${WORK_BRANCH}:refs/remotes/origin/${WORK_BRANCH}" >&2
+GIT_NO_REPLACE_OBJECTS=1 git_network_guard_run "${WORKTREE_DIR}" fetch \
+  --no-tags --refmap= origin \
+  "+refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}" >&2
 
 echo "REMOTE_CLEAN"

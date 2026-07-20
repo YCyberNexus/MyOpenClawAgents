@@ -31,6 +31,8 @@ Important fields:
 - `require_labels_match`
 - `model_tiers`
 - `continue_upgrade_threshold`
+- `dependency_scan_cursor_iid`
+- `shared_branch_groups`
 - `pending_subagents`
 - `driven_launch_receipts`
 - `blocked_iids`
@@ -43,6 +45,26 @@ Important fields:
 There are no persisted runtime basename, data directory, or account-pool fields.
 Legacy state files may still contain `run_timeout_seconds`; `load_state` deletes
 that field in memory and the next state write persists the migrated shape.
+`dependency_scan_cursor_iid` is either `null` or a positive IID lower bound. A
+scheduled tick uses it only to rotate the bounded dependency-preflight view;
+it resets after a complete scan or a full runnable batch, so a large waiting
+prefix cannot permanently starve later candidates.
+`shared_branch_groups` is an object keyed by the exact frozen branch
+`issue/<head>+<tail>`. Each value contains the same `work_branch`, positive and
+distinct `head_iid` / `tail_iid`, ordered `members:[head,tail]`, a non-empty
+`scope_id`, and an optional non-empty `merge_target_branch`. The key must encode
+the two stored members exactly, and one IID may occur in at most one group.
+Malformed keys, duplicate membership, invalid targets, declaration changes,
+or a second group binding fail closed before attempt allocation.
+
+Graph discovery from a frozen planning scope is advisory for topology already
+visible. An incomplete scope never delays or changes an ordinary A. When C is
+processed, its direct declaration may bind a completed A from the same scope or
+an earlier campaign. API/parse uncertainty uses bounded non-terminal preflight
+reasons. Deterministic cycles, fan-out, longer chains, binding conflicts, and
+invalid declarations are persisted through the ordinary per-Issue blocked
+state. A driven project response also carries an
+exact scheduler `skipped_entries[]` handoff so the physical job terminates.
 
 ### Driven project launch receipts
 
@@ -76,15 +98,110 @@ result without persisting again, so `quota_launched_this_tick`, `spawned_at`,
 after the pending entry was drained. A conflicting outcome, run/session,
 attempt, generation, or token fails closed.
 
-Scheduler-driven pending entries also freeze `auto_merge:boolean` and
-`merge_target_branch:string|null` from the exact active job. New automatic
-requests require a non-empty merge target; legacy records missing both fields
-normalize to `false/null`. Phase 6 reads only this trusted pending configuration,
-not callback-authored labels. The fixed outer executor may already have written
-`finish` after its exact GET/PUT/GET merge confirmation; Phase 6 separately
-verifies the exact MR before durable terminal persistence and callback emission.
-Neither callback fields nor an attempt marker alone authorize that Phase 6
-success decision.
+Scheduler-driven pending entries freeze `auto_merge:boolean`,
+`merge_target_branch:string|null`, `work_branch`, ordered `branch_members`,
+`shared_branch_role`, optional `expected_work_branch_sha`, and optional
+`expected_commit_parent_sha` from the exact active job.
+`expected_work_branch_sha` is the old remote tip used only by the push lease;
+`expected_commit_parent_sha` is the required sole parent of the new shared
+commit. Ordinary automatic requests require a non-empty merge target;
+shared groups require `auto_merge:false`. Legacy ordinary records missing the
+new branch fields normalize to `issue/<iid>`, `[iid]`, and a null shared role;
+a two-member record never receives that compatibility default. Phase 6 reads
+only this trusted pending configuration, not callback-authored labels.
+
+Dependency and branch identity are committed in two phases. Before worktree
+preparation, `attempt_state.json` binds `work_branch`, `branch_members`,
+`shared_branch_role`, `expected_work_branch_sha`,
+`expected_commit_parent_sha`, and the all-null or
+all-present `dependency_iid` / `dependency_branch` / `dependency_base_sha`
+tuple to the exact IID, attempt, title, mode, merge policy, and target. A shared
+head requires a null dependency tuple. A shared tail requires the complete
+tuple with `dependency_iid=head`, `dependency_branch=work_branch`; in fresh mode
+`expected_work_branch_sha` must equal `dependency_base_sha`. Every shared
+attempt requires a full `expected_commit_parent_sha`; for C it equals
+`dependency_base_sha`, while for A it is the frozen target baseline. At that point
+`state.json` retains the last successfully pushed identity and stores the new
+values only under `proposed_*` plus `preparing_attempt_number`.
+
+Only after `run_executor_attempt.sh` has pushed the exact remote branch,
+matched it to the returned commit, and verified the dependency history does it
+promote the identity in `state.json`. The promoted fields include
+`work_branch`, `branch_members`, `shared_branch_role`, `work_branch_sha`, the
+dependency tuple, `dependency_history_verified:true`,
+`dependency_pinned_attempt_number`, and `dependency_history_updated_at`.
+For fresh C, the commit must have A's frozen SHA as its only parent and the push
+uses that same SHA as an explicit lease. For continued C, the lease is the old
+C tip while the new commit's sole parent remains A, so C1 is replaced by C2
+instead of producing `A -> C1 -> C2`. A published shared head cannot enter the
+ordinary continue path. Continue mode otherwise requires this complete identity
+and an exact resume SHA. A two-member state can never normalize to a
+dependency-free tail. Missing, legacy, partial, moved, or mismatched metadata
+fails closed and is never reconstructed from current Issue text.
+
+Before C starts, `migrate_shared_dependency_head.sh` moves an ordinary completed
+A from `issue/A` to `issue/A+C` without changing A's commit. A's state first
+adds `branch_migration` with `version:1`, `status:"pending"`, ordered
+`head_iid`/`tail_iid`, `from_branch`, `to_branch`, exact `commit_sha`, frozen
+`target_branch`, old MR IID/URL, random 64-hex `intent_id`, source attempt, and
+`started_at`. The script creates the new ref with an empty lease, closes the
+old MR, creates one replacement MR, and deletes the old ref with an exact A-SHA
+lease. Every external mutation is rediscovered and identity-checked on replay.
+
+Completion changes `branch_migration.status` to `"completed"`, adds the new MR
+IID/URL and `completed_at`, changes A's `work_branch` to `issue/A+C`, sets
+`branch_members:[A,C]` and `shared_branch_role:"head"`, and installs a
+`mr_finalization.status:"verified_open"` binding for the same A commit and
+replacement MR. A terminal identity conflict changes the checkpoint to
+`"failed"` with `failure_reason`/`failed_at`; transient GitLab or transport
+uncertainty leaves it pending and returns a retryable migration deferral. The
+old ordinary MR remains closed in GitLab history, but steady state has exactly
+one open shared MR.
+
+After C's shared push is verified, `state.json.mr_finalization` first has exactly
+`status:"pending"`, `source_attempt_number`, `work_branch`, ordered
+`branch_members`, `shared_branch_role`, `commit_sha`, a 64-lowercase-hex
+`intent_id`, and `target_branch`. The A migration creates the high-entropy
+intent and embeds it in the replacement MR description; C inherits the same
+value from A's verified binding. The intent is ownership evidence, not a secret.
+This checkpoint authorizes only MR finalization for the already-pushed commit;
+it never authorizes acpx, stage, commit, or push. A missing/invalid current-
+attempt marker keeps the same pending claim with
+`mr_finalization_retry:true` and
+`mr_finalization_retry_attempt:<attempt>`. The heartbeat repeats all private
+state, local HEAD, and remote-tip checks before entering the MR-only path.
+An exact marker whose prior observation is `unknown` is identity evidence only:
+it can select the MR IID/URL for Phase 6, but only a fresh GitLab GET can
+authorize `done`. A closed, moved, retargeted, or foreign live identity drains
+the current claim without authorizing success; an unavailable GET retains it.
+History reads paginate until complete. Multiple, truncated, or repeating
+history pages for the frozen source branch produce
+`shared_mr_history_conflict` evidence, which Phase 6 immediately classifies as
+terminal `failed-dispatcher`; it can never authorize success or a replacement
+MR.
+
+Phase 6 promotes a successful shared result to
+`mr_finalization.status:"verified_open"` and adds the exact MR `iid`,
+`web_url`, the unchanged `intent_id`, role-specific `mr_action`, and
+`verified_at`. Before reuse, C
+requires A's durable `done` state to carry this exact binding for the A commit,
+members, branch, head role, frozen target, and latest pinned attempt. The only
+open MR returned by GitLab must have the same URL/IID. Phase 6 performs both an
+exact-IID GET and a source-branch open-list read, while C's release gate repeats
+the same uniqueness and identity checks. They require `state=opened`, current
+token author, the intent marker, both exact `Closes` lines, source/target branch,
+and source SHA. Closed, moved, retargeted, foreign, duplicate, or ambiguous MR history
+fails closed and never authorizes a replacement MR. `mr_result.json` records
+`mr_action:"created"` for A and `mr_action:"reused"` for C. Shared branches
+never enter the automatic-merge mutation path. Ordinary automatic-merge jobs
+retain the exact GET/PUT/GET and independent Phase 6 verification contract;
+neither callback fields nor a marker alone authorize `finish`.
+
+C additionally requires A to be absent from current `pending_subagents`. This
+prevents the per-Issue completion write from releasing C during the Phase-6
+crash window. A in the current campaign is normally also present in
+`completed_iids`; for an earlier-campaign A, the migration helper instead
+requires its private done state, exact ordinary ref SHA, and unique live MR.
 
 If the exact merge is verified but the atomic `finish` update fails,
 Phase 6 keeps the claim in `pending_subagents[iid]` and adds
@@ -96,6 +213,11 @@ claim's `attempt_number`. A missing, invalid, or stale retry-attempt fence is
 ignored and cannot hijack a later attempt. The retry re-verifies the exact MR
 against GitLab before trying only the `finish` transition; it does not rerun
 Issue work or drain the scheduler slot early.
+
+The same retention rule applies when a verified shared MR cannot receive the
+atomic `pr` label: Phase 6 records `mr_label_retry:true` plus the exact attempt,
+then retries only the trusted marker and label transition. It does not rerun
+Issue work or change the shared branch.
 
 ## Executor-Wide Scheduler State
 

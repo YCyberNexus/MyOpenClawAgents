@@ -92,9 +92,13 @@ iso_to_epoch() {
 atomic_write_json() {
   local target="$1"
   local tmp
-  tmp="$(mktemp "${target}.tmp.XXXXXX")"
-  cat >"${tmp}"
-  mv -f "${tmp}" "${target}"
+  (
+    umask 077
+    tmp="$(mktemp "${target}.tmp.XXXXXX")"
+    cat >"${tmp}"
+    chmod 600 "${tmp}"
+    mv -f "${tmp}" "${target}"
+  )
 }
 
 wrapper_log() {
@@ -133,7 +137,7 @@ completion_extract_unique_worker_reply() {
       and (.merge_request_url | type == "string")
       and (.mr_action as $mr_action
         | ($mr_action | type) == "string"
-          and (["created","rotated","none"] | index($mr_action) != null))
+          and (["created","rotated","reused","none"] | index($mr_action) != null))
       and (.wiki_url | type == "string")
       and (.labels_added | type == "array" and all(.[]; type == "string"))
       and (.labels_removed | type == "array" and all(.[]; type == "string"))
@@ -661,6 +665,7 @@ fresh_init_state() {
       model_tiers: null,
       continue_upgrade_threshold: 2,
       next_new_issue_iid: null,
+      dependency_scan_cursor_iid: null,
       tick_seq: 0,
       active_issue_iids: [],
       active_issue_sessions: [],
@@ -888,6 +893,15 @@ phase6_file_mode() {
   fi
 }
 
+phase6_file_owner() {
+  local path="$1" owner
+  if owner="$(stat -f '%u' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${owner}"
+  else
+    stat -c '%u' "${path}" 2>/dev/null
+  fi
+}
+
 phase6_auto_merge_marker_path() {
   local iid="$1" attempt_number="$2" attempt_padded
   [[ "${iid}" =~ ^[1-9][0-9]*$ ]] || return 1
@@ -903,13 +917,21 @@ phase6_auto_merge_marker_path() {
 # JSON or from the marker itself without an exact comparison.
 phase6_read_auto_merge_marker() {
   local state_json="$1" iid="$2" attempt_number="$3"
-  local pending target_branch marker_path marker_bytes marker_mode
+  local pending target_branch dependency_base_sha work_branch marker_path marker_bytes marker_mode
   pending="$(jq -ce --argjson iid "${iid}" \
     '.pending_subagents[($iid|tostring)] // error("missing pending entry")' \
     <<<"${state_json}" 2>/dev/null)" || return 1
   [ "$(jq -r '.auto_merge // false' <<<"${pending}")" = true ] || return 1
   target_branch="$(jq -r '.merge_target_branch // .branch // ""' <<<"${pending}")"
   [ -n "${target_branch}" ] || return 1
+  work_branch="$(jq -r --argjson iid "${iid}" \
+    '.work_branch // ("issue/" + ($iid | tostring))' <<<"${pending}")"
+  git check-ref-format --branch "${work_branch}" >/dev/null 2>&1 || return 1
+  dependency_base_sha="$(jq -r '.dependency_base_sha // ""' <<<"${pending}")"
+  if [ -n "${dependency_base_sha}" ] \
+      && ! [[ "${dependency_base_sha}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+    return 1
+  fi
   marker_path="$(phase6_auto_merge_marker_path "${iid}" "${attempt_number}")" || return 1
   [ -f "${marker_path}" ] && [ ! -L "${marker_path}" ] || return 1
   marker_mode="$(phase6_file_mode "${marker_path}")" || return 1
@@ -922,33 +944,45 @@ phase6_read_auto_merge_marker() {
   jq -ce \
     --argjson issue_iid "${iid}" \
     --argjson attempt_number "${attempt_number}" \
-    --arg source_branch "issue/${iid}" \
-    --arg target_branch "${target_branch}" '
-      if type == "object"
-        and (keys | sort) == ([
-          "attempt_number","auto_merge","iid","issue_iid",
+    --arg source_branch "${work_branch}" \
+    --arg target_branch "${target_branch}" \
+    --arg dependency_base_sha "${dependency_base_sha}" '
+      # Rolling-upgrade compatibility: old version-1 markers predate the
+      # dependency field. They are safe to normalize only for a pending entry
+      # that itself has no dependency; a dependent attempt must always carry
+      # and match the explicit SHA.
+      (if type == "object" and has("dependency_base_sha") then .
+       elif type == "object" and $dependency_base_sha == "" then
+         . + {dependency_base_sha:""}
+       else error("missing dependency identity") end) as $marker
+      | if ($marker | type) == "object"
+        and ($marker | keys | sort) == ([
+          "attempt_number","auto_merge","dependency_base_sha","iid","issue_iid",
           "merge_api_succeeded","merge_attempted","mr_action","observed_state",
           "outcome","reason","sha","source_branch","target_branch",
           "verified","version","web_url"
         ] | sort)
-        and .version == 1
-        and .issue_iid == $issue_iid
-        and .attempt_number == $attempt_number
-        and .auto_merge == true
-        and .source_branch == $source_branch
-        and .target_branch == $target_branch
-        and (.iid | type == "number" and . == floor and . > 0)
-        and (.web_url | type == "string"
+        and $marker.version == 1
+        and $marker.issue_iid == $issue_iid
+        and $marker.attempt_number == $attempt_number
+        and $marker.auto_merge == true
+        and $marker.source_branch == $source_branch
+        and $marker.target_branch == $target_branch
+        and (($marker.dependency_base_sha | ascii_downcase)
+          == ($dependency_base_sha | ascii_downcase))
+        and ($marker.iid | type == "number" and . == floor and . > 0)
+        and ($marker.web_url | type == "string"
           and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*$"))
-        and (.sha | type == "string" and test("^[0-9a-fA-F]{7,64}$"))
-        and (.mr_action == "created" or .mr_action == "rotated")
-        and (.outcome == "merged" or .outcome == "opened" or .outcome == "unknown")
-        and (.verified | type == "boolean")
-        and (.observed_state | type == "string")
-        and (.merge_attempted | type == "boolean")
-        and (.merge_api_succeeded | type == "boolean")
-        and (.reason | type == "string")
-      then . else error("invalid automatic-merge marker") end
+        and ($marker.sha | type == "string" and test("^[0-9a-fA-F]{7,64}$"))
+        and ($marker.mr_action == "created" or $marker.mr_action == "rotated"
+          or $marker.mr_action == "reused")
+        and ($marker.outcome == "merged" or $marker.outcome == "opened" or $marker.outcome == "unknown")
+        and ($marker.verified | type == "boolean")
+        and ($marker.observed_state | type == "string")
+        and ($marker.merge_attempted | type == "boolean")
+        and ($marker.merge_api_succeeded | type == "boolean")
+        and ($marker.reason | type == "string")
+      then $marker else error("invalid automatic-merge marker") end
     ' "${marker_path}" 2>/dev/null
 }
 
@@ -979,13 +1013,474 @@ phase6_reply_from_auto_merge_marker() {
     }'
 }
 
+# Shared branches never auto-merge, but their one MR is a cross-Issue durable
+# identity and therefore needs the same callback-side trust boundary as an
+# automatic merge.  The pending entry supplies the frozen topology/target;
+# only the fixed, private marker may supply the source SHA and MR identity.
+phase6_read_shared_branch_marker() {
+  local state_json="$1" iid="$2" attempt_number="$3"
+  local pending work_branch target_branch dependency_base_sha shared_role
+  local checkpoint intent_id marker_path marker_bytes marker_mode marker_owner
+
+  pending="$(jq -ce --argjson iid "${iid}" '
+    .pending_subagents[($iid|tostring)] // error("missing pending entry")
+  ' <<<"${state_json}" 2>/dev/null)" || return 1
+  if ! pending="$(jq -ce --argjson iid "${iid}" '
+      if type == "object"
+        and .auto_merge == false
+        and (.work_branch | type == "string"
+          and test("^issue/[1-9][0-9]*\\+[1-9][0-9]*$"))
+        and (.branch_members | type == "array" and length == 2)
+        and all(.branch_members[];
+          type == "number" and . == floor and . > 0)
+        and .branch_members[0] != .branch_members[1]
+        and (.branch_members | index($iid) != null)
+        and .work_branch == ("issue/" + (.branch_members[0] | tostring)
+          + "+" + (.branch_members[1] | tostring))
+        and .shared_branch_role ==
+          (if $iid == .branch_members[0] then "head" else "tail" end)
+        and (if .shared_branch_role == "head" then
+          (.dependency_iid // null) == null
+          and (.dependency_branch // null) == null
+          and (.dependency_base_sha // null) == null
+        else
+          .dependency_iid == .branch_members[0]
+          and .dependency_branch == .work_branch
+          and (.dependency_base_sha | type == "string"
+            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+        end)
+      then . else error("invalid shared pending identity") end
+    ' <<<"${pending}" 2>/dev/null)"; then
+    return 1
+  fi
+
+  work_branch="$(jq -r '.work_branch' <<<"${pending}")"
+  target_branch="$(jq -r '.merge_target_branch // .branch // ""' \
+    <<<"${pending}")"
+  [ -n "${target_branch}" ] || return 1
+  dependency_base_sha="$(jq -r '.dependency_base_sha // ""' <<<"${pending}")"
+  shared_role="$(jq -r '.shared_branch_role' <<<"${pending}")"
+  checkpoint="$(phase6_read_shared_mr_checkpoint \
+    "${state_json}" "${iid}" "${attempt_number}")" || return 1
+  intent_id="$(jq -r '.intent_id' <<<"${checkpoint}")"
+  marker_path="$(phase6_auto_merge_marker_path \
+    "${iid}" "${attempt_number}")" || return 1
+  [ -f "${marker_path}" ] && [ ! -L "${marker_path}" ] || return 1
+  marker_mode="$(phase6_file_mode "${marker_path}")" || return 1
+  marker_owner="$(phase6_file_owner "${marker_path}")" || return 1
+  [ "${marker_mode}" = 600 ] && [ "${marker_owner}" = "$(id -u)" ] \
+    || return 1
+  marker_bytes="$(wc -c <"${marker_path}" 2>/dev/null | tr -d '[:space:]')"
+  [[ "${marker_bytes}" =~ ^[0-9]+$ ]] \
+    && [ "${marker_bytes}" -gt 0 ] \
+    && [ "${marker_bytes}" -le 65536 ] || return 1
+
+  jq -ce \
+    --argjson issue_iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
+    --arg source_branch "${work_branch}" \
+    --arg target_branch "${target_branch}" \
+    --arg dependency_base_sha "${dependency_base_sha}" \
+    --arg intent_id "${intent_id}" \
+    --argjson checkpoint "${checkpoint}" \
+    --arg shared_role "${shared_role}" '
+      . as $marker
+      | if ($marker | type) == "object"
+        and ($marker | keys | sort) == ([
+          "attempt_number","auto_merge","dependency_base_sha","iid","issue_iid",
+          "merge_api_succeeded","merge_attempted","mr_action","observed_state",
+          "outcome","reason","sha","source_branch","target_branch",
+          "shared_mr_intent_id","verified","version","web_url"
+        ] | sort)
+        and $marker.version == 1
+        and $marker.issue_iid == $issue_iid
+        and $marker.attempt_number == $attempt_number
+        and $marker.auto_merge == false
+        and $marker.source_branch == $source_branch
+        and $marker.target_branch == $target_branch
+        and (($marker.dependency_base_sha | ascii_downcase)
+          == ($dependency_base_sha | ascii_downcase))
+        and $marker.shared_mr_intent_id == $intent_id
+        and ($marker.iid | type == "number" and . == floor and . > 0)
+        and ($marker.web_url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/"
+            + ($marker.iid | tostring) + "/?$"))
+        and ($marker.sha | type == "string"
+          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+        and (($marker.sha | ascii_downcase)
+          == ($checkpoint.commit_sha | ascii_downcase))
+        and (if $shared_role == "head"
+          then $marker.mr_action == "created"
+          else $marker.mr_action == "reused" end)
+        and ($marker.verified | type == "boolean")
+        and ($marker.outcome | type == "string")
+        and ($marker.observed_state | type == "string")
+        and $marker.merge_attempted == false
+        and $marker.merge_api_succeeded == false
+        and ($marker.reason | type == "string" and length > 0)
+        and (if $checkpoint.status == "verified_open" then
+          $marker.iid == $checkpoint.iid
+          and $marker.web_url == $checkpoint.web_url
+          and $marker.mr_action == $checkpoint.mr_action
+        else
+          $checkpoint.status == "pending"
+        end)
+      then $marker else error("invalid shared-branch MR marker") end
+    ' "${marker_path}" 2>/dev/null
+}
+
+phase6_reply_from_shared_branch_marker() {
+  local state_json="$1" iid="$2" attempt_number="$3"
+  local marker marker_path log_dir
+  marker="$(phase6_read_shared_branch_marker \
+    "${state_json}" "${iid}" "${attempt_number}")" || return 1
+  marker_path="$(phase6_auto_merge_marker_path \
+    "${iid}" "${attempt_number}")" || return 1
+  log_dir="$(dirname "${marker_path}")"
+  jq -nc \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
+    --arg work_branch "$(jq -r '.source_branch' <<<"${marker}")" \
+    --arg local_branch "issue/${iid}-att$(printf '%03d' "${attempt_number}")" \
+    --arg commit_sha "$(jq -r '.sha' <<<"${marker}")" \
+    --arg merge_request_url "$(jq -r '.web_url' <<<"${marker}")" \
+    --arg mr_action "$(jq -r '.mr_action' <<<"${marker}")" \
+    --arg log_dir "${log_dir}" '{
+      iid:$iid,attempt_number:$attempt_number,status:"done",mode_actual:"",
+      work_branch:$work_branch,local_branch:$local_branch,
+      commit_sha:$commit_sha,merge_request_url:$merge_request_url,
+      mr_action:$mr_action,wiki_url:"",labels_added:[],labels_removed:[],
+      summary_posted:false,block_reason:"",log_dir:$log_dir,block_side:"dispatcher"
+    }'
+}
+
+# A shared attempt checkpoints its exact pushed commit before it starts MR
+# creation. Phase 6 may later have atomically promoted that authority to the
+# exact verified-open MR binding before the campaign-state drain is persisted.
+# Both forms authorize replay of the same attempt, but the promoted form must
+# bind every MR identity field as well as the immutable branch/commit intent.
+phase6_read_shared_mr_checkpoint() {
+  local state_json="$1" iid="$2" attempt_number="$3"
+  local pending issue_state_file state_bytes state_mode state_owner
+
+  pending="$(jq -ce --argjson iid "${iid}" '
+    .pending_subagents[($iid|tostring)]
+    | select(type == "object"
+      and .auto_merge == false
+      and (.work_branch | type == "string"
+        and test("^issue/[1-9][0-9]*\\+[1-9][0-9]*$"))
+      and (.branch_members | type == "array" and length == 2)
+      and (.shared_branch_role == "head" or .shared_branch_role == "tail"))
+  ' <<<"${state_json}" 2>/dev/null)" || return 1
+  issue_state_file="${ISSUES_ROOT}/issue-${iid}/state.json"
+  [ -f "${issue_state_file}" ] && [ ! -L "${issue_state_file}" ] || return 1
+  state_mode="$(phase6_file_mode "${issue_state_file}")" || return 1
+  state_owner="$(phase6_file_owner "${issue_state_file}")" || return 1
+  [ "${state_mode}" = 600 ] && [ "${state_owner}" = "$(id -u)" ] \
+    || return 1
+  state_bytes="$(wc -c <"${issue_state_file}" 2>/dev/null | tr -d '[:space:]')"
+  [[ "${state_bytes}" =~ ^[1-9][0-9]*$ ]] \
+    && [ "${state_bytes}" -le 65536 ] || return 1
+
+  jq -ce \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
+    --argjson pending "${pending}" '
+    . as $issue
+    | (.mr_finalization // null) as $checkpoint
+    | ($pending.merge_target_branch // $pending.branch // "") as $target
+    | if type == "object"
+      and .iid == $iid
+      and .work_branch == $pending.work_branch
+      and .branch_members == $pending.branch_members
+      and .shared_branch_role == $pending.shared_branch_role
+      and .dependency_pinned_attempt_number == $attempt_number
+      and .dependency_history_verified == true
+      and (.work_branch_sha | type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+      and ($checkpoint | type == "object")
+      and $checkpoint.source_attempt_number == $attempt_number
+      and $checkpoint.work_branch == $pending.work_branch
+      and $checkpoint.branch_members == $pending.branch_members
+      and $checkpoint.shared_branch_role == $pending.shared_branch_role
+      and ($checkpoint.commit_sha | type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+      and ($checkpoint.intent_id | type == "string"
+        and test("^[0-9a-f]{64}$"))
+      and ((.work_branch_sha | ascii_downcase)
+        == ($checkpoint.commit_sha | ascii_downcase))
+      and $target != ""
+      and $checkpoint.target_branch == $target
+      and (if $checkpoint.status == "pending" then
+        ($checkpoint | keys | sort) == ([
+          "branch_members","commit_sha","intent_id","shared_branch_role",
+          "source_attempt_number","status","target_branch","work_branch"
+        ] | sort)
+      elif $checkpoint.status == "verified_open" then
+        ($checkpoint | keys | sort) == ([
+          "branch_members","commit_sha","iid","intent_id","mr_action",
+          "shared_branch_role","source_attempt_number","status",
+          "target_branch","verified_at","web_url","work_branch"
+        ] | sort)
+        and $issue.status == "done"
+        and $issue.latest_attempt_number == $attempt_number
+        and ($issue.commit_sha | type == "string")
+        and (($issue.commit_sha | ascii_downcase)
+          == ($checkpoint.commit_sha | ascii_downcase))
+        and $issue.merge_request_url == $checkpoint.web_url
+        and ($checkpoint.iid | type == "number"
+          and . == floor and . > 0)
+        and ($checkpoint.web_url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/"
+            + ($checkpoint.iid | tostring) + "/?$"))
+        and (if $pending.shared_branch_role == "head" then
+          $checkpoint.mr_action == "created"
+        else
+          $checkpoint.mr_action == "reused"
+        end)
+        and ($checkpoint.verified_at | type == "string" and length > 0)
+      else false end)
+    then $checkpoint else error("invalid shared MR checkpoint") end
+  ' "${issue_state_file}" 2>/dev/null
+}
+
+phase6_shared_mr_checkpoint_is_pending() {
+  phase6_read_shared_mr_checkpoint "$@" \
+    | jq -e '.status == "pending"' >/dev/null
+}
+
+phase6_shared_mr_recovery_is_authorized() {
+  phase6_read_shared_mr_checkpoint "$@" >/dev/null
+}
+
+# Query one exact shared MR and classify its current identity. The historical
+# private marker selects the IID and immutable intent, but only this fresh API
+# read may prove that the MR is still open on the expected branch/SHA. Requiring
+# the current token principal plus both exact closing lines prevents an
+# unrelated user or same-branch MR from being adopted during recovery.
+shared_mr_query_live_identity() {
+  local mr_iid="$1" mr_url="$2" source_branch="$3" target_branch="$4"
+  local commit_sha="$5" intent_id="$6" head_iid="$7" tail_iid="$8"
+  local verify_timeout glab_cmd user_response live_response open_response
+  local encoded_source command_rc username
+
+  [[ "${mr_iid}" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ "${head_iid}" =~ ^[1-9][0-9]*$ ]] || return 2
+  [[ "${tail_iid}" =~ ^[1-9][0-9]*$ ]] || return 2
+  [ "${head_iid}" != "${tail_iid}" ] || return 2
+  [[ "${commit_sha}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] || return 2
+  [[ "${intent_id}" =~ ^[0-9a-f]{64}$ ]] || return 2
+  [ -n "${mr_url}" ] && [ -n "${source_branch}" ] \
+    && [ -n "${target_branch}" ] || return 2
+
+  verify_timeout="${PHASE6_MR_VERIFY_TIMEOUT_SECONDS:-120}"
+  [[ "${verify_timeout}" =~ ^[1-9][0-9]*$ ]] \
+    && [ "${verify_timeout}" -le 600 ] || return 2
+  command -v timeout >/dev/null 2>&1 || return 2
+  glab_cmd="${GLAB_BIN:-glab}"
+  command -v "${glab_cmd}" >/dev/null 2>&1 || return 2
+
+  set +e
+  user_response="$(timeout --kill-after=5s "${verify_timeout}s" \
+    "${glab_cmd}" api user 2>/dev/null)"
+  command_rc=$?
+  set -e
+  [ "${command_rc}" -eq 0 ] || return 1
+  username="$(jq -er '
+    .username | select(type == "string" and length > 0 and length <= 255)
+  ' <<<"${user_response}" 2>/dev/null)" || return 1
+
+  set +e
+  live_response="$(timeout --kill-after=5s "${verify_timeout}s" \
+    "${glab_cmd}" api \
+      "projects/${PROJECT_URI}/merge_requests/${mr_iid}" 2>/dev/null)"
+  command_rc=$?
+  set -e
+  [ "${command_rc}" -eq 0 ] || return 1
+
+  encoded_source="$(jq -rn --arg value "${source_branch}" '$value | @uri')" \
+    || return 1
+  set +e
+  open_response="$(timeout --kill-after=5s "${verify_timeout}s" \
+    "${glab_cmd}" api \
+      "projects/${PROJECT_URI}/merge_requests?scope=all&state=opened&source_branch=${encoded_source}&per_page=100" \
+      2>/dev/null)"
+  command_rc=$?
+  set -e
+  [ "${command_rc}" -eq 0 ] || return 1
+  open_response="$(jq -ce '
+    if type == "array" and length <= 100
+      and all(.[];
+        type == "object"
+        and (.iid | type == "number" and . == floor and . > 0)
+        and (.web_url | type == "string" and length > 0)
+        and (.source_branch | type == "string" and length > 0)
+        and (.state | type == "string" and length > 0))
+    then . else error("invalid open shared MR list") end
+  ' <<<"${open_response}" 2>/dev/null)" || return 1
+
+  jq -nce \
+    --argjson live "${live_response}" \
+    --argjson open_rows "${open_response}" \
+    --argjson iid "${mr_iid}" \
+    --arg web_url "${mr_url}" \
+    --arg source_branch "${source_branch}" \
+    --arg target_branch "${target_branch}" \
+    --arg sha "${commit_sha}" \
+    --arg intent_marker "<!-- req_executor-shared-mr-intent:${intent_id} -->" \
+    --arg author_username "${username}" \
+    --arg closes_head "Closes #${head_iid}" \
+    --arg closes_tail "Closes #${tail_iid}" '
+      if ($live | type) == "object"
+        and ($live.iid | type == "number" and . == floor and . > 0)
+        and ($live.web_url | type == "string" and length > 0)
+        and ($live.source_branch | type == "string" and length > 0)
+        and ($live.target_branch | type == "string" and length > 0)
+        and ($live.sha | type == "string"
+          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+        and ($live.state | type == "string" and length > 0)
+        and ($live.description | type == "string")
+        and ($live.author.username | type == "string" and length > 0)
+      then {
+        state:$live.state,
+        identity_matches:(
+          $live.iid == $iid
+          and $live.web_url == $web_url
+          and $live.source_branch == $source_branch
+          and $live.target_branch == $target_branch
+          and (($live.sha | ascii_downcase) == ($sha | ascii_downcase))
+          and $live.author.username == $author_username
+          and ($live.description | contains($intent_marker))
+          and (($live.description | split("\n")) | index($closes_head) != null)
+          and (($live.description | split("\n")) | index($closes_tail) != null)
+          and ($open_rows | length) == 1
+          and $open_rows[0].iid == $iid
+          and $open_rows[0].web_url == $web_url
+          and $open_rows[0].source_branch == $source_branch
+          and $open_rows[0].state == "opened"
+        )
+      } else error("invalid live shared MR response") end
+    ' 2>/dev/null
+}
+
+# Return applies=false for ordinary branches.  For a shared branch, success is
+# authorized only by the exact private marker and an exact compact-result match.
+phase6_resolve_shared_branch_mr() {
+  local state_json="$1" reply_json="$2"
+  local iid attempt_number pending work_branch marker live_mr live_state
+  local head_iid tail_iid shared_mr_recovery_pending=false
+  iid="$(jq -r '.iid' <<<"${reply_json}")"
+  attempt_number="$(jq -r '.attempt_number' <<<"${reply_json}")"
+  pending="$(jq -c --argjson iid "${iid}" \
+    '.pending_subagents[($iid|tostring)] // {}' <<<"${state_json}")"
+  work_branch="$(jq -r '.work_branch // ""' <<<"${pending}")"
+  if ! [[ "${work_branch}" =~ ^issue/[1-9][0-9]*\+[1-9][0-9]*$ ]]; then
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:false,reply:$reply,completion_label:"",recovery_pending:false}'
+    return 0
+  fi
+
+  if ! marker="$(phase6_read_shared_branch_marker \
+      "${state_json}" "${iid}" "${attempt_number}")"; then
+    reply_json="$(jq -c '
+      .status = "blocked"
+      | .block_side = "dispatcher"
+      | .block_reason = "shared MR could not be verified: the trusted current-attempt marker is missing, unsafe, pending, or mismatched"
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:true,reply:$reply,completion_label:"",recovery_pending:true}'
+    return 0
+  fi
+
+  if ! jq -e \
+      --arg mr_url "$(jq -r '.web_url' <<<"${marker}")" \
+      --arg source_branch "$(jq -r '.source_branch' <<<"${marker}")" \
+      --arg sha "$(jq -r '.sha' <<<"${marker}")" \
+      --arg mr_action "$(jq -r '.mr_action' <<<"${marker}")" '
+      .merge_request_url == $mr_url
+      and .work_branch == $source_branch
+      and ((.commit_sha | ascii_downcase) == ($sha | ascii_downcase))
+      and .mr_action == $mr_action
+    ' <<<"${reply_json}" >/dev/null 2>&1; then
+    reply_json="$(jq -c '
+      .status = "blocked"
+      | .block_side = "dispatcher"
+      | .block_reason = "shared MR could not be verified: compact result does not match the trusted current-attempt marker"
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:true,reply:$reply,completion_label:"preserve",recovery_pending:false}'
+    return 0
+  fi
+
+  if [ "$(jq -r '.reason' <<<"${marker}")" = \
+      shared_mr_history_conflict ]; then
+    reply_json="$(jq -c '
+      .status = "failed"
+      | .block_side = "dispatcher"
+      | .block_reason = "shared MR source history is ambiguous; replacement is forbidden"
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:true,reply:$reply,completion_label:"",recovery_pending:false}'
+    return 0
+  fi
+
+  head_iid="$(jq -r '.branch_members[0]' <<<"${pending}")"
+  tail_iid="$(jq -r '.branch_members[1]' <<<"${pending}")"
+  if ! live_mr="$(shared_mr_query_live_identity \
+      "$(jq -r '.iid' <<<"${marker}")" \
+      "$(jq -r '.web_url' <<<"${marker}")" \
+      "$(jq -r '.source_branch' <<<"${marker}")" \
+      "$(jq -r '.target_branch' <<<"${marker}")" \
+      "$(jq -r '.sha' <<<"${marker}")" \
+      "$(jq -r '.shared_mr_intent_id' <<<"${marker}")" \
+      "${head_iid}" "${tail_iid}")"; then
+    reply_json="$(jq -c '
+      .status = "blocked"
+      | .block_side = "dispatcher"
+      | .block_reason = "shared MR live verification is temporarily unavailable"
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:true,reply:$reply,completion_label:"",recovery_pending:true}'
+    return 0
+  fi
+  live_state="$(jq -r '.state' <<<"${live_mr}")"
+  if [ "$(jq -r '.identity_matches' <<<"${live_mr}")" != true ]; then
+    reply_json="$(jq -c '
+      .status = "blocked"
+      | .block_side = "dispatcher"
+      | .block_reason = "shared MR live identity, ownership intent, target, or source SHA no longer matches"
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:true,reply:$reply,completion_label:"preserve",recovery_pending:false}'
+    return 0
+  fi
+  if [ "${live_state}" != opened ]; then
+    reply_json="$(jq -c --arg state "${live_state}" '
+      .status = "blocked"
+      | .block_side = "dispatcher"
+      | .block_reason = ("shared MR is no longer open (state=" + $state + ")")
+    ' <<<"${reply_json}")"
+    jq -nc --argjson reply "${reply_json}" \
+      '{applies:true,reply:$reply,completion_label:"preserve",recovery_pending:false}'
+    return 0
+  fi
+
+  reply_json="$(jq -c '
+    .status = "done"
+    | .block_side = "cc"
+    | .block_reason = ""
+  ' <<<"${reply_json}")"
+  jq -nc --argjson reply "${reply_json}" \
+    '{applies:true,reply:$reply,completion_label:"pr",recovery_pending:false}'
+}
+
 # Reconcile an automatic-merge result against the exact live GitLab MR.
 # Inputs: $1=current campaign state, $2=normalized compact reply.
 # Output: {reply:<normalized reply>,completion_label:""|"pr"|"finish"|"preserve"}
 phase6_resolve_auto_merge() {
   local state_json="$1" reply_json="$2"
   local iid attempt_number pending auto_merge reply_status marker
-  local mr_url work_branch commit_sha target_branch mr_iid mr_action
+  local mr_url work_branch commit_sha target_branch dependency_base_sha mr_iid mr_action
   iid="$(jq -r '.iid' <<<"${reply_json}")"
   attempt_number="$(jq -r '.attempt_number' <<<"${reply_json}")"
   pending="$(jq -c --argjson iid "${iid}" '.pending_subagents[($iid|tostring)] // {}' <<<"${state_json}")"
@@ -1017,6 +1512,7 @@ phase6_resolve_auto_merge() {
   work_branch="$(jq -r '.source_branch' <<<"${marker}")"
   commit_sha="$(jq -r '.sha' <<<"${marker}")"
   target_branch="$(jq -r '.target_branch' <<<"${marker}")"
+  dependency_base_sha="$(jq -r '.dependency_base_sha' <<<"${marker}")"
   mr_iid="$(jq -r '.iid' <<<"${marker}")"
   mr_action="$(jq -r '.mr_action' <<<"${marker}")"
 
@@ -1054,6 +1550,7 @@ phase6_resolve_auto_merge() {
         MERGE_MR_MODE=verify AUTO_MERGE=false \
         MR_IID="${mr_iid}" MERGE_REQUEST_URL="${mr_url}" \
         WORK_BRANCH="${work_branch}" MERGE_TARGET_BRANCH="${target_branch}" \
+        DEPENDENCY_BASE_SHA="${dependency_base_sha}" \
         COMMIT_SHA="${commit_sha}" \
         bash "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/merge_mr.sh" 2>/dev/null
     )"
@@ -1066,6 +1563,7 @@ phase6_resolve_auto_merge() {
       --arg web_url "${mr_url}" \
       --arg source_branch "${work_branch}" \
       --arg target_branch "${target_branch}" \
+      --arg dependency_base_sha "${dependency_base_sha}" \
       --arg sha "${commit_sha}" '
         type == "object"
         and .version == 1
@@ -1073,6 +1571,8 @@ phase6_resolve_auto_merge() {
         and .web_url == $web_url
         and .source_branch == $source_branch
         and .target_branch == $target_branch
+        and ((.dependency_base_sha | ascii_downcase)
+          == ($dependency_base_sha | ascii_downcase))
         and ((.sha | ascii_downcase) == ($sha | ascii_downcase))
         and (.verified | type == "boolean")
         and (.outcome == "merged" or .outcome == "opened" or .outcome == "unknown")
@@ -1251,7 +1751,8 @@ phase6_read_prior_issue_state() {
 # campaign-level classification with the same value).
 phase6_write_state_files() {
   local iid="$1" attempt_number="$2" reply="$3" final_status="$4" \
-        prior_issue_state="$5" is_launch_synth="$6" block_side="${7:-}"
+        prior_issue_state="$5" is_launch_synth="$6" block_side="${7:-}" \
+        shared_mr_binding="${8:-null}"
 
   local issue_root="${ISSUES_ROOT}/issue-${iid}"
   local attempt_padded
@@ -1285,16 +1786,21 @@ phase6_write_state_files() {
 
   local new_attempt_state
   new_attempt_state="$(printf '%s' "${prior_attempt_state}" | jq \
+    --argjson iid "${iid}" \
+    --argjson attempt_number "${attempt_number}" \
     --arg now "${now}" \
     --arg final_status "${final_status}" \
     --arg block_side "${block_side}" \
     --arg summary_file "${summary_file}" \
     --argjson summary_exists "${summary_exists}" \
+    --argjson shared_mr_binding "${shared_mr_binding}" \
     --argjson reply "${reply}" \
     '
     . as $prior
     | $prior
     + {
+        iid: $iid,
+        attempt_number: $attempt_number,
         status: $final_status,
         attempt_finished_at: $now,
         commit_sha: (if $reply.commit_sha == "" then null else $reply.commit_sha end),
@@ -1305,6 +1811,8 @@ phase6_write_state_files() {
         block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end),
         block_side: (if ($final_status == "blocked" or $final_status == "failed") and ($block_side != "") then $block_side else null end)
       }
+    | if $shared_mr_binding == null then .
+      else .mr_finalization = $shared_mr_binding end
     ')"
   printf '%s' "${new_attempt_state}" | atomic_write_json "${attempt_state_file}"
 
@@ -1318,6 +1826,7 @@ phase6_write_state_files() {
     --arg block_side "${block_side}" \
     --arg issue_root "${issue_root}" \
     --argjson new_retry_count "${new_retry_count}" \
+    --argjson shared_mr_binding "${shared_mr_binding}" \
     --argjson reply "${reply}" \
     '
     . as $prior
@@ -1337,6 +1846,8 @@ phase6_write_state_files() {
         updated_at: $now,
         block_side: (if ($final_status == "blocked" or $final_status == "failed") and ($block_side != "") then $block_side else ($prior.block_side // null) end)
       }
+    | if $shared_mr_binding == null then .
+      else .mr_finalization = $shared_mr_binding end
     ')"
   printf '%s' "${new_issue_state}" | atomic_write_json "${issue_state_file}"
 
@@ -1445,10 +1956,23 @@ phase6_process() {
   attempt_number="$(printf '%s' "${reply_json}" | jq -r '.attempt_number')"
   reply_status="$(printf '%s' "${reply_json}" | jq -r '.status')"
 
-  local auto_merge_resolution
-  auto_merge_resolution="$(phase6_resolve_auto_merge "${state_json}" "${reply_json}")"
-  reply_json="$(jq -c '.reply' <<<"${auto_merge_resolution}")"
-  completion_label="$(jq -r '.completion_label' <<<"${auto_merge_resolution}")"
+  local shared_mr_resolution auto_merge_resolution
+  local shared_mr_applies=false shared_mr_binding=null
+  local shared_mr_recovery_pending=false
+  shared_mr_resolution="$(phase6_resolve_shared_branch_mr \
+    "${state_json}" "${reply_json}")"
+  if [ "$(jq -r '.applies' <<<"${shared_mr_resolution}")" = true ]; then
+    shared_mr_applies=true
+    reply_json="$(jq -c '.reply' <<<"${shared_mr_resolution}")"
+    completion_label="$(jq -r '.completion_label' <<<"${shared_mr_resolution}")"
+    shared_mr_recovery_pending="$(jq -r '.recovery_pending // false' \
+      <<<"${shared_mr_resolution}")"
+  else
+    auto_merge_resolution="$(phase6_resolve_auto_merge \
+      "${state_json}" "${reply_json}")"
+    reply_json="$(jq -c '.reply' <<<"${auto_merge_resolution}")"
+    completion_label="$(jq -r '.completion_label' <<<"${auto_merge_resolution}")"
+  fi
   if [ -z "${completion_label}" ] \
       && [ "${trusted_completion_override}" = preserve ]; then
     completion_label=preserve
@@ -1462,24 +1986,64 @@ phase6_process() {
   child_session_key="$(printf '%s' "${state_json}" \
     | jq -r --argjson iid "${iid}" '.pending_subagents[($iid|tostring)].child_session_key // ""')"
 
+  # The exact shared commit is already durable, but its MR marker is not ready.
+  # Preserve the claim without touching labels or retry counters; the batch
+  # heartbeat can now finalize only the MR and feed its verified marker back
+  # through this same Phase 6 path.
+  if [ "${shared_mr_applies}" = true ] \
+      && [ "${shared_mr_recovery_pending}" = true ] \
+      && { [ -z "${completion_label}" ] \
+        || [ "${completion_label}" = preserve ]; } \
+      && [ "${reply_status}" = blocked ] \
+      && phase6_shared_mr_recovery_is_authorized \
+        "${state_json}" "${iid}" "${attempt_number}"; then
+    local recovery_state recovery_cleanup recovery_remaining
+    recovery_state="$(jq -c \
+      --argjson iid "${iid}" \
+      --argjson attempt_number "${attempt_number}" '
+      .pending_subagents[($iid|tostring)].mr_finalization_retry = true
+      | .pending_subagents[($iid|tostring)].mr_finalization_retry_attempt = $attempt_number
+    ' <<<"${state_json}")"
+    recovery_cleanup="$(phase6_decide_cleanup \
+      "${recovery_state}" "${iid}" blocked "${child_session_key}")"
+    recovery_remaining="$(jq -r '.pending_subagents | keys | length' \
+      <<<"${recovery_state}")"
+    jq -nc \
+      --argjson final_reply "${reply_json}" \
+      --argjson cleanup "${recovery_cleanup}" \
+      --argjson remaining_pending_count "${recovery_remaining}" \
+      --argjson updated_state "${recovery_state}" '{
+        final_status:"blocked",
+        final_reply:$final_reply,
+        cleanup:$cleanup,
+        remaining_pending_count:$remaining_pending_count,
+        updated_state:$updated_state,
+        mr_recovery_pending:true
+      }'
+    return 0
+  fi
+
   # Sync labels for the preliminary status. On sync failure:
   #   - `failed`  → keep `failed` (retry-budget exhaustion is sticky).
   #   - `timeout` → keep `timeout` (terminal, no retry; only append diagnostic
   #                 to block_reason and retry the sync best-effort once).
   #   - else      → demote to `blocked` (the historical safety net for
   #                 transient GitLab API failures on done/blocked outcomes).
-  local label_err="" label_retry_pending=false
+  local label_err="" label_retry_pending=false label_retry_kind=""
   local final_status="${reply_status}"
   local _err=""
   if ! _err="$(phase6_sync_labels "${iid}" "${final_status}" "${block_side}" "${completion_label}" 2>&1 >/dev/null)"; then
     label_err="${_err}"
-    if [ "${completion_label}" = finish ]; then
+    if [ "${completion_label}" = finish ] \
+        || { [ "${shared_mr_applies}" = true ] \
+          && [ "${completion_label}" = pr ]; }; then
       final_status="blocked"
       block_side="dispatcher"
+      label_retry_kind="${completion_label}"
       completion_label=preserve
       label_retry_pending=true
       reply_json="$(printf '%s' "${reply_json}" | jq -c \
-        --arg le "phase6 finish label sync failed after verified merge: ${label_err}" '
+        --arg le "phase6 completion label sync failed after verified MR state: ${label_err}" '
         .status = "blocked"
         | .block_side = "dispatcher"
         | (.block_reason = (if .block_reason == "" then $le else (.block_reason + "; " + $le) end))
@@ -1510,7 +2074,7 @@ phase6_process() {
     fi
   fi
 
-  # A verified merge whose atomic `finish` transition failed is not terminal.
+  # A verified MR whose atomic `pr`/`finish` transition failed is not terminal.
   # Keep the exact pending claim and durable worker/MR markers intact so the
   # heartbeat's result/completion reconciliation re-enters Phase 6 and retries
   # only the live verification + label transition; it must never rerun issue
@@ -1519,10 +2083,16 @@ phase6_process() {
     local retry_cleanup retry_remaining retry_state
     retry_state="$(jq -c \
       --argjson iid "${iid}" \
-      --argjson attempt_number "${attempt_number}" '
+      --argjson attempt_number "${attempt_number}" \
+      --arg retry_kind "${label_retry_kind}" '
       if .pending_subagents[($iid|tostring)] != null then
-        .pending_subagents[($iid|tostring)].finish_label_retry = true
-        | .pending_subagents[($iid|tostring)].finish_label_retry_attempt = $attempt_number
+        if $retry_kind == "finish" then
+          .pending_subagents[($iid|tostring)].finish_label_retry = true
+          | .pending_subagents[($iid|tostring)].finish_label_retry_attempt = $attempt_number
+        else
+          .pending_subagents[($iid|tostring)].mr_label_retry = true
+          | .pending_subagents[($iid|tostring)].mr_label_retry_attempt = $attempt_number
+        end
       else . end
     ' <<<"${state_json}")"
     retry_cleanup="$(phase6_decide_cleanup \
@@ -1548,9 +2118,44 @@ phase6_process() {
   # Write per-issue state files (computes new retry_count).
   local prior_issue_state
   prior_issue_state="$(phase6_read_prior_issue_state "${iid}")"
+  if [ "${shared_mr_applies}" = true ] \
+      && [ "${final_status}" = done ]; then
+    local shared_marker shared_pending shared_verified_at
+    shared_marker="$(phase6_read_shared_branch_marker \
+      "${state_json}" "${iid}" "${attempt_number}")" || return 1
+    shared_pending="$(jq -c --argjson iid "${iid}" \
+      '.pending_subagents[($iid|tostring)]' <<<"${state_json}")"
+    shared_verified_at="$(utc_now)"
+    shared_mr_binding="$(jq -nc \
+      --argjson attempt_number "${attempt_number}" \
+      --arg work_branch "$(jq -r '.work_branch' <<<"${shared_pending}")" \
+      --argjson branch_members "$(jq -c '.branch_members' <<<"${shared_pending}")" \
+      --arg shared_branch_role "$(jq -r '.shared_branch_role' <<<"${shared_pending}")" \
+      --arg commit_sha "$(jq -r '.sha' <<<"${shared_marker}")" \
+      --arg intent_id "$(jq -r '.shared_mr_intent_id' <<<"${shared_marker}")" \
+      --arg target_branch "$(jq -r '.target_branch' <<<"${shared_marker}")" \
+      --argjson iid "$(jq -r '.iid' <<<"${shared_marker}")" \
+      --arg web_url "$(jq -r '.web_url' <<<"${shared_marker}")" \
+      --arg mr_action "$(jq -r '.mr_action' <<<"${shared_marker}")" \
+      --arg verified_at "${shared_verified_at}" '{
+        status:"verified_open",
+        source_attempt_number:$attempt_number,
+        work_branch:$work_branch,
+        branch_members:$branch_members,
+        shared_branch_role:$shared_branch_role,
+        commit_sha:$commit_sha,
+        intent_id:$intent_id,
+        target_branch:$target_branch,
+        iid:$iid,
+        web_url:$web_url,
+        mr_action:$mr_action,
+        verified_at:$verified_at
+      }')"
+  fi
   local new_retry_count blocked_retry_limit
   new_retry_count="$(phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
-    "${final_status}" "${prior_issue_state}" "${is_launch_synth}" "${block_side}")"
+    "${final_status}" "${prior_issue_state}" "${is_launch_synth}" \
+    "${block_side}" "${shared_mr_binding}")"
 
   # Promote blocked → failed if retry_count > blocked_retry_limit.
   blocked_retry_limit="$(printf '%s' "${state_json}" | jq -r '.blocked_retry_limit // 0')"
@@ -1560,7 +2165,8 @@ phase6_process() {
     phase6_sync_labels "${iid}" failed "${block_side}" >/dev/null 2>&1 || true
     # rewrite issue state with final_status=failed (retry_count already incremented)
     phase6_write_state_files "${iid}" "${attempt_number}" "${reply_json}" \
-      "${final_status}" "${prior_issue_state}" "${is_launch_synth}" "${block_side}" >/dev/null
+      "${final_status}" "${prior_issue_state}" "${is_launch_synth}" \
+      "${block_side}" "${shared_mr_binding}" >/dev/null
   fi
 
   # Apply campaign-state classification + drain.

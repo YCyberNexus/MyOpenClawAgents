@@ -15,6 +15,7 @@ REPO_PARENT="${REPO_PARENT_BASE}/group"
 REPO_PATH="${REPO_PARENT}/repo"
 SCRIPTS="${TEST_ROOT}/scripts"
 TEST_CONFIG_DIR="${TEST_ROOT}/config"
+STALE_CONFIG_DIR="${TEST_ROOT}/stale-config"
 SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
 ACTION_ROOT="${SCHEDULER_ROOT}/launch_actions"
 ACTION_ARCHIVE_ROOT="${SCHEDULER_ROOT}/launch_action_archive"
@@ -28,6 +29,7 @@ mkdir -p \
   "${REPO_PATH}/.req_executor/_dispatcher/log" \
   "${REPO_PATH}/.req_executor/issues/issue-42" \
   "${TEST_CONFIG_DIR}" \
+  "${STALE_CONFIG_DIR}" \
   "${ACTION_ROOT}" \
   "${ACTION_ARCHIVE_ROOT}" \
   "${ACTION_LOCK_ROOT}" \
@@ -79,6 +81,13 @@ REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true
 REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS=gitlab.local
 EOF
 chmod 600 "${TEST_CONFIG_DIR}/campaign_defaults.local.env"
+cp "${TEST_CONFIG_DIR}/gitlab.env" \
+  "${TEST_CONFIG_DIR}/campaign_defaults.env" \
+  "${STALE_CONFIG_DIR}/"
+sed "s#^REPO_PARENT_PATH=.*#REPO_PARENT_PATH=${TEST_ROOT}/stale-config-repos#" \
+  "${TEST_CONFIG_DIR}/campaign_defaults.local.env" \
+  >"${STALE_CONFIG_DIR}/campaign_defaults.local.env"
+chmod 600 "${STALE_CONFIG_DIR}/campaign_defaults.local.env"
 
 cat >"${SCRIPTS}/reconcile.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -807,6 +816,30 @@ run_ingest_self_routed "${SELF_EVENT_611}"
 jq -e '.callback_status == "handled" and .terminal_status == "done"' \
   <<<"${RUN_OUTPUT}" >/dev/null \
   || fail "self-routed 6.11 archive completion did not reach Phase 6"
+
+# Gateway-wide clone defaults are trusted deployment state, not an explicit
+# callback route.  Without PROJECT/GROUP, the process-level parent must win
+# over a stale local-config parent exactly as it does during intake and ticks.
+reset_state
+set +e
+AMBIENT_REPO_OUTPUT="$(printf '%s' "${SELF_EVENT_611}" | \
+  env -u PROJECT -u GROUP -u PROJECT_FULL -u PROJECT_URI -u REPO_PATH \
+    -u GITLAB_HOST -u GITLAB_API_PROTOCOL -u GITLAB_ADDRESS -u GITLAB_TOKEN \
+    -u EXECUTOR_SCHEDULER_ROOT -u REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE \
+    -u REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS \
+    REPO_PARENT_PATH="${REPO_PARENT_BASE}" \
+    REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
+    REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS=gitlab.local \
+    CONFIG_DIR="${STALE_CONFIG_DIR}" RECONCILE_CALLS="${RECONCILE_CALLS}" \
+    bash "${SCRIPTS}/ingest_subagent_completion.sh" \
+    2>"${TEST_ROOT}/ambient-repo-route.err")"
+AMBIENT_REPO_RC=$?
+set -e
+[ "${AMBIENT_REPO_RC}" -eq 0 ] \
+  || fail "process clone-root override did not outrank stale local config"
+jq -e '.callback_status == "handled" and .iid == 42' \
+  <<<"${AMBIENT_REPO_OUTPUT}" >/dev/null \
+  || fail "process clone-root override did not reach Phase 6"
 
 # A partial ambient legacy tuple cannot block an authoritative durable match.
 # PROJECT is checked against the action slug, the missing group/token come from
