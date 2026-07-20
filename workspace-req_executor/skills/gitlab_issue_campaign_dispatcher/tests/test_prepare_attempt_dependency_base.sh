@@ -9,6 +9,15 @@ fail() {
   exit 1
 }
 
+file_mode() {
+  local mode
+  if mode="$(stat -f '%Lp' "$1" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "$1"
+  fi
+}
+
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-dependency-base.XXXXXX")"
 FIXTURE_SKILL="${TEST_ROOT}/skill"
 FIXTURE_SCRIPTS="${FIXTURE_SKILL}/scripts"
@@ -147,7 +156,7 @@ PREP_OUTPUT="$(
 
 [ "$(sed -n '1p' <<<"${PREP_OUTPUT}")" = fresh ] \
   || fail "fresh dependency attempt returned the wrong mode"
-[ "$(sed -n '2p' <<<"${PREP_OUTPUT}")" = issue/2-att001 ] \
+[ "$(sed -n '2p' <<<"${PREP_OUTPUT}")" = issue/2 ] \
   || fail "dependency attempt returned the wrong local branch"
 
 WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-2"
@@ -174,6 +183,44 @@ WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-2"
   || fail "dependency checkout/index hook ran during worktree materialization"
 [ -z "$(git -C "${WORKTREE_DIR}" diff --name-only --diff-filter=D)" ] \
   || fail "sanitized dependency-only control paths became forbidden deletions"
+
+# A later run of the same Issue reuses both the local branch and the fixed log
+# directory. Durable evidence is replaced with a fresh private inode, even if
+# the old path is not writable or is a hard link; no attempt archive or
+# numbered local branch is created.
+ISSUE_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-2/log"
+printf '{"attempt_number":1}\n' >"${ISSUE_LOG_DIR}/acpx_terminal.json"
+chmod 000 "${ISSUE_LOG_DIR}/acpx_terminal.json"
+HARDLINK_TARGET="${TEST_ROOT}/worker-result-hardlink-target.json"
+printf '{"sentinel":"must-survive"}\n' >"${HARDLINK_TARGET}"
+ln "${HARDLINK_TARGET}" "${ISSUE_LOG_DIR}/worker_result.json"
+printf '{"attempt_number":1}\n' >"${ISSUE_LOG_DIR}/mr_result.json"
+chmod 600 "${ISSUE_LOG_DIR}/mr_result.json"
+PREP_REUSE_OUTPUT="$(
+  CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
+  GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
+  GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
+  ISSUE_IID=2 ATTEMPT_NUMBER=2 ISSUE_MODE=fresh \
+  BRANCH=issue/9 CONFIG_BRANCH=main DEPENDENCY_BASE_SHA="${PINNED_SHA}" \
+    bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
+)" || fail "prepare_attempt rejected fixed issue-local reuse"
+[ "$(sed -n '2p' <<<"${PREP_REUSE_OUTPUT}")" = issue/2 ] \
+  || fail "later run did not reuse the fixed issue-local branch"
+for evidence_name in acpx_terminal.json worker_result.json mr_result.json; do
+  [ ! -s "${ISSUE_LOG_DIR}/${evidence_name}" ] \
+    || fail "later run retained stale ${evidence_name} content"
+  [ "$(file_mode "${ISSUE_LOG_DIR}/${evidence_name}")" = 600 ] \
+    || fail "later run did not make ${evidence_name} private"
+done
+[ "$(cat "${HARDLINK_TARGET}")" = '{"sentinel":"must-survive"}' ] \
+  || fail "later run truncated the hard-linked evidence target"
+[ -z "$(git -C "${REPO_PATH}" for-each-ref \
+  --format='%(refname)' 'refs/heads/issue/2-att*')" ] \
+  || fail "prepare_attempt created a numbered attempt branch"
+[ ! -e "${REPO_PATH}/.req_executor/.worktrees/.preserved-attempts" ] \
+  || fail "prepare_attempt created a per-attempt runtime archive"
+[ ! -e "${REPO_PATH}/.req_executor/.worktrees/.preserved-log-reruns" ] \
+  || fail "prepare_attempt created a per-attempt log archive"
 
 set +e
 CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
@@ -257,15 +304,12 @@ RECOVERED_RUNTIME_WORKTREE="${REPO_PATH}/.req_executor/.worktrees/issue-4"
 [ "$(cat "${OUTSIDE_RUNTIME}/sentinel")" = 'runtime-sentinel' ] \
   || fail "safe runtime recovery modified the outside symlink target"
 
-# The dispatcher can select an older verified local attempt while a newer,
-# unpushed attempt ref also exists. Preparation must use the exact pinned SHA,
-# not independently reselect the numerically latest local branch.
+# A fixed local issue branch may be the only verified continue source when the
+# canonical remote branch is unavailable. Preparation must use the pinned SHA.
 VERIFIED_CONTINUE_SHA="$(git -C "${REPO_PATH}" rev-parse refs/remotes/origin/main)"
 UNVERIFIED_CONTINUE_SHA="${PINNED_SHA}"
-git -C "${REPO_PATH}" update-ref refs/heads/issue/6-att001 \
+git -C "${REPO_PATH}" update-ref refs/heads/issue/6 \
   "${VERIFIED_CONTINUE_SHA}"
-git -C "${REPO_PATH}" update-ref refs/heads/issue/6-att002 \
-  "${UNVERIFIED_CONTINUE_SHA}"
 PINNED_CONTINUE_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
@@ -273,7 +317,7 @@ PINNED_CONTINUE_OUTPUT="$(
   ISSUE_IID=6 ATTEMPT_NUMBER=3 ISSUE_MODE=continue \
   BRANCH=main CONFIG_BRANCH=main CONTINUE_BASE_REQUIRED=true \
   CONTINUE_BASE_SHA="${VERIFIED_CONTINUE_SHA}" \
-  CONTINUE_BASE_REF=refs/heads/issue/6-att001 \
+  CONTINUE_BASE_REF=refs/heads/issue/6 \
     bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
 )" || fail "exact verified local continue base was rejected"
 [ "$(sed -n '1p' <<<"${PINNED_CONTINUE_OUTPUT}")" = continue ] \
@@ -281,11 +325,11 @@ PINNED_CONTINUE_OUTPUT="$(
 PINNED_CONTINUE_WORKTREE="${REPO_PATH}/.req_executor/.worktrees/issue-6"
 [ "$(git -C "${PINNED_CONTINUE_WORKTREE}" rev-parse HEAD)" = \
     "${VERIFIED_CONTINUE_SHA}" ] \
-  || fail "prepare reselected a newer unverified local attempt branch"
+  || fail "prepare did not use the fixed verified local issue branch"
 
 # A shared tail continue must resume C's published tree without appending a
 # second C commit. Preparation leaves the C tree in place but mixed-resets the
-# local attempt branch/index to frozen A, so the next commit replaces C1 as A's
+# local issue branch/index to frozen A, so the next commit replaces C1 as A's
 # single direct child while the independent remote lease can still name C1.
 git -C "${AUTHOR_REPO}" switch -q -C issue/9+13 "${PINNED_SHA}"
 printf 'shared-c1\n' >"${AUTHOR_REPO}/shared-c.txt"

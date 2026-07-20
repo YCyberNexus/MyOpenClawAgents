@@ -12,7 +12,7 @@ fail() {
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-shared-branch.XXXXXX")"
 
 # A dependency chain A -> C publishes both issues through one canonical work
-# branch. The physical worktree and its local attempt branch must nevertheless
+# branch. The physical worktree and fixed local issue branch must nevertheless
 # remain owned by the currently executing IID C.
 REPO_PARENT="${TEST_ROOT}/repos"
 mkdir -p "${REPO_PARENT}"
@@ -23,13 +23,13 @@ paths_out="$(
     GITLAB_TOKEN=test-token REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
     REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS='local-gitlab.invalid:9443' \
     bash -c 'source "$1"; printf "%s\n%s\n%s\n" \
-      "${WORK_BRANCH}" "${LOCAL_ATTEMPT_BRANCH}" "${WORKTREE_DIR}"' \
+      "${WORK_BRANCH}" "${LOCAL_ISSUE_BRANCH}" "${WORKTREE_DIR}"' \
       _ "${SKILL_DIR}/scripts/env_paths.sh"
 )"
 [ "$(printf '%s\n' "${paths_out}" | sed -n '1p')" = 'issue/41+43' ] \
   || fail "env_paths did not preserve the shared canonical work branch"
-[ "$(printf '%s\n' "${paths_out}" | sed -n '2p')" = 'issue/43-att007' ] \
-  || fail "the local attempt branch was not isolated by the current IID"
+[ "$(printf '%s\n' "${paths_out}" | sed -n '2p')" = 'issue/43' ] \
+  || fail "the local issue branch was not owned by the current IID"
 case "$(printf '%s\n' "${paths_out}" | sed -n '3p')" in
   */.req_executor/.worktrees/issue-43) ;;
   *) fail "the worktree path was not isolated by the current IID" ;;
@@ -391,7 +391,7 @@ push_out="$(
   PATH="${PUSH_BIN}:${PATH}" GIT_LOG="${GIT_LOG}" \
     PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
     ATTEMPT_NUMBER_PADDED=007 ISSUE_TITLE='shared tail' \
-    WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ATTEMPT_BRANCH='issue/43-att007' \
+    WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
     WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${EXPECTED_LEASE_SHA}" \
     EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" \
     bash "${PUSH_SCRIPTS}/commit_and_push.sh"
@@ -406,7 +406,7 @@ grep -Fq \
   '4444444444444444444444444444444444444444:refs/heads/issue/41+43' \
   "${GIT_LOG}" \
   || fail "push did not publish the immutable captured commit to the canonical ref"
-if grep -Fq 'issue/43-att007:issue/41+43' "${GIT_LOG}"; then
+if grep -Fq 'issue/43:issue/41+43' "${GIT_LOG}"; then
   fail "push still trusted the mutable IID-local attempt ref"
 fi
 grep -Fq -- '-c core.hooksPath=/dev/null -c commit.gpgSign=false commit' \
@@ -425,7 +425,7 @@ ambiguous_push_out="$({
     REMOTE_AFTER_FAILED_PUSH_SHA=4444444444444444444444444444444444444444 \
     PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=8 \
     ATTEMPT_NUMBER_PADDED=008 ISSUE_TITLE='ambiguous accepted push' \
-    WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ATTEMPT_BRANCH='issue/43-att008' \
+    WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
     WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${EXPECTED_LEASE_SHA}" \
     EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" \
     bash "${PUSH_SCRIPTS}/commit_and_push.sh"
@@ -483,7 +483,7 @@ set +e
 MERGE_NETWORK_LOG="${MERGE_NETWORK_LOG}" \
   PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=1 \
   ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='reject merge parent' \
-  WORKTREE_DIR="${MERGE_REPO}" LOCAL_ATTEMPT_BRANCH='issue/43-att001' \
+  WORKTREE_DIR="${MERGE_REPO}" LOCAL_ISSUE_BRANCH='issue/43' \
   WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${MERGE_EXPECTED_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${MERGE_EXPECTED_SHA}" \
   bash "${MERGE_SCRIPTS}/commit_and_push.sh" >/dev/null 2>&1
@@ -532,13 +532,13 @@ git -C "${TOPOLOGY_REPO}" add target.txt
 git -C "${TOPOLOGY_REPO}" commit -q -m target
 TOPOLOGY_BASE_SHA="$(git -C "${TOPOLOGY_REPO}" rev-parse HEAD)"
 
-git -C "${TOPOLOGY_REPO}" switch -q -c issue/41-att001
+git -C "${TOPOLOGY_REPO}" switch -q -c issue/41
 printf 'A\n' >"${TOPOLOGY_REPO}/a.txt"
 git -C "${TOPOLOGY_REPO}" add a.txt
 TOPOLOGY_A_SHA="$(
   PROJECT=repo GROUP=group ISSUE_IID=41 ATTEMPT_NUMBER=1 \
   ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='A' \
-  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ATTEMPT_BRANCH='issue/41-att001' \
+  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/41' \
   WORK_BRANCH='issue/41' \
     bash "${TOPOLOGY_SCRIPTS}/commit_and_push.sh" | tail -n 1
 )"
@@ -564,13 +564,13 @@ if git --git-dir="${TOPOLOGY_ORIGIN}" show-ref --verify --quiet \
   fail "late migration retained the obsolete issue/A branch"
 fi
 
-git -C "${TOPOLOGY_REPO}" switch -q -c issue/43-att001 "${TOPOLOGY_A_SHA}"
+git -C "${TOPOLOGY_REPO}" switch -q -c issue/43 "${TOPOLOGY_A_SHA}"
 printf 'C\n' >"${TOPOLOGY_REPO}/c.txt"
 git -C "${TOPOLOGY_REPO}" add c.txt
 TOPOLOGY_C_SHA="$(
   PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=1 \
   ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='C' \
-  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ATTEMPT_BRANCH='issue/43-att001' \
+  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/43' \
   WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${TOPOLOGY_A_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${TOPOLOGY_A_SHA}" \
     bash "${TOPOLOGY_SCRIPTS}/commit_and_push.sh" | tail -n 1
@@ -580,26 +580,27 @@ TOPOLOGY_C_SHA="$(
 # tip, while the new commit parent remains frozen A; a mixed reset preserves the
 # published C tree as a worktree diff and folds the next edit into one C commit.
 TOPOLOGY_C1_SHA="${TOPOLOGY_C_SHA}"
-git -C "${TOPOLOGY_REPO}" switch -q -c issue/43-att002 "${TOPOLOGY_C1_SHA}"
+[ "$(git -C "${TOPOLOGY_REPO}" branch --show-current)" = issue/43 ] \
+  || fail "shared-tail worktree left its fixed issue-local branch"
 printf 'C-v2\n' >"${TOPOLOGY_REPO}/c.txt"
 git -C "${TOPOLOGY_REPO}" reset -q --mixed "${TOPOLOGY_A_SHA}"
 git -C "${TOPOLOGY_REPO}" add c.txt
 TOPOLOGY_C_SHA="$(
   PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=2 \
   ATTEMPT_NUMBER_PADDED=002 ISSUE_TITLE='C continue' \
-  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ATTEMPT_BRANCH='issue/43-att002' \
+  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/43' \
   WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${TOPOLOGY_C1_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${TOPOLOGY_A_SHA}" \
     bash "${TOPOLOGY_SCRIPTS}/commit_and_push.sh" | tail -n 1
 )"
 
-git -C "${TOPOLOGY_REPO}" switch -q -c issue/42-att001 "${TOPOLOGY_BASE_SHA}"
+git -C "${TOPOLOGY_REPO}" switch -q -c issue/42 "${TOPOLOGY_BASE_SHA}"
 printf 'B\n' >"${TOPOLOGY_REPO}/b.txt"
 git -C "${TOPOLOGY_REPO}" add b.txt
 TOPOLOGY_B_SHA="$(
   PROJECT=repo GROUP=group ISSUE_IID=42 ATTEMPT_NUMBER=1 \
   ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='B' \
-  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ATTEMPT_BRANCH='issue/42-att001' \
+  WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/42' \
   WORK_BRANCH='issue/42' \
     bash "${TOPOLOGY_SCRIPTS}/commit_and_push.sh" | tail -n 1
 )"
@@ -633,4 +634,4 @@ fi
     "${TOPOLOGY_B_SHA}" ] \
   || fail "origin independent B branch was not preserved"
 
-echo "ok shared dependency branches preserve IID-local attempts, reuse one MR, and push with an explicit SHA lease"
+echo "ok shared dependency branches reuse fixed IID-local branches, one MR, and an explicit SHA lease"

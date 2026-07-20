@@ -7,8 +7,8 @@
 # Why this exists: the executor's env_paths.sh used to auto-increment the
 # attempt number every time it was sourced. If the executor session got
 # cold-restarted or env_paths was sourced multiple times in one logical
-# resolution, you ended up with multiple attempt numbers and stale
-# attempt-scoped paths because each source() advanced attempt state. The
+# resolution, you ended up with multiple attempt identities because each
+# source() advanced attempt state. The
 # fix is to make attempt allocation a SINGLE event owned by the dispatcher:
 # dispatcher allocates once before spawning, executor reads the allocated number from the
 # trigger and never derives its own.

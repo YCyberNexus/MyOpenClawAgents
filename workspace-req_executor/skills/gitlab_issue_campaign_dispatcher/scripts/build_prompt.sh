@@ -187,7 +187,7 @@ EOF
 - Repository cwd:             ${WORKTREE_DIR} (shared per-issue linked git worktree)
 - Output directory:           ${OUTPUT_DIR} (for standalone deliverables that need to be preserved separately — force-added at commit time. Other source-code changes in the repo commit normally and do NOT need to go under this directory)
 ${SHARED_CONFIG_BLOCK}
-- Working branch (local):     IID-local attempt branch in this worktree, will be pushed to origin/${WORK_BRANCH}
+- Working branch (local):     fixed IID-local branch in this worktree, will be pushed to origin/${WORK_BRANCH}
 - Processing base branch:       ${BRANCH}
 - Merge-request target branch:  ${MERGE_TARGET_BRANCH}
 - Completion policy:            $([ "${AUTO_MERGE}" = true ] && echo "merge automatically after exact GitLab verification" || echo "leave the merge request open for review")

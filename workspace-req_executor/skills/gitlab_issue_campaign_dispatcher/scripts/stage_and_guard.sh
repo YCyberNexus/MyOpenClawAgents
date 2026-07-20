@@ -15,7 +15,7 @@
 # Required env vars:
 #   WORKTREE_DIR    shared per-issue worktree cwd (set by env_paths.sh)
 #   OUTPUT_DIR      current issue's primary result directory inside the worktree (force-added)
-#   LOG_DIR         current-attempt log dir INSIDE the worktree;
+#   LOG_DIR         fixed issue-local log dir INSIDE the worktree;
 #                   evidence files (git_status.txt / git_diff.patch) are written here
 #   ISSUE_IID       current issue IID
 #
@@ -66,13 +66,9 @@ fi
 
 git add -A
 
-# In continue mode the worktree is checked out from origin/${WORK_BRANCH}
-# which already has prior attempts' `log/attempt-NNN/prompt.txt` +
-# `claude_result.txt` committed. `.git/info/exclude` only blocks untracked
-# files, so any modification a Claude Code run accidentally makes under
-# `.req_executor/issue-<iid>/log/` would be picked up by `git add -A`
-# above and silently rewrite prior attempts' reviewer evidence. Unstage
-# anything under that subtree before any output force-add below.
+# `.git/info/exclude` only blocks untracked files, so a repository that already
+# tracks paths under the issue-local log directory could still stage them via
+# `git add -A`. Unstage the whole log subtree before force-adding output.
 unstage_log_paths
 
 staged_deleted_paths="$(git diff --cached --name-only --diff-filter=D \

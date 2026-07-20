@@ -497,7 +497,7 @@ persist_shared_mr_pending_checkpoint() {
   mv "${state_tmp}" "${ISSUE_STATE_FILE}"
 }
 
-# Capture every fixed step in attempt-local evidence. Each post-acpx operation
+# Capture every fixed step in the issue-local log. Each post-acpx operation
 # has its own hard cap so a wedged Git/glab call cannot indefinitely retain the
 # native subagent slot. The heartbeat has a larger whole-finalization watchdog
 # as a second line of defense.
@@ -582,7 +582,7 @@ persist_and_print_result() {
     --arg status "${FINAL_STATUS}" \
     --arg mode_actual "${ISSUE_MODE}" \
     --arg work_branch "${WORK_BRANCH}" \
-    --arg local_branch "${LOCAL_ATTEMPT_BRANCH}" \
+    --arg local_branch "${LOCAL_ISSUE_BRANCH}" \
     --arg commit_sha "${COMMIT_SHA}" \
     --arg merge_request_url "${MERGE_REQUEST_URL}" \
     --arg mr_action "${MR_ACTION}" \

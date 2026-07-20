@@ -30,7 +30,7 @@ esac
 EOF
 chmod +x "${FAKE_BIN}/glab"
 
-LOG_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-7/.req_executor/issue-7/log/attempt-001"
+LOG_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-7/.req_executor/issue-7/log"
 mkdir -p "${LOG_DIR}"
 printf 'prompt body\n' >"${LOG_DIR}/prompt.txt"
 printf 'claude result\n' >"${LOG_DIR}/claude_result.txt"

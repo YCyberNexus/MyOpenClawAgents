@@ -83,9 +83,22 @@ chmod +x "${FIXTURE_SCRIPTS}/env_paths.sh" "${FAKE_BIN}/glab"
 
 run_create() {
   local scenario="$1" auto_merge="$2"
-  local case_root="${TEST_ROOT}/${scenario}-${auto_merge}"
+  local case_name="${3:-${scenario}-${auto_merge}}" seed_mode="${4:-}"
+  local case_root="${TEST_ROOT}/${case_name}"
   local worktree="${case_root}/worktree" log_dir="${case_root}/log"
   mkdir -p "${worktree}" "${log_dir}"
+  case "${seed_mode}" in
+    readonly)
+      printf '{"stale":true}\n' >"${log_dir}/mr_result.json"
+      chmod 000 "${log_dir}/mr_result.json"
+      ;;
+    hardlink)
+      printf '{"sentinel":"must-survive"}\n' >"${case_root}/hardlink-target.json"
+      ln "${case_root}/hardlink-target.json" "${log_dir}/mr_result.json"
+      ;;
+    '') ;;
+    *) fail "unknown seed mode: ${seed_mode}" ;;
+  esac
   PATH="${FAKE_BIN}:${PATH}" \
   GLAB_SCENARIO="${scenario}" GLAB_LOG="${case_root}/glab.log" \
   LIST_COUNT_FILE="${case_root}/list.count" API_COUNT_FILE="${case_root}/api.count" \
@@ -126,6 +139,22 @@ opened_out="$(run_create opened false)" || fail "ordinary MR creation failed"
 if grep -Fq -- '--method PUT' "${TEST_ROOT}/opened-false/glab.log"; then
   fail "AUTO_MERGE=false issued a merge mutation"
 fi
+
+readonly_out="$(run_create opened false opened-readonly readonly)" \
+  || fail "read-only stale MR evidence blocked MR creation"
+[ "$(printf '%s\n' "${readonly_out}" | tail -n 1)" = opened ] \
+  || fail "read-only stale MR evidence changed the MR outcome"
+
+hardlink_out="$(run_create opened false opened-hardlink hardlink)" \
+  || fail "hard-linked stale MR evidence blocked MR creation"
+[ "$(printf '%s\n' "${hardlink_out}" | tail -n 1)" = opened ] \
+  || fail "hard-linked stale MR evidence changed the MR outcome"
+[ "$(cat "${TEST_ROOT}/opened-hardlink/hardlink-target.json")" = \
+    '{"sentinel":"must-survive"}' ] \
+  || fail "MR creation truncated the hard-linked evidence target"
+jq -e '.verified == true and .outcome == "opened"' \
+  "${TEST_ROOT}/opened-hardlink/log/mr_result.json" >/dev/null \
+  || fail "MR creation did not replace hard-linked evidence with its marker"
 
 set +e
 run_create list_fail true >"${TEST_ROOT}/list-fail.out" 2>"${TEST_ROOT}/list-fail.err"

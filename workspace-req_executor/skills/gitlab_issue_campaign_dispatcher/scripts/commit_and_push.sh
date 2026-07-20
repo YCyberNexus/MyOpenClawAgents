@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # commit_and_push.sh — commit the staged changes inside the repo root and
-# force-push the per-attempt local branch to the SINGLE fixed remote
+# publish the commit from the fixed issue-local branch to the canonical remote
 # branch ${WORK_BRANCH} (Strategy A).
 #
 # Required env vars:
 #   WORKTREE_DIR             repo root cwd for git commands
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
-#   LOCAL_ATTEMPT_BRANCH     "issue/<iid>-att<NNN>"
+#   LOCAL_ISSUE_BRANCH       "issue/<iid>"
 #   WORK_BRANCH              `issue/<iid>` or shared `issue/<head>+<tail>`
 #   EXPECTED_WORK_BRANCH_SHA  optional full old remote tip used only as the
 #                             explicit push lease; required when updating an
@@ -17,10 +17,8 @@
 #                             only parent; required for every shared branch push
 #   ISSUE_TITLE              short human title for commit message
 #
-# Why force-push: Strategy A keeps a single MR pointing at a single
-# remote branch. Each attempt overwrites that branch's tip with the
-# new attempt's history. Local attempt branches are preserved in
-# ${REPO_PATH}/.git/refs/heads/ for audit; only the remote moves.
+# Strategy A keeps a single MR pointing at a single remote branch. The local
+# issue branch and remote work branch are both reused across runs.
 
 set -euo pipefail
 
@@ -32,7 +30,7 @@ source "${SCRIPT_DIR}/git_network_guard.sh"
 GIT_NETWORK_GUARD_CONTEXT=commit_and_push
 
 : "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
-  "${LOCAL_ATTEMPT_BRANCH:?}" "${WORK_BRANCH:?}" "${ISSUE_TITLE:?}"
+  "${LOCAL_ISSUE_BRANCH:?}" "${WORK_BRANCH:?}" "${ISSUE_TITLE:?}"
 EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
 EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
 if [ -n "${EXPECTED_WORK_BRANCH_SHA}" ] \

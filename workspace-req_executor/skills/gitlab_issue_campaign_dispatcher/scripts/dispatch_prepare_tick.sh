@@ -1180,8 +1180,8 @@ fi
 #
 # An Issue may declare one same-project prerequisite in its description, for
 # example `依赖 Issue #123` or `Depends on #123`. A supported one-to-one pair
-# shares `issue/<dependency IID>+<dependent IID>`; each IID still owns its local
-# attempt branch and contributes one commit in dependency order.
+# shares `issue/<dependency IID>+<dependent IID>`; each IID still owns one fixed
+# local issue branch and contributes one commit in dependency order.
 #
 # Do this before attempt allocation and placeholder persistence. If the
 # prerequisite branch has not been pushed yet, leave the IID/grant untouched
@@ -1831,8 +1831,8 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
   candidate_description="$(printf '%s' "${candidate_issue_json}" \
     | jq -r '.description // ""')"
 
-  # Continue mode resumes C's already-created shared branch. If that branch (or a prior
-  # local attempt branch) is recoverable, changes to A's later labels/ref must
+  # Continue mode resumes C's already-created shared branch. If that branch (or
+  # the fixed local issue branch) is recoverable, changes to A's later labels/ref must
   # not prevent C from resuming. Only a continue that would downgrade to fresh
   # still needs the dependency gate below.
   candidate_entry_mode="auto"
@@ -1988,24 +1988,16 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
     candidate_resume_is_remote=true
     candidate_resume_ref="refs/remotes/origin/${candidate_work_branch}"
   else
-    candidate_local_best_number=-1
-    while IFS= read -r candidate_local_ref; do
-      if [[ "${candidate_local_ref}" =~ ^refs/heads/issue/${candidate_iid}-att[0-9]+$ ]]; then
-        candidate_local_number="${candidate_local_ref##*att}"
-        candidate_local_number=$((10#${candidate_local_number}))
-        if [ "${candidate_local_number}" -gt "${candidate_local_best_number}" ]; then
-          candidate_local_best_number="${candidate_local_number}"
-          candidate_resume_ref="${candidate_local_ref}"
-        fi
-      fi
-    done < <(git -C "${REPO_PATH}" for-each-ref \
-      --format='%(refname)' "refs/heads/issue/${candidate_iid}-att*")
-    if [ -n "${candidate_resume_ref}" ]; then
+    candidate_resume_ref="refs/heads/issue/${candidate_iid}"
+    if GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" rev-parse \
+        --verify --quiet "${candidate_resume_ref}^{commit}" >/dev/null; then
       candidate_resume_sha="$(GIT_NO_REPLACE_OBJECTS=1 \
         git -C "${REPO_PATH}" rev-parse --verify \
         "${candidate_resume_ref}^{commit}" 2>/dev/null || true)"
       [ -z "${candidate_resume_sha}" ] \
         || candidate_resume_ref_ready=true
+    else
+      candidate_resume_ref=""
     fi
   fi
   if [ "${candidate_requests_continue}" = "true" ] \
@@ -2096,22 +2088,6 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
       continue
     fi
 
-    if [ "${prior_work_branch_sha,,}" != "${candidate_resume_sha,,}" ] \
-        && [ "${candidate_resume_is_remote}" != true ]; then
-      while IFS= read -r candidate_local_ref; do
-        [[ "${candidate_local_ref}" =~ ^refs/heads/issue/${candidate_iid}-att[0-9]+$ ]] \
-          || continue
-        candidate_local_sha="$(GIT_NO_REPLACE_OBJECTS=1 \
-          git -C "${REPO_PATH}" rev-parse --verify \
-          "${candidate_local_ref}^{commit}" 2>/dev/null || true)"
-        if [ "${candidate_local_sha,,}" = "${prior_work_branch_sha,,}" ]; then
-          candidate_resume_ref="${candidate_local_ref}"
-          candidate_resume_sha="${candidate_local_sha}"
-          break
-        fi
-      done < <(git -C "${REPO_PATH}" for-each-ref --format='%(refname)' \
-        "refs/heads/issue/${candidate_iid}-att*")
-    fi
     if [ "${prior_work_branch_sha,,}" != "${candidate_resume_sha,,}" ]; then
       DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="continue_branch_history_mismatch"
       append_batch_iid "${candidate_iid}"
@@ -2824,7 +2800,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # Initialize per-iteration locals so set -u cannot trip a later read of
   # an unset var on the failure paths below.
   MODE_ACTUAL=""
-  LOCAL_ATTEMPT_BRANCH=""
+  LOCAL_ISSUE_BRANCH=""
   ISSUE_TITLE=""
   ISSUE_LABELS=""
   IID_BRANCH="${T[branch]}"
@@ -2878,7 +2854,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
   # resume signal. Every other entry path (`todo`, `retry`, `new`,
   # `blocked`, trigger require_labels) resets from the target branch
-  # baseline, even if this IID has prior attempts on disk.
+  # baseline, even if this IID has prior run state on disk.
   ISSUE_MODE="fresh"
   if [ "${DISPATCH_MODE}" = "driven_topup" ] && [ "${GRANT_ENTRY_MODE}" != "auto" ]; then
     ISSUE_MODE="${GRANT_ENTRY_MODE}"
@@ -3013,8 +2989,9 @@ for iid in "${BATCH_IIDS[@]}"; do
   fi
 
   # Persist the exact proposed baseline identity before prepare_attempt mutates
-  # or creates the worktree. This attempt-local file is the fixed wrapper's
-  # trust source for the current run, but it is deliberately not durable proof
+  # or creates the worktree. This issue-local file records the current
+  # attempt_number and is the fixed wrapper's trust source for the run, but it
+  # is deliberately not durable proof
   # that C contains the dependency: Issue state promotes the tuple only after
   # the canonical remote work branch is pushed and independently verified.
   ISSUE_ROOT_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$ISSUE_ROOT"' "${SCRIPT_DIR}/env_paths.sh")"
@@ -3070,7 +3047,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   fi
 
   # prepare_attempt.sh — keep stdout clean (the script's contract is two
-  # lines on stdout: mode_actual, LOCAL_ATTEMPT_BRANCH). `git fetch` /
+  # lines on stdout: mode_actual, LOCAL_ISSUE_BRANCH). `git fetch` /
   # `git worktree add` etc. write progress to stderr; we capture stderr
   # to a separate file so it does NOT contaminate the two output lines.
   PA_OUT="$(mktemp)"
@@ -3103,10 +3080,10 @@ for iid in "${BATCH_IIDS[@]}"; do
     continue
   fi
   MODE_ACTUAL="$(sed -n '1p' "${PA_OUT}")"
-  LOCAL_ATTEMPT_BRANCH="$(sed -n '2p' "${PA_OUT}")"
+  LOCAL_ISSUE_BRANCH="$(sed -n '2p' "${PA_OUT}")"
   retire_temp_file "${PA_OUT}"
   retire_temp_file "${PA_ERR}"
-  if [ -z "${MODE_ACTUAL}" ] || [ -z "${LOCAL_ATTEMPT_BRANCH}" ]; then
+  if [ -z "${MODE_ACTUAL}" ] || [ -z "${LOCAL_ISSUE_BRANCH}" ]; then
     prep_blocked "prepare_attempt: empty stdout (script printed no mode/branch lines)"
     continue
   fi
@@ -3121,7 +3098,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   if [ -n "${IID_SHARED_BRANCH_ROLE}" ]; then
     IID_EXPECTED_COMMIT_PARENT_SHA="$(GIT_NO_REPLACE_OBJECTS=1 \
       git -C "${REPO_PATH}" rev-parse --verify \
-      "refs/heads/${LOCAL_ATTEMPT_BRANCH}^{commit}" 2>/dev/null || true)"
+      "refs/heads/${LOCAL_ISSUE_BRANCH}^{commit}" 2>/dev/null || true)"
     if ! [[ "${IID_EXPECTED_COMMIT_PARENT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
       prep_blocked "shared branch prepared commit parent is unavailable"
       continue
@@ -3345,7 +3322,7 @@ for iid in "${BATCH_IIDS[@]}"; do
     --arg mode_requested "${ISSUE_MODE}" \
     --arg mode_actual "${MODE_ACTUAL}" \
     --argjson mode_downgraded "${MODE_DOWNGRADED}" \
-    --arg local_branch "${LOCAL_ATTEMPT_BRANCH}" \
+    --arg local_branch "${LOCAL_ISSUE_BRANCH}" \
     --arg config_branch "${IID_CONFIG_BRANCH}" \
     --arg work_branch "${IID_WORK_BRANCH}" \
     --argjson branch_members "${IID_BRANCH_MEMBERS_JSON}" \
@@ -3397,7 +3374,7 @@ for iid in "${BATCH_IIDS[@]}"; do
     --argjson iid "${iid}" \
     --argjson attempts_total "${attempt}" \
     --argjson latest_attempt_number "${attempt}" \
-    --arg latest_attempt_dir "${ISSUE_ROOT_X}" \
+    --arg issue_root "${ISSUE_ROOT_X}" \
     --argjson retry_count "${PRIOR_RETRY}" \
     --argjson continue_count "${NEW_CONTINUE_COUNT}" \
     --arg model_tier "${RESOLVED_MODEL_TIER:-}" \
@@ -3428,7 +3405,9 @@ for iid in "${BATCH_IIDS[@]}"; do
       continue_count:$continue_count,
       model_tier:(if $model_tier == "" then (if $prior_model_tier == "" then null else $prior_model_tier end) else $model_tier end),
       attempts_total:$attempts_total, latest_attempt_number:$latest_attempt_number,
-      latest_attempt_dir:$latest_attempt_dir, retry_count:$retry_count,
+      # Keep the legacy state key for persisted-schema compatibility. Its
+      # value is the fixed issue root, not an attempt-specific directory.
+      latest_attempt_dir:$issue_root, retry_count:$retry_count,
       block_reason:null, commit_sha:null, merge_request_url:null,
       updated_at:$updated_at}' | atomic_write_json "${ISSUE_STATE_X}"
 
@@ -3505,7 +3484,7 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_WORK_BRANCH_QUOTED="${IID_WORK_BRANCH_QUOTED}" \
               TPL_EXPECTED_WORK_BRANCH_SHA="${IID_EXPECTED_WORK_BRANCH_SHA}" \
               TPL_EXPECTED_COMMIT_PARENT_SHA="${IID_EXPECTED_COMMIT_PARENT_SHA}" \
-              TPL_LOCAL_ATTEMPT_BRANCH="${LOCAL_ATTEMPT_BRANCH}" \
+              TPL_LOCAL_ISSUE_BRANCH="${LOCAL_ISSUE_BRANCH}" \
               TPL_REPO_PATH="${REPO_PATH}" \
               TPL_WORKTREE_DIR="${WORKTREE_DIR_X}" \
               TPL_OUTPUT_DIR="${OUTPUT_DIR_X}" \

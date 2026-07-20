@@ -1795,7 +1795,7 @@ cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/campaign-state-baseline.json"
 : >"${FOLLOWUP_IMPORT_LOG}"
 
 write_followup_auto_merge_marker() {
-  local marker_dir="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/attempt-001"
+  local marker_dir="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log"
   mkdir -p "${marker_dir}"
   jq -cn '{
     version:1,iid:9,
@@ -2013,7 +2013,7 @@ chmod 600 "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/state.json"
 : >"${FOLLOWUP_LABEL_LOG}"
 shared_failure_reply="$(jq -cn '{
   iid:42,attempt_number:1,status:"blocked",mode_actual:"fresh",
-  work_branch:"issue/42+43",local_branch:"issue/42-att001",
+  work_branch:"issue/42+43",local_branch:"issue/42",
   commit_sha:"0123456789abcdef0123456789abcdef01234567",
   merge_request_url:"",mr_action:"none",wiki_url:"",
   labels_added:[],labels_removed:[],summary_posted:false,
@@ -2080,7 +2080,7 @@ jq '.pending_subagents["42"] += {
 }' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.marker-pending"
 mv "${FOLLOWUP_STATE}.marker-pending" "${FOLLOWUP_STATE}"
 write_followup_auto_merge_marker
-PENDING_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/attempt-001/mr_result.json"
+PENDING_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/mr_result.json"
 jq '.verified=false
   | .outcome="unknown"
   | .observed_state="unknown"
@@ -2292,7 +2292,7 @@ jq '.pending_subagents["42"] += {
   finish_label_retry_attempt:99
 }' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.stale-finish-retry"
 mv "${FOLLOWUP_STATE}.stale-finish-retry" "${FOLLOWUP_STATE}"
-STALE_FENCE_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/attempt-001/mr_result.json"
+STALE_FENCE_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/mr_result.json"
 mv "${STALE_FENCE_MARKER}" "${STALE_FENCE_MARKER}.held-for-stale-fence-test"
 : >"${FOLLOWUP_IMPORT_LOG}"
 : >"${FOLLOWUP_LABEL_LOG}"
@@ -2377,7 +2377,7 @@ durable_result_followup_out="$(printf '%s\n' '{
   "status":"done",
   "mode_actual":"fresh",
   "work_branch":"issue/42",
-  "local_branch":"issue/42-att001",
+  "local_branch":"issue/42",
   "commit_sha":"0123456789abcdef",
   "merge_request_url":"https://gitlab.example/group/repo/-/merge_requests/9",
   "mr_action":"created",

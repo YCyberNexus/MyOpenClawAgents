@@ -361,7 +361,7 @@ dependency_base_sha="$(jq -r ".dependency_base_sha // \"\"" "${issue_state}")"
 mr_action=created
 [ "${shared_role}" != tail ] || mr_action=reused
 printf -v attempt_padded "%03d" "${ATTEMPT_NUMBER}"
-marker_dir="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/.worktrees/issue-${ISSUE_IID}/.req_executor/issue-${ISSUE_IID}/log/attempt-${attempt_padded}"
+marker_dir="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/.worktrees/issue-${ISSUE_IID}/.req_executor/issue-${ISSUE_IID}/log"
 mkdir -p "${marker_dir}"
 jq -n \
   --argjson issue_iid "${ISSUE_IID}" \
@@ -1051,7 +1051,7 @@ cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 EOF
 PROJECT_RUNTIME="${TEST_ROOT}/repos/group/repo/.req_executor"
 CAMPAIGN_DIR="${PROJECT_RUNTIME}/_dispatcher"
-RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-003"
+RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
 mkdir -p "${CAMPAIGN_DIR}" "${RESULT_LOG_DIR}"
 cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
 {"pending_subagents":{"42":{
@@ -1060,7 +1060,7 @@ cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
 }}}
 EOF
 cat >"${RESULT_LOG_DIR}/worker_result.json" <<EOF
-{"iid":42,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42-att003","commit_sha":"0123456789abcdef","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/1","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${RESULT_LOG_DIR}"}
+{"iid":42,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42","commit_sha":"0123456789abcdef","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/1","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${RESULT_LOG_DIR}"}
 EOF
 cat >"${RESULT_LOG_DIR}/acpx_terminal.json" <<'EOF'
 {"version":1,"iid":42,"attempt_number":3,"exit_code":0,"completed_at_epoch":100}
@@ -1090,8 +1090,8 @@ jq -e '
 
 # If the wrapper died after acpx_terminal.json but before worker_result.json,
 # wait for a bounded grace period and then reclaim only the matching native
-# child. The marker is exact-schema and attempt-scoped, so an in-flight acpx
-# process cannot be mistaken for this post-acpx state.
+# child. The issue-local marker has an exact schema and attempt-number payload,
+# so an in-flight acpx process cannot be mistaken for this post-acpx state.
 cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 {"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
   "A:snapshot-0":{
@@ -1109,7 +1109,7 @@ cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
   "run_id":"run-42-marker","child_session_key":"agent:req_executor:subagent:42"
 }}}
 EOF
-MARKER_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-004"
+MARKER_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
 mkdir -p "${MARKER_LOG_DIR}"
 cat >"${MARKER_LOG_DIR}/acpx_terminal.json" <<'EOF'
 {"version":1,"iid":42,"attempt_number":4,"exit_code":0,"completed_at_epoch":100}
@@ -1199,7 +1199,7 @@ cat >"${SHARED_ISSUE_DIR}/state.json" <<EOF
 EOF
 chmod 600 "${SHARED_ISSUE_DIR}/attempt_state.json" \
   "${SHARED_ISSUE_DIR}/state.json"
-SHARED_MR_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-006"
+SHARED_MR_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
 mkdir -p "${SHARED_MR_LOG_DIR}"
 cat >"${SHARED_MR_LOG_DIR}/acpx_terminal.json" <<'EOF'
 {"version":1,"iid":42,"attempt_number":6,"exit_code":0,"completed_at_epoch":100}
@@ -1207,7 +1207,7 @@ EOF
 cat >"${SHARED_MR_LOG_DIR}/worker_result.json" <<EOF
 {
   "iid":42,"attempt_number":6,"status":"blocked","mode_actual":"fresh",
-  "work_branch":"issue/9+42","local_branch":"issue/42-att006",
+  "work_branch":"issue/9+42","local_branch":"issue/42",
   "commit_sha":"${SHARED_COMMIT_SHA}","merge_request_url":"",
   "mr_action":"none","wiki_url":"","labels_added":[],
   "labels_removed":[],"summary_posted":false,
@@ -1301,7 +1301,7 @@ cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
   "auto_merge":true,"branch":"main","merge_target_branch":"release"
 }}}
 EOF
-MARKER_RETRY_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/attempt-005"
+MARKER_RETRY_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
 mkdir -p "${MARKER_RETRY_LOG_DIR}"
 cat >"${MARKER_RETRY_LOG_DIR}/acpx_terminal.json" <<'EOF'
 {"version":1,"iid":42,"attempt_number":5,"exit_code":0,"completed_at_epoch":100}

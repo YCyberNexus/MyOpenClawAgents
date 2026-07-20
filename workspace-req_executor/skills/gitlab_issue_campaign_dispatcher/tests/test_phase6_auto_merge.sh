@@ -104,7 +104,8 @@ make_reply() {
   local iid="$1"
   jq -cn --argjson iid "${iid}" '{
     iid:$iid,attempt_number:1,status:"done",mode_actual:"fresh",
-    work_branch:("issue/" + ($iid|tostring)),local_branch:"attempt-1",
+    work_branch:("issue/" + ($iid|tostring)),
+    local_branch:("issue/" + ($iid|tostring)),
     commit_sha:"0123456789abcdef0123456789abcdef01234567",
     merge_request_url:("https://gitlab.example.test/group/repo/-/merge_requests/" + ($iid|tostring)),
     mr_action:"created",wiki_url:"",labels_added:["pr"],labels_removed:["done"],
@@ -114,7 +115,7 @@ make_reply() {
 
 write_marker() {
   local iid="$1" mode="${2:-600}" marker_path marker_dir
-  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log/attempt-001"
+  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log"
   marker_path="${marker_dir}/mr_result.json"
   mkdir -p "${marker_dir}"
   jq -cn --argjson iid "${iid}" '{
@@ -280,7 +281,7 @@ jq -e '
 : >"${LABEL_LOG}"
 export VERIFY_SCENARIO=merged
 write_marker 16
-legacy_marker_path="${WORKTREES_ROOT}/issue-16/.req_executor/issue-16/log/attempt-001/mr_result.json"
+legacy_marker_path="${WORKTREES_ROOT}/issue-16/.req_executor/issue-16/log/mr_result.json"
 jq 'del(.dependency_base_sha)' "${legacy_marker_path}" \
   >"${legacy_marker_path}.legacy"
 mv "${legacy_marker_path}.legacy" "${legacy_marker_path}"
@@ -292,7 +293,7 @@ jq -e '.final_status == "done"' <<<"${legacy_marker_out}" >/dev/null \
 
 : >"${LABEL_LOG}"
 write_marker 17
-dependent_legacy_marker_path="${WORKTREES_ROOT}/issue-17/.req_executor/issue-17/log/attempt-001/mr_result.json"
+dependent_legacy_marker_path="${WORKTREES_ROOT}/issue-17/.req_executor/issue-17/log/mr_result.json"
 jq 'del(.dependency_base_sha)' "${dependent_legacy_marker_path}" \
   >"${dependent_legacy_marker_path}.legacy"
 mv "${dependent_legacy_marker_path}.legacy" "${dependent_legacy_marker_path}"

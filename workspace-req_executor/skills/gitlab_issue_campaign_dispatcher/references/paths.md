@@ -41,7 +41,7 @@ ${REPO_PATH}/
         .req_executor/
           issue-<iid>/
             output/
-            log/attempt-NNN/
+            log/
 ```
 
 ## Key Variables
@@ -56,9 +56,15 @@ ${REPO_PATH}/
 | `WORKTREE_DIR` | `${WORKTREES_ROOT}/issue-${ISSUE_IID}` |
 | `ISSUE_WORKTREE_REL` | `.req_executor/issue-${ISSUE_IID}` |
 | `OUTPUT_DIR` | `${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}/output` |
-| `ATTEMPT_LOG_REL` | `${ISSUE_WORKTREE_REL}/log/attempt-${ATTEMPT_NUMBER_PADDED}` |
-| `LOG_DIR` | `${WORKTREE_DIR}/${ATTEMPT_LOG_REL}` |
+| `ISSUE_LOG_REL` | `${ISSUE_WORKTREE_REL}/log` |
+| `LOG_DIR` | `${WORKTREE_DIR}/${ISSUE_LOG_REL}` |
 
 `clone_or_pull.sh` appends `/.req_executor/` and `logs/` to `${REPO_PATH}/.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes `${LOG_DIR}` plus any `logs/` path from the commit index, so logs stay local and do not appear in MR changes.
 
 Claude Code is invoked only through `scripts/run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs the fixed acpx command against `${LOG_DIR}/prompt.txt`.
+
+The worktree, output directory, log directory, and `LOCAL_ISSUE_BRANCH=issue/<iid>`
+are fixed for one Issue and do not contain `ATTEMPT_NUMBER`. The attempt number
+remains inside state and recovery JSON for stale-callback rejection. Before a
+new run starts, the fixed `acpx_terminal.json`, `worker_result.json`, and
+`mr_result.json` files are invalidated; later writes replace them atomically.

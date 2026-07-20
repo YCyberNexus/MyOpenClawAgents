@@ -40,7 +40,7 @@ credentials from the private process/deployment environment, and
 | `{WORK_BRANCH_QUOTED}` | shell-safe single-quoted work branch |
 | `{EXPECTED_WORK_BRANCH_SHA}` | exact old shared-branch tip used only for the explicit push lease, or empty for a new/ordinary branch |
 | `{EXPECTED_COMMIT_PARENT_SHA}` | exact commit required as the new shared commit's only parent, or empty for an ordinary branch |
-| `{LOCAL_ATTEMPT_BRANCH}` | attempt-local branch |
+| `{LOCAL_ISSUE_BRANCH}` | fixed issue-local branch |
 | `{REPO_PATH}` | parent checkout |
 | `{WORKTREE_DIR}` | shared per-IID linked worktree |
 | `{OUTPUT_DIR}` | issue output directory inside the worktree |
@@ -96,7 +96,7 @@ MERGE_TARGET_BRANCH={MERGE_TARGET_BRANCH}
 WORK_BRANCH={WORK_BRANCH}
 EXPECTED_WORK_BRANCH_SHA={EXPECTED_WORK_BRANCH_SHA}
 EXPECTED_COMMIT_PARENT_SHA={EXPECTED_COMMIT_PARENT_SHA}
-LOCAL_ATTEMPT_BRANCH={LOCAL_ATTEMPT_BRANCH}
+LOCAL_ISSUE_BRANCH={LOCAL_ISSUE_BRANCH}
 REPO_PATH={REPO_PATH}
 WORKTREE_DIR={WORKTREE_DIR}
 OUTPUT_DIR={OUTPUT_DIR}

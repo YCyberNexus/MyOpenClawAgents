@@ -78,7 +78,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/env_paths.sh"
 mkdir -p "${WORKTREE_DIR}/.claude" "${LOG_DIR}" "${OUTPUT_DIR}"
-printf 'fresh\nissue/%s-att%03d\n' "${ISSUE_IID}" "${ATTEMPT_NUMBER}"
+printf 'fresh\nissue/%s\n' "${ISSUE_IID}"
 EOF
 
 cat >"${BIN_DIR}/glab" <<'EOF'

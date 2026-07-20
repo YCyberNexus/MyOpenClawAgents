@@ -29,19 +29,15 @@
 #                   summary.md
 #           .worktrees/                  ← per-issue linked git worktrees
 #               issue-<iid>/             ← WORKTREE_DIR; acpx cwd; reused across every
-#                                          attempt of this IID. prepare_attempt.sh
-#                                          creates it on attempt 1 via `git worktree add -B`
-#                                          and on attempt N>1 force-switches the checked-out
-#                                          branch to BASE_REF in place (untracked files
-#                                          Claude wrote in earlier attempts survive, so
-#                                          `acpx claude exec` can pick up where it left off).
+#                                          run of this IID. prepare_attempt.sh creates it
+#                                          once and later force-switches the same issue-local
+#                                          branch to BASE_REF in place.
 #                   .req_executor/issue-<iid>/output/
-#                                                        ← OUTPUT_DIR (force-added; shared
-#                                                          across attempts of this IID)
-#                   .req_executor/issue-<iid>/log/attempt-NNN/
-#                                                        ← LOG_DIR (still attempt-scoped
-#                                                          inside the shared worktree;
-#                                                          stays local and is not committed)
+#                                                        ← OUTPUT_DIR (force-added; shared)
+#                   .req_executor/issue-<iid>/log/
+#                                                        ← LOG_DIR (one fixed issue-local
+#                                                          directory; stays local and is not
+#                                                          committed)
 #
 # Path derivation is layered:
 #
@@ -50,12 +46,12 @@
 #       → REPO_PATH, RESULT_ROOT, WORK_ROOT,
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
 #         ISSUES_ROOT, LOCK_FILE, WORKTREES_ROOT
-#   - per-issue + attempt level (derived only if ISSUE_IID is set):
+#   - per-issue run level (derived only if ISSUE_IID is set):
 #                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
-#         ATTEMPT_NUMBER_PADDED, ATTEMPT_DIR, WORKTREE_DIR, OUTPUT_DIR,
+#         ATTEMPT_NUMBER_PADDED, WORKTREE_DIR, OUTPUT_DIR,
 #         LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
-#         LOCAL_ATTEMPT_BRANCH
+#         LOCAL_ISSUE_BRANCH
 #
 # Why a single layered file: a single env_paths.sh keeps the dispatcher's
 # prep scripts (which need attempt-level paths to call prepare_attempt.sh,
@@ -209,7 +205,7 @@ issue_state_file_for() {
 }
 export -f issue_state_file_for
 
-# ─── 2. Per-issue + attempt path layout (only when ISSUE_IID set) ──
+# ─── 2. Per-issue runtime layout (only when ISSUE_IID set) ──
 if [ -n "${ISSUE_IID:-}" ]; then
   : "${ATTEMPT_NUMBER:?env_paths.sh: ATTEMPT_NUMBER must be set when ISSUE_IID is set (dispatcher allocates via allocate_attempt.sh)}"
 
@@ -251,7 +247,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
   export ATTEMPT_NUMBER_PADDED
 
-  # Every attempt of this IID runs inside one shared linked git worktree at
+  # Every run of this IID uses one linked git worktree at
   # WORKTREE_DIR (the path does NOT include the attempt number). The parent
   # checkout at ${REPO_PATH} is only used as the shared object database /
   # `git fetch` target and is NEVER mutated by an attempt. Cross-IID
@@ -259,31 +255,26 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # paths; same-IID attempts never run concurrently (single-batch-in-flight
   # invariant enforced by the dispatcher's `pending_subagents` bookkeeping),
   # so it is safe to reuse one working tree across attempts. The benefit:
-  # any local scratch state Claude Code wrote during attempt N (untracked
-  # files under .claude/, intermediate artifacts, etc.) survives in place
-  # so `acpx claude exec` on attempt N+1 can pick up where it left off.
+  # issue-local runtime paths and the local branch do not include the attempt
+  # number. ATTEMPT_NUMBER remains an execution identity used by state and
+  # callback fencing, not by filesystem or Git-ref layout.
   # prepare_attempt.sh owns the create-or-reuse logic.
   #
-  # ATTEMPT_DIR remains a compatibility alias for ISSUE_ROOT (the per-issue
-  # persistent subtree). Cross-attempt state (state.json, attempt_state.json,
-  # summary.md) lives in ISSUE_ROOT so it survives worktree teardown by a
-  # housekeeper. LOG_DIR is still attempt-scoped under the shared worktree at
-  # .req_executor/issue-<iid>/log/attempt-NNN/ so successive attempts do NOT
-  # overwrite each other's prompt.txt / claude_result.txt. Log files stay local;
+  # Persistent state and the latest summary live in ISSUE_ROOT. Runtime logs
+  # use one fixed issue-local directory and are overwritten by later runs.
   # stage_and_guard.sh force-adds only OUTPUT_DIR and removes LOG_DIR / logs/
   # paths from the commit index.
-  export ATTEMPT_DIR="${ISSUE_ROOT}"
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_WORKTREE_REL="${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"
-  export ATTEMPT_LOG_REL="${ISSUE_WORKTREE_REL}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
+  export ISSUE_LOG_REL="${ISSUE_WORKTREE_REL}/log"
   export OUTPUT_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}/output"
-  export LOG_DIR="${WORKTREE_DIR}/${ATTEMPT_LOG_REL}"
-  export ATTEMPT_STATE_FILE="${ATTEMPT_DIR}/attempt_state.json"
-  export SUMMARY_FILE="${ATTEMPT_DIR}/summary.md"
+  export LOG_DIR="${WORKTREE_DIR}/${ISSUE_LOG_REL}"
+  export ATTEMPT_STATE_FILE="${ISSUE_ROOT}/attempt_state.json"
+  export SUMMARY_FILE="${ISSUE_ROOT}/summary.md"
   # A and its dependent share one remote branch, but their linked worktrees
-  # must never try to check out the same local branch. Keep the local audit ref
-  # owned by the current IID while WORK_BRANCH names the shared remote ref.
-  export LOCAL_ATTEMPT_BRANCH="issue/${ISSUE_IID}-att${ATTEMPT_NUMBER_PADDED}"
+  # must never try to check out the same local branch. Keep one fixed local ref
+  # owned by the current IID while WORK_BRANCH names the canonical remote ref.
+  export LOCAL_ISSUE_BRANCH="issue/${ISSUE_IID}"
 
   # Only create parent-side dirs here. WORKTREE_DIR + OUTPUT_DIR + LOG_DIR
   # are created inside prepare_attempt.sh after `git worktree add`
@@ -291,7 +282,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # `git worktree add` refuse the path, and LOG_DIR is nested inside the
   # worktree.
   if [ -d "${REPO_PATH}/.git" ]; then
-    mkdir -p "${ATTEMPT_DIR}"
+    mkdir -p "${ISSUE_ROOT}"
   fi
 fi
 

@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-20.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-20.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -44,12 +44,12 @@ All agent runtime files live INSIDE the cloned repo under the fixed
 `${REPO_PATH}/.req_executor/` directory — campaign state, dispatcher logs,
 locks, per-issue state/logs/summaries, and one shared per-issue linked
 git worktree per IID at `${REPO_PATH}/.req_executor/.worktrees/issue-<iid>/`.
-The worktree is reused across every attempt of an IID (created on
-attempt 1 via `git worktree add -B`, then force-switched in place on
-attempt N>1 after preserving the same-IID runtime subtree; `continue`
-restores it for resume, while all non-continue entry labels reset from
-the target branch and archive the preserved subtree outside the active
-worktree).
+The worktree, runtime directories, log directory, and local `issue/<iid>`
+branch are reused across every attempt of an IID. None contains the attempt
+number. `attempt_number` remains a state and callback identity fence. Later
+runs reset the fixed local branch to their selected base and overwrite current
+result evidence in the issue-local log; ordinary runs create no per-attempt
+archives.
 See [`references/paths.md`](references/paths.md) for the complete layout.
 
 ## Issue dependency branch baseline
@@ -91,7 +91,7 @@ branch: issue/<A IID>+<C IID>
 history: target -> commit(A) -> commit(C)
 ```
 
-A and C keep IID-local branches `issue/<iid>-attNNN` and separate worktrees,
+A and C keep fixed IID-local branches `issue/<iid>` and separate worktrees,
 while an unrelated B remains on `issue/<B IID>` and may run alongside A. A
 first publishes `issue/A`. C remains deferred without consuming an attempt,
 label mutation, project placeholder, or agent-wide slot until A has a stable
@@ -888,7 +888,8 @@ payload before making the verified payload's single long
 `run_executor_attempt.sh` call. **It does NOT load this SKILL, NOT read
 SOUL.md / AGENTS.md, NOT call `sessions_spawn` / `sessions_history`,
 and NOT directly write dispatcher terminal state.** The fixed wrapper writes
-only attempt-scoped recovery artifacts and prints the compact JSON. That reply
+issue-local recovery artifacts containing the current attempt identity and
+prints the compact JSON. That reply
 is normally accepted inside a protected native `task_completion` event (or
 bounded authenticated history recovery) through
 `ingest_subagent_completion.sh` → `dispatch_followup.sh`; a claim-fenced tick

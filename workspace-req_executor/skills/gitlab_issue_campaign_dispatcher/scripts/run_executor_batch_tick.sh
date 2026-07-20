@@ -518,8 +518,7 @@ while IFS= read -r post_job; do
   if ! git check-ref-format --branch "${post_work_branch}" >/dev/null 2>&1; then
     continue
   fi
-  printf -v post_attempt_padded '%03d' "${post_attempt}"
-  post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log/attempt-${post_attempt_padded}"
+  post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log"
   post_result_file="${post_log_dir}/worker_result.json"
   post_marker_file="${post_log_dir}/acpx_terminal.json"
 
@@ -559,7 +558,7 @@ while IFS= read -r post_job; do
       --argjson iid "${post_iid}" \
       --argjson attempt "${post_attempt}" \
       --arg work_branch "${post_work_branch}" \
-      --arg local_branch "issue/${post_iid}-att${post_attempt_padded}" \
+      --arg local_branch "issue/${post_iid}" \
       --arg log_dir "${post_log_dir}" \
       --argjson acpx_exit "$(jq -r '.exit_code' <<<"${post_marker_json}")" '
       if type == "object"
