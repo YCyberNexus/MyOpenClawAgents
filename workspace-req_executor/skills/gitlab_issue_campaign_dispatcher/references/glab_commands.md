@@ -35,9 +35,9 @@ glab api "projects/${PROJECT_URI}/issues/${ISSUE_IID}"
 
 Response is the raw issue JSON. Parse with `jq` to read `.state`, `.labels`, `.title`, `.description`.
 
-### G1b — Read the target issue's notes (dispatcher prep, continue mode)
+### G1b — Read the target issue's notes (dispatcher prep, every mode)
 
-Used in continue mode by `scripts/build_prompt.sh` to partition notes into past attempt summaries and reviewer comments.
+Used by `scripts/build_prompt.sh` in every mode to inject non-system issue comments into the Claude Code prompt. Continue mode additionally partitions historical attempt summaries into a separate block.
 
 ```bash
 glab api --paginate \
@@ -46,7 +46,7 @@ glab api --paginate \
 
 The response is a JSON array of note objects. Non-system notes (`.system == false`) carry `body`, `author.username`, `created_at`. The dispatcher's prep concatenates these into the Claude Code prompt verbatim, in chronological order, separated by buckets per the marker comments.
 
-In fresh mode, fetching notes is unnecessary. In continue mode, fetching notes is **mandatory**.
+Fetching notes is mandatory in both fresh and continue modes.
 
 ### G2 — List project labels (dispatcher prep)
 
@@ -142,7 +142,7 @@ glab mr view "${WORK_BRANCH}" --repo "${PROJECT_FULL}" --output json | jq -r '.w
 
 ### G9 — Post a note (comment) on the issue (subagent)
 
-Used by `scripts/summarize_attempt.sh` to post successful `done` attempt summaries back to the issue so the next continue-mode run can read them. Failure summaries are written locally only when `SUMMARY_POST_TO_ISSUE=false`.
+Reserved for structured result-notification flows. `summarize_attempt.sh` never calls G9; every attempt summary stays local.
 
 ```bash
 glab api --method POST \

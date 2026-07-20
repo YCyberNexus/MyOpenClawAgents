@@ -127,7 +127,7 @@ DESC_FILE="${LOG_DIR}/mr_description.md"
   echo "Attempt prompt/result logs are also published to the project Wiki before"
   echo "this MR is created."
   echo
-  echo "Per-attempt summaries are posted as comments on the linked issue."
+  echo "Per-attempt summaries remain in the executor's local issue state and are not posted as issue comments."
   echo
   echo "Do not merge until reviewed."
 } > "${DESC_FILE}"

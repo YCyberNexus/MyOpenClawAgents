@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# summarize_attempt.sh — write a SHORT digest of this attempt to
-# ${SUMMARY_FILE} and optionally post the same content as a GitLab issue
-# comment.
+# summarize_attempt.sh — write a SHORT local digest of this attempt to
+# ${SUMMARY_FILE}. It never posts the digest to the GitLab issue.
 #
-# Design choice: the comment is intentionally short.
+# Design choice: the local summary is intentionally short.
 # Detailed evidence (full claude_result.txt, full git_diff.patch,
 # acpx_raw.log, prompt.txt) lives on the runner under ${LOG_DIR}. On
 # push-ready attempts, prompt/result/report evidence is also published to
@@ -24,16 +23,7 @@
 #   COMMIT_SHA               last commit on the work branch (if pushed)
 #   MERGE_REQUEST_URL        MR URL (if known)
 #   BLOCK_REASON             when ATTEMPT_STATUS=blocked|failed|timeout
-#   SUMMARY_POST_TO_ISSUE    true/false; defaults true. Failure paths set false
-#                            so evidence stays local under ${LOG_DIR} / ${ISSUE_ROOT}.
-#
-# When posting is enabled, the comment is wrapped with a recognizable marker
-# so future build_prompt.sh runs distinguish agent-posted summaries from
-# reviewer comments:
-#
-#   <!-- acpx_auto_tester:attempt-summary v2 attempt=NNN -->
-#   ...short summary...
-#   <!-- /acpx_auto_tester:attempt-summary -->
+#   SUMMARY_POST_TO_ISSUE    deprecated compatibility input; ignored.
 
 set -euo pipefail
 
@@ -50,19 +40,9 @@ ATTEMPT_STATUS="${ATTEMPT_STATUS:-unknown}"
 COMMIT_SHA="${COMMIT_SHA:-}"
 MERGE_REQUEST_URL="${MERGE_REQUEST_URL:-}"
 BLOCK_REASON="${BLOCK_REASON:-}"
-SUMMARY_POST_TO_ISSUE="${SUMMARY_POST_TO_ISSUE:-true}"
-
-case "${SUMMARY_POST_TO_ISSUE}" in
-  true|1|yes|TRUE|YES) SUMMARY_POST_TO_ISSUE=true ;;
-  false|0|no|FALSE|NO) SUMMARY_POST_TO_ISSUE=false ;;
-  *)
-    echo "summarize_attempt: SUMMARY_POST_TO_ISSUE must be true/false, got '${SUMMARY_POST_TO_ISSUE}'" >&2
-    exit 2
-    ;;
-esac
 
 # Count changed files without embedding them; cap displayed list at 10 so
-# the comment stays compact. The full list is in ${LOG_DIR}/git_status.txt.
+# the summary stays compact. The full list is in ${LOG_DIR}/git_status.txt.
 CHANGED_COUNT=0
 CHANGED_PREVIEW=""
 if [ -s "${LOG_DIR}/git_status.txt" ]; then
@@ -71,7 +51,6 @@ if [ -s "${LOG_DIR}/git_status.txt" ]; then
 fi
 
 {
-  echo "<!-- acpx_auto_tester:attempt-summary v2 attempt=${ATTEMPT_NUMBER_PADDED} -->"
   echo "## acpx_auto_tester attempt ${ATTEMPT_NUMBER_PADDED}"
   echo
   echo "- **Mode**: ${ISSUE_MODE}"
@@ -106,17 +85,8 @@ fi
     echo "</details>"
   fi
 
-  echo
-  echo "<!-- /acpx_auto_tester:attempt-summary -->"
 } > "${SUMMARY_FILE}"
 
-if [ "${SUMMARY_POST_TO_ISSUE}" = "true" ]; then
-  glab api --method POST \
-    "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes" \
-    -F "body=@${SUMMARY_FILE}" >/dev/null
-  echo "SUMMARY_POSTED=true" >&2
-else
-  echo "SUMMARY_POSTED=false" >&2
-fi
+echo "SUMMARY_POSTED=false" >&2
 
 echo "${SUMMARY_FILE}"

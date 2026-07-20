@@ -754,7 +754,7 @@ if [ "${REUSE_EXISTING}" != true ]; then
     echo "the shared per-issue worktree on the runner (\`${LOG_DIR}\`) until housekeeping"
     echo "removes the worktree."
     echo
-    echo "Per-attempt summaries are posted as comments on the linked issue."
+    echo "Per-attempt summaries remain in the executor's local issue state and are not posted as issue comments."
     echo
     if [ "${AUTO_MERGE}" = true ]; then
       echo "req_executor will attempt an immediate merge; if GitLab does not confirm it, this MR remains available for normal review."

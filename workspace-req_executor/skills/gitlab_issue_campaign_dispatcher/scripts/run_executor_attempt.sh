@@ -271,7 +271,6 @@ MERGE_REQUEST_IID=""
 MR_ACTION="none"
 SHARED_MR_INTENT_ID=""
 SUMMARY_POSTED=false
-SUPPRESS_SUCCESS_SUMMARY=false
 LABELS_ADDED='[]'
 LABELS_REMOVED='[]'
 LAST_LABEL_PRESERVED=false
@@ -548,14 +547,9 @@ sync_failure_labels() {
 }
 
 run_summary() {
-  local post_to_issue=false
-  if [ "${FINAL_STATUS}" = done ] \
-      && [ "${SUPPRESS_SUCCESS_SUMMARY}" != true ]; then
-    post_to_issue=true
-  fi
   run_bounded_step summarize 180 env \
     ATTEMPT_STATUS="${FINAL_STATUS}" \
-    SUMMARY_POST_TO_ISSUE="${post_to_issue}" \
+    SUMMARY_POST_TO_ISSUE=false \
     COMMIT_SHA="${COMMIT_SHA}" \
     MERGE_REQUEST_URL="${MERGE_REQUEST_URL}" \
     BLOCK_REASON="${BLOCK_REASON}" \
@@ -982,7 +976,6 @@ if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ] \
         and .merge_api_succeeded == false
       ' <<<"${MR_MARKER}" >/dev/null; }; then
   FINAL_STATUS=done
-  SUPPRESS_SUCCESS_SUMMARY=true
   BLOCK_REASON=""
   run_summary
   persist_and_print_result
@@ -1010,12 +1003,7 @@ fi
 
 # The compact result intentionally stays success-shaped once the code, push,
 # and MR creation completed so Phase 6 can independently reconcile the exact
-# MR.  An automatic merge that is not yet verified, however, must not publish a
-# premature `Status: done` Issue comment before that independent check.
-if [ "${AUTO_MERGE}" = true ] \
-    && [ "${DESIRED_COMPLETION_LABEL}" != finish ]; then
-  SUPPRESS_SUCCESS_SUMMARY=true
-fi
+# MR.
 
 FINAL_STATUS=done
 if ! sync_label add "${DESIRED_COMPLETION_LABEL}"; then

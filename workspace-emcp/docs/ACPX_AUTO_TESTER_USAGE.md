@@ -233,7 +233,7 @@ worker_result_json=<the exact compact JSON line emitted by the subagent>
 subagent compact JSON 示例：
 
 ```json
-{"iid":14,"attempt_number":2,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att002","commit_sha":"abc1234","merge_request_url":"http://gitlab.example.com/group/project/-/merge_requests/15","mr_action":"created","wiki_url":"http://gitlab.example.com/group/project/-/wikis/issue14/attempt-002/prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":true,"block_reason":"","log_dir":"/data/project/ifp-result/.worktrees/issue-14/ifp-result/issue-14/log/attempt-002"}
+{"iid":14,"attempt_number":2,"status":"done","mode_actual":"fresh","work_branch":"issue/14-auto-fix","local_branch":"issue/14-auto-fix-att002","commit_sha":"abc1234","merge_request_url":"http://gitlab.example.com/group/project/-/merge_requests/15","mr_action":"created","wiki_url":"http://gitlab.example.com/group/project/-/wikis/issue14/attempt-002/prompt","labels_added":["done","pr"],"labels_removed":["doing"],"summary_posted":false,"block_reason":"","log_dir":"/data/project/ifp-result/.worktrees/issue-14/ifp-result/issue-14/log/attempt-002"}
 ```
 
 callback path 不接受 scheduled trigger 的调度字段覆盖。它只处理单个 IID 的终态：
