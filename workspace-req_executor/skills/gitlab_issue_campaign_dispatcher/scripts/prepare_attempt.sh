@@ -7,7 +7,7 @@
 # Every run uses one IID-local branch (${LOCAL_ISSUE_BRANCH}, `issue/<iid>`)
 # checked out into one per-issue linked worktree at
 # ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}. Neither path includes
-# the attempt number. The first run creates the worktree; later runs reset the
+# the execution identity. The first run creates the worktree; later runs reset the
 # same local branch to BASE_REF in place. That local issue branch is pushed to
 # ${WORK_BRANCH} at commit time.
 # Cross-IID parallelism stays safe because different IIDs use different
@@ -58,7 +58,7 @@
 # Required env vars (all from env_paths.sh + glab_auth.sh + trigger):
 #   REPO_PATH, ISSUE_IID, ISSUE_MODE,
 #   WORKTREE_DIR, OUTPUT_DIR, LOG_DIR,
-#   ATTEMPT_NUMBER_PADDED, WORK_BRANCH, LOCAL_ISSUE_BRANCH
+#   EXECUTION_ID, WORK_BRANCH, LOCAL_ISSUE_BRANCH
 # Optional shared-tail inputs:
 #   SHARED_BRANCH_ROLE, EXPECTED_COMMIT_PARENT_SHA
 #
@@ -78,7 +78,7 @@ GIT_NETWORK_GUARD_CONTEXT=prepare_attempt
 
 : "${REPO_PATH:?}" "${WORK_ROOT:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" \
   "${ISSUE_ROOT:?}" \
-  "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${LOG_DIR:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
+  "${WORKTREE_DIR:?}" "${OUTPUT_DIR:?}" "${LOG_DIR:?}" "${EXECUTION_ID:?}" \
   "${WORK_BRANCH:?}" "${LOCAL_ISSUE_BRANCH:?}"
 BRANCH="${BRANCH:-}"
 CONFIG_BRANCH="${CONFIG_BRANCH:-}"
@@ -431,10 +431,10 @@ for stale in "${WORKTREE_DIR}.recreate-backup."*; do
 done
 
 if [ "${WORKTREE_REUSE}" = false ]; then
-  if [ "${ATTEMPT_NUMBER}" -gt 1 ]; then
-    dir_present=false; [ -e "${WORKTREE_DIR}" ] && dir_present=true
-    reg_present=false; worktree_registered && reg_present=true
-    echo "prepare_attempt: recreating worktree at ${WORKTREE_DIR} for attempt ${ATTEMPT_NUMBER_PADDED} (dir_present=${dir_present} registered=${reg_present}); will salvage untracked scratch after recreate" >&2
+  dir_present=false; [ -e "${WORKTREE_DIR}" ] && dir_present=true
+  reg_present=false; worktree_registered && reg_present=true
+  if [ "${dir_present}" = true ] || [ "${reg_present}" = true ]; then
+    echo "prepare_attempt: recreating unhealthy worktree at ${WORKTREE_DIR} (dir_present=${dir_present} registered=${reg_present}); untracked scratch will be salvaged" >&2
   fi
   # Salvage: if the directory exists, move it aside BEFORE we touch the
   # registry. Only then call `git worktree remove --force` on the
@@ -458,7 +458,7 @@ if [ "${WORKTREE_REUSE}" = false ]; then
 fi
 git worktree prune >&2
 
-# Ensure the issue root exists for state.json / attempt_state.json / summary.md.
+# Ensure the issue root exists for state.json, execution state, and summary.md.
 mkdir -p "${ISSUE_ROOT}"
 
 ISSUE_WORKTREE_RUNTIME_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}"
@@ -472,7 +472,7 @@ ISSUE_WORKTREE_RUNTIME_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}"
 validate_runtime_path_boundary() {
   local expected_runtime="${WORKTREE_DIR}/${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"
   local expected_output="${expected_runtime}/output"
-  local expected_log="${expected_runtime}/log"
+  local expected_log="${expected_runtime}/log/execution-${EXECUTION_ID}"
   local root_real component component_real path_component log_component
 
   if [ "${ISSUE_WORKTREE_RUNTIME_DIR}" != "${expected_runtime}" ] \
@@ -515,7 +515,7 @@ validate_runtime_path_boundary() {
   done
 
   component="${expected_runtime}/log"
-  for log_component in "${component}"; do
+  for log_component in "${component}" "${expected_log}"; do
     if [ -L "${log_component}" ]; then
       echo "prepare_attempt: log ancestor must not be a symlink: ${log_component}" >&2
       return 1
@@ -845,10 +845,8 @@ if [ -e "${LEGACY_SINGLE_WORKTREE_DIR}" ]; then
 fi
 git worktree prune >&2
 
-# One fixed issue-local log directory is reused. Invalidate the three durable
-# recovery files before the next worker starts so the heartbeat cannot consume
-# a prior run's evidence. Their JSON payloads still carry attempt_number and
-# are independently checked against the pending state.
+# Each execution has an isolated log directory. Defensive invalidation below
+# protects against the extremely unlikely reuse of a random execution identity.
 mkdir -p "${LOG_DIR}"
 for evidence_name in acpx_terminal.json worker_result.json mr_result.json; do
   evidence_path="${LOG_DIR}/${evidence_name}"

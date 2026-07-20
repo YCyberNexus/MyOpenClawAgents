@@ -64,4 +64,4 @@ GITLAB_TOKEN
 REPO_PARENT_PATH   # optional, defaults to /data
 ```
 
-Per-IID scripts additionally receive `ISSUE_IID` and `ATTEMPT_NUMBER`. All paths are derived by `env_paths.sh`.
+Per-IID scripts additionally receive `ISSUE_IID` and an opaque random `EXECUTION_ID`; it is an identity fence, not an execution counter. All paths are derived by `env_paths.sh`.

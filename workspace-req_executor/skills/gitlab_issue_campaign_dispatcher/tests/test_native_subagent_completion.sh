@@ -129,7 +129,7 @@ jq -cnS '{
   kill_subagent_on_terminal:false,
   pending_subagents:{
     "42":{
-      attempt_number:1,
+      execution_id:1,
       run_id:"run-42",
       child_session_key:"agent:req_executor:subagent:child-42",
       child_label:"#42-att-001",
@@ -151,7 +151,7 @@ jq -cnS '{
 
 WORKER_42="$(jq -cnS '{
   iid:42,
-  attempt_number:1,
+  execution_id:1,
   status:"done",
   mode_actual:"auto",
   work_branch:"issue/42",
@@ -316,7 +316,7 @@ write_launch_action() {
       job_id:$job_id,
       project:"group/repo",
       iid:42,
-      attempt_number:1,
+      execution_id:1,
       expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
       expected_task_bytes:42,
       child_label:"#42-att-001",
@@ -345,7 +345,7 @@ write_internal_launch_action() {
       job_id:$job_id,
       project:"group/repo",
       iid:42,
-      attempt_number:1,
+      execution_id:1,
       expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
       expected_task_bytes:42,
       child_label:$child_label,
@@ -371,7 +371,7 @@ write_unrelated_pre_ack_action() {
     job_id:$job_id,
     project:"other/repo",
     iid:77,
-    attempt_number:1,
+    execution_id:1,
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000077",
     expected_task_bytes:77,
     claim_generation:1,
@@ -395,7 +395,7 @@ write_unrelated_launch_failed_action() {
     job_id:$job_id,
     project:"failed/repo",
     iid:88,
-    attempt_number:1,
+    execution_id:1,
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000088",
     expected_task_bytes:88,
     claim_generation:1,
@@ -576,7 +576,7 @@ write_internal_registry
 cp "${INTERNAL_SESSION_FILE}" "${INTERNAL_SESSION_BASELINE}"
 cp "${INTERNAL_REGISTRY_FILE}" "${INTERNAL_REGISTRY_BASELINE}"
 write_internal_launch_action
-INJECTED_WORKER="$(jq '.iid = 999 | .attempt_number = 999' <<<"${WORKER_42}")"
+INJECTED_WORKER="$(jq '.iid = 999 | .execution_id = 999' <<<"${WORKER_42}")"
 INTERNAL_CONTEXT="$(make_49_internal_context "${INJECTED_WORKER}")"
 INTERNAL_REFERENCE="$(make_49_terminal_reference)"
 
@@ -588,7 +588,7 @@ reset_internal_state
 run_ingest_self_routed "${INTERNAL_REFERENCE}"
 [ "${RUN_RC}" -eq 0 ] \
   || fail "4.9 terminal reference was rejected: ${RUN_OUTPUT}; $(cat "${TEST_ROOT}/last-self-ingest.err")"
-jq -e '.callback_status == "handled" and .iid == 42 and .attempt_number == 1' \
+jq -e '.callback_status == "handled" and .iid == 42 and .execution_id == 1' \
   <<<"${RUN_OUTPUT}" >/dev/null \
   || fail "4.9 terminal reference did not authenticate the local terminal"
 
@@ -604,7 +604,7 @@ reset_internal_state
 run_ingest_self_routed "${INTERNAL_CONTEXT}"
 [ "${RUN_RC}" -eq 0 ] \
   || fail "raw 4.9 internal context was rejected: ${RUN_OUTPUT}; $(cat "${TEST_ROOT}/last-self-ingest.err")"
-jq -e '.callback_status == "handled" and .iid == 42 and .attempt_number == 1' \
+jq -e '.callback_status == "handled" and .iid == 42 and .execution_id == 1' \
   <<<"${RUN_OUTPUT}" >/dev/null \
   || fail "raw 4.9 internal context trusted its Result block instead of the transcript"
 if grep -Fq 'internal-private-claim' <<<"${RUN_OUTPUT}" \
@@ -635,7 +635,7 @@ run_ingest_self_routed "${INTERNAL_REFERENCE}"
   || fail "4.9 failed terminal reference was rejected: ${RUN_OUTPUT}; $(cat "${TEST_ROOT}/last-self-ingest.err")"
 jq -e '.callback_status == "handled"
   and .iid == 42
-  and .attempt_number == 1
+  and .execution_id == 1
   and .terminal_status == "failed"' <<<"${RUN_OUTPUT}" >/dev/null \
   || fail "raw 4.9 failed context did not synthesize a failed terminal"
 jq -e '(.pending_subagents | has("42") | not)
@@ -792,7 +792,7 @@ SELF_EVENT_49="$(make_49_event "worker notes"$'\n'"${WORKER_42}")"
 run_ingest_self_routed "${SELF_EVENT_49}"
 [ "${RUN_RC}" -eq 0 ] \
   || fail "self-routed 4.9 completion was rejected: ${RUN_OUTPUT}; $(cat "${TEST_ROOT}/last-self-ingest.err")"
-jq -e '.callback_status == "handled" and .iid == 42 and .attempt_number == 1' \
+jq -e '.callback_status == "handled" and .iid == 42 and .execution_id == 1' \
   <<<"${RUN_OUTPUT}" >/dev/null \
   || fail "self-routed 4.9 completion did not reach Phase 6"
 grep -qx 'called:gitlab.local:group/repo:group%2Frepo' "${RECONCILE_CALLS}" \
@@ -974,7 +974,7 @@ reset_state
 EVENT_611="$(make_611_event "${WORKER_42}")"
 run_ingest "${EVENT_611}"
 [ "${RUN_RC}" -eq 0 ] || fail "6.11 task_completion was rejected: ${RUN_OUTPUT}"
-jq -e '.callback_status == "handled" and .iid == 42 and .attempt_number == 1' \
+jq -e '.callback_status == "handled" and .iid == 42 and .execution_id == 1' \
   <<<"${RUN_OUTPUT}" >/dev/null || fail "6.11 completion identity was not preserved"
 
 # Scheduled reconciliation can pass a terminal sessions_history envelope.  It
@@ -1006,7 +1006,7 @@ for bad_case in wrong_run wrong_session wrong_iid wrong_attempt wrong_label user
       BAD_EVENT="$(make_611_event "${BAD_WORKER}")"
       ;;
     wrong_attempt)
-      BAD_WORKER="$(jq '.attempt_number = 2' <<<"${WORKER_42}")"
+      BAD_WORKER="$(jq '.execution_id = 2' <<<"${WORKER_42}")"
       BAD_EVENT="$(make_611_event "${BAD_WORKER}")"
       ;;
     wrong_label) BAD_EVENT="$(make_611_event "${WORKER_42}" run-42 agent:req_executor:subagent:child-42 wrong-label)" ;;
@@ -1035,7 +1035,7 @@ run_ingest "${TWO_WORKERS}"
 [ "${RUN_RC}" -eq 3 ] || fail "ambiguous worker JSON was accepted"
 
 reset_state
-jq '.pending_subagents["43"] = (.pending_subagents["42"] | .attempt_number = 1)' \
+jq '.pending_subagents["43"] = (.pending_subagents["42"] | .execution_id = 1)' \
   "${STATE_FILE}" >"${STATE_FILE}.ambiguous"
 mv "${STATE_FILE}.ambiguous" "${STATE_FILE}"
 run_ingest "${EVENT_611}"
@@ -1051,7 +1051,7 @@ DIRECT_OUTPUT="$(printf '%s' "${WORKER_42}" | \
   PROJECT=repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.local GITLAB_API_PROTOCOL=https \
   REPO_PARENT_PATH="${REPO_PARENT}" RECONCILE_CALLS="${RECONCILE_CALLS}" \
-  IID=42 ATTEMPT_NUMBER=1 \
+  IID=42 EXECUTION_ID=1 \
   bash "${SCRIPTS}/dispatch_followup.sh" 2>"${TEST_ROOT}/direct-no-auth.err")"
 DIRECT_RC=$?
 set -e
@@ -1068,7 +1068,7 @@ DIRECT_WRONG_OUTPUT="$(printf '%s' "${WORKER_42}" | \
   PROJECT=repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.local GITLAB_API_PROTOCOL=https \
   REPO_PARENT_PATH="${REPO_PARENT}" RECONCILE_CALLS="${RECONCILE_CALLS}" \
-  IID=42 ATTEMPT_NUMBER=1 CALLBACK_RUN_ID=run-wrong \
+  IID=42 EXECUTION_ID=1 CALLBACK_RUN_ID=run-wrong \
   CALLBACK_CHILD_SESSION_KEY=agent:req_executor:subagent:child-42 \
   CALLBACK_LABEL='#42-att-001' \
   bash "${SCRIPTS}/dispatch_followup.sh" 2>"${TEST_ROOT}/direct-wrong-auth.err")"
@@ -1093,7 +1093,7 @@ LEGACY_OUTPUT="$(printf '%s' "${WORKER_42}" | \
   PROJECT=repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.local GITLAB_API_PROTOCOL=https \
   REPO_PARENT_PATH="${REPO_PARENT}" RECONCILE_CALLS="${RECONCILE_CALLS}" \
-  IID=42 ATTEMPT_NUMBER=1 \
+  IID=42 EXECUTION_ID=1 \
   bash "${SCRIPTS}/dispatch_followup.sh" 2>"${TEST_ROOT}/legacy.err")"
 LEGACY_RC=$?
 set -e

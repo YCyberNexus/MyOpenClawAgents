@@ -74,7 +74,7 @@ CANDIDATES="$(jq -ce '
     | {
         key:.key,
         iid:(try (.key | tonumber) catch null),
-        attempt_number:(.value.attempt_number // null),
+        execution_id:(.value.execution_id // null),
         job_id:(.value.job_id // null)
       }]
 ' <<<"${STATE_JSON}")"
@@ -86,7 +86,7 @@ while IFS= read -r candidate; do
   [ -n "${candidate}" ] || continue
   candidate_key="$(jq -r '.key' <<<"${candidate}")"
   candidate_iid="$(jq -r '.iid // 0' <<<"${candidate}")"
-  candidate_attempt="$(jq -r '.attempt_number // 0' <<<"${candidate}")"
+  candidate_attempt="$(jq -r '.execution_id // 0' <<<"${candidate}")"
   candidate_job_id="$(jq -r '.job_id // empty' <<<"${candidate}")"
 
   if ! [[ "${candidate_key}" =~ ^[1-9][0-9]*$ ]] \
@@ -105,8 +105,8 @@ while IFS= read -r candidate; do
     PROTECTED_ENTRIES="$(jq -ce \
       --argjson iid "${candidate_iid}" \
       --arg job_id "${candidate_job_id}" \
-      --argjson attempt_number "${candidate_attempt}" \
-      '. + [{iid:$iid,job_id:$job_id,attempt_number:$attempt_number}]' \
+      --argjson execution_id "${candidate_attempt}" \
+      '. + [{iid:$iid,job_id:$job_id,execution_id:$execution_id}]' \
       <<<"${PROTECTED_ENTRIES}")"
     continue
   fi
@@ -116,7 +116,7 @@ while IFS= read -r candidate; do
   if ! jq -e \
       --arg key "${candidate_key}" \
       --arg job_id "${candidate_job_id}" \
-      --argjson attempt_number "${candidate_attempt}" '
+      --argjson execution_id "${candidate_attempt}" '
       .pending_subagents[$key] as $pending
       | ($pending | type == "object")
         and $pending.placeholder == true
@@ -125,7 +125,7 @@ while IFS= read -r candidate; do
         and ($pending.spawned_at // null) == null
         and $pending.memberships_source == "scheduler_active_job"
         and $pending.job_id == $job_id
-        and $pending.attempt_number == $attempt_number
+        and $pending.execution_id == $execution_id
     ' <<<"${STATE_JSON}" >/dev/null; then
     UNRESOLVED_IIDS="$(jq -ce --argjson iid "${candidate_iid}" \
       '(. + [$iid]) | unique | sort' <<<"${UNRESOLVED_IIDS}")"
@@ -149,8 +149,8 @@ while IFS= read -r candidate; do
   REAPED_ENTRIES="$(jq -ce \
     --argjson iid "${candidate_iid}" \
     --arg job_id "${candidate_job_id}" \
-    --argjson attempt_number "${candidate_attempt}" \
-    '. + [{iid:$iid,job_id:$job_id,attempt_number:$attempt_number}]' \
+    --argjson execution_id "${candidate_attempt}" \
+    '. + [{iid:$iid,job_id:$job_id,execution_id:$execution_id}]' \
     <<<"${REAPED_ENTRIES}")"
 done < <(jq -c '.[]' <<<"${CANDIDATES}")
 
@@ -159,7 +159,7 @@ if [ "$(jq -r 'length' <<<"${REAPED_ENTRIES}")" -gt 0 ]; then
   while IFS= read -r reaped; do
     [ -n "${reaped}" ] || continue
     wrapper_log orphan_reaper \
-      "reaped scheduler orphan iid=$(jq -r '.iid' <<<"${reaped}") job_id=$(jq -r '.job_id' <<<"${reaped}") attempt=$(jq -r '.attempt_number' <<<"${reaped}")"
+      "reaped scheduler orphan iid=$(jq -r '.iid' <<<"${reaped}") job_id=$(jq -r '.job_id' <<<"${reaped}") execution_id=$(jq -r '.execution_id' <<<"${reaped}")"
   done < <(jq -c '.[]' <<<"${REAPED_ENTRIES}")
 fi
 

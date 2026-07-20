@@ -179,7 +179,7 @@ case "${jobs}" in
     jq -cn "{
       status:\"ready\",
       dispatch_entries:[{
-        iid:42,attempt_number:1,child_label:\"#42-att-001\",
+        iid:42,execution_id:1,child_label:\"#42-att-001\",
         payload_path:\"${TEST_ROOT}/payload-42.txt\",
         expected_task_sha256:\"${sha42}\",expected_task_bytes:42,
         job_id:\"A:snapshot-0\",batch_id:\"A\",snapshot_index:0,
@@ -197,7 +197,7 @@ case "${jobs}" in
     jq -cn "{
       status:\"ready\",
       dispatch_entries:[{
-        iid:44,attempt_number:1,child_label:\"#44-att-001\",
+        iid:44,execution_id:1,child_label:\"#44-att-001\",
         payload_path:\"${TEST_ROOT}/payload-44.txt\",
         expected_task_sha256:\"${sha44}\",expected_task_bytes:44,
         job_id:\"A:snapshot-2\",batch_id:\"A\",snapshot_index:2,
@@ -241,11 +241,11 @@ printf "project-record:%s:%s\n" "${STATUS}" "${IID}" >>"${ORDER_LOG}"
 [[ "${EXPECTED_TASK_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] || exit 95
 [[ "${EXPECTED_TASK_BYTES:-}" =~ ^[1-9][0-9]*$ ]] || exit 95
 if [ "${STATUS}" = spawned ]; then
-  jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" \
-    "{status:\"spawned\",iid:\$iid,attempt_number:\$attempt,remaining_pending_count:1,chat_summary:\"recorded\"}"
+  jq -cn --argjson iid "${IID}" --argjson attempt "${EXECUTION_ID}" \
+    "{status:\"spawned\",iid:\$iid,execution_id:\$attempt,remaining_pending_count:1,chat_summary:\"recorded\"}"
 else
-  jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" \
-    "{status:\"launch_failed_recorded\",iid:\$iid,attempt_number:\$attempt,final_status:\"blocked\",cleanup:{action:\"skip\",target:\"\",reason:\"no_child_session_key\"},remaining_pending_count:0,chat_summary:\"recorded\"}"
+  jq -cn --argjson iid "${IID}" --argjson attempt "${EXECUTION_ID}" \
+    "{status:\"launch_failed_recorded\",iid:\$iid,execution_id:\$attempt,final_status:\"blocked\",cleanup:{action:\"skip\",target:\"\",reason:\"no_child_session_key\"},remaining_pending_count:0,chat_summary:\"recorded\"}"
 fi
 '
 
@@ -266,7 +266,7 @@ if [ "${DRIVEN_RESULT_RECONCILE:-0}" = 1 ]; then
       <<<"${worker_result}" >/dev/null
     jq -cn --argjson iid "${IID}" \
       "{
-        callback_status:\"handled\",iid:\$iid,attempt_number:6,
+        callback_status:\"handled\",iid:\$iid,execution_id:6,
         terminal_status:\"blocked\",merge_request_url:\"\",
         block_reason:\"shared MR marker is pending\",
         cleanup:{action:\"skip\",target:\"\",reason:\"claim retained for shared MR recovery\"},
@@ -350,7 +350,7 @@ jq -cn --argjson iid "${IID}" \
 
 write_fake recover_shared_mr_finalization.sh '
 printf "shared-mr-recovery:%s:%s:%s:%s:%s\n" \
-  "${PROJECT}" "${GROUP}" "${ISSUE_IID}" "${ATTEMPT_NUMBER}" \
+  "${PROJECT}" "${GROUP}" "${ISSUE_IID}" "${EXECUTION_ID}" \
   "${WORK_BRANCH}" >>"${ORDER_LOG}"
 issue_state="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/issues/issue-${ISSUE_IID}/state.json"
 commit_sha="$(jq -r ".mr_finalization.commit_sha" "${issue_state}")"
@@ -360,12 +360,11 @@ shared_role="$(jq -r ".mr_finalization.shared_branch_role" "${issue_state}")"
 dependency_base_sha="$(jq -r ".dependency_base_sha // \"\"" "${issue_state}")"
 mr_action=created
 [ "${shared_role}" != tail ] || mr_action=reused
-printf -v attempt_padded "%03d" "${ATTEMPT_NUMBER}"
-marker_dir="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/.worktrees/issue-${ISSUE_IID}/.req_executor/issue-${ISSUE_IID}/log"
+marker_dir="${REPO_PARENT_PATH}/${PROJECT}/.req_executor/.worktrees/issue-${ISSUE_IID}/.req_executor/issue-${ISSUE_IID}/log/execution-${EXECUTION_ID}"
 mkdir -p "${marker_dir}"
 jq -n \
   --argjson issue_iid "${ISSUE_IID}" \
-  --argjson attempt_number "${ATTEMPT_NUMBER}" \
+  --argjson execution_id "${EXECUTION_ID}" \
   --arg source_branch "${WORK_BRANCH}" \
   --arg target_branch "${target_branch}" \
   --arg dependency_base_sha "${dependency_base_sha}" \
@@ -379,18 +378,18 @@ jq -n \
     shared_mr_intent_id:\$intent_id,
     observed_state:\"opened\",outcome:\"opened\",verified:true,
     mr_action:\$mr_action,issue_iid:\$issue_iid,
-    attempt_number:\$attempt_number,auto_merge:false,
+    execution_id:\$execution_id,auto_merge:false,
     merge_attempted:false,merge_api_succeeded:false,
     reason:\"shared MR verified open\"
   }" >"${marker_dir}/mr_result.json"
 chmod 600 "${marker_dir}/mr_result.json"
 jq -cn \
   --argjson iid "${ISSUE_IID}" \
-  --argjson attempt_number "${ATTEMPT_NUMBER}" \
+  --argjson execution_id "${EXECUTION_ID}" \
   --arg commit_sha "${commit_sha}" \
   --arg intent_id "${intent_id}" \
   --arg mr_action "${mr_action}" "{
-    status:\"verified_open\",iid:\$iid,attempt_number:\$attempt_number,
+    status:\"verified_open\",iid:\$iid,execution_id:\$execution_id,
     commit_sha:\$commit_sha,intent_id:\$intent_id,
     merge_request_url:\"https://gitlab.example.test/group/repo/-/merge_requests/17\",
     mr_action:\$mr_action
@@ -528,7 +527,7 @@ jq -e '
   and (.spawn_grants | length) == 1
   and (.spawn_grants[0] | del(.child_label)) == {
     job_id:"A:snapshot-0",claim_generation:1,project:"group/repo",iid:42,
-    attempt_number:1,
+    execution_id:1,
     payload_path:"'"${TEST_ROOT}"'/payload-42.txt",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42
@@ -683,7 +682,7 @@ printf "topup:%s\n" "\$(jq -r '.grants | map(.job_id) | join(",")' <<<"\${reques
 jq -cn '{
   status:"ready",
   dispatch_entries:[{
-    iid:42,attempt_number:2,child_label:"#42-att-002",
+    iid:42,execution_id:2,child_label:"#42-att-002",
     payload_path:"${TEST_ROOT}/payload-42.txt",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42,
@@ -711,7 +710,7 @@ jq -e '
   and (.spawn_grants | length) == 1
   and .spawn_grants[0].job_id == "A:snapshot-0"
   and .spawn_grants[0].claim_generation == 2
-  and .spawn_grants[0].attempt_number == 2
+  and .spawn_grants[0].execution_id == 2
   and (.spawn_grants[0].child_label
     | test("^reqx-iid42-gen2-[0-9a-f]{40}$"))
   and (tostring | contains("continuation-private-claim") | not)
@@ -866,7 +865,7 @@ archive_digest="$(printf '%s' "${archive_job_id}" | shasum -a 256 | awk '{print 
 mkdir -p "${SCHEDULER_ROOT}/launch_actions"
 jq -cnS --arg job_id "${archive_job_id}" '{
   version:1,job_id:$job_id,project:"group/repo",iid:42,
-  batch_id:"A",snapshot_index:0,attempt_number:1,
+  batch_id:"A",snapshot_index:0,execution_id:1,
   child_label:"reqx-iid42-gen1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   payload_path:"/private/payload",runtime_label_version:1,
   expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
@@ -920,7 +919,7 @@ chmod +x "${FAKE_BIN}/record_driven_batch_launch.sh"
 record_output="$({
   jq -cn '{
     job_id:"A:snapshot-0",claim_generation:2,project:"group/repo",iid:42,
-    attempt_number:2,status:"spawned",run_id:"run-42",
+    execution_id:2,status:"spawned",run_id:"run-42",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42,
     child_session_key:"agent:req_executor:subagent:42"
@@ -993,7 +992,7 @@ jq -c --arg root "${TEST_ROOT}" '
   {
     status:"ready",
     dispatch_entries:[.grants[] | {
-      iid,attempt_number:1,
+      iid,execution_id:1,
       child_label:("#" + (.iid|tostring) + "-att-001"),
       payload_path:(\$root + "/payload-" + (.iid|tostring) + ".txt"),
       expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
@@ -1051,19 +1050,19 @@ cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 EOF
 PROJECT_RUNTIME="${TEST_ROOT}/repos/group/repo/.req_executor"
 CAMPAIGN_DIR="${PROJECT_RUNTIME}/_dispatcher"
-RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
+RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/execution-3"
 mkdir -p "${CAMPAIGN_DIR}" "${RESULT_LOG_DIR}"
 cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
 {"pending_subagents":{"42":{
-  "job_id":"A:snapshot-0","claim_generation":3,"attempt_number":3,
+  "job_id":"A:snapshot-0","claim_generation":3,"execution_id":3,
   "run_id":"run-42-result","child_session_key":"agent:req_executor:subagent:42"
 }}}
 EOF
 cat >"${RESULT_LOG_DIR}/worker_result.json" <<EOF
-{"iid":42,"attempt_number":3,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42","commit_sha":"0123456789abcdef","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/1","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${RESULT_LOG_DIR}"}
+{"iid":42,"execution_id":3,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42","commit_sha":"0123456789abcdef","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/1","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${RESULT_LOG_DIR}"}
 EOF
 cat >"${RESULT_LOG_DIR}/acpx_terminal.json" <<'EOF'
-{"version":1,"iid":42,"attempt_number":3,"exit_code":0,"completed_at_epoch":100}
+{"version":1,"iid":42,"execution_id":3,"exit_code":0,"completed_at_epoch":100}
 EOF
 durable_result_output="$(
   RESULT_TEST_RELEASE=1 SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
@@ -1090,7 +1089,7 @@ jq -e '
 
 # If the wrapper died after acpx_terminal.json but before worker_result.json,
 # wait for a bounded grace period and then reclaim only the matching native
-# child. The issue-local marker has an exact schema and attempt-number payload,
+# child. The issue-local marker has an exact schema and execution identity,
 # so an in-flight acpx process cannot be mistaken for this post-acpx state.
 cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 {"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
@@ -1105,14 +1104,14 @@ cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 EOF
 cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
 {"pending_subagents":{"42":{
-  "job_id":"A:snapshot-0","claim_generation":4,"attempt_number":4,
+  "job_id":"A:snapshot-0","claim_generation":4,"execution_id":4,
   "run_id":"run-42-marker","child_session_key":"agent:req_executor:subagent:42"
 }}}
 EOF
-MARKER_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
+MARKER_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/execution-4"
 mkdir -p "${MARKER_LOG_DIR}"
 cat >"${MARKER_LOG_DIR}/acpx_terminal.json" <<'EOF'
-{"version":1,"iid":42,"attempt_number":4,"exit_code":0,"completed_at_epoch":100}
+{"version":1,"iid":42,"execution_id":4,"exit_code":0,"completed_at_epoch":100}
 EOF
 post_acpx_output="$(
   NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
@@ -1129,7 +1128,7 @@ jq -e '
   and .cleanup_actions[0].action == "kill"
   and .cleanup_actions[0].target == "agent:req_executor:subagent:42"
   and .cleanup_actions[0].reason == "post_acpx_finalization_grace_exceeded"
-  and .cleanup_actions[0].attempt_number == 4
+  and .cleanup_actions[0].execution_id == 4
   and .cleanup_actions[0].claim_generation == 4
   and ([.operation_results[] | select(
     .operation == "post_acpx_watchdog"
@@ -1159,7 +1158,7 @@ cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 EOF
 cat >"${CAMPAIGN_DIR}/campaign_state.json" <<EOF
 {"pending_subagents":{"42":{
-  "job_id":"A:snapshot-0","claim_generation":6,"attempt_number":6,
+  "job_id":"A:snapshot-0","claim_generation":6,"execution_id":6,
   "run_id":"run-42-shared-mr","child_session_key":"agent:req_executor:subagent:42",
   "auto_merge":false,"branch":"main","merge_target_branch":"main",
   "work_branch":"issue/9+42","branch_members":[9,42],
@@ -1169,10 +1168,10 @@ cat >"${CAMPAIGN_DIR}/campaign_state.json" <<EOF
 }}}
 EOF
 SHARED_ISSUE_DIR="${PROJECT_RUNTIME}/issues/issue-42"
-mkdir -p "${SHARED_ISSUE_DIR}"
-cat >"${SHARED_ISSUE_DIR}/attempt_state.json" <<EOF
+mkdir -p "${SHARED_ISSUE_DIR}/executions"
+cat >"${SHARED_ISSUE_DIR}/executions/execution-6.json" <<EOF
 {
-  "iid":42,"attempt_number":6,"issue_title":"共享分支尾节点",
+  "iid":42,"execution_id":6,"issue_title":"共享分支尾节点",
   "mode_actual":"fresh","auto_merge":false,"merge_target_branch":"main",
   "work_branch":"issue/9+42","branch_members":[9,42],
   "shared_branch_role":"tail","dependency_iid":9,
@@ -1189,7 +1188,7 @@ cat >"${SHARED_ISSUE_DIR}/state.json" <<EOF
   "dependency_history_verified":true,
   "work_branch_sha":"${SHARED_COMMIT_SHA}",
   "mr_finalization":{
-    "status":"pending","source_attempt_number":6,
+    "status":"pending","source_execution_id":6,
     "work_branch":"issue/9+42","branch_members":[9,42],
     "shared_branch_role":"tail","commit_sha":"${SHARED_COMMIT_SHA}",
     "intent_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1197,16 +1196,16 @@ cat >"${SHARED_ISSUE_DIR}/state.json" <<EOF
   }
 }
 EOF
-chmod 600 "${SHARED_ISSUE_DIR}/attempt_state.json" \
+chmod 600 "${SHARED_ISSUE_DIR}/executions/execution-6.json" \
   "${SHARED_ISSUE_DIR}/state.json"
-SHARED_MR_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
+SHARED_MR_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/execution-6"
 mkdir -p "${SHARED_MR_LOG_DIR}"
 cat >"${SHARED_MR_LOG_DIR}/acpx_terminal.json" <<'EOF'
-{"version":1,"iid":42,"attempt_number":6,"exit_code":0,"completed_at_epoch":100}
+{"version":1,"iid":42,"execution_id":6,"exit_code":0,"completed_at_epoch":100}
 EOF
 cat >"${SHARED_MR_LOG_DIR}/worker_result.json" <<EOF
 {
-  "iid":42,"attempt_number":6,"status":"blocked","mode_actual":"fresh",
+  "iid":42,"execution_id":6,"status":"blocked","mode_actual":"fresh",
   "work_branch":"issue/9+42","local_branch":"issue/42",
   "commit_sha":"${SHARED_COMMIT_SHA}","merge_request_url":"",
   "mr_action":"none","wiki_url":"","labels_added":[],
@@ -1296,15 +1295,15 @@ cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 EOF
 cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
 {"pending_subagents":{"42":{
-  "job_id":"A:snapshot-0","claim_generation":5,"attempt_number":5,
+  "job_id":"A:snapshot-0","claim_generation":5,"execution_id":5,
   "run_id":"run-42-marker-retry","child_session_key":"agent:req_executor:subagent:42",
   "auto_merge":true,"branch":"main","merge_target_branch":"release"
 }}}
 EOF
-MARKER_RETRY_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log"
+MARKER_RETRY_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/execution-5"
 mkdir -p "${MARKER_RETRY_LOG_DIR}"
 cat >"${MARKER_RETRY_LOG_DIR}/acpx_terminal.json" <<'EOF'
-{"version":1,"iid":42,"attempt_number":5,"exit_code":0,"completed_at_epoch":100}
+{"version":1,"iid":42,"execution_id":5,"exit_code":0,"completed_at_epoch":100}
 EOF
 marker_retry_blocked_out="$(
   NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \

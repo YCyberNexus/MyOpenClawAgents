@@ -27,7 +27,7 @@ cat >"${STATE_DIR}/campaign_state.json" <<'EOF'
   "project":"repo",
   "pending_subagents":{
     "42":{
-      "attempt_number":1,
+      "execution_id":1,
       "run_id":null,
       "child_session_key":null,
       "spawned_at":null,

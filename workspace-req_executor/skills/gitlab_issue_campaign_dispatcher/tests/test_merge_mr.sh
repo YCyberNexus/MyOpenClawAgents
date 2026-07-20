@@ -121,7 +121,7 @@ run_case() {
   PATH="${FAKE_BIN}:${PATH}" \
   GLAB_SCENARIO="${scenario}" GLAB_LOG="${log}" GLAB_COUNT_FILE="${count_file}" \
   MERGE_TEST_REPO="${MERGE_REPO}" \
-  PROJECT=repo GROUP=group ISSUE_IID=42 ATTEMPT_NUMBER=1 \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 \
   BRANCH=main MERGE_TARGET_BRANCH=release WORK_BRANCH=issue/42 \
   MR_IID=7 \
   MERGE_REQUEST_URL='https://gitlab.example.test/group/repo/-/merge_requests/7' \
@@ -270,7 +270,7 @@ PATH="${FAKE_BIN}:${PATH}" \
 GLAB_SCENARIO=stays_open GLAB_LOG="${SHARED_LOG}" \
 GLAB_COUNT_FILE="${TEST_ROOT}/shared-auto-merge.count" \
 MERGE_TEST_REPO="${MERGE_REPO}" \
-PROJECT=repo GROUP=group ISSUE_IID=42 ATTEMPT_NUMBER=1 \
+PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 \
 BRANCH=main MERGE_TARGET_BRANCH=release WORK_BRANCH='issue/42+43' \
 MR_IID=7 \
 MERGE_REQUEST_URL='https://gitlab.example.test/group/repo/-/merge_requests/7' \

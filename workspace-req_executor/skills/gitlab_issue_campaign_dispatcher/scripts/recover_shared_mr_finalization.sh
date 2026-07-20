@@ -10,8 +10,8 @@ source "${SCRIPT_DIR}/env_paths.sh"
 source "${SCRIPT_DIR}/git_network_guard.sh"
 GIT_NETWORK_GUARD_CONTEXT=recover_shared_mr_finalization
 
-: "${ISSUE_IID:?}" "${ATTEMPT_NUMBER:?}" "${ISSUE_STATE_FILE:?}" \
-  "${ATTEMPT_STATE_FILE:?}" "${WORK_BRANCH:?}" "${WORKTREE_DIR:?}"
+: "${ISSUE_IID:?}" "${EXECUTION_ID:?}" "${ISSUE_STATE_FILE:?}" \
+  "${EXECUTION_STATE_FILE:?}" "${WORK_BRANCH:?}" "${WORKTREE_DIR:?}"
 
 private_file_mode() {
   local path="$1"
@@ -48,99 +48,99 @@ ISSUE_STATE="$(read_private_json "${ISSUE_STATE_FILE}")" || {
   echo "recover_shared_mr_finalization: unsafe or invalid Issue state" >&2
   exit 2
 }
-ATTEMPT_STATE="$(read_private_json "${ATTEMPT_STATE_FILE}")" || {
-  echo "recover_shared_mr_finalization: unsafe or invalid attempt state" >&2
+EXECUTION_STATE="$(read_private_json "${EXECUTION_STATE_FILE}")" || {
+  echo "recover_shared_mr_finalization: unsafe or invalid execution state" >&2
   exit 2
 }
 
 if ! RECOVERY_IDENTITY="$(jq -nce \
     --argjson issue_state "${ISSUE_STATE}" \
-    --argjson attempt_state "${ATTEMPT_STATE}" \
+    --argjson execution_state "${EXECUTION_STATE}" \
     --argjson iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg work_branch "${WORK_BRANCH}" '
     ($issue_state.mr_finalization // null) as $finalization
-    | if $attempt_state.iid == $iid
-      and $attempt_state.attempt_number == $attempt_number
-      and ($attempt_state.issue_title | type == "string" and length > 0)
-      and ($attempt_state.mode_actual == "fresh"
-        or $attempt_state.mode_actual == "continue")
-      and $attempt_state.auto_merge == false
-      and $attempt_state.work_branch == $work_branch
-      and ($attempt_state.branch_members | type == "array" and length == 2)
-      and $attempt_state.branch_members[0] != $attempt_state.branch_members[1]
-      and ($attempt_state.branch_members | index($iid) != null)
-      and $attempt_state.work_branch ==
-        ("issue/" + ($attempt_state.branch_members[0] | tostring)
-          + "+" + ($attempt_state.branch_members[1] | tostring))
-      and $attempt_state.shared_branch_role ==
-        (if $iid == $attempt_state.branch_members[0] then "head" else "tail" end)
-      and ($attempt_state.expected_commit_parent_sha | type == "string"
+    | if $execution_state.iid == $iid
+      and $execution_state.execution_id == $execution_id
+      and ($execution_state.issue_title | type == "string" and length > 0)
+      and ($execution_state.mode_actual == "fresh"
+        or $execution_state.mode_actual == "continue")
+      and $execution_state.auto_merge == false
+      and $execution_state.work_branch == $work_branch
+      and ($execution_state.branch_members | type == "array" and length == 2)
+      and $execution_state.branch_members[0] != $execution_state.branch_members[1]
+      and ($execution_state.branch_members | index($iid) != null)
+      and $execution_state.work_branch ==
+        ("issue/" + ($execution_state.branch_members[0] | tostring)
+          + "+" + ($execution_state.branch_members[1] | tostring))
+      and $execution_state.shared_branch_role ==
+        (if $iid == $execution_state.branch_members[0] then "head" else "tail" end)
+      and ($execution_state.expected_commit_parent_sha | type == "string"
         and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-      and ($attempt_state.merge_target_branch | type == "string" and length > 0)
+      and ($execution_state.merge_target_branch | type == "string" and length > 0)
       and ($finalization | type == "object")
       and ($finalization | keys | sort) == ([
         "branch_members","commit_sha","intent_id","shared_branch_role",
-        "source_attempt_number","status","target_branch","work_branch"
+        "source_execution_id","status","target_branch","work_branch"
       ] | sort)
       and $finalization.status == "pending"
-      and $finalization.source_attempt_number == $attempt_number
-      and $finalization.work_branch == $attempt_state.work_branch
-      and $finalization.branch_members == $attempt_state.branch_members
-      and $finalization.shared_branch_role == $attempt_state.shared_branch_role
+      and $finalization.source_execution_id == $execution_id
+      and $finalization.work_branch == $execution_state.work_branch
+      and $finalization.branch_members == $execution_state.branch_members
+      and $finalization.shared_branch_role == $execution_state.shared_branch_role
       and ($finalization.commit_sha | type == "string"
         and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
       and ($finalization.intent_id | type == "string"
         and test("^[0-9a-f]{64}$"))
-      and $finalization.target_branch == $attempt_state.merge_target_branch
+      and $finalization.target_branch == $execution_state.merge_target_branch
       and $issue_state.dependency_history_verified == true
-      and $issue_state.dependency_pinned_attempt_number == $attempt_number
+      and $issue_state.dependency_pinned_execution_id == $execution_id
       and (($issue_state.work_branch_sha | ascii_downcase)
         == ($finalization.commit_sha | ascii_downcase))
       and $issue_state.work_branch == $finalization.work_branch
       and $issue_state.branch_members == $finalization.branch_members
       and $issue_state.shared_branch_role == $finalization.shared_branch_role
-      and (if $attempt_state.shared_branch_role == "head" then
-        $attempt_state.mode_actual == "fresh"
-        and ($attempt_state.expected_work_branch_sha // null) == null
-        and ($attempt_state.dependency_iid // null) == null
-        and ($attempt_state.dependency_branch // null) == null
-        and ($attempt_state.dependency_base_sha // null) == null
+      and (if $execution_state.shared_branch_role == "head" then
+        $execution_state.mode_actual == "fresh"
+        and ($execution_state.expected_work_branch_sha // null) == null
+        and ($execution_state.dependency_iid // null) == null
+        and ($execution_state.dependency_branch // null) == null
+        and ($execution_state.dependency_base_sha // null) == null
         and ($issue_state.dependency_iid // null) == null
         and ($issue_state.dependency_branch // null) == null
         and ($issue_state.dependency_base_sha // null) == null
       else
-        ($attempt_state.expected_work_branch_sha | type == "string"
+        ($execution_state.expected_work_branch_sha | type == "string"
           and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-        and $attempt_state.dependency_iid == $attempt_state.branch_members[0]
-        and $attempt_state.dependency_branch == $attempt_state.work_branch
-        and ($attempt_state.dependency_base_sha | type == "string"
+        and $execution_state.dependency_iid == $execution_state.branch_members[0]
+        and $execution_state.dependency_branch == $execution_state.work_branch
+        and ($execution_state.dependency_base_sha | type == "string"
           and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-        and $issue_state.dependency_iid == $attempt_state.dependency_iid
-        and $issue_state.dependency_branch == $attempt_state.dependency_branch
+        and $issue_state.dependency_iid == $execution_state.dependency_iid
+        and $issue_state.dependency_branch == $execution_state.dependency_branch
         and (($issue_state.dependency_base_sha | ascii_downcase)
-          == ($attempt_state.dependency_base_sha | ascii_downcase))
-        and (($attempt_state.expected_commit_parent_sha | ascii_downcase)
-          == ($attempt_state.dependency_base_sha | ascii_downcase))
-        and (if $attempt_state.mode_actual == "fresh" then
-          (($attempt_state.expected_work_branch_sha | ascii_downcase)
-            == ($attempt_state.dependency_base_sha | ascii_downcase))
+          == ($execution_state.dependency_base_sha | ascii_downcase))
+        and (($execution_state.expected_commit_parent_sha | ascii_downcase)
+          == ($execution_state.dependency_base_sha | ascii_downcase))
+        and (if $execution_state.mode_actual == "fresh" then
+          (($execution_state.expected_work_branch_sha | ascii_downcase)
+            == ($execution_state.dependency_base_sha | ascii_downcase))
         else true end)
       end)
     then {
-      issue_title:$attempt_state.issue_title,
-      mode_actual:$attempt_state.mode_actual,
-      target_branch:$attempt_state.merge_target_branch,
-      branch_members:$attempt_state.branch_members,
-      shared_branch_role:$attempt_state.shared_branch_role,
-      dependency_iid:($attempt_state.dependency_iid // null),
-      dependency_branch:($attempt_state.dependency_branch // null),
-      dependency_base_sha:($attempt_state.dependency_base_sha // null),
+      issue_title:$execution_state.issue_title,
+      mode_actual:$execution_state.mode_actual,
+      target_branch:$execution_state.merge_target_branch,
+      branch_members:$execution_state.branch_members,
+      shared_branch_role:$execution_state.shared_branch_role,
+      dependency_iid:($execution_state.dependency_iid // null),
+      dependency_branch:($execution_state.dependency_branch // null),
+      dependency_base_sha:($execution_state.dependency_base_sha // null),
       commit_sha:$finalization.commit_sha,
       intent_id:$finalization.intent_id
     } else error("invalid shared MR recovery checkpoint") end
   ')"; then
-  echo "recover_shared_mr_finalization: checkpoint does not match the fixed attempt" >&2
+  echo "recover_shared_mr_finalization: checkpoint does not match the fixed execution" >&2
   exit 2
 fi
 
@@ -203,12 +203,12 @@ fi
 
 jq -nc \
   --argjson iid "${ISSUE_IID}" \
-  --argjson attempt_number "${ATTEMPT_NUMBER}" \
+  --argjson execution_id "${EXECUTION_ID}" \
   --arg commit_sha "${COMMIT_SHA}" \
   --arg intent_id "$(jq -r '.intent_id' <<<"${RECOVERY_IDENTITY}")" \
   --arg mr_url "${MR_URL}" \
   --arg mr_action "${MR_ACTION}" '{
-    status:"verified_open",iid:$iid,attempt_number:$attempt_number,
+    status:"verified_open",iid:$iid,execution_id:$execution_id,
     commit_sha:$commit_sha,intent_id:$intent_id,
     merge_request_url:$mr_url,mr_action:$mr_action
   }'

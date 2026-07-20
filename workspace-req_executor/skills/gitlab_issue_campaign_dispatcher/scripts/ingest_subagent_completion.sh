@@ -594,7 +594,7 @@ if [ "${PROJECT_ENV_SET}" = x ] || [ "${GROUP_ENV_SET}" = x ]; then
 fi
 
 ROUTED_IID=""
-ROUTED_ATTEMPT_NUMBER=""
+ROUTED_EXECUTION_ID=""
 CONFIG_DIR="${CONFIG_DIR:-$(cd "${SCRIPT_DIR}/../../.." && pwd)/config}"
 SCHEDULER_ENV_SCRIPT="${SCRIPT_DIR}/scheduler_env.sh"
 GITLAB_RESOLVER_SCRIPT="${SCRIPT_DIR}/gitlab_env_resolver.sh"
@@ -706,7 +706,7 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
         and (.job_id | clean_string and length <= 1024)
         and (.project | safe_project)
         and (.iid | type == "number" and . == floor and . > 0)
-        and (.attempt_number | type == "number" and . == floor and . > 0)
+        and (.execution_id | type == "number" and . == floor and . > 0)
         and (.expected_task_sha256 | type == "string"
           and test("^[0-9a-f]{64}$"))
         and (.expected_task_bytes | type == "number"
@@ -781,7 +781,7 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
       ROUTE_ACTION_JSON="$(jq -c '{
         project,
         iid,
-        attempt_number,
+        execution_id,
         child_label:(.child_label // ""),
         run_id:.ack.run_id
       }' <<<"${ACTION_JSON}")"
@@ -830,7 +830,7 @@ if [ "${TRY_DURABLE_ROUTE}" = true ]; then
       reject_completion explicit_group_conflicts_with_durable_route
     fi
     ROUTED_IID="$(jq -r '.iid' <<<"${ROUTE_ACTION_JSON}")"
-    ROUTED_ATTEMPT_NUMBER="$(jq -r '.attempt_number' <<<"${ROUTE_ACTION_JSON}")"
+    ROUTED_EXECUTION_ID="$(jq -r '.execution_id' <<<"${ROUTE_ACTION_JSON}")"
     PROJECT="${PROJECT_FULL##*/}"
     GROUP="${PROJECT_FULL%/*}"
 
@@ -959,12 +959,12 @@ if [ "${INTERNAL_CONTEXT_MODE}" = true ] \
   esac
   ASSISTANT_TEXT="$(jq -cnS \
     --argjson iid "${ROUTED_IID}" \
-    --argjson attempt_number "${ROUTED_ATTEMPT_NUMBER}" \
+    --argjson execution_id "${ROUTED_EXECUTION_ID}" \
     --arg status "${SYNTHETIC_RUNTIME_STATUS}" \
     --arg block_reason \
       "OpenClaw subagent runtime ended with ${INTERNAL_REGISTRY_STATUS}" '{
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       status:$status,
       mode_actual:"",
       work_branch:"",
@@ -985,11 +985,11 @@ if ! WORKER_JSON="$(completion_extract_unique_worker_reply "${ASSISTANT_TEXT}")"
   reject_completion invalid_or_ambiguous_worker_json
 fi
 IID="$(jq -r '.iid' <<<"${WORKER_JSON}")"
-ATTEMPT_NUMBER="$(jq -r '.attempt_number' <<<"${WORKER_JSON}")"
+EXECUTION_ID="$(jq -r '.execution_id' <<<"${WORKER_JSON}")"
 
 if [ "${ROUTE_MODE}" = durable ] \
     && { [ "${IID}" != "${ROUTED_IID}" ] \
-      || [ "${ATTEMPT_NUMBER}" != "${ROUTED_ATTEMPT_NUMBER}" ]; }; then
+      || [ "${EXECUTION_ID}" != "${ROUTED_EXECUTION_ID}" ]; }; then
   reject_completion worker_identity_mismatch
 fi
 
@@ -1016,7 +1016,7 @@ if [ "${PENDING_AT_IID}" != null ]; then
     reject_completion pending_identity_mismatch
   fi
   if ! completion_authenticate_pending \
-      "${PENDING_AT_IID}" "${ATTEMPT_NUMBER}" "${RUN_ID}" \
+      "${PENDING_AT_IID}" "${EXECUTION_ID}" "${RUN_ID}" \
       "${CHILD_SESSION_KEY}" "${CHILD_LABEL}" >/dev/null; then
     reject_completion pending_identity_mismatch
   fi
@@ -1031,5 +1031,5 @@ fi
 CALLBACK_RUN_ID="${RUN_ID}" \
 CALLBACK_CHILD_SESSION_KEY="${CHILD_SESSION_KEY}" \
 CALLBACK_LABEL="${CHILD_LABEL}" \
-IID="${IID}" ATTEMPT_NUMBER="${ATTEMPT_NUMBER}" \
+IID="${IID}" EXECUTION_ID="${EXECUTION_ID}" \
   bash "${FOLLOWUP_SCRIPT}" <<<"${WORKER_JSON}"

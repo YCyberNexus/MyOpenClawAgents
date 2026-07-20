@@ -12,9 +12,9 @@ export PROJECT_URI="claw_gitlab%2Freq_executor_test"
 export PROJECT="req_executor_test"
 export REPO_PARENT_PATH="${TEST_ROOT}/repos"
 
-mkdir -p "${DISPATCHER_LOG_DIR}" "${ISSUES_ROOT}/issue-10"
+mkdir -p "${DISPATCHER_LOG_DIR}" "${ISSUES_ROOT}/issue-10/executions"
 printf '{}\n' >"${ISSUES_ROOT}/issue-10/state.json"
-printf '{}\n' >"${ISSUES_ROOT}/issue-10/attempt_state.json"
+printf '{}\n' >"${ISSUES_ROOT}/issue-10/executions/execution-1.json"
 printf '# summary\n' >"${ISSUES_ROOT}/issue-10/summary.md"
 
 # shellcheck source=../scripts/_dispatch_lib.sh

@@ -231,17 +231,17 @@ tick_read_private_json() {
 # the MR-only recovery command; that command independently repeats the fixed
 # identity checks before touching GitLab.
 post_acpx_shared_mr_checkpoint() {
-  local pending="$1" issue_state_file="$2" attempt_state_file="$3"
-  local iid="$4" attempt_number="$5" work_branch="$6"
-  local issue_state attempt_state
+  local pending="$1" issue_state_file="$2" execution_state_file="$3"
+  local iid="$4" execution_id="$5" work_branch="$6"
+  local issue_state execution_state
   issue_state="$(tick_read_private_json "${issue_state_file}")" || return 1
-  attempt_state="$(tick_read_private_json "${attempt_state_file}")" || return 1
+  execution_state="$(tick_read_private_json "${execution_state_file}")" || return 1
   jq -nce \
     --argjson pending "${pending}" \
     --argjson issue_state "${issue_state}" \
-    --argjson attempt_state "${attempt_state}" \
+    --argjson execution_state "${execution_state}" \
     --argjson iid "${iid}" \
-    --argjson attempt_number "${attempt_number}" \
+    --argjson execution_id "${execution_id}" \
     --arg work_branch "${work_branch}" '
       ($pending.branch_members // null) as $members
       | ($pending.merge_target_branch // $pending.branch // "") as $target
@@ -258,16 +258,16 @@ post_acpx_shared_mr_checkpoint() {
         and $pending.shared_branch_role ==
           (if $iid == $members[0] then "head" else "tail" end)
         and ($target | type == "string" and length > 0)
-        and $attempt_state.iid == $iid
-        and $attempt_state.attempt_number == $attempt_number
-        and ($attempt_state.issue_title | type == "string" and length > 0)
-        and ($attempt_state.mode_actual == "fresh"
-          or $attempt_state.mode_actual == "continue")
-        and $attempt_state.auto_merge == false
-        and $attempt_state.work_branch == $work_branch
-        and $attempt_state.branch_members == $members
-        and $attempt_state.shared_branch_role == $pending.shared_branch_role
-        and $attempt_state.merge_target_branch == $target
+        and $execution_state.iid == $iid
+        and $execution_state.execution_id == $execution_id
+        and ($execution_state.issue_title | type == "string" and length > 0)
+        and ($execution_state.mode_actual == "fresh"
+          or $execution_state.mode_actual == "continue")
+        and $execution_state.auto_merge == false
+        and $execution_state.work_branch == $work_branch
+        and $execution_state.branch_members == $members
+        and $execution_state.shared_branch_role == $pending.shared_branch_role
+        and $execution_state.merge_target_branch == $target
         and $issue_state.iid == $iid
         and $issue_state.work_branch == $work_branch
         and $issue_state.branch_members == $members
@@ -278,10 +278,10 @@ post_acpx_shared_mr_checkpoint() {
         and ($finalization | type == "object")
         and ($finalization | keys | sort) == ([
           "branch_members","commit_sha","intent_id","shared_branch_role",
-          "source_attempt_number","status","target_branch","work_branch"
+          "source_execution_id","status","target_branch","work_branch"
         ] | sort)
         and $finalization.status == "pending"
-        and $finalization.source_attempt_number == $attempt_number
+        and $finalization.source_execution_id == $execution_id
         and $finalization.work_branch == $work_branch
         and $finalization.branch_members == $members
         and $finalization.shared_branch_role == $pending.shared_branch_role
@@ -296,9 +296,9 @@ post_acpx_shared_mr_checkpoint() {
           ($pending.dependency_iid // null) == null
           and ($pending.dependency_branch // null) == null
           and ($pending.dependency_base_sha // null) == null
-          and ($attempt_state.dependency_iid // null) == null
-          and ($attempt_state.dependency_branch // null) == null
-          and ($attempt_state.dependency_base_sha // null) == null
+          and ($execution_state.dependency_iid // null) == null
+          and ($execution_state.dependency_branch // null) == null
+          and ($execution_state.dependency_base_sha // null) == null
           and ($issue_state.dependency_iid // null) == null
           and ($issue_state.dependency_branch // null) == null
           and ($issue_state.dependency_base_sha // null) == null
@@ -307,9 +307,9 @@ post_acpx_shared_mr_checkpoint() {
           and $pending.dependency_branch == $work_branch
           and ($pending.dependency_base_sha | type == "string"
             and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-          and $attempt_state.dependency_iid == $pending.dependency_iid
-          and $attempt_state.dependency_branch == $pending.dependency_branch
-          and (($attempt_state.dependency_base_sha | ascii_downcase)
+          and $execution_state.dependency_iid == $pending.dependency_iid
+          and $execution_state.dependency_branch == $pending.dependency_branch
+          and (($execution_state.dependency_base_sha | ascii_downcase)
             == ($pending.dependency_base_sha | ascii_downcase))
           and $issue_state.dependency_iid == $pending.dependency_iid
           and $issue_state.dependency_branch == $pending.dependency_branch
@@ -326,25 +326,25 @@ post_acpx_shared_mr_checkpoint() {
 # and alone decides whether to complete, terminate, or retain the claim.
 post_acpx_shared_mr_marker_ready() {
   local marker_file="$1" pending="$2" checkpoint="$3"
-  local iid="$4" attempt_number="$5" marker
+  local iid="$4" execution_id="$5" marker
   marker="$(tick_read_private_json "${marker_file}")" || return 1
   jq -nce \
     --argjson marker "${marker}" \
     --argjson pending "${pending}" \
     --argjson checkpoint "${checkpoint}" \
     --argjson iid "${iid}" \
-    --argjson attempt_number "${attempt_number}" '
+    --argjson execution_id "${execution_id}" '
       ($pending.merge_target_branch // $pending.branch // "") as $target
       | ($pending.dependency_base_sha // "") as $dependency_sha
       | if ($marker | keys | sort) == ([
-          "attempt_number","auto_merge","dependency_base_sha","iid",
+          "execution_id","auto_merge","dependency_base_sha","iid",
           "issue_iid","merge_api_succeeded","merge_attempted","mr_action",
           "observed_state","outcome","reason","sha","source_branch",
           "shared_mr_intent_id","target_branch","verified","version","web_url"
         ] | sort)
         and $marker.version == 1
         and $marker.issue_iid == $iid
-        and $marker.attempt_number == $attempt_number
+        and $marker.execution_id == $execution_id
         and $marker.auto_merge == false
         and $marker.source_branch == $checkpoint.work_branch
         and $marker.target_branch == $target
@@ -504,13 +504,13 @@ while IFS= read -r post_job; do
       | select(type == "object"
         and .job_id == $job_id
         and .claim_generation == $generation
-        and (.attempt_number | type == "number" and . == floor and . > 0)
+        and (.execution_id | type == "number" and . == floor and . > 0)
         and (.run_id | type == "string" and length > 0)
         and (.child_session_key | type == "string" and length > 0))
     ' "${post_state_file}" 2>/dev/null)"; then
     continue
   fi
-  post_attempt="$(jq -r '.attempt_number' <<<"${post_pending}")"
+  post_attempt="$(jq -r '.execution_id' <<<"${post_pending}")"
   post_run_id="$(jq -r '.run_id' <<<"${post_pending}")"
   post_child_session_key="$(jq -r '.child_session_key' <<<"${post_pending}")"
   post_work_branch="$(jq -r --argjson iid "${post_iid}" \
@@ -518,7 +518,7 @@ while IFS= read -r post_job; do
   if ! git check-ref-format --branch "${post_work_branch}" >/dev/null 2>&1; then
     continue
   fi
-  post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log"
+  post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log/execution-${post_attempt}"
   post_result_file="${post_log_dir}/worker_result.json"
   post_marker_file="${post_log_dir}/acpx_terminal.json"
 
@@ -537,8 +537,8 @@ while IFS= read -r post_job; do
       --argjson iid "${post_iid}" \
       --argjson attempt "${post_attempt}" '
       if type == "object"
-        and (keys | sort) == ["attempt_number","completed_at_epoch","exit_code","iid","version"]
-        and .version == 1 and .iid == $iid and .attempt_number == $attempt
+        and (keys | sort) == ["completed_at_epoch","execution_id","exit_code","iid","version"]
+        and .version == 1 and .iid == $iid and .execution_id == $attempt
         and (.exit_code | type == "number" and . == floor and . >= 0 and . <= 255)
         and (.completed_at_epoch | type == "number" and . == floor and . >= 0)
       then . else error("invalid acpx terminal marker") end
@@ -563,13 +563,13 @@ while IFS= read -r post_job; do
       --argjson acpx_exit "$(jq -r '.exit_code' <<<"${post_marker_json}")" '
       if type == "object"
         and (keys | sort) == ([
-          "attempt_number","block_reason","commit_sha","iid",
+          "execution_id","block_reason","commit_sha","iid",
           "labels_added","labels_removed","local_branch","log_dir",
           "merge_request_url","mode_actual","mr_action","status",
           "summary_posted","wiki_url","work_branch"
         ] | sort)
         and .iid == $iid
-        and .attempt_number == $attempt
+        and .execution_id == $attempt
         and (.status as $status
           | ["done","no_changes","blocked","failed","timeout"]
           | index($status)) != null
@@ -637,10 +637,10 @@ while IFS= read -r post_job; do
           --argjson cleanup "$(jq -c '.cleanup' <<<"${post_reconcile_json}")" \
           --arg job_id "${post_job_id}" \
           --argjson iid "${post_iid}" \
-          --argjson attempt_number "${post_attempt}" \
+          --argjson execution_id "${post_attempt}" \
           --argjson claim_generation "${post_generation}" '
           . + [$cleanup + {
-            job_id:$job_id,iid:$iid,attempt_number:$attempt_number,
+            job_id:$job_id,iid:$iid,execution_id:$execution_id,
             claim_generation:$claim_generation
           }]
         ' <<<"${CLEANUP_ACTIONS}")"
@@ -685,11 +685,11 @@ while IFS= read -r post_job; do
   ' <<<"${post_pending}")"
   if [ "${post_shared_branch}" = true ]; then
     post_issue_state_file="${post_repo}/.req_executor/issues/issue-${post_iid}/state.json"
-    post_attempt_state_file="${post_repo}/.req_executor/issues/issue-${post_iid}/attempt_state.json"
+    post_execution_state_file="${post_repo}/.req_executor/issues/issue-${post_iid}/executions/execution-${post_attempt}.json"
     post_shared_checkpoint=""
     if post_shared_checkpoint="$(post_acpx_shared_mr_checkpoint \
         "${post_pending}" "${post_issue_state_file}" \
-        "${post_attempt_state_file}" "${post_iid}" "${post_attempt}" \
+        "${post_execution_state_file}" "${post_iid}" "${post_attempt}" \
         "${post_work_branch}")" \
         && ! post_acpx_shared_mr_marker_ready "${post_log_dir}/mr_result.json" \
           "${post_pending}" "${post_shared_checkpoint}" \
@@ -700,7 +700,7 @@ while IFS= read -r post_job; do
         GROUP="$(jq -r '.group' <<<"${post_context}")" \
         GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
         REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${post_context}")" \
-        ISSUE_IID="${post_iid}" ATTEMPT_NUMBER="${post_attempt}" \
+        ISSUE_IID="${post_iid}" EXECUTION_ID="${post_attempt}" \
         WORK_BRANCH="${post_work_branch}" \
           timeout --kill-after=30s 300s \
             bash "${RECOVER_SHARED_MR_CMD}" 2>/dev/null
@@ -710,7 +710,7 @@ while IFS= read -r post_job; do
       if [ "${post_shared_recovery_rc}" -eq 0 ] \
           && post_shared_recovery_json="$(jq -ce \
             --argjson iid "${post_iid}" \
-            --argjson attempt_number "${post_attempt}" \
+            --argjson execution_id "${post_attempt}" \
             --arg commit_sha "$(jq -r '.commit_sha' \
               <<<"${post_shared_checkpoint}")" \
             --arg shared_role "$(jq -r '.shared_branch_role' \
@@ -719,12 +719,12 @@ while IFS= read -r post_job; do
               <<<"${post_shared_checkpoint}")" '
             if type == "object"
               and (keys | sort) == ([
-                "attempt_number","commit_sha","iid","intent_id","merge_request_url",
+                "execution_id","commit_sha","iid","intent_id","merge_request_url",
                 "mr_action","status"
               ] | sort)
               and .status == "verified_open"
               and .iid == $iid
-              and .attempt_number == $attempt_number
+              and .execution_id == $execution_id
               and ((.commit_sha | ascii_downcase)
                 == ($commit_sha | ascii_downcase))
               and .intent_id == $intent_id
@@ -849,7 +849,7 @@ while IFS= read -r post_job; do
     --arg job_id "${post_job_id}" \
     --arg run_id "${post_run_id}" \
     --argjson iid "${post_iid}" \
-    --argjson attempt_number "${post_attempt}" \
+    --argjson execution_id "${post_attempt}" \
     --argjson claim_generation "${post_generation}" \
     --argjson completed_at_epoch "${post_completed_at}" \
     --argjson grace_seconds "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" '
@@ -857,7 +857,7 @@ while IFS= read -r post_job; do
       action:"kill",target:$target,
       reason:"post_acpx_finalization_grace_exceeded",
       job_id:$job_id,run_id:$run_id,iid:$iid,
-      attempt_number:$attempt_number,claim_generation:$claim_generation,
+      execution_id:$execution_id,claim_generation:$claim_generation,
       completed_at_epoch:$completed_at_epoch,grace_seconds:$grace_seconds
     }]
   ' <<<"${CLEANUP_ACTIONS}")"
@@ -1097,7 +1097,7 @@ resume_durable_launch_actions() {
         claim_generation:$action.claim_generation,
         project:$action.project,
         iid:$action.iid,
-        attempt_number:$action.attempt_number,
+        execution_id:$action.execution_id,
         expected_task_sha256:$action.expected_task_sha256,
         expected_task_bytes:$action.expected_task_bytes,
         status:"spawned",
@@ -1116,7 +1116,7 @@ resume_durable_launch_actions() {
         claim_generation:$action.claim_generation,
         project:$action.project,
         iid:$action.iid,
-        attempt_number:$action.attempt_number,
+        execution_id:$action.execution_id,
         expected_task_sha256:$action.expected_task_sha256,
         expected_task_bytes:$action.expected_task_bytes,
         status:"launch_failed",
@@ -1442,6 +1442,14 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
   }
   serial_stage="$(jq -r '.stage' <<<"${serial_action}")"
   case "${serial_stage}" in
+    legacy_execution_schema)
+      append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+        operation:"launch_coordinator",job_id:$job_id,
+        status:"legacy_execution_schema",action:"drain_required"
+      }')"
+      HAD_FAILURE=true
+      SERIAL_LAUNCH_GATE_CLOSED=true
+      ;;
     action_emitted)
       if ! serial_state_lock_timeout="$(remaining_topup_seconds 5)"; then
         dlc_close
@@ -1481,7 +1489,7 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
           --argjson claim_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" \
           --arg project "$(jq -r '.project' <<<"${serial_action}")" \
           --argjson iid "$(jq -r '.iid' <<<"${serial_action}")" \
-          --argjson attempt_number "$(jq -r '.attempt_number' <<<"${serial_action}")" \
+          --argjson execution_id "$(jq -r '.execution_id' <<<"${serial_action}")" \
           --arg child_label "$(jq -r '.child_label' <<<"${serial_action}")" \
           --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${serial_action}")" \
           --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${serial_action}")" '
@@ -1491,7 +1499,7 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
             claim_generation:$claim_generation,
             project:$project,
             iid:$iid,
-            attempt_number:$attempt_number,
+            execution_id:$execution_id,
             child_label:$child_label,
             expected_task_sha256:$expected_task_sha256,
             expected_task_bytes:$expected_task_bytes
@@ -1883,7 +1891,7 @@ seed_topup_actions() {
         --argjson iid "${iid}" \
         --arg batch_id "$(jq -r '.batch_id' <<<"${grant}")" \
         --argjson snapshot_index "$(jq -r '.snapshot_index' <<<"${grant}")" \
-        --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" \
+        --argjson execution_id "$(jq -r '.execution_id' <<<"${entry}")" \
         --arg child_label "$(jq -r '.child_label' <<<"${entry}")" \
         --arg payload_path "$(jq -r '.payload_path' <<<"${entry}")" \
         --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${entry}")" \
@@ -1895,7 +1903,7 @@ seed_topup_actions() {
         iid:$iid,
         batch_id:$batch_id,
         snapshot_index:$snapshot_index,
-        attempt_number:$attempt_number,
+        execution_id:$execution_id,
         child_label:$child_label,
         payload_path:$payload_path,
         expected_task_sha256:$expected_task_sha256,
@@ -1916,12 +1924,12 @@ seed_topup_actions() {
           --argjson iid "${iid}" \
           --arg batch_id "$(jq -r '.batch_id' <<<"${grant}")" \
           --argjson snapshot_index "$(jq -r '.snapshot_index' <<<"${grant}")" \
-          --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" \
+          --argjson execution_id "$(jq -r '.execution_id' <<<"${entry}")" \
           --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${entry}")" \
           --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${entry}")" '
           .job_id == $job_id and .project == $project and .iid == $iid
           and .batch_id == $batch_id and .snapshot_index == $snapshot_index
-          and .attempt_number == $attempt_number
+          and .execution_id == $execution_id
           and .expected_task_sha256 == $expected_task_sha256
           and .expected_task_bytes == $expected_task_bytes
         ' <<<"${action}" >/dev/null; then
@@ -1931,20 +1939,20 @@ seed_topup_actions() {
             --argjson iid "${iid}" \
             --arg batch_id "$(jq -r '.batch_id' <<<"${grant}")" \
             --argjson snapshot_index "$(jq -r '.snapshot_index' <<<"${grant}")" \
-            --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" '
+            --argjson execution_id "$(jq -r '.execution_id' <<<"${entry}")" '
             .stage == "completed"
             and .job_id == $job_id and .project == $project and .iid == $iid
             and .batch_id == $batch_id and .snapshot_index == $snapshot_index
-            and .attempt_number < $attempt_number
+            and .execution_id != $execution_id
           ' <<<"${action}" >/dev/null; then
           action="$(jq -c \
-            --argjson attempt_number "$(jq -r '.attempt_number' <<<"${entry}")" \
+            --argjson execution_id "$(jq -r '.execution_id' <<<"${entry}")" \
             --arg child_label "$(jq -r '.child_label' <<<"${entry}")" \
             --arg payload_path "$(jq -r '.payload_path' <<<"${entry}")" \
             --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${entry}")" \
             --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${entry}")" \
             --argjson now "${now}" '
-            .attempt_number = $attempt_number
+            .execution_id = $execution_id
             | .child_label = $child_label
             | .payload_path = $payload_path
             | .expected_task_sha256 = $expected_task_sha256
@@ -2514,6 +2522,15 @@ while IFS= read -r grant; do
     dlc_close
     continue
   fi
+  if [ "$(jq -r '.legacy_execution_schema // false' <<<"${action}")" = true ]; then
+    append_operation "$(jq -cn --arg job_id "${job_id}" '{
+      operation:"preparing",job_id:$job_id,
+      status:"legacy_execution_schema",action:"drain_required"
+    }')"
+    HAD_FAILURE=true
+    dlc_close
+    continue
+  fi
   if ! jq -e \
       --arg job_id "${job_id}" \
       --arg project "${project}" \
@@ -2522,7 +2539,7 @@ while IFS= read -r grant; do
       --argjson snapshot_index "$(jq -r '.snapshot_index' <<<"${grant}")" '
       .job_id == $job_id and .project == $project and .iid == $iid
       and .batch_id == $batch_id and .snapshot_index == $snapshot_index
-      and (.attempt_number | type == "number" and . == floor and . > 0)
+      and (.execution_id | type == "number" and . == floor and . > 0)
       and (.child_label | type == "string" and length > 0)
       and (.payload_path | type == "string" and startswith("/"))
       and (.expected_task_sha256 | type == "string"
@@ -2563,7 +2580,7 @@ while IFS= read -r grant; do
         --argjson claim_generation "$(jq -r '.claim_generation' <<<"${action}")" \
         --arg project "${project}" \
         --argjson iid "${iid}" \
-        --argjson attempt_number "$(jq -r '.attempt_number' <<<"${action}")" \
+        --argjson execution_id "$(jq -r '.execution_id' <<<"${action}")" \
         --arg child_label "$(jq -r '.child_label' <<<"${action}")" \
         --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${action}")" \
         --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${action}")" '
@@ -2573,7 +2590,7 @@ while IFS= read -r grant; do
           claim_generation:$claim_generation,
           project:$project,
           iid:$iid,
-          attempt_number:$attempt_number,
+          execution_id:$execution_id,
           child_label:$child_label,
           expected_task_sha256:$expected_task_sha256,
           expected_task_bytes:$expected_task_bytes
@@ -2671,8 +2688,8 @@ while IFS= read -r grant; do
     fi
   fi
 
-  # Project preparation labels are only project-local (for example
-  # #42-att-001). Before bind/emission, replace them with a deterministic
+  # Project preparation labels are only project-local. Before bind/emission,
+  # replace them with a deterministic
   # agent-wide runtime label bound to project + physical job + generation.
   # Recomputing the same bytes also repairs a crash after claim persistence but
   # before the coordinator label write. Never relabel action_emitted: a runtime
@@ -2682,7 +2699,7 @@ while IFS= read -r grant; do
     runtime_child_label="$(dlc_runtime_child_label \
       "${project}" "${iid}" "${job_id}" \
       "$(jq -r '.claim_generation' <<<"${action}")" \
-      "$(jq -r '.attempt_number' <<<"${action}")")" || {
+      "$(jq -r '.execution_id' <<<"${action}")")" || {
       append_operation "$(jq -cn --arg job_id "${job_id}" '{
         operation:"preparing",job_id:$job_id,status:"invalid_runtime_label"
       }')"
@@ -2767,7 +2784,7 @@ while IFS= read -r grant; do
       --argjson claim_generation "$(jq -r '.claim_generation' <<<"${action}")" \
       --arg project "${project}" \
       --argjson iid "${iid}" \
-      --argjson attempt_number "$(jq -r '.attempt_number' <<<"${action}")" \
+      --argjson execution_id "$(jq -r '.execution_id' <<<"${action}")" \
       --arg child_label "$(jq -r '.child_label' <<<"${action}")" \
       --arg payload_path "$(jq -r '.payload_path' <<<"${action}")" \
       --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${action}")" \
@@ -2777,7 +2794,7 @@ while IFS= read -r grant; do
         claim_generation:$claim_generation,
         project:$project,
         iid:$iid,
-        attempt_number:$attempt_number,
+        execution_id:$execution_id,
         child_label:$child_label,
         payload_path:$payload_path,
         expected_task_sha256:$expected_task_sha256,

@@ -135,7 +135,7 @@ sanitize_runtime_path() {
 }
 
 : "${ISSUE_IID:?run_acpx_attempt.sh: ISSUE_IID must be set}"
-: "${ATTEMPT_NUMBER:?run_acpx_attempt.sh: ATTEMPT_NUMBER must be set}"
+: "${EXECUTION_ID:?run_acpx_attempt.sh: EXECUTION_ID must be set}"
 DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
 CLAUDE_CODE_SAFE_MODE_EFFECTIVE="${CLAUDE_CODE_SAFE_MODE:-}"
 CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-}"
@@ -372,8 +372,8 @@ write_terminal_marker() {
   terminal_marker_tmp="${terminal_marker}.tmp.$$"
   (
     umask 077
-    printf '{"version":1,"iid":%s,"attempt_number":%s,"exit_code":%s,"completed_at_epoch":%s}\n' \
-      "${ISSUE_IID}" "${ATTEMPT_NUMBER}" "${exit_code}" \
+    printf '{"version":1,"iid":%s,"execution_id":%s,"exit_code":%s,"completed_at_epoch":%s}\n' \
+      "${ISSUE_IID}" "${EXECUTION_ID}" "${exit_code}" \
       "${completed_at_epoch}" >"${terminal_marker_tmp}"
     chmod 600 "${terminal_marker_tmp}"
     mv "${terminal_marker_tmp}" "${terminal_marker}"
@@ -446,7 +446,7 @@ trap - TERM INT HUP
 # Persist a machine-readable terminal marker before returning control to the
 # outer agent. OpenClaw can occasionally finish this long synchronous tool call
 # without scheduling the model's next turn. The executor heartbeat uses this
-# issue-local marker, fenced by attempt_number in its payload, to distinguish
+# issue-local marker, fenced by execution_id in its payload, to distinguish
 # that post-acpx stall from an inner acpx process that is still legitimately running.
 if ! write_terminal_marker "${acpx_exit}"; then
   # The marker is a recovery aid, not the source of truth for this live tool

@@ -65,7 +65,7 @@ exit 0
 EOF
 done
 
-cat >"${FIXTURE_SCRIPTS}/allocate_attempt.sh" <<'EOF'
+cat >"${FIXTURE_SCRIPTS}/allocate_execution_id.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "${IID}" >>"${DEPENDENCY_CURSOR_ALLOC_LOG}"

@@ -513,19 +513,19 @@ if [ -z "${MIGRATION_STATUS}" ]; then
         and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
       and .work_branch_sha == .commit_sha
       and .dependency_history_verified == true
-      and (.latest_attempt_number | type == "number" and . == floor and . > 0)
-      and .dependency_pinned_attempt_number == .latest_attempt_number
+      and (.latest_execution_id | type == "number" and . == floor and . > 0)
+      and .dependency_pinned_execution_id == .latest_execution_id
       and (.merge_request_url | type == "string"
         and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
     then {
       commit_sha:.commit_sha,
-      source_attempt_number:.latest_attempt_number,
+      source_execution_id:.latest_execution_id,
       old_mr_url:.merge_request_url
     } else error("ordinary dependency head is not migration-safe") end
   ' <<<"${HEAD_STATE_JSON}" 2>/dev/null)" \
     || terminal_migration_failure dependency_head_not_migration_safe
   HEAD_COMMIT_SHA="$(jq -r '.commit_sha' <<<"${ORDINARY_IDENTITY}")"
-  SOURCE_ATTEMPT_NUMBER="$(jq -r '.source_attempt_number' \
+  SOURCE_EXECUTION_ID="$(jq -r '.source_execution_id' \
     <<<"${ORDINARY_IDENTITY}")"
   OLD_MR_URL="$(jq -r '.old_mr_url' <<<"${ORDINARY_IDENTITY}")"
   if [[ "${OLD_MR_URL}" =~ /-/merge_requests/([1-9][0-9]*)/?$ ]]; then
@@ -584,14 +584,14 @@ if [ -z "${MIGRATION_STATUS}" ]; then
     --argjson old_mr_iid "${OLD_MR_IID}" \
     --arg old_mr_url "${OLD_MR_URL}" \
     --arg intent_id "${INTENT_ID}" \
-    --argjson source_attempt_number "${SOURCE_ATTEMPT_NUMBER}" \
+    --argjson source_execution_id "${SOURCE_EXECUTION_ID}" \
     --arg started_at "${STARTED_AT}" '
     .branch_migration = {
       version:1,status:"pending",head_iid:$head,tail_iid:$tail,
       from_branch:$from_branch,to_branch:$to_branch,commit_sha:$commit_sha,
       target_branch:$target_branch,old_mr_iid:$old_mr_iid,
       old_mr_url:$old_mr_url,intent_id:$intent_id,
-      source_attempt_number:$source_attempt_number,started_at:$started_at
+      source_execution_id:$source_execution_id,started_at:$started_at
     }
   ' <<<"${HEAD_STATE_JSON}")"
   store_head_state "${HEAD_STATE_JSON}" \
@@ -619,7 +619,7 @@ MIGRATION_JSON="$(jq -ce \
       | .old_mr_url | type == "string"
         and test("/-/merge_requests/" + ($old_mr_iid | tostring) + "/?$"))
     and (.intent_id | type == "string" and test("^[0-9a-f]{64}$"))
-    and (.source_attempt_number | type == "number" and . == floor and . > 0)
+    and (.source_execution_id | type == "number" and . == floor and . > 0)
     and (.started_at | type == "string" and length > 0)
     and (if .status == "completed" then
       (.new_mr_iid | type == "number" and . == floor and . > 0)
@@ -633,7 +633,7 @@ MIGRATION_JSON="$(jq -ce \
   || terminal_migration_failure migration_checkpoint_invalid
 
 HEAD_COMMIT_SHA="$(jq -r '.commit_sha' <<<"${MIGRATION_JSON}")"
-SOURCE_ATTEMPT_NUMBER="$(jq -r '.source_attempt_number' <<<"${MIGRATION_JSON}")"
+SOURCE_EXECUTION_ID="$(jq -r '.source_execution_id' <<<"${MIGRATION_JSON}")"
 OLD_MR_IID="$(jq -r '.old_mr_iid' <<<"${MIGRATION_JSON}")"
 OLD_MR_URL="$(jq -r '.old_mr_url' <<<"${MIGRATION_JSON}")"
 INTENT_ID="$(jq -r '.intent_id' <<<"${MIGRATION_JSON}")"
@@ -709,7 +709,7 @@ COMPLETED_STATE="$(jq -ce \
   --arg commit_sha "${HEAD_COMMIT_SHA}" \
   --arg intent_id "${INTENT_ID}" \
   --arg target_branch "${TARGET_BRANCH}" \
-  --argjson source_attempt_number "${SOURCE_ATTEMPT_NUMBER}" \
+  --argjson source_execution_id "${SOURCE_EXECUTION_ID}" \
   --argjson new_mr_iid "${NEW_MR_IID}" \
   --arg new_mr_url "${NEW_MR_URL}" \
   --arg completed_at "${COMPLETED_AT}" '
@@ -721,11 +721,11 @@ COMPLETED_STATE="$(jq -ce \
     | .shared_branch_role = "head"
     | .work_branch_sha = $commit_sha
     | .dependency_history_verified = true
-    | .dependency_pinned_attempt_number = $source_attempt_number
+    | .dependency_pinned_execution_id = $source_execution_id
     | .dependency_history_updated_at = $completed_at
     | .merge_request_url = $new_mr_url
     | .mr_finalization = {
-        status:"verified_open",source_attempt_number:$source_attempt_number,
+        status:"verified_open",source_execution_id:$source_execution_id,
         work_branch:$new_branch,branch_members:[$head,$tail],
         shared_branch_role:"head",commit_sha:$commit_sha,intent_id:$intent_id,
         target_branch:$target_branch,iid:$new_mr_iid,web_url:$new_mr_url,

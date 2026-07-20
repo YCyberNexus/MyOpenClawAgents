@@ -8,7 +8,8 @@
 #                              summaries and artifact-link notes)
 #
 # Continue mode also includes:
-#   - Past attempt summaries  (notes posted by req_executor itself, marked
+#   - Historical run summaries (legacy notes posted by req_executor itself,
+#                              marked
 #                              with <!-- req_executor:attempt-summary ... -->;
 #                              legacy pre-rename markers are also recognized)
 #
@@ -19,9 +20,7 @@
 #
 # Output:
 #   Writes ${LOG_DIR}/prompt.txt and prints its absolute path on stdout.
-#   Reports auditing flags on stderr:
-#     CONTINUE_MODE_NO_REVIEWER_COMMENTS=true|false
-#     CONTINUE_MODE_PRIOR_ATTEMPT_COUNT=<int>
+#   Reports CONTINUE_MODE_NO_REVIEWER_COMMENTS=true|false on stderr.
 
 set -euo pipefail
 
@@ -83,10 +82,9 @@ ISSUE_DESC="$(echo "${ISSUE_JSON}" | jq -r '.description // ""')"
 
 # 2. Notes. Issue comments are prompt input in every mode. Continue mode also
 # separates historical agent summaries into their own context block.
-PAST_ATTEMPTS_BLOCK=""
+PAST_RUNS_BLOCK=""
 REVIEWER_BLOCK=""
 NO_REVIEWER_COMMENTS=true
-PRIOR_ATTEMPT_COUNT=0
 CURRENT_AGENT_MARKER_PREFIX="req_executor"
 LEGACY_AGENT_MARKER_PREFIX="uiauto""tester"
 SUMMARY_MARKER_RE="<!-- (${CURRENT_AGENT_MARKER_PREFIX}|${LEGACY_AGENT_MARKER_PREFIX}):attempt-summary v[0-9]+ "
@@ -113,18 +111,13 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
   #   agent-posted summaries → match the marker comment
   #   agent-posted Wiki artifact notes → ignore for prompt purposes
   #   everything else (non-system) → reviewer comments
-  PAST_ATTEMPTS_BLOCK="$(echo "${NOTES_JSON}" | jq -r --arg marker_re "${SUMMARY_MARKER_RE}" '
+  PAST_RUNS_BLOCK="$(echo "${NOTES_JSON}" | jq -r --arg marker_re "${SUMMARY_MARKER_RE}" '
     [ .[] | select(.system == false)
           | select(.body | test($marker_re)) | .body ]
     | if length == 0 then "" else (join("\n\n")) end
   ')"
-  PRIOR_ATTEMPT_COUNT="$(echo "${NOTES_JSON}" | jq -r --arg marker_re "${SUMMARY_MARKER_RE}" '
-    [ .[] | select(.system == false)
-          | select(.body | test($marker_re)) ] | length
-  ')"
-
-  if [ -z "${PAST_ATTEMPTS_BLOCK}" ]; then
-    PAST_ATTEMPTS_BLOCK="(no historical agent-posted summaries; inspect the issue branch's existing commits and diff for prior work)"
+  if [ -z "${PAST_RUNS_BLOCK}" ]; then
+    PAST_RUNS_BLOCK="(no historical agent-posted summaries; inspect the issue branch's existing commits and diff for prior work)"
   fi
 fi
 
@@ -167,8 +160,8 @@ EOF
 
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
-# Historical attempt summaries (from older req_executor runs)
-${PAST_ATTEMPTS_BLOCK}
+# Historical run summaries (from older req_executor runs)
+${PAST_RUNS_BLOCK}
 
 EOF
   fi
@@ -215,5 +208,4 @@ EOF
 } > "${PROMPT_FILE}"
 
 echo "CONTINUE_MODE_NO_REVIEWER_COMMENTS=${NO_REVIEWER_COMMENTS}" >&2
-echo "CONTINUE_MODE_PRIOR_ATTEMPT_COUNT=${PRIOR_ATTEMPT_COUNT}" >&2
 echo "${PROMPT_FILE}"

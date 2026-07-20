@@ -39,10 +39,10 @@ ${REPO_PATH}/
 
 `clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes any `logs/` path plus `${LOG_DIR}` from the commit index.
 
-The worktree, output directory, log directory, and local Git branch are fixed
-per Issue and do not contain `attempt_number`. That number remains only as a
-state/callback identity fence. Later runs overwrite current-result evidence in
-the same issue-local log directory.
+The worktree, output directory, and local Git branch are fixed per Issue. Each
+run receives a random opaque `execution_id`, an isolated log directory, and an
+immutable execution-state file. The ID is a stale-callback fence, never a count
+of how many times the Issue has run.
 
 ## Removed Legacy Inputs
 

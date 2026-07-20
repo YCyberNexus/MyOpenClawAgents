@@ -11,9 +11,9 @@
 #     "dispatch_entries": [
 #       {
 #         "iid": 14,
-#         "attempt_number": 3,
-#         "child_label": "#14-att-003",
-#         "payload_path": "/data/.../spawn_payload.txt",
+#         "execution_id": 3,
+#         "child_label": "#14-exec-104729681223",
+#         "payload_path": "/data/.../spawn_payload-104729681223.txt",
 #         "expected_task_sha256": "<64 lowercase hex>",
 #         "expected_task_bytes": 1234
 #       }, ...
@@ -349,6 +349,25 @@ if [ "$(printf '%s' "${OWNER_DECISION}" | jq -r '.allowed')" != "true" ]; then
     '{status:$status, dispatch_entries:[], cleanup_actions:[], chat_summary:$status}'
   exit 0
 fi
+
+# Owner admission remains the first campaign-state decision. Only an admitted
+# owner may run the exclusive, quiescent legacy sweep. Reload and recompute the
+# pure transition afterwards so a later state write cannot restore scrubbed
+# historical fields from the pre-migration snapshot.
+LEGACY_EXECUTION_MIGRATION_RC=0
+migrate_legacy_execution_state_locked || LEGACY_EXECUTION_MIGRATION_RC=$?
+case "${LEGACY_EXECUTION_MIGRATION_RC}" in
+  0) ;;
+  2) emit_chat_failure "legacy_execution_identity_drain_required" ;;
+  *) emit_chat_failure "legacy_execution_identity_cleanup_failed" ;;
+esac
+STATE_JSON="$(load_state)"
+INITIAL_PENDING_IIDS_JSON="$(printf '%s' "${STATE_JSON}" \
+  | jq -c '(.pending_subagents // {}) | keys | map(tonumber) | sort')"
+OWNER_DECISION="$(dispatch_owner_transition "${STATE_JSON}" \
+  "${REQUESTED_OWNER_MODE}" "${REQUESTED_OWNER_ID}" "${OWNER_NOW}")"
+[ "$(printf '%s' "${OWNER_DECISION}" | jq -r '.allowed')" = "true" ] \
+  || emit_chat_failure "dispatch_owner_changed_during_locked_migration"
 STATE_JSON="$(printf '%s' "${OWNER_DECISION}" | jq -c '.updated_state')"
 DRIVEN_GRANT_IIDS_JSON="[]"
 if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
@@ -662,7 +681,7 @@ for piid in ${PENDING_KEYS}; do
   fi
   ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --arg k "${piid}" '.pending_subagents[$k]')"
   SP_AT="$(printf '%s' "${ENTRY}" | jq -r '.spawned_at // ""')"
-  PA_NUM="$(printf '%s' "${ENTRY}" | jq -r '.attempt_number')"
+  PA_NUM="$(printf '%s' "${ENTRY}" | jq -r '.execution_id')"
   CHILD_SESSION_KEY="$(printf '%s' "${ENTRY}" | jq -r '.child_session_key // ""')"
   EVICT=false
   EVICT_KIND=""
@@ -2488,15 +2507,15 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
               and (.mr_finalization | type == "object")
               and ((.mr_finalization | keys | sort) == ([
                 "branch_members","commit_sha","iid","intent_id","mr_action",
-                "shared_branch_role","source_attempt_number","status",
+                "shared_branch_role","source_execution_id","status",
                 "target_branch","verified_at","web_url","work_branch"
               ] | sort))
               and .mr_finalization.status == "verified_open"
-              and (.mr_finalization.source_attempt_number | type == "number"
+              and (.mr_finalization.source_execution_id | type == "number"
                 and . == floor and . > 0)
-              and .mr_finalization.source_attempt_number == .latest_attempt_number
-              and .mr_finalization.source_attempt_number ==
-                .dependency_pinned_attempt_number
+              and .mr_finalization.source_execution_id == .latest_execution_id
+              and .mr_finalization.source_execution_id ==
+                .dependency_pinned_execution_id
               and .mr_finalization.work_branch == $work_branch
               and .mr_finalization.branch_members == $members
               and .mr_finalization.shared_branch_role == "head"
@@ -2677,10 +2696,10 @@ if [ "${DISPATCH_MODE}" = "scheduled" ]; then
       else . end')"
 fi
 
-# ─── 17. Allocate attempt numbers ─────────────────────────────────
-declare -A ATTEMPT
+# ─── 17. Generate execution identities ─────────────────────────────────
+declare -A EXECUTION_ID_BY_IID
 mapfile -t BATCH_IIDS < <(printf '%s' "${BATCH_JSON}" | jq -r '.[]')
-# allocate_attempt.sh prints ONLY the integer attempt number on stdout. Capture
+# allocate_execution_id.sh prints ONLY the integer execution identity on stdout. Capture
 # its exit code and stderr explicitly: under `set -e` a non-zero exit inside the
 # `N="$(...)"` assignment aborts the whole tick with a raw, unclassified error
 # and no JSON envelope on stdout — exactly the failure shape a weak orchestrator
@@ -2694,32 +2713,32 @@ for iid in "${BATCH_IIDS[@]}"; do
   N="$(PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
        REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
        IID="${iid}" \
-       bash "${SCRIPT_DIR}/allocate_attempt.sh" 2>"${ALLOC_ERR}")"
+       bash "${SCRIPT_DIR}/allocate_execution_id.sh" 2>"${ALLOC_ERR}")"
   _rc=$?
   set -e
   if [ "${_rc}" -ne 0 ]; then
-    # Capture allocate_attempt.sh stderr to wrapper.log first, then emit a
+    # Capture allocate_execution_id.sh stderr to wrapper.log first, then emit a
     # stable, named reason only — never tail raw sub-tool stderr into
     # chat_summary (see emit_chat_failure contract + SOUL.md §No-Fallback).
-    wrapper_log prepare_tick "allocate_attempt_failed iid=${iid} rc=${_rc} (stderr follows)"
+    wrapper_log prepare_tick "allocate_execution_id_failed iid=${iid} rc=${_rc} (stderr follows)"
     cat "${ALLOC_ERR}" >>"${DISPATCHER_LOG_DIR}/wrapper.log" 2>/dev/null || true
-    emit_chat_failure "allocate_attempt_failed: iid=${iid} (rc=${_rc}; stderr in dispatcher wrapper.log)"
+    emit_chat_failure "allocate_execution_id_failed: iid=${iid} (rc=${_rc}; stderr in dispatcher wrapper.log)"
   fi
-  ATTEMPT["${iid}"]="${N}"
+  EXECUTION_ID_BY_IID["${iid}"]="${N}"
 done
 
 # ─── 18. Pre-spawn persist (placeholder pending entries) ──────────
 # Defensive guard: every value below is passed to `jq --argjson`, which rejects
 # a non-JSON token with the generic "invalid JSON text passed to --argjson".
-# An empty ATTEMPT[$iid] (allocate_attempt.sh printed nothing) would surface
+# An empty execution identity would surface
 # far from its real cause and invite a misdiagnosis as a "jq version bug".
 # Validate it here once and fail with a named, terminal reason.
 for iid in "${BATCH_IIDS[@]}"; do
-  for _pair in "iid:${iid}" "attempt:${ATTEMPT[$iid]:-}"; do
+  for _pair in "iid:${iid}" "execution_id:${EXECUTION_ID_BY_IID[$iid]:-}"; do
     _field="${_pair%%:*}"; _val="${_pair#*:}"
     case "${_val}" in
       ''|*[!0-9]*)
-        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a non-negative integer (allocate_attempt.sh produced an empty/non-numeric value); refusing to build a malformed jq --argjson call"
+        emit_chat_failure "prep_invariant_violation: iid=${iid} ${_field}='${_val}' is not a positive numeric execution identity"
         ;;
     esac
   done
@@ -2728,7 +2747,7 @@ done
 PRE_PENDING_JQ_ARGS=()
 for iid in "${BATCH_IIDS[@]}"; do
   PRE_PENDING_JQ_ARGS+=( --argjson "iid_${iid}" "${iid}"
-                         --argjson "att_${iid}" "${ATTEMPT[$iid]}" )
+                         --argjson "exec_${iid}" "${EXECUTION_ID_BY_IID[$iid]}" )
 done
 # Build the placeholder additions in one jq pass to avoid quoting hell.
 # active_issue_sessions uses the canonical "issue-<project>-<iid>" format
@@ -2740,7 +2759,7 @@ done
 PRE_PENDING_JQ_ARGS+=( --arg project "${PROJECT}" --argjson acpx_timeout "${ACPX_TIMEOUT}" )
 FILTER='.pending_subagents = (.pending_subagents // {})'
 for iid in "${BATCH_IIDS[@]}"; do
-  FILTER+=" | .pending_subagents[\"${iid}\"] = {attempt_number: \$att_${iid}, run_id: null, child_session_key: null, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout, auto_merge: false, merge_target_branch: null}"
+  FILTER+=" | .pending_subagents[\"${iid}\"] = {execution_id: \$exec_${iid}, run_id: null, child_session_key: null, spawned_at: null, placeholder: true, acpx_timeout_seconds: \$acpx_timeout, auto_merge: false, merge_target_branch: null}"
 done
 FILTER+=' | .active_issue_iids = (.pending_subagents | keys | map(tonumber) | sort)'
 FILTER+=' | .active_issue_sessions = (.active_issue_iids | map("issue-" + $project + "-" + (.|tostring)))'
@@ -2792,9 +2811,8 @@ TICK_OUTCOMES='{}'
 DISPATCH_ENTRIES='[]'
 declare -A PAYLOAD_PATH CHILD_LABEL_BY_IID
 for iid in "${BATCH_IIDS[@]}"; do
-  attempt="${ATTEMPT[$iid]}"
-  attempt_padded="$(printf '%03d' "${attempt}")"
-  child_label="#${iid}-att-${attempt_padded}"
+  execution_id="${EXECUTION_ID_BY_IID[$iid]}"
+  child_label="#${iid}-exec-${execution_id}"
   CHILD_LABEL_BY_IID["${iid}"]="${child_label}"
 
   # Initialize per-iteration locals so set -u cannot trip a later read of
@@ -2847,7 +2865,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   iid_env=(
     PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}"
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
-    ISSUE_IID="${iid}" ATTEMPT_NUMBER="${attempt}"
+    ISSUE_IID="${iid}" EXECUTION_ID="${execution_id}"
     WORK_BRANCH="${IID_WORK_BRANCH}"
   )
 
@@ -2892,7 +2910,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   prep_blocked() {
     local reason="$1"
     wrapper_log prepare_tick "iid=${iid} blocked during prep: ${reason}"
-    REPLY_JSON="$(phase6_synthesize_blocked "${iid}" "${attempt}" "dispatcher prep failed: ${reason}")"
+    REPLY_JSON="$(phase6_synthesize_blocked "${iid}" "${execution_id}" "dispatcher prep failed: ${reason}")"
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "false")"
     STATE_JSON="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
     persist_state "${STATE_JSON}"
@@ -2990,20 +3008,20 @@ for iid in "${BATCH_IIDS[@]}"; do
 
   # Persist the exact proposed baseline identity before prepare_attempt mutates
   # or creates the worktree. This issue-local file records the current
-  # attempt_number and is the fixed wrapper's trust source for the run, but it
+  # execution_id and is the fixed wrapper's trust source for the run, but it
   # is deliberately not durable proof
   # that C contains the dependency: Issue state promotes the tuple only after
   # the canonical remote work branch is pushed and independently verified.
   ISSUE_ROOT_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$ISSUE_ROOT"' "${SCRIPT_DIR}/env_paths.sh")"
   LOG_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$LOG_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
-  ATTEMPT_STATE_X="${ISSUE_ROOT_X}/attempt_state.json"
+  EXECUTION_STATE_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$EXECUTION_STATE_FILE"' "${SCRIPT_DIR}/env_paths.sh")"
   ISSUE_STATE_X="${ISSUE_ROOT_X}/state.json"
   mkdir -p "${ISSUE_ROOT_X}"
   PREP_IDENTITY_NOW="$(utc_now)"
 
   if ! jq -n \
       --argjson iid "${iid}" \
-      --argjson attempt_number "${attempt}" \
+      --argjson execution_id "${execution_id}" \
       --arg started_at "${PREP_IDENTITY_NOW}" \
       --arg issue_title "${ISSUE_TITLE}" \
       --arg mode_requested "${ISSUE_MODE}" \
@@ -3019,12 +3037,12 @@ for iid in "${BATCH_IIDS[@]}"; do
       --arg dependency_branch "${IID_DEPENDENCY_BRANCH}" \
       --arg dependency_base_sha "${IID_DEPENDENCY_BASE_SHA}" \
       --arg log_dir "${LOG_DIR_X}" '
-      {iid:$iid, attempt_number:$attempt_number,
-       attempt_started_at:$started_at,
+      {iid:$iid, execution_id:$execution_id,
+       execution_started_at:$started_at,
        issue_title:$issue_title,
        mode_requested:$mode_requested, mode_actual:null,
        mode_downgraded_from:null,
-       no_reviewer_comments:false, prior_attempt_count:0,
+       no_reviewer_comments:false,
        config_branch:$config_branch,
        work_branch:$work_branch,
        branch_members:$branch_members,
@@ -3037,12 +3055,12 @@ for iid in "${BATCH_IIDS[@]}"; do
        dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
        dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
        local_branch:null, log_dir:$log_dir,
-       status:"preparing"}' | atomic_write_json "${ATTEMPT_STATE_X}"; then
-    prep_blocked "unable to persist fixed pre-prepare attempt identity"
+       status:"preparing"}' | atomic_write_json "${EXECUTION_STATE_X}"; then
+    prep_blocked "unable to persist fixed pre-prepare execution identity"
     continue
   fi
-  if ! chmod 600 "${ATTEMPT_STATE_X}"; then
-    prep_blocked "fixed pre-prepare attempt identity must be private"
+  if ! chmod 600 "${EXECUTION_STATE_X}"; then
+    prep_blocked "fixed pre-prepare execution identity must be private"
     continue
   fi
 
@@ -3187,7 +3205,7 @@ for iid in "${BATCH_IIDS[@]}"; do
       prep_blocked "model_tiers settings file not found or not readable: ${MODEL_SETTINGS_SRC}"; continue
     fi
     # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
-    # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
+    # EXECUTION_ID is missing. We already set it for this iid; source in subshell.
     WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
     if ! cp "${MODEL_SETTINGS_SRC}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
       prep_blocked "model_tiers settings copy failed"; continue
@@ -3214,7 +3232,7 @@ for iid in "${BATCH_IIDS[@]}"; do
       prep_blocked "claude_settings_path file not found or not readable: ${csp}"; continue
     fi
     # WORKTREE_DIR is derivable via env_paths.sh, but env_paths.sh exits if
-    # ATTEMPT_NUMBER is missing. We already set it for this iid; source in subshell.
+    # EXECUTION_ID is missing. We already set it for this iid; source in subshell.
     WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
     if ! cp "${csp}" "${WORKTREE_DIR_X}/.claude/settings.json"; then
       prep_blocked "claude_settings copy failed"; continue
@@ -3302,12 +3320,12 @@ for iid in "${BATCH_IIDS[@]}"; do
     continue
   fi
 
-  # Init/refresh attempt + issue state files.
+  # Init/refresh execution + issue state files.
   WORKTREE_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$WORKTREE_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
   LOG_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$LOG_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
   OUTPUT_DIR_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$OUTPUT_DIR"' "${SCRIPT_DIR}/env_paths.sh")"
   ISSUE_ROOT_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$ISSUE_ROOT"' "${SCRIPT_DIR}/env_paths.sh")"
-  ATTEMPT_STATE_X="${ISSUE_ROOT_X}/attempt_state.json"
+  EXECUTION_STATE_X="$(env "${iid_env[@]}" bash -c 'source "$0" >/dev/null; printf %s "$EXECUTION_STATE_FILE"' "${SCRIPT_DIR}/env_paths.sh")"
   ISSUE_STATE_X="${ISSUE_ROOT_X}/state.json"
   NOW="$(utc_now)"
   MODE_DOWNGRADED="null"
@@ -3316,7 +3334,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   fi
   jq -n \
     --argjson iid "${iid}" \
-    --argjson attempt_number "${attempt}" \
+    --argjson execution_id "${execution_id}" \
     --arg started_at "${NOW}" \
     --arg issue_title "${ISSUE_TITLE}" \
     --arg mode_requested "${ISSUE_MODE}" \
@@ -3335,11 +3353,11 @@ for iid in "${BATCH_IIDS[@]}"; do
     --arg dependency_branch "${IID_DEPENDENCY_BRANCH}" \
     --arg dependency_base_sha "${IID_DEPENDENCY_BASE_SHA}" \
     --arg log_dir "${LOG_DIR_X}" \
-    '{iid:$iid, attempt_number:$attempt_number, attempt_started_at:$started_at,
+    '{iid:$iid, execution_id:$execution_id, execution_started_at:$started_at,
       issue_title:$issue_title,
       mode_requested:$mode_requested, mode_actual:$mode_actual,
       mode_downgraded_from:$mode_downgraded,
-      no_reviewer_comments:false, prior_attempt_count:0,
+      no_reviewer_comments:false,
       config_branch:$config_branch,
       work_branch:$work_branch,
       branch_members:$branch_members,
@@ -3352,16 +3370,16 @@ for iid in "${BATCH_IIDS[@]}"; do
       dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
       dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
       local_branch:$local_branch, log_dir:$log_dir,
-      status:"in_progress"}' | atomic_write_json "${ATTEMPT_STATE_X}"
-  chmod 600 "${ATTEMPT_STATE_X}" 2>/dev/null \
-    || { prep_blocked "attempt identity must remain private"; continue; }
+      status:"in_progress"}' | atomic_write_json "${EXECUTION_STATE_X}"
+  chmod 600 "${EXECUTION_STATE_X}" 2>/dev/null \
+    || { prep_blocked "execution identity must remain private"; continue; }
 
   PRIOR_ISSUE_STATE_JSON='{}'
   if [ -f "${ISSUE_STATE_X}" ]; then
     if ! PRIOR_ISSUE_STATE_JSON="$(jq -ce \
         'if type == "object" then . else error("invalid issue state") end' \
         "${ISSUE_STATE_X}" 2>/dev/null)"; then
-      prep_blocked "persisted Issue state is invalid before attempt launch"
+      prep_blocked "persisted Issue state is invalid before executor launch"
       continue
     fi
   fi
@@ -3372,9 +3390,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   PRIOR_MODEL_TIER="$(printf '%s' "${PRIOR_ISSUE_STATE_JSON}" | jq -r '.model_tier // empty')"
   printf '%s' "${PRIOR_ISSUE_STATE_JSON}" | jq \
     --argjson iid "${iid}" \
-    --argjson attempts_total "${attempt}" \
-    --argjson latest_attempt_number "${attempt}" \
-    --arg issue_root "${ISSUE_ROOT_X}" \
+    --argjson latest_execution_id "${execution_id}" \
     --argjson retry_count "${PRIOR_RETRY}" \
     --argjson continue_count "${NEW_CONTINUE_COUNT}" \
     --arg model_tier "${RESOLVED_MODEL_TIER:-}" \
@@ -3391,7 +3407,9 @@ for iid in "${BATCH_IIDS[@]}"; do
     --arg dependency_branch "${IID_DEPENDENCY_BRANCH}" \
     --arg dependency_base_sha "${IID_DEPENDENCY_BASE_SHA}" \
     --arg updated_at "${NOW}" \
-    '. + {iid:$iid, session:$session, status:"in_progress", mode:$mode,
+    'del(.attempts_total,.latest_attempt_number,.preparing_attempt_number,
+         .latest_attempt_dir,.prior_attempt_count)
+    | . + {iid:$iid, session:$session, status:"in_progress", mode:$mode,
       proposed_config_branch:$config_branch,
       proposed_work_branch:$work_branch,
       proposed_branch_members:$branch_members,
@@ -3401,24 +3419,21 @@ for iid in "${BATCH_IIDS[@]}"; do
       proposed_dependency_iid:(if $dependency_iid == "" then null else ($dependency_iid | tonumber) end),
       proposed_dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
       proposed_dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
-      preparing_attempt_number:$latest_attempt_number,
+      preparing_execution_id:$latest_execution_id,
       continue_count:$continue_count,
       model_tier:(if $model_tier == "" then (if $prior_model_tier == "" then null else $prior_model_tier end) else $model_tier end),
-      attempts_total:$attempts_total, latest_attempt_number:$latest_attempt_number,
-      # Keep the legacy state key for persisted-schema compatibility. Its
-      # value is the fixed issue root, not an attempt-specific directory.
-      latest_attempt_dir:$issue_root, retry_count:$retry_count,
+      latest_execution_id:$latest_execution_id, retry_count:$retry_count,
       block_reason:null, commit_sha:null, merge_request_url:null,
       updated_at:$updated_at}' | atomic_write_json "${ISSUE_STATE_X}"
 
   # Render the full executor workflow to a private local file. sessions_spawn
-  # receives only the small secret-free bootstrap written to spawn_payload.txt;
+  # receives only the small secret-free bootstrap written to its execution-scoped file;
   # the child verifies the manifest and full payload before reading either as
   # instructions. This removes the large model-copied task from the runtime
   # boundary and gives every launch a stable byte/hash identity.
-  executor_payload_path="${LOG_DIR_X}/executor_payload.txt"
-  manifest_path="${LOG_DIR_X}/spawn_manifest.json"
-  payload_path="${LOG_DIR_X}/spawn_payload.txt"
+  executor_payload_path="${LOG_DIR_X}/executor_payload-${execution_id}.txt"
+  manifest_path="${LOG_DIR_X}/spawn_manifest-${execution_id}.json"
+  payload_path="${LOG_DIR_X}/spawn_payload-${execution_id}.txt"
   mkdir -p "${LOG_DIR_X}"
 
   # Extract the fenced "Rendered Prompt" block from executor_prompt.md.
@@ -3468,8 +3483,7 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_GITLAB_HOST="${GITLAB_HOST}" \
               TPL_GITLAB_API_PROTOCOL="${GITLAB_API_PROTOCOL}" \
               TPL_ISSUE_IID="${iid}" \
-              TPL_ATTEMPT_NUMBER="${attempt}" \
-              TPL_ATTEMPT_NUMBER_PADDED="${attempt_padded}" \
+              TPL_EXECUTION_ID="${execution_id}" \
               TPL_ISSUE_MODE="${MODE_ACTUAL}" \
               TPL_BRANCH="${IID_BRANCH}" \
               TPL_BRANCH_QUOTED="${IID_BRANCH_QUOTED}" \
@@ -3542,7 +3556,7 @@ PYEOF
     --arg project "${GROUP}/${PROJECT}" \
     --arg job_id "${manifest_job_id}" \
     --argjson iid "${iid}" \
-    --argjson attempt_number "${attempt}" \
+    --argjson execution_id "${execution_id}" \
     --arg executor_payload_path "${executor_payload_path}" \
     --arg executor_payload_sha256 "${executor_payload_sha256}" \
     --argjson executor_payload_bytes "${executor_payload_bytes}" '{
@@ -3550,7 +3564,7 @@ PYEOF
       project:$project,
       job_id:(if $job_id == "" then null else $job_id end),
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       executor_payload_path:$executor_payload_path,
       executor_payload_sha256:$executor_payload_sha256,
       executor_payload_bytes:$executor_payload_bytes
@@ -3571,11 +3585,11 @@ PYEOF
     --arg project "${GROUP}/${PROJECT}" \
     --arg job_id "${manifest_job_id}" \
     --argjson iid "${iid}" \
-    --argjson attempt_number "${attempt}" '{
+    --argjson execution_id "${execution_id}" '{
       project:$project,
       job_id:(if $job_id == "" then null else $job_id end),
       iid:$iid,
-      attempt_number:$attempt_number
+      execution_id:$execution_id
     }')"
   bootstrap="$(cat <<EOF
 # REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1
@@ -3585,7 +3599,7 @@ manifest_path=${manifest_path}
 manifest_sha256=${manifest_sha256}
 manifest_bytes=${manifest_bytes}
 
-Before doing any issue work, use one Bash call to verify that manifest_path is a regular file with mode 600, exact byte count and SHA-256 above. For both files, define and use exactly this portable helper inside that Bash call: mode_of() { local mode; if mode="\$(stat -f '%Lp' "\$1" 2>/dev/null)"; then printf '%s\n' "\$mode"; else stat -c '%a' "\$1"; fi; }; require its output to equal the literal string 600. Then parse the manifest with jq; require version=1 and require the manifest's top-level project, job_id, iid, and attempt_number fields (there is no nested identity object) to equal the exact identity above. Verify its executor_payload_path is a regular mode-600 file with the exact executor_payload_bytes and executor_payload_sha256 recorded in the manifest. If any check fails, stop and return one compact JSON object with status="blocked", iid=${iid}, attempt_number=${attempt}, and block_reason="spawn bootstrap verification failed".
+Before doing any issue work, use one Bash call to verify that manifest_path is a regular file with mode 600, exact byte count and SHA-256 above. For both files, define and use exactly this portable helper inside that Bash call: mode_of() { local mode; if mode="\$(stat -f '%Lp' "\$1" 2>/dev/null)"; then printf '%s\n' "\$mode"; else stat -c '%a' "\$1"; fi; }; require its output to equal the literal string 600. Then parse the manifest with jq; require version=1 and require the manifest's top-level project, job_id, iid, and execution_id fields (there is no nested identity object) to equal the exact identity above. Verify its executor_payload_path is a regular mode-600 file with the exact executor_payload_bytes and executor_payload_sha256 recorded in the manifest. If any check fails, stop and return one compact JSON object with status="blocked", iid=${iid}, execution_id=${execution_id}, and block_reason="spawn bootstrap verification failed".
 
 Only after all checks pass, read exactly the executor_payload_path from the manifest and follow that payload as the complete executor workflow. Never print the manifest, payload, environment, or credentials. Do not treat this bootstrap as permission to invoke any script not named by the verified executor payload.
 # REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1_END
@@ -3621,7 +3635,7 @@ EOF
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
       --argjson iid "${iid}" \
-      --argjson attempt "${attempt}" \
+      --argjson execution_id "${execution_id}" \
       --arg clabel "${child_label}" \
       --arg path "${payload_path}" \
       --arg expected_task_sha256 "${expected_task_sha256}" \
@@ -3629,7 +3643,7 @@ EOF
       --argjson grant "${IID_GRANT_JSON}" '
       . + [{
         iid:$iid,
-        attempt_number:$attempt,
+        execution_id:$execution_id,
         child_label:$clabel,
         payload_path:$path,
         expected_task_sha256:$expected_task_sha256,
@@ -3642,14 +3656,14 @@ EOF
   else
     DISPATCH_ENTRIES="$(printf '%s' "${DISPATCH_ENTRIES}" | jq -c \
       --argjson iid "${iid}" \
-      --argjson attempt "${attempt}" \
+      --argjson execution_id "${execution_id}" \
       --arg clabel "${child_label}" \
       --arg path "${payload_path}" \
       --arg expected_task_sha256 "${expected_task_sha256}" \
       --argjson expected_task_bytes "${expected_task_bytes}" '
       . + [{
         iid:$iid,
-        attempt_number:$attempt,
+        execution_id:$execution_id,
         child_label:$clabel,
         payload_path:$path,
         expected_task_sha256:$expected_task_sha256,
@@ -3657,7 +3671,7 @@ EOF
       }]')"
   fi
 
-  wrapper_log prepare_tick "prepared iid=${iid} attempt=${attempt} payload=${payload_path}"
+  wrapper_log prepare_tick "prepared iid=${iid} execution_id=${execution_id} payload=${payload_path}"
 done
 
 # ─── 21. Emit envelope ───────────────────────────────────────────

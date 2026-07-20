@@ -17,15 +17,15 @@ Owns scheduled preparation:
   `issue/<A>+<C>` through a replayable branch/MR transaction
 - defers C until A's stable `pr`/`finish`, migrated shared branch, durable
   commit SHA, replacement MR identity, and campaign `pending` drain all agree
-- allocates attempt numbers
+- allocates execution identities
 - prepares per-IID worktrees
 - builds `${LOG_DIR}/prompt.txt`
-- renders `${LOG_DIR}/spawn_payload.txt`
+- renders execution-scoped payload, manifest, and spawn-bootstrap files under `${LOG_DIR}`
 - emits `dispatch_entries[]` for `sessions_spawn`
 
 It does not read runtime basename, data directory, or account-pool trigger fields.
 Dependency planning and waiting happen before allocation and placeholder
-persistence, so they do not consume retry/attempt budget. Version 1 supports
+persistence, so they do not consume retry budget or create an execution identity. Version 1 supports
 only a two-node one-to-one A -> C pair. Fan-out, a longer chain, cycles,
 duplicate persisted membership, a changed edge, or a changed target fail
 closed. An incomplete frozen scope does not block an ordinary A; a later C may
@@ -112,7 +112,7 @@ suffix so stale claims cannot collide with it.
 
 `ingest_subagent_completion.sh` authenticates an OpenClaw native
 `task_completion` event, or one bounded non-truncated `sessions_history`
-recovery envelope, against the pending run/session/attempt identity. It then
+recovery envelope, against the pending run/session/execution identity. It then
 passes exactly one strict compact worker JSON object to `dispatch_followup.sh`.
 The followup rechecks the same identity while holding the campaign lock,
 reconciles the IID, writes terminal state, updates labels, optionally reports
@@ -129,7 +129,7 @@ result mode accepts one non-empty compact worker result, rechecks the exact
 job/generation/token digest, runs ordinary Phase 6, and returns a kill cleanup
 for the stale native child only after state persistence.
 
-The fixed outer attempt performs the first authorization before Phase 6:
+The fixed outer execution performs the first authorization before Phase 6:
 `merge_mr.sh` uses exact GET, SHA-fenced PUT, and exact GET, then
 `run_executor_attempt.sh` atomically writes `finish` only for the matching
 server-side merged result. Phase 6 does not postpone this first label update;
@@ -137,8 +137,8 @@ it separately gates durable terminal persistence and callback emission with a
 bounded read-only verification of the same MR identity, branches, and SHA.
 
 If the automatic-merge compact result is empty or unavailable, Phase 6 may
-recover identity only from the current attempt's mode-600, regular non-symlink
-`${LOG_DIR}/mr_result.json`, with exact Issue, attempt, canonical source branch,
+recover identity only from the current execution's mode-600, regular non-symlink
+`${LOG_DIR}/mr_result.json`, with exact Issue, execution ID, canonical source branch,
 frozen merge target, and SHA checks. A marker or callback by itself never
 authorizes `finish` or a successful terminal callback; the independent live
 verification remains mandatory.
@@ -164,7 +164,7 @@ Consumes the protected physical-job IDs built by `run_executor_batch_tick.sh`
 from current scheduler jobs plus unfinished launch coordinators. Under the
 project campaign lock it removes only scheduler-driven `placeholder:true`
 entries whose `run_id`, `child_session_key`, and `spawned_at` are null and whose
-exact safe `job_id` is not protected. It never guesses from IID, attempt, batch
+exact safe `job_id` is not protected. It never guesses from IID, execution ID, batch
 labels, or malformed identity, and it returns unresolved IIDs explicitly.
 
 ## Standard Env
@@ -178,4 +178,4 @@ GITLAB_TOKEN
 REPO_PARENT_PATH   # optional; defaults to /data
 ```
 
-Per-IID wrappers additionally receive `ISSUE_IID` and `ATTEMPT_NUMBER`. `env_paths.sh` derives every path from those values and the fixed `.req_executor` runtime directory.
+Per-IID wrappers additionally receive `ISSUE_IID` and `EXECUTION_ID`. `env_paths.sh` derives every path from those values and the fixed `.req_executor` runtime directory.

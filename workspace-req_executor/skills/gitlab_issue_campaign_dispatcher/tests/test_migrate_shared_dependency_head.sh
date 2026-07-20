@@ -167,8 +167,8 @@ git -C "${REPO_PATH}" update-ref refs/remotes/origin/issue/41 "${HEAD_SHA}"
 ISSUE_STATE_DIR="${REPO_PATH}/.req_executor/issues/issue-41"
 mkdir -p "${ISSUE_STATE_DIR}"
 jq -n --arg sha "${HEAD_SHA}" '{
-  iid:41,status:"done",latest_attempt_number:1,
-  dependency_pinned_attempt_number:1,
+  iid:41,status:"done",latest_execution_id:1,
+  dependency_pinned_execution_id:1,
   work_branch:"issue/41",branch_members:[41],shared_branch_role:null,
   dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
   commit_sha:$sha,work_branch_sha:$sha,dependency_history_verified:true,

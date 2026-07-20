@@ -25,13 +25,12 @@ cat >"${FIXTURE_SCRIPTS}/env_paths.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 : "${RECOVERY_ISSUES_ROOT:?}" "${RECOVERY_WORK_ROOT:?}" \
-  "${ATTEMPT_NUMBER:?}" "${LOG_DIR:?}"
+  "${EXECUTION_ID:?}" "${LOG_DIR:?}"
 export PROJECT_FULL='group/repo'
 export PROJECT_URI='group%2Frepo'
 export ISSUES_ROOT="${RECOVERY_ISSUES_ROOT}"
 export WORK_ROOT="${RECOVERY_WORK_ROOT}"
-printf -v ATTEMPT_NUMBER_PADDED '%03d' "${ATTEMPT_NUMBER}"
-export ATTEMPT_NUMBER_PADDED
+export EXECUTION_ID
 EOF
 
 cat >"${FIXTURE_SCRIPTS}/git_network_guard.sh" <<'EOF'
@@ -192,7 +191,7 @@ make_case() {
   CASE_WORKTREE="${CASE_ROOT}/worktree"
   CASE_LOG_DIR="${CASE_ROOT}/attempt-log"
   CASE_ISSUE_STATE="${CASE_ROOT}/issue-state.json"
-  CASE_ATTEMPT_STATE="${CASE_ROOT}/attempt-state.json"
+  CASE_EXECUTION_STATE="${CASE_ROOT}/attempt-state.json"
   CASE_GIT_LOG="${CASE_ROOT}/git.log"
   CASE_GUARD_LOG="${CASE_ROOT}/guard.log"
   CASE_GLAB_LOG="${CASE_ROOT}/glab.log"
@@ -209,12 +208,12 @@ make_case() {
     --arg commit_sha "${CHECKPOINT_SHA}" \
     --arg work_branch_sha "${work_branch_sha}" '{
       iid:41,status:"doing",dependency_history_verified:true,
-      dependency_pinned_attempt_number:1,
+      dependency_pinned_execution_id:1,
       work_branch:"issue/41+43",branch_members:[41,43],
       shared_branch_role:"head",work_branch_sha:$work_branch_sha,
       dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
       mr_finalization:{
-        status:"pending",source_attempt_number:1,
+        status:"pending",source_execution_id:1,
         work_branch:"issue/41+43",branch_members:[41,43],
         shared_branch_role:"head",commit_sha:$commit_sha,
         intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -222,15 +221,15 @@ make_case() {
       }
     }' >"${CASE_ISSUE_STATE}"
   jq -cn '{
-    iid:41,attempt_number:1,issue_title:"shared head recovery",
+    iid:41,execution_id:1,issue_title:"shared head recovery",
     mode_actual:"fresh",auto_merge:false,
     work_branch:"issue/41+43",branch_members:[41,43],
     shared_branch_role:"head",merge_target_branch:"main",
     expected_work_branch_sha:null,
     expected_commit_parent_sha:"3333333333333333333333333333333333333333",
     dependency_iid:null,dependency_branch:null,dependency_base_sha:null
-  }' >"${CASE_ATTEMPT_STATE}"
-  chmod 600 "${CASE_ISSUE_STATE}" "${CASE_ATTEMPT_STATE}"
+  }' >"${CASE_EXECUTION_STATE}"
+  chmod 600 "${CASE_ISSUE_STATE}" "${CASE_EXECUTION_STATE}"
 }
 
 run_case() {
@@ -240,9 +239,9 @@ run_case() {
     PATH="${FAKE_BIN}:${PATH}" \
     RECOVERY_ISSUES_ROOT="${CASE_ISSUES_ROOT}" \
     RECOVERY_WORK_ROOT="${CASE_WORK_ROOT}" \
-    ISSUE_IID=41 ATTEMPT_NUMBER=1 \
+    ISSUE_IID=41 EXECUTION_ID=1 \
     ISSUE_STATE_FILE="${CASE_ISSUE_STATE}" \
-    ATTEMPT_STATE_FILE="${CASE_ATTEMPT_STATE}" \
+    EXECUTION_STATE_FILE="${CASE_EXECUTION_STATE}" \
     WORK_BRANCH='issue/41+43' WORKTREE_DIR="${CASE_WORKTREE}" \
     LOG_DIR="${CASE_LOG_DIR}" \
     REMOTE_TIP="${remote_tip}" LOCAL_TIP="${local_tip}" \
@@ -273,7 +272,7 @@ run_case "${CHECKPOINT_SHA}" "${CHECKPOINT_SHA}"
 jq -e \
   --arg sha "${CHECKPOINT_SHA}" '
     .status == "verified_open"
-    and .iid == 41 and .attempt_number == 1
+    and .iid == 41 and .execution_id == 1
     and .commit_sha == $sha
     and .intent_id == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     and .merge_request_url ==
@@ -361,7 +360,7 @@ PATH="${FAKE_BIN}:${PATH}" \
 RECOVERY_ISSUES_ROOT="${CASE_ISSUES_ROOT}" \
 RECOVERY_WORK_ROOT="${CASE_WORK_ROOT}" \
 MR_ISSUES_ROOT="${CASE_ISSUES_ROOT}" \
-ISSUE_IID=41 ATTEMPT_NUMBER=1 ISSUE_STATE_FILE="${CASE_ISSUE_STATE}" \
+ISSUE_IID=41 EXECUTION_ID=1 ISSUE_STATE_FILE="${CASE_ISSUE_STATE}" \
 WORK_BRANCH='issue/41+43' WORKTREE_DIR="${CASE_WORKTREE}" \
 LOG_DIR="${CASE_LOG_DIR}" ISSUE_MODE=fresh ISSUE_TITLE='fresh head retry' \
 BRANCH=main MERGE_TARGET_BRANCH=main AUTO_MERGE=false \
@@ -442,13 +441,13 @@ grep -F 'unsafe or invalid Issue state' "${CASE_STDERR}" >/dev/null \
 assert_no_mr_or_git_activity 'non-private state'
 
 make_case symlink-state
-REAL_ATTEMPT_STATE="${CASE_ROOT}/attempt-state-real.json"
-mv "${CASE_ATTEMPT_STATE}" "${REAL_ATTEMPT_STATE}"
-ln -s "${REAL_ATTEMPT_STATE}" "${CASE_ATTEMPT_STATE}"
+REAL_EXECUTION_STATE="${CASE_ROOT}/attempt-state-real.json"
+mv "${CASE_EXECUTION_STATE}" "${REAL_EXECUTION_STATE}"
+ln -s "${REAL_EXECUTION_STATE}" "${CASE_EXECUTION_STATE}"
 run_case "${CHECKPOINT_SHA}" "${CHECKPOINT_SHA}"
 [ "${CASE_RC}" -eq 2 ] \
   || fail "symlink state returned rc=${CASE_RC}, expected 2"
-grep -F 'unsafe or invalid attempt state' "${CASE_STDERR}" >/dev/null \
+grep -F 'unsafe or invalid execution state' "${CASE_STDERR}" >/dev/null \
   || fail "symlink state did not report the trust-boundary rejection"
 assert_no_mr_or_git_activity 'symlink state'
 

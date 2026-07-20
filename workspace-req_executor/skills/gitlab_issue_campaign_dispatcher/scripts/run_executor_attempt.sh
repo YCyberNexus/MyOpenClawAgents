@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one complete per-Issue executor attempt in a single Bash tool call.
+# Run one complete per-Issue executor execution in a single Bash tool call.
 #
 # The OpenClaw outer subagent used to call run_acpx_attempt.sh and then rely on
 # another model turn to start staging. A long synchronous acpx tool call can
@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=env_paths.sh
 source "${SCRIPT_DIR}/env_paths.sh"
 
-: "${PROJECT:?}" "${GROUP:?}" "${ISSUE_IID:?}" "${ATTEMPT_NUMBER:?}"
+: "${PROJECT:?}" "${GROUP:?}" "${ISSUE_IID:?}" "${EXECUTION_ID:?}"
 : "${ISSUE_MODE:?run_executor_attempt.sh: ISSUE_MODE must be set}"
 : "${BRANCH:?run_executor_attempt.sh: BRANCH must be set}"
 
@@ -38,7 +38,7 @@ CALLER_WORK_BRANCH="${WORK_BRANCH:-}"
 CALLER_EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
 CALLER_EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
 
-attempt_state_file_mode() {
+execution_state_file_mode() {
   local path="$1"
   if stat -f '%Lp' "${path}" 2>/dev/null; then
     :
@@ -47,7 +47,7 @@ attempt_state_file_mode() {
   fi
 }
 
-attempt_state_file_owner() {
+execution_state_file_owner() {
   local path="$1"
   if stat -f '%u' "${path}" 2>/dev/null; then
     :
@@ -60,25 +60,25 @@ attempt_state_file_owner() {
 # an authority for merge intent or dependency identity. Load those values from
 # the private state written before worktree preparation, and reject omission or
 # substitution rather than silently defaulting to a non-dependent run.
-: "${ATTEMPT_STATE_FILE:?run_executor_attempt.sh: ATTEMPT_STATE_FILE must be set}"
-if [ ! -f "${ATTEMPT_STATE_FILE}" ] || [ -L "${ATTEMPT_STATE_FILE}" ]; then
-  echo "run_executor_attempt.sh: fixed attempt identity is missing or not a regular file" >&2
+: "${EXECUTION_STATE_FILE:?run_executor_attempt.sh: EXECUTION_STATE_FILE must be set}"
+if [ ! -f "${EXECUTION_STATE_FILE}" ] || [ -L "${EXECUTION_STATE_FILE}" ]; then
+  echo "run_executor_attempt.sh: fixed execution identity is missing or not a regular file" >&2
   exit 2
 fi
-ATTEMPT_STATE_MODE="$(attempt_state_file_mode "${ATTEMPT_STATE_FILE}")" || true
-ATTEMPT_STATE_OWNER="$(attempt_state_file_owner "${ATTEMPT_STATE_FILE}")" || true
-ATTEMPT_STATE_BYTES="$(wc -c <"${ATTEMPT_STATE_FILE}" 2>/dev/null | tr -d '[:space:]')"
-if [ "${ATTEMPT_STATE_MODE}" != 600 ] \
-    || [ "${ATTEMPT_STATE_OWNER}" != "$(id -u)" ] \
-    || ! [[ "${ATTEMPT_STATE_BYTES}" =~ ^[1-9][0-9]*$ ]] \
-    || [ "${ATTEMPT_STATE_BYTES}" -gt 65536 ]; then
-  echo "run_executor_attempt.sh: fixed attempt identity has unsafe metadata" >&2
+EXECUTION_STATE_MODE="$(execution_state_file_mode "${EXECUTION_STATE_FILE}")" || true
+EXECUTION_STATE_OWNER="$(execution_state_file_owner "${EXECUTION_STATE_FILE}")" || true
+EXECUTION_STATE_BYTES="$(wc -c <"${EXECUTION_STATE_FILE}" 2>/dev/null | tr -d '[:space:]')"
+if [ "${EXECUTION_STATE_MODE}" != 600 ] \
+    || [ "${EXECUTION_STATE_OWNER}" != "$(id -u)" ] \
+    || ! [[ "${EXECUTION_STATE_BYTES}" =~ ^[1-9][0-9]*$ ]] \
+    || [ "${EXECUTION_STATE_BYTES}" -gt 65536 ]; then
+  echo "run_executor_attempt.sh: fixed execution identity has unsafe metadata" >&2
   exit 2
 fi
 
-if ! TRUSTED_ATTEMPT_IDENTITY="$(jq -ce \
+if ! TRUSTED_EXECUTION_IDENTITY="$(jq -ce \
     --argjson iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" '
+    --argjson execution_id "${EXECUTION_ID}" '
     def absent_or_empty: . == null or . == "";
     if type == "object"
         and (has("work_branch") | not)
@@ -96,7 +96,7 @@ if ! TRUSTED_ATTEMPT_IDENTITY="$(jq -ce \
     |
     if type == "object"
       and .iid == $iid
-      and .attempt_number == $attempt_number
+      and .execution_id == $execution_id
       and (.issue_title | type == "string" and length > 0 and length <= 1024)
       and (.mode_actual == "fresh" or .mode_actual == "continue")
       and (.auto_merge | type == "boolean")
@@ -177,24 +177,24 @@ if ! TRUSTED_ATTEMPT_IDENTITY="$(jq -ce \
       dependency_branch:(.dependency_branch // null),
       dependency_base_sha:(.dependency_base_sha // null)
     }
-    else error("invalid fixed attempt identity") end
-  ' "${ATTEMPT_STATE_FILE}" 2>/dev/null)"; then
-  echo "run_executor_attempt.sh: fixed attempt identity is invalid" >&2
+    else error("invalid fixed execution identity") end
+  ' "${EXECUTION_STATE_FILE}" 2>/dev/null)"; then
+  echo "run_executor_attempt.sh: fixed execution identity is invalid" >&2
   exit 2
 fi
 
-AUTO_MERGE="$(jq -r '.auto_merge' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-ISSUE_TITLE="$(jq -r '.issue_title' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-MERGE_TARGET_BRANCH="$(jq -r '.merge_target_branch' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-DEPENDENCY_IID="$(jq -r '.dependency_iid // ""' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-DEPENDENCY_BRANCH="$(jq -r '.dependency_branch // ""' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-DEPENDENCY_BASE_SHA="$(jq -r '.dependency_base_sha // ""' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-WORK_BRANCH="$(jq -r '.work_branch' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-BRANCH_MEMBERS_JSON="$(jq -c '.branch_members' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-SHARED_BRANCH_ROLE="$(jq -r '.shared_branch_role // ""' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-EXPECTED_WORK_BRANCH_SHA="$(jq -r '.expected_work_branch_sha // ""' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-EXPECTED_COMMIT_PARENT_SHA="$(jq -r '.expected_commit_parent_sha // ""' <<<"${TRUSTED_ATTEMPT_IDENTITY}")"
-if [ "${ISSUE_MODE}" != "$(jq -r '.mode_actual' <<<"${TRUSTED_ATTEMPT_IDENTITY}")" ] \
+AUTO_MERGE="$(jq -r '.auto_merge' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+ISSUE_TITLE="$(jq -r '.issue_title' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+MERGE_TARGET_BRANCH="$(jq -r '.merge_target_branch' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+DEPENDENCY_IID="$(jq -r '.dependency_iid // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+DEPENDENCY_BRANCH="$(jq -r '.dependency_branch // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+DEPENDENCY_BASE_SHA="$(jq -r '.dependency_base_sha // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+WORK_BRANCH="$(jq -r '.work_branch' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+BRANCH_MEMBERS_JSON="$(jq -c '.branch_members' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+SHARED_BRANCH_ROLE="$(jq -r '.shared_branch_role // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+EXPECTED_WORK_BRANCH_SHA="$(jq -r '.expected_work_branch_sha // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+EXPECTED_COMMIT_PARENT_SHA="$(jq -r '.expected_commit_parent_sha // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
+if [ "${ISSUE_MODE}" != "$(jq -r '.mode_actual' <<<"${TRUSTED_EXECUTION_IDENTITY}")" ] \
     || [ "${CALLER_AUTO_MERGE}" != "${AUTO_MERGE}" ] \
     || [ "${CALLER_MERGE_TARGET_BRANCH}" != "${MERGE_TARGET_BRANCH}" ] \
     || [ "${CALLER_DEPENDENCY_IID}" != "${DEPENDENCY_IID}" ] \
@@ -203,7 +203,7 @@ if [ "${ISSUE_MODE}" != "$(jq -r '.mode_actual' <<<"${TRUSTED_ATTEMPT_IDENTITY}"
     || [ "${CALLER_WORK_BRANCH}" != "${WORK_BRANCH}" ] \
     || [ "${CALLER_EXPECTED_WORK_BRANCH_SHA}" != "${EXPECTED_WORK_BRANCH_SHA}" ] \
     || [ "${CALLER_EXPECTED_COMMIT_PARENT_SHA}" != "${EXPECTED_COMMIT_PARENT_SHA}" ]; then
-  echo "run_executor_attempt.sh: caller inputs do not match the fixed attempt identity" >&2
+  echo "run_executor_attempt.sh: caller inputs do not match the fixed execution identity" >&2
   exit 2
 fi
 
@@ -338,7 +338,7 @@ persist_pushed_branch_identity() {
   state_tmp="${ISSUE_STATE_FILE}.tmp.$$"
   if ! (umask 077; printf '%s' "${prior_state}" | jq \
       --argjson iid "${ISSUE_IID}" \
-      --argjson attempt_number "${ATTEMPT_NUMBER}" \
+      --argjson execution_id "${EXECUTION_ID}" \
       --arg work_branch "${WORK_BRANCH}" \
       --argjson branch_members "${BRANCH_MEMBERS_JSON}" \
       --arg shared_branch_role "${SHARED_BRANCH_ROLE}" \
@@ -355,7 +355,7 @@ persist_pushed_branch_identity() {
         dependency_iid:(if $dependency_iid == "" then null else ($dependency_iid | tonumber) end),
         dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
         dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
-        dependency_pinned_attempt_number:$attempt_number,
+        dependency_pinned_execution_id:$execution_id,
         work_branch_sha:$work_branch_sha,
         dependency_history_verified:true,
         dependency_history_updated_at:$updated_at
@@ -369,7 +369,7 @@ persist_pushed_branch_identity() {
             .proposed_dependency_iid,
             .proposed_dependency_branch,
             .proposed_dependency_base_sha,
-            .preparing_attempt_number)
+            .preparing_execution_id)
     ' >"${state_tmp}"); then
     return 1
   fi
@@ -380,15 +380,15 @@ persist_pushed_branch_identity() {
 # A shared branch has one cross-Issue MR identity. After the main execution
 # path has pushed and verified the exact remote commit, invalidate any stale
 # finalization and bind the MR work that is about to start to this fixed
-# attempt. Partial-work salvage never calls this function: it may preserve a
+# execution. Partial-work salvage never calls this function: it may preserve a
 # pushed commit, but it is not authorized to start or checkpoint MR creation.
 persist_shared_mr_pending_checkpoint() {
   [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ] || return 0
 
   local prior_state state_tmp intent_id="" head_state_file="" state_bytes
   if [ ! -f "${ISSUE_STATE_FILE}" ] || [ -L "${ISSUE_STATE_FILE}" ] \
-      || [ "$(attempt_state_file_mode "${ISSUE_STATE_FILE}" 2>/dev/null || true)" != 600 ] \
-      || [ "$(attempt_state_file_owner "${ISSUE_STATE_FILE}" 2>/dev/null || true)" != "$(id -u)" ]; then
+      || [ "$(execution_state_file_mode "${ISSUE_STATE_FILE}" 2>/dev/null || true)" != 600 ] \
+      || [ "$(execution_state_file_owner "${ISSUE_STATE_FILE}" 2>/dev/null || true)" != "$(id -u)" ]; then
     return 1
   fi
   state_bytes="$(wc -c <"${ISSUE_STATE_FILE}" 2>/dev/null \
@@ -397,7 +397,7 @@ persist_shared_mr_pending_checkpoint() {
     && [ "${state_bytes}" -le 65536 ] || return 1
   prior_state="$(jq -ce \
     --argjson iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg work_branch "${WORK_BRANCH}" \
     --argjson branch_members "${BRANCH_MEMBERS_JSON}" \
     --arg shared_branch_role "${SHARED_BRANCH_ROLE}" \
@@ -407,24 +407,24 @@ persist_shared_mr_pending_checkpoint() {
         and .work_branch == $work_branch
         and .branch_members == $branch_members
         and .shared_branch_role == $shared_branch_role
-        and .dependency_pinned_attempt_number == $attempt_number
+        and .dependency_pinned_execution_id == $execution_id
         and .dependency_history_verified == true
         and ((.work_branch_sha | ascii_downcase)
           == ($commit_sha | ascii_downcase))
       then . else error("pushed shared identity mismatch") end
     ' "${ISSUE_STATE_FILE}" 2>/dev/null)" || return 1
 
-  # Reuse an exact same-attempt intent after a process restart. Otherwise A
+  # Reuse an exact same-execution intent after a process restart. Otherwise A
   # creates a fresh high-entropy ownership marker; C inherits A's verified
   # marker so both commits bind the same one MR.
   intent_id="$(jq -r \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg work_branch "${WORK_BRANCH}" \
     --arg commit_sha "${COMMIT_SHA}" '
     .mr_finalization // null
     | select(type == "object"
       and .status == "pending"
-      and .source_attempt_number == $attempt_number
+      and .source_execution_id == $execution_id
       and .work_branch == $work_branch
       and ((.commit_sha | ascii_downcase) == ($commit_sha | ascii_downcase))
       and (.intent_id | type == "string" and test("^[0-9a-f]{64}$")))
@@ -433,8 +433,8 @@ persist_shared_mr_pending_checkpoint() {
   if [ -z "${intent_id}" ] && [ "${SHARED_BRANCH_ROLE}" = tail ]; then
     head_state_file="${ISSUES_ROOT}/issue-${DEPENDENCY_IID}/state.json"
     if [ ! -f "${head_state_file}" ] || [ -L "${head_state_file}" ] \
-        || [ "$(attempt_state_file_mode "${head_state_file}" 2>/dev/null || true)" != 600 ] \
-        || [ "$(attempt_state_file_owner "${head_state_file}" 2>/dev/null || true)" != "$(id -u)" ]; then
+        || [ "$(execution_state_file_mode "${head_state_file}" 2>/dev/null || true)" != 600 ] \
+        || [ "$(execution_state_file_owner "${head_state_file}" 2>/dev/null || true)" != "$(id -u)" ]; then
       return 1
     fi
     state_bytes="$(wc -c <"${head_state_file}" 2>/dev/null \
@@ -472,7 +472,7 @@ persist_shared_mr_pending_checkpoint() {
 
   state_tmp="${ISSUE_STATE_FILE}.tmp.$$"
   if ! (umask 077; printf '%s' "${prior_state}" | jq \
-      --argjson attempt_number "${ATTEMPT_NUMBER}" \
+      --argjson execution_id "${EXECUTION_ID}" \
       --arg work_branch "${WORK_BRANCH}" \
       --argjson branch_members "${BRANCH_MEMBERS_JSON}" \
       --arg shared_branch_role "${SHARED_BRANCH_ROLE}" \
@@ -481,7 +481,7 @@ persist_shared_mr_pending_checkpoint() {
       --arg target_branch "${MERGE_TARGET_BRANCH}" '
       .mr_finalization = {
         status:"pending",
-        source_attempt_number:$attempt_number,
+        source_execution_id:$execution_id,
         work_branch:$work_branch,
         branch_members:$branch_members,
         shared_branch_role:$shared_branch_role,
@@ -572,7 +572,7 @@ persist_and_print_result() {
   local result
   result="$(jq -cn \
     --argjson iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg status "${FINAL_STATUS}" \
     --arg mode_actual "${ISSUE_MODE}" \
     --arg work_branch "${WORK_BRANCH}" \
@@ -586,7 +586,7 @@ persist_and_print_result() {
     --arg block_reason "${BLOCK_REASON}" \
     --arg log_dir "${LOG_DIR}" '{
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       status:$status,
       mode_actual:$mode_actual,
       work_branch:$work_branch,
@@ -877,12 +877,12 @@ esac
 
 # create_mr.sh writes this marker before attempting the optional merge.  It is
 # a recovery artifact, not part of the strict compact worker-result schema.
-# Require exact attempt/issue/branch/SHA identity before trusting it; in
+# Require exact execution/issue/branch/SHA identity before trusting it; in
 # particular, only a verified merged marker can authorize `finish`.
 MR_RESULT_FILE="${LOG_DIR}/mr_result.json"
 MR_MARKER=""
-MR_RESULT_MODE="$(attempt_state_file_mode "${MR_RESULT_FILE}" 2>/dev/null || true)"
-MR_RESULT_OWNER="$(attempt_state_file_owner "${MR_RESULT_FILE}" 2>/dev/null || true)"
+MR_RESULT_MODE="$(execution_state_file_mode "${MR_RESULT_FILE}" 2>/dev/null || true)"
+MR_RESULT_OWNER="$(execution_state_file_owner "${MR_RESULT_FILE}" 2>/dev/null || true)"
 MR_RESULT_BYTES="$(wc -c <"${MR_RESULT_FILE}" 2>/dev/null | tr -d '[:space:]' || true)"
 if [ -f "${MR_RESULT_FILE}" ] && [ ! -L "${MR_RESULT_FILE}" ] \
     && [ "${MR_RESULT_MODE}" = 600 ] \
@@ -891,7 +891,7 @@ if [ -f "${MR_RESULT_FILE}" ] && [ ! -L "${MR_RESULT_FILE}" ] \
     && [ "${MR_RESULT_BYTES}" -le 65536 ]; then
   MR_MARKER="$(jq -ce \
     --argjson issue_iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg source_branch "${WORK_BRANCH}" \
     --arg target_branch "${MERGE_TARGET_BRANCH}" \
     --arg sha "${COMMIT_SHA}" \
@@ -902,7 +902,7 @@ if [ -f "${MR_RESULT_FILE}" ] && [ ! -L "${MR_RESULT_FILE}" ] \
       if type == "object"
         and .version == 1
         and .issue_iid == $issue_iid
-        and .attempt_number == $attempt_number
+        and .execution_id == $execution_id
         and .source_branch == $source_branch
         and .target_branch == $target_branch
         and ((.sha | ascii_downcase) == ($sha | ascii_downcase))

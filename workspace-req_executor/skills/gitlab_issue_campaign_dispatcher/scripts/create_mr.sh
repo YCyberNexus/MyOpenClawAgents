@@ -40,7 +40,7 @@
 #                   optional complete dependency identity used to fence merge
 #   COMMIT_SHA      exact source HEAD that the MR must expose
 #   WORK_BRANCH     source branch (single, fixed)
-#   ATTEMPT_NUMBER_PADDED  e.g. "002" (used in MR title for visibility)
+#   EXECUTION_ID    opaque execution identity used only for machine fencing
 #
 # Output (four lines on stdout):
 #   <merge-request-web-url>
@@ -60,7 +60,7 @@ set -euo pipefail
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${PROJECT_FULL:?}" "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${ISSUE_MODE:?}" "${ISSUE_TITLE:?}" \
-  "${LOG_DIR:?}" "${BRANCH:?}" "${WORK_BRANCH:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
+  "${LOG_DIR:?}" "${BRANCH:?}" "${WORK_BRANCH:?}" "${EXECUTION_ID:?}" \
   "${PROJECT_URI:?}" "${COMMIT_SHA:?}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -200,7 +200,7 @@ if [ "${SHARED_BRANCH}" = true ]; then
   }
   SHARED_MR_INTENT_ID="$(jq -er \
     --argjson iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg work_branch "${WORK_BRANCH}" \
     --argjson head_iid "${SHARED_HEAD_IID}" \
     --argjson tail_iid "${SHARED_TAIL_IID}" \
@@ -216,10 +216,10 @@ if [ "${SHARED_BRANCH}" = true ]; then
       and (.mr_finalization | type == "object")
       and ((.mr_finalization | keys | sort) == ([
         "branch_members","commit_sha","intent_id","shared_branch_role",
-        "source_attempt_number","status","target_branch","work_branch"
+        "source_execution_id","status","target_branch","work_branch"
       ] | sort))
       and .mr_finalization.status == "pending"
-      and .mr_finalization.source_attempt_number == $attempt_number
+      and .mr_finalization.source_execution_id == $execution_id
       and .mr_finalization.work_branch == $work_branch
       and .mr_finalization.branch_members == [$head_iid,$tail_iid]
       and .mr_finalization.shared_branch_role == $shared_branch_role
@@ -299,21 +299,21 @@ if [ "${SHARED_BRANCH_ROLE}" = head ] \
     && require_private_state_file "${MR_RESULT_FILE}"; then
   RECOVERY_MARKER_IDENTITY="$(jq -ce \
     --argjson issue_iid "${ISSUE_IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg source_branch "${WORK_BRANCH}" \
     --arg target_branch "${MERGE_TARGET_BRANCH}" \
     --arg sha "${COMMIT_SHA}" \
     --arg intent_id "${SHARED_MR_INTENT_ID}" '
       if type == "object"
         and (keys | sort) == ([
-          "attempt_number","auto_merge","dependency_base_sha","iid",
+          "execution_id","auto_merge","dependency_base_sha","iid",
           "issue_iid","merge_api_succeeded","merge_attempted","mr_action",
           "observed_state","outcome","reason","sha","shared_mr_intent_id",
           "source_branch","target_branch","verified","version","web_url"
         ] | sort)
         and .version == 1
         and .issue_iid == $issue_iid
-        and .attempt_number == $attempt_number
+        and .execution_id == $execution_id
         and .auto_merge == false
         and .source_branch == $source_branch
         and .target_branch == $target_branch
@@ -532,7 +532,7 @@ persist_shared_mr_identity_evidence() {
       --arg reason "${evidence_reason}" \
       --arg mr_action "${evidence_action}" \
       --argjson issue_iid "${ISSUE_IID}" \
-      --argjson attempt_number "${ATTEMPT_NUMBER}" \
+      --argjson execution_id "${EXECUTION_ID}" \
       --arg shared_mr_intent_id "${SHARED_MR_INTENT_ID}" '{
         version:1,iid:$iid,web_url:$web_url,
         source_branch:$source_branch,target_branch:$target_branch,
@@ -540,7 +540,7 @@ persist_shared_mr_identity_evidence() {
         observed_state:"unknown",outcome:"unknown",verified:false,
         merge_attempted:false,merge_api_succeeded:false,reason:$reason,
         mr_action:$mr_action,issue_iid:$issue_iid,
-        attempt_number:$attempt_number,auto_merge:false,
+        execution_id:$execution_id,auto_merge:false,
         shared_mr_intent_id:$shared_mr_intent_id
       }' >"${evidence_tmp}"; then
     return 1
@@ -722,7 +722,7 @@ elif [ "${EXISTING_COUNT}" -gt 0 ]; then
       exit 4
     }
   done
-  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by req_executor attempt ${ATTEMPT_NUMBER_PADDED} re-run; mode=${ISSUE_MODE})."
+  SUPERSEDES_LINE="Supersedes ${SUPERSEDES_REFS} (closed by a req_executor re-run; mode=${ISSUE_MODE})."
   MR_ACTION="rotated"
 fi
 
@@ -744,9 +744,9 @@ if [ "${REUSE_EXISTING}" != true ]; then
       echo
     fi
     if [ "${SHARED_BRANCH}" = true ]; then
-      echo "Auto-generated shared MR for issues #${SHARED_HEAD_IID} and #${SHARED_TAIL_IID} (head attempt ${ATTEMPT_NUMBER_PADDED})."
+      echo "Auto-generated shared MR for issues #${SHARED_HEAD_IID} and #${SHARED_TAIL_IID}."
     else
-      echo "Auto-generated MR for issue #${ISSUE_IID} (attempt ${ATTEMPT_NUMBER_PADDED}, mode=${ISSUE_MODE})."
+      echo "Auto-generated MR for issue #${ISSUE_IID} (mode=${ISSUE_MODE})."
     fi
     echo
     echo "Attempt logs, including prompt.txt, claude_result.txt, raw acpx logs,"
@@ -773,7 +773,7 @@ if [ "${REUSE_EXISTING}" != true ]; then
     --repo "${PROJECT_FULL}" \
     --source-branch "${WORK_BRANCH}" \
     --target-branch "${MERGE_TARGET_BRANCH}" \
-    --title "Issue #${ISSUE_IID} (attempt ${ATTEMPT_NUMBER_PADDED}): ${ISSUE_TITLE}" \
+    --title "Issue #${ISSUE_IID}: ${ISSUE_TITLE}" \
     --description "$(cat "${DESC_FILE}")" \
     --yes >/dev/null
 fi
@@ -815,14 +815,14 @@ persist_mr_result() {
   if ! jq -c \
       --arg mr_action "${MR_ACTION}" \
       --argjson issue_iid "${ISSUE_IID}" \
-      --argjson attempt_number "${ATTEMPT_NUMBER}" \
+      --argjson execution_id "${EXECUTION_ID}" \
       --argjson auto_merge "${AUTO_MERGE}" \
       --argjson shared_branch "${SHARED_BRANCH}" \
       --arg shared_mr_intent_id "${SHARED_MR_INTENT_ID}" '
         . + {
           mr_action:$mr_action,
           issue_iid:$issue_iid,
-          attempt_number:$attempt_number,
+          execution_id:$execution_id,
           auto_merge:$auto_merge
         }
         | if $shared_branch then

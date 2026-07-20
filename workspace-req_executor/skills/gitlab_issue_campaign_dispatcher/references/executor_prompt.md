@@ -1,11 +1,11 @@
 # Executor Prompt Template (Subagent Task)
 
 The dispatcher extracts the sentinel-bounded rendered block below and writes it
-to private mode-600 `executor_payload.txt`. The anonymous `sessions_spawn` task
+to a private mode-600 execution-scoped payload file. The anonymous `sessions_spawn` task
 is a separate secret-free bootstrap that validates the manifest before reading
 this payload. The outer subagent does not load workspace instruction files.
 
-The complete technical attempt now runs through one fixed wrapper. This is a
+The complete technical execution now runs through one fixed wrapper. This is a
 correctness boundary, not only a prompt simplification: a long synchronous acpx
 tool call can return without OpenClaw scheduling another model turn. Keeping
 acpx and all deterministic finalization in one Bash process removes that gap.
@@ -24,8 +24,7 @@ credentials from the private process/deployment environment, and
 | `{PROJECT}` | trigger project slug |
 | `{GROUP}` | trigger GitLab group |
 | `{ISSUE_IID}` | current IID |
-| `{ATTEMPT_NUMBER}` | allocated attempt number |
-| `{ATTEMPT_NUMBER_PADDED}` | zero-padded attempt number |
+| `{EXECUTION_ID}` | random opaque execution identity |
 | `{ISSUE_MODE}` | `fresh` or `continue` |
 | `{BRANCH}` | resolved processing base branch |
 | `{BRANCH_QUOTED}` | shell-safe single-quoted processing base branch |
@@ -44,7 +43,7 @@ credentials from the private process/deployment environment, and
 | `{REPO_PATH}` | parent checkout |
 | `{WORKTREE_DIR}` | shared per-IID linked worktree |
 | `{OUTPUT_DIR}` | issue output directory inside the worktree |
-| `{LOG_DIR}` | attempt log directory inside the worktree |
+| `{LOG_DIR}` | execution-scoped log directory inside the worktree |
 | `{ISSUE_ROOT}` | parent checkout's durable per-Issue state directory |
 | `{SCRIPTS_DIR}` | absolute dispatcher scripts directory |
 | `{GITLAB_HOST}` | deployment pin |
@@ -83,8 +82,7 @@ GROUP={GROUP}
 GITLAB_HOST={GITLAB_HOST}
 GITLAB_API_PROTOCOL={GITLAB_API_PROTOCOL}
 ISSUE_IID={ISSUE_IID}
-ATTEMPT_NUMBER={ATTEMPT_NUMBER}
-ATTEMPT_NUMBER_PADDED={ATTEMPT_NUMBER_PADDED}
+EXECUTION_ID={EXECUTION_ID}
 ISSUE_MODE={ISSUE_MODE}
 BRANCH={BRANCH}
 CONFIG_BRANCH={CONFIG_BRANCH}
@@ -112,7 +110,7 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
    post-acpx caps fire first. Invoke exactly:
 
    PROJECT={PROJECT} GROUP={GROUP} \
-     ISSUE_IID={ISSUE_IID} ATTEMPT_NUMBER={ATTEMPT_NUMBER} \
+     ISSUE_IID={ISSUE_IID} EXECUTION_ID={EXECUTION_ID} \
      REPO_PARENT_PATH= REPO_PATH={REPO_PATH} \
      ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH_QUOTED} \
      WORK_BRANCH={WORK_BRANCH_QUOTED} \

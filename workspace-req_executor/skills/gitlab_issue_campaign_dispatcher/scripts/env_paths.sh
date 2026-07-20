@@ -25,7 +25,7 @@
 #               issue-<iid>/             ← per-issue subtree (lives OUTSIDE worktree
 #                                          so state/summary survive worktree teardown)
 #                   state.json
-#                   attempt_state.json
+#                   executions/execution-<execution_id>.json
 #                   summary.md
 #           .worktrees/                  ← per-issue linked git worktrees
 #               issue-<iid>/             ← WORKTREE_DIR; acpx cwd; reused across every
@@ -34,10 +34,9 @@
 #                                          branch to BASE_REF in place.
 #                   .req_executor/issue-<iid>/output/
 #                                                        ← OUTPUT_DIR (force-added; shared)
-#                   .req_executor/issue-<iid>/log/
-#                                                        ← LOG_DIR (one fixed issue-local
-#                                                          directory; stays local and is not
-#                                                          committed)
+#                   .req_executor/issue-<iid>/log/execution-<execution_id>/
+#                                                        ← LOG_DIR (isolated per execution;
+#                                                          stays local and is not committed)
 #
 # Path derivation is layered:
 #
@@ -47,16 +46,16 @@
 #         STATE_DIR, CAMPAIGN_STATE_FILE, LOG_ROOT, DISPATCHER_LOG_DIR,
 #         ISSUES_ROOT, LOCK_FILE, WORKTREES_ROOT
 #   - per-issue run level (derived only if ISSUE_IID is set):
-#                                       PROJECT, ISSUE_IID, ATTEMPT_NUMBER
+#                                       PROJECT, ISSUE_IID, EXECUTION_ID
 #       → ISSUE_ROOT, ISSUE_STATE_FILE, WORK_BRANCH,
-#         ATTEMPT_NUMBER_PADDED, WORKTREE_DIR, OUTPUT_DIR,
-#         LOG_DIR, ATTEMPT_STATE_FILE, SUMMARY_FILE,
+#         EXECUTION_ID, WORKTREE_DIR, OUTPUT_DIR,
+#         LOG_DIR, EXECUTION_STATE_FILE, SUMMARY_FILE,
 #         LOCAL_ISSUE_BRANCH
 #
 # Why a single layered file: a single env_paths.sh keeps the dispatcher's
-# prep scripts (which need attempt-level paths to call prepare_attempt.sh,
+# prep scripts (which need execution-scoped paths to call prepare_attempt.sh,
 # build_prompt.sh) and the subagent's post-acpx scripts (which also need
-# attempt-level paths) symmetric. Each Bash exec under OpenClaw is a fresh
+# execution-scoped paths) symmetric. Each Bash exec under OpenClaw is a fresh
 # shell, so every script must self-bootstrap; the same env_paths.sh works
 # for everyone.
 #
@@ -65,7 +64,7 @@
 #   GROUP            GitLab group slug                              (always)
 #   GITLAB_TOKEN     GitLab access token                            (always)
 #   ISSUE_IID        integer issue IID                              (per-issue)
-#   ATTEMPT_NUMBER   integer attempt number, allocated by dispatcher (per-issue)
+#   EXECUTION_ID   integer execution identity, allocated by dispatcher (per-issue)
 #
 # Optional input env vars (forwarded by the orchestrator from trigger
 # fields:
@@ -182,7 +181,7 @@ export LOCK_FILE="${STATE_DIR}/campaign.lock"
 # Per-issue git worktrees live under a single root inside the agent
 # runtime tree (already covered by `.git/info/exclude`). Always exported
 # so housekeeper / cleanup scripts can find them even when ISSUE_IID is
-# unset. Each IID gets exactly one worktree (reused across attempts);
+# unset. Each IID gets exactly one worktree (reused across executions);
 # see WORKTREE_DIR below.
 export WORKTREES_ROOT="${RESULT_ROOT}/.worktrees"
 
@@ -207,7 +206,17 @@ export -f issue_state_file_for
 
 # ─── 2. Per-issue runtime layout (only when ISSUE_IID set) ──
 if [ -n "${ISSUE_IID:-}" ]; then
-  : "${ATTEMPT_NUMBER:?env_paths.sh: ATTEMPT_NUMBER must be set when ISSUE_IID is set (dispatcher allocates via allocate_attempt.sh)}"
+  : "${EXECUTION_ID:?env_paths.sh: EXECUTION_ID must be set when ISSUE_IID is set (dispatcher generates it via allocate_execution_id.sh)}"
+  case "${EXECUTION_ID}" in
+    ''|*[!0-9]*)
+      echo "env_paths.sh: EXECUTION_ID must be a positive integer" >&2
+      return 2 2>/dev/null || exit 2
+      ;;
+  esac
+  if [ "${EXECUTION_ID}" -le 0 ]; then
+    echo "env_paths.sh: EXECUTION_ID must be a positive integer" >&2
+    return 2 2>/dev/null || exit 2
+  fi
 
   export ISSUE_ROOT="${ISSUES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
@@ -244,32 +253,31 @@ if [ -n "${ISSUE_IID:-}" ]; then
     mkdir -p "${ISSUE_ROOT}"
   fi
 
-  ATTEMPT_NUMBER_PADDED="$(printf '%03d' "${ATTEMPT_NUMBER}")"
-  export ATTEMPT_NUMBER_PADDED
+  export EXECUTION_ID
 
   # Every run of this IID uses one linked git worktree at
-  # WORKTREE_DIR (the path does NOT include the attempt number). The parent
+  # WORKTREE_DIR (the path does NOT include the execution identity). The parent
   # checkout at ${REPO_PATH} is only used as the shared object database /
-  # `git fetch` target and is NEVER mutated by an attempt. Cross-IID
+  # `git fetch` target and is NEVER mutated by an execution. Cross-IID
   # parallelism is still safe because different IIDs get different worktree
-  # paths; same-IID attempts never run concurrently (single-batch-in-flight
+  # paths; same-IID executions never run concurrently (single-batch-in-flight
   # invariant enforced by the dispatcher's `pending_subagents` bookkeeping),
-  # so it is safe to reuse one working tree across attempts. The benefit:
-  # issue-local runtime paths and the local branch do not include the attempt
-  # number. ATTEMPT_NUMBER remains an execution identity used by state and
-  # callback fencing, not by filesystem or Git-ref layout.
+  # so it is safe to reuse one working tree across executions. EXECUTION_ID is
+  # an opaque random identity used by state, log isolation, and callback
+  # fencing; it never represents how many times the Issue has run.
   # prepare_attempt.sh owns the create-or-reuse logic.
   #
-  # Persistent state and the latest summary live in ISSUE_ROOT. Runtime logs
-  # use one fixed issue-local directory and are overwritten by later runs.
+  # Persistent Issue state and the latest summary live in ISSUE_ROOT. Each
+  # execution uses an isolated state file and log directory.
   # stage_and_guard.sh force-adds only OUTPUT_DIR and removes LOG_DIR / logs/
   # paths from the commit index.
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_WORKTREE_REL="${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"
-  export ISSUE_LOG_REL="${ISSUE_WORKTREE_REL}/log"
+  export ISSUE_LOG_REL="${ISSUE_WORKTREE_REL}/log/execution-${EXECUTION_ID}"
   export OUTPUT_DIR="${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}/output"
   export LOG_DIR="${WORKTREE_DIR}/${ISSUE_LOG_REL}"
-  export ATTEMPT_STATE_FILE="${ISSUE_ROOT}/attempt_state.json"
+  export EXECUTIONS_ROOT="${ISSUE_ROOT}/executions"
+  export EXECUTION_STATE_FILE="${EXECUTIONS_ROOT}/execution-${EXECUTION_ID}.json"
   export SUMMARY_FILE="${ISSUE_ROOT}/summary.md"
   # A and its dependent share one remote branch, but their linked worktrees
   # must never try to check out the same local branch. Keep one fixed local ref
@@ -282,7 +290,7 @@ if [ -n "${ISSUE_IID:-}" ]; then
   # `git worktree add` refuse the path, and LOG_DIR is nested inside the
   # worktree.
   if [ -d "${REPO_PATH}/.git" ]; then
-    mkdir -p "${ISSUE_ROOT}"
+    mkdir -p "${ISSUE_ROOT}" "${EXECUTIONS_ROOT}"
   fi
 fi
 

@@ -60,14 +60,14 @@ dlc_sha256() {
 # generation so same-IID work in different projects cannot collide. The fixed
 # character set and 96-byte ceiling stay conservative for runtime transports.
 dlc_runtime_child_label() {
-  local project="$1" iid="$2" job_id="$3" generation="$4" attempt_number="$5"
+  local project="$1" iid="$2" job_id="$3" generation="$4" execution_id="$5"
   local identity digest label
 
-  case "${iid}:${generation}:${attempt_number}" in
+  case "${iid}:${generation}:${execution_id}" in
     *[!0-9:]*|:*|*::*|*:) return 2 ;;
   esac
   [ "${iid}" -gt 0 ] && [ "${generation}" -gt 0 ] \
-    && [ "${attempt_number}" -gt 0 ] || return 2
+    && [ "${execution_id}" -gt 0 ] || return 2
   case "${project}${job_id}" in
     *$'\n'*|*$'\r'*|*$'\t'*) return 2 ;;
   esac
@@ -78,13 +78,13 @@ dlc_runtime_child_label() {
     --arg job_id "${job_id}" \
     --argjson iid "${iid}" \
     --argjson generation "${generation}" \
-    --argjson attempt_number "${attempt_number}" '{
+    --argjson execution_id "${execution_id}" '{
       version:1,
       project:$project,
       job_id:$job_id,
       iid:$iid,
       claim_generation:$generation,
-      attempt_number:$attempt_number
+      execution_id:$execution_id
     }')" || return 2
   digest="$(printf '%s' "${identity}" | dlc_sha256)" || return 2
   label="reqx-iid${iid}-gen${generation}-${digest:0:40}"
@@ -182,7 +182,7 @@ dlc_read() {
       and (.job_id | type == "string" and length > 0)
       and (.project | type == "string" and length > 0)
       and (.iid | type == "number" and . == floor and . > 0)
-      and (.attempt_number | type == "number" and . == floor and . > 0)
+      and (.execution_id | type == "number" and . == floor and . > 0)
       and (.expected_task_sha256 | type == "string"
         and test("^[0-9a-f]{64}$"))
       and (.expected_task_bytes | type == "number"
@@ -208,7 +208,45 @@ dlc_read() {
       and (.ack == null or (.ack | type == "object"))
       and (.created_at | type == "number" and . == floor and . >= 0)
       and (.updated_at | type == "number" and . == floor and . >= 0)
-    then . else error("invalid durable launch action") end
+    then .
+    elif type == "object"
+      and .version == 1
+      and (.job_id | type == "string" and length > 0)
+      and (.project | type == "string" and length > 0)
+      and (.iid | type == "number" and . == floor and . > 0)
+      and (.attempt_number | type == "number" and . == floor and . > 0)
+      and (has("execution_id") | not)
+      and (.expected_task_sha256 | type == "string"
+        and test("^[0-9a-f]{64}$"))
+      and (.expected_task_bytes | type == "number"
+        and . == floor and . > 0)
+      and (.claim_generation | type == "number" and . == floor and . >= 0)
+      and ((.claim_token == null)
+        or (.claim_token | type == "string" and length > 0))
+      and (.stage == "topup_prepared" or .stage == "preparing_claimed"
+        or .stage == "bound" or .stage == "action_emitted"
+        or .stage == "ack_received" or .stage == "project_recorded"
+        or .stage == "scheduler_recorded" or .stage == "completed")
+      and (if .stage == "topup_prepared"
+        then .claim_generation == 0 and .claim_token == null
+        else .claim_generation > 0
+          and (.claim_token | type == "string" and length > 0)
+        end)
+      and (.outcome == null or .outcome == "spawned"
+        or .outcome == "launch_failed")
+      and (.ack == null or (.ack | type == "object"))
+      and (.created_at | type == "number" and . == floor and . >= 0)
+      and (.updated_at | type == "number" and . == floor and . >= 0)
+    then {
+      version:1,
+      job_id:.job_id,
+      project:.project,
+      iid:.iid,
+      stage:"legacy_execution_schema",
+      legacy_stage:.stage,
+      legacy_execution_schema:true
+    }
+    else error("invalid durable launch action") end
   ' "${DLC_ACTION_FILE}"
 }
 

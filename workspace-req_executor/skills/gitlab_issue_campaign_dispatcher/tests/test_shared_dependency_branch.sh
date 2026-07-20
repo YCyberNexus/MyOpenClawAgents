@@ -18,7 +18,7 @@ REPO_PARENT="${TEST_ROOT}/repos"
 mkdir -p "${REPO_PARENT}"
 paths_out="$(
   PROJECT=repo GROUP=group REPO_PARENT_PATH="${REPO_PARENT}" \
-    ISSUE_IID=43 ATTEMPT_NUMBER=7 WORK_BRANCH='issue/41+43' \
+    ISSUE_IID=43 EXECUTION_ID=7 WORK_BRANCH='issue/41+43' \
     GITLAB_HOST='local-gitlab.invalid:9443' GITLAB_API_PROTOCOL=https \
     GITLAB_TOKEN=test-token REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
     REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS='local-gitlab.invalid:9443' \
@@ -68,7 +68,7 @@ jq -n '{
   dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
   merge_request_url:"https://gitlab.example.test/group/repo/-/merge_requests/17",
   mr_finalization:{
-    status:"verified_open",source_attempt_number:1,
+    status:"verified_open",source_execution_id:1,
     work_branch:"issue/41+43",branch_members:[41,43],
     shared_branch_role:"head",
     commit_sha:"1111111111111111111111111111111111111111",
@@ -84,11 +84,11 @@ jq -n '{
   iid:43,status:"doing",commit_sha:"2222222222222222222222222222222222222222",
   work_branch:"issue/41+43",branch_members:[41,43],shared_branch_role:"tail",
   work_branch_sha:"2222222222222222222222222222222222222222",
-  dependency_history_verified:true,dependency_pinned_attempt_number:7,
+  dependency_history_verified:true,dependency_pinned_execution_id:7,
   dependency_iid:41,dependency_branch:"issue/41+43",
   dependency_base_sha:"1111111111111111111111111111111111111111",
   mr_finalization:{
-    status:"pending",source_attempt_number:7,
+    status:"pending",source_execution_id:7,
     work_branch:"issue/41+43",branch_members:[41,43],
     shared_branch_role:"tail",
     commit_sha:"2222222222222222222222222222222222222222",
@@ -188,8 +188,8 @@ mr_out="$(
   PATH="${MR_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
     MR_ISSUES_ROOT="${MR_ISSUES_ROOT}" \
     ISSUE_STATE_FILE="${MR_TAIL_STATE}" \
-    PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
-    ATTEMPT_NUMBER_PADDED=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
+    PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=7 \
+    EXECUTION_ID=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
     WORKTREE_DIR="${MR_WORKTREE}" LOG_DIR="${MR_LOG_DIR}" \
     BRANCH=main MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/41+43' \
     DEPENDENCY_IID=41 DEPENDENCY_BRANCH='issue/41+43' \
@@ -206,7 +206,7 @@ if grep -Eq '^mr (close|create)( |$)' "${GLAB_LOG}"; then
   fail "create_mr mutated MR identity instead of reusing the unique open MR"
 fi
 jq -e '
-  .iid == 17 and .issue_iid == 43 and .attempt_number == 7
+  .iid == 17 and .issue_iid == 43 and .execution_id == 7
   and .mr_action == "reused" and .source_branch == "issue/41+43"
   and .target_branch == "main" and .outcome == "opened"
 ' "${MR_LOG_DIR}/mr_result.json" >/dev/null \
@@ -220,8 +220,8 @@ set +e
 PATH="${MR_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
   FAKE_DUPLICATE_OPEN_MR=true MR_ISSUES_ROOT="${MR_ISSUES_ROOT}" \
   ISSUE_STATE_FILE="${MR_TAIL_STATE}" \
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
-  ATTEMPT_NUMBER_PADDED=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=7 \
+  EXECUTION_ID=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
   WORKTREE_DIR="${MR_WORKTREE}" LOG_DIR="${MR_LOG_DIR}" \
   BRANCH=main MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/41+43' \
   DEPENDENCY_IID=41 DEPENDENCY_BRANCH='issue/41+43' \
@@ -248,8 +248,8 @@ set +e
 PATH="${MR_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" MR_VERIFIED=false \
   MR_ISSUES_ROOT="${MR_ISSUES_ROOT}" \
   ISSUE_STATE_FILE="${MR_TAIL_STATE}" \
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
-  ATTEMPT_NUMBER_PADDED=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=7 \
+  EXECUTION_ID=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
   WORKTREE_DIR="${MR_WORKTREE}" LOG_DIR="${MR_LOG_DIR}" \
   BRANCH=main MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/41+43' \
   DEPENDENCY_IID=41 DEPENDENCY_BRANCH='issue/41+43' \
@@ -269,8 +269,8 @@ set +e
 PATH="${MR_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
   FAKE_FOREIGN_MR_INTENT=true MR_ISSUES_ROOT="${MR_ISSUES_ROOT}" \
   ISSUE_STATE_FILE="${MR_TAIL_STATE}" \
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
-  ATTEMPT_NUMBER_PADDED=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=7 \
+  EXECUTION_ID=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
   WORKTREE_DIR="${MR_WORKTREE}" LOG_DIR="${MR_LOG_DIR}" \
   BRANCH=main MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/41+43' \
   DEPENDENCY_IID=41 DEPENDENCY_BRANCH='issue/41+43' \
@@ -294,8 +294,8 @@ set +e
 PATH="${MR_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
   MR_ISSUES_ROOT="${MR_ISSUES_ROOT}" \
   ISSUE_STATE_FILE="${MR_TAIL_STATE}" \
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
-  ATTEMPT_NUMBER_PADDED=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=7 \
+  EXECUTION_ID=007 ISSUE_MODE=fresh ISSUE_TITLE='shared tail' \
   WORKTREE_DIR="${MR_WORKTREE}" LOG_DIR="${MR_LOG_DIR}" \
   BRANCH=main MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/41+43' \
   DEPENDENCY_IID=41 DEPENDENCY_BRANCH='issue/41+43' \
@@ -389,8 +389,8 @@ chmod +x "${PUSH_SCRIPTS}/env_paths.sh" \
 
 push_out="$(
   PATH="${PUSH_BIN}:${PATH}" GIT_LOG="${GIT_LOG}" \
-    PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=7 \
-    ATTEMPT_NUMBER_PADDED=007 ISSUE_TITLE='shared tail' \
+    PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=7 \
+    EXECUTION_ID=007 ISSUE_TITLE='shared tail' \
     WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
     WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${EXPECTED_LEASE_SHA}" \
     EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" \
@@ -423,8 +423,8 @@ ambiguous_push_out="$({
   PATH="${PUSH_BIN}:${PATH}" GIT_LOG="${GIT_LOG}" \
     SIMULATE_ACCEPTED_PUSH_ERROR=true \
     REMOTE_AFTER_FAILED_PUSH_SHA=4444444444444444444444444444444444444444 \
-    PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=8 \
-    ATTEMPT_NUMBER_PADDED=008 ISSUE_TITLE='ambiguous accepted push' \
+    PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=8 \
+    EXECUTION_ID=008 ISSUE_TITLE='ambiguous accepted push' \
     WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
     WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${EXPECTED_LEASE_SHA}" \
     EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" \
@@ -481,8 +481,8 @@ MERGE_EXPECTED_SHA="$(git -C "${MERGE_REPO}" rev-parse HEAD)"
 git -C "${MERGE_REPO}" merge -q --no-ff --no-commit side
 set +e
 MERGE_NETWORK_LOG="${MERGE_NETWORK_LOG}" \
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=1 \
-  ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='reject merge parent' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=1 \
+  EXECUTION_ID=001 ISSUE_TITLE='reject merge parent' \
   WORKTREE_DIR="${MERGE_REPO}" LOCAL_ISSUE_BRANCH='issue/43' \
   WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${MERGE_EXPECTED_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${MERGE_EXPECTED_SHA}" \
@@ -536,8 +536,8 @@ git -C "${TOPOLOGY_REPO}" switch -q -c issue/41
 printf 'A\n' >"${TOPOLOGY_REPO}/a.txt"
 git -C "${TOPOLOGY_REPO}" add a.txt
 TOPOLOGY_A_SHA="$(
-  PROJECT=repo GROUP=group ISSUE_IID=41 ATTEMPT_NUMBER=1 \
-  ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='A' \
+  PROJECT=repo GROUP=group ISSUE_IID=41 EXECUTION_ID=1 \
+  EXECUTION_ID=001 ISSUE_TITLE='A' \
   WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/41' \
   WORK_BRANCH='issue/41' \
     bash "${TOPOLOGY_SCRIPTS}/commit_and_push.sh" | tail -n 1
@@ -568,8 +568,8 @@ git -C "${TOPOLOGY_REPO}" switch -q -c issue/43 "${TOPOLOGY_A_SHA}"
 printf 'C\n' >"${TOPOLOGY_REPO}/c.txt"
 git -C "${TOPOLOGY_REPO}" add c.txt
 TOPOLOGY_C_SHA="$(
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=1 \
-  ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='C' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=1 \
+  EXECUTION_ID=001 ISSUE_TITLE='C' \
   WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/43' \
   WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${TOPOLOGY_A_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${TOPOLOGY_A_SHA}" \
@@ -586,8 +586,8 @@ printf 'C-v2\n' >"${TOPOLOGY_REPO}/c.txt"
 git -C "${TOPOLOGY_REPO}" reset -q --mixed "${TOPOLOGY_A_SHA}"
 git -C "${TOPOLOGY_REPO}" add c.txt
 TOPOLOGY_C_SHA="$(
-  PROJECT=repo GROUP=group ISSUE_IID=43 ATTEMPT_NUMBER=2 \
-  ATTEMPT_NUMBER_PADDED=002 ISSUE_TITLE='C continue' \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=2 \
+  EXECUTION_ID=002 ISSUE_TITLE='C continue' \
   WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/43' \
   WORK_BRANCH='issue/41+43' EXPECTED_WORK_BRANCH_SHA="${TOPOLOGY_C1_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${TOPOLOGY_A_SHA}" \
@@ -598,8 +598,8 @@ git -C "${TOPOLOGY_REPO}" switch -q -c issue/42 "${TOPOLOGY_BASE_SHA}"
 printf 'B\n' >"${TOPOLOGY_REPO}/b.txt"
 git -C "${TOPOLOGY_REPO}" add b.txt
 TOPOLOGY_B_SHA="$(
-  PROJECT=repo GROUP=group ISSUE_IID=42 ATTEMPT_NUMBER=1 \
-  ATTEMPT_NUMBER_PADDED=001 ISSUE_TITLE='B' \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 \
+  EXECUTION_ID=001 ISSUE_TITLE='B' \
   WORKTREE_DIR="${TOPOLOGY_REPO}" LOCAL_ISSUE_BRANCH='issue/42' \
   WORK_BRANCH='issue/42' \
     bash "${TOPOLOGY_SCRIPTS}/commit_and_push.sh" | tail -n 1

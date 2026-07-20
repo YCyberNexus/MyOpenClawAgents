@@ -11,7 +11,7 @@
 #   GITLAB_HOST              from glab_auth.sh
 #   PROJECT_URI              URI-encoded "${GROUP}/${PROJECT}"
 #   ISSUE_IID                from env_paths.sh
-#   ATTEMPT_NUMBER_PADDED    e.g. "001"
+#   EXECUTION_ID            opaque execution identity
 #   ISSUE_MODE               "fresh" or "continue"
 #   ISSUE_ROOT               persistent issue directory
 #   LOG_DIR                  fixed issue-local log dir
@@ -32,7 +32,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 
 : "${GITLAB_HOST:?run scripts/glab_auth.sh first}"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
-: "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" "${ISSUE_MODE:?}" \
+: "${ISSUE_IID:?}" "${EXECUTION_ID:?}" "${ISSUE_MODE:?}" \
   "${ISSUE_ROOT:?}" "${LOG_DIR:?}" "${SUMMARY_FILE:?}"
 
 ATTEMPT_STATUS="${ATTEMPT_STATUS:-unknown}"
@@ -50,7 +50,7 @@ if [ -s "${LOG_DIR}/git_status.txt" ]; then
 fi
 
 {
-  echo "## req_executor attempt ${ATTEMPT_NUMBER_PADDED}"
+  echo "## req_executor execution result"
   echo
   echo "- **Mode**: ${ISSUE_MODE}"
   echo "- **Status**: ${ATTEMPT_STATUS}"

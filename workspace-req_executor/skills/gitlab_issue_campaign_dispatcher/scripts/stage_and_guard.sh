@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # stage_and_guard.sh — stage Claude's changes from inside the shared
-# per-issue linked git worktree at ${WORKTREE_DIR} (created on attempt 1
-# and reused on later attempts by prepare_attempt.sh).
+# per-issue linked git worktree at ${WORKTREE_DIR} (created on the first
+# execution and reused by later executions through prepare_attempt.sh).
 #
 # All ordinary non-log files Claude wrote (or any non-log file already tracked
 # on the base branch) go through. The script force-adds the current issue's

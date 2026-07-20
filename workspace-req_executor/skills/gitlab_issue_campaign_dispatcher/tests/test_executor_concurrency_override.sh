@@ -201,8 +201,8 @@ set -euo pipefail
   && [ "${DRIVEN_LEGACY_LOCK_COMPAT_SECONDS}" = 172800 ] \
   || exit 95
 printf '%s\n' project-root-ok >>"${OVERRIDE_LOG}"
-jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" '{
-  status:"spawned",iid:$iid,attempt_number:$attempt,
+jq -cn --argjson iid "${IID}" --argjson attempt "${EXECUTION_ID}" '{
+  status:"spawned",iid:$iid,execution_id:$attempt,
   remaining_pending_count:1,chat_summary:"recorded"
 }'
 EOF
@@ -290,7 +290,7 @@ job_digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
 mkdir -p "${OVERRIDE_ROOT}/launch_actions"
 jq -cnS --arg job_id "${job_id}" '{
   version:1,job_id:$job_id,project:"group/repo",iid:42,
-  batch_id:"override-batch",snapshot_index:0,attempt_number:1,
+  batch_id:"override-batch",snapshot_index:0,execution_id:1,
   child_label:"reqx-iid42-gen1-0123456789abcdef0123456789abcdef01234567",
   runtime_label_version:1,payload_path:"/private/payload",
   expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
@@ -309,7 +309,7 @@ jq -cn --arg job_id "${job_id}" '{
 
 record_output="$(jq -cn --arg job_id "${job_id}" '{
   job_id:$job_id,claim_generation:1,project:"group/repo",iid:42,
-  attempt_number:1,status:"spawned",run_id:"override-run",
+  execution_id:1,status:"spawned",run_id:"override-run",
   expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
   expected_task_bytes:42,
   child_session_key:"agent:req_executor:subagent:override"

@@ -68,7 +68,7 @@ printf '%s\n' topup >>"${CALL_LOG}"
 jq -cn --arg payload "${CASE_ROOT}/payload.txt" '{
   status:"ready",
   dispatch_entries:[{
-    iid:42,attempt_number:1,child_label:"#42-att-001",
+    iid:42,execution_id:1,child_label:"#42-att-001",
     payload_path:$payload,job_id:"A:snapshot-0",batch_id:"A",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:7,
@@ -131,8 +131,8 @@ status_before="$(jq -r '.active_jobs["A:snapshot-0"].status' \
   exit 98
 }
 printf 'project:%s:%s\n' "${STATUS}" "${IID}" >>"${CALL_LOG}"
-jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" '{
-  status:"spawned",iid:$iid,attempt_number:$attempt,
+jq -cn --argjson iid "${IID}" --argjson attempt "${EXECUTION_ID}" '{
+  status:"spawned",iid:$iid,execution_id:$attempt,
   remaining_pending_count:1,chat_summary:"recorded"
 }'
 EOF
@@ -274,7 +274,7 @@ assert_replay_once() {
       claim_generation:1,
       project:"group/repo",
       iid:42,
-      attempt_number:1,
+      execution_id:1,
       child_label:$child_label,
       expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
       expected_task_bytes:7

@@ -136,7 +136,7 @@ make_shared_state() {
     --arg role "${role}" \
     --arg dependency_sha "${HEAD_SHA}" '{
       pending_subagents:{($iid|tostring):{
-        attempt_number:1,child_session_key:"child",auto_merge:false,
+        execution_id:1,child_session_key:"child",auto_merge:false,
         branch:"main",merge_target_branch:"main",
         work_branch:("issue/" + ($head|tostring) + "+" + ($tail|tostring)),
         branch_members:[$head,$tail],shared_branch_role:$role,
@@ -166,7 +166,7 @@ make_shared_reply() {
     --argjson mr_iid "${mr_iid}" \
     --arg commit_sha "${commit_sha}" \
     --arg action "${action}" '{
-      iid:$iid,attempt_number:1,status:"done",mode_actual:"fresh",
+      iid:$iid,execution_id:1,status:"done",mode_actual:"fresh",
       work_branch:("issue/" + ($head|tostring) + "+" + ($tail|tostring)),
       local_branch:("issue/" + ($iid|tostring)),
       commit_sha:$commit_sha,
@@ -190,7 +190,7 @@ write_shared_marker() {
   else
     [ -n "${action}" ] || action=created
   fi
-  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log"
+  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log/execution-1"
   marker_path="${marker_dir}/mr_result.json"
   issue_dir="${ISSUES_ROOT}/issue-${iid}"
   mkdir -p "${marker_dir}" "${issue_dir}"
@@ -213,7 +213,7 @@ write_shared_marker() {
       target_branch:"main",dependency_base_sha:$dependency_sha,sha:$commit_sha,
       observed_state:$observed_state,outcome:$outcome,verified:$verified,
       merge_attempted:false,merge_api_succeeded:false,reason:"auto_merge_disabled",
-      mr_action:$action,issue_iid:$iid,attempt_number:1,auto_merge:false,
+      mr_action:$action,issue_iid:$iid,execution_id:1,auto_merge:false,
       shared_mr_intent_id:$intent_id
     }' >"${marker_path}"
   chmod 600 "${marker_path}"
@@ -232,10 +232,10 @@ write_shared_marker() {
       dependency_branch:(if $role == "tail" then
         ("issue/" + ($head|tostring) + "+" + ($tail|tostring)) else null end),
       dependency_base_sha:(if $role == "tail" then $dependency_sha else null end),
-      work_branch_sha:$commit_sha,dependency_pinned_attempt_number:1,
+      work_branch_sha:$commit_sha,dependency_pinned_execution_id:1,
       dependency_history_verified:true,
       mr_finalization:{
-        status:"pending",source_attempt_number:1,
+        status:"pending",source_execution_id:1,
         work_branch:("issue/" + ($head|tostring) + "+" + ($tail|tostring)),
         branch_members:[$head,$tail],shared_branch_role:$role,
         commit_sha:$commit_sha,intent_id:$intent_id,target_branch:"main"
@@ -260,7 +260,7 @@ jq -e '
   || fail "valid shared head marker did not complete"
 jq -e '
   .mr_finalization.status == "verified_open"
-  and .mr_finalization.source_attempt_number == 1
+  and .mr_finalization.source_execution_id == 1
   and .mr_finalization.work_branch == "issue/41+43"
   and .mr_finalization.branch_members == [41,43]
   and .mr_finalization.shared_branch_role == "head"
@@ -333,7 +333,7 @@ jq -e '
   .final_status == "blocked"
   and .label_retry_pending == true
   and .updated_state.pending_subagents["45"].mr_label_retry == true
-  and .updated_state.pending_subagents["45"].mr_label_retry_attempt == 1
+  and .updated_state.pending_subagents["45"].mr_label_retry_execution_id == 1
 ' <<<"${label_retry_out}" >/dev/null \
   || fail "shared pr-label failure drained the exact pending claim"
 label_retry_done="$(phase6_process \
@@ -354,9 +354,9 @@ mkdir -p "${pending_recovery_dir}"
 jq -cn --arg sha "${HEAD_SHA}" '{
   iid:55,status:"done",work_branch:"issue/55+57",branch_members:[55,57],
   shared_branch_role:"head",work_branch_sha:$sha,
-  dependency_pinned_attempt_number:1,dependency_history_verified:true,
+  dependency_pinned_execution_id:1,dependency_history_verified:true,
   mr_finalization:{
-    status:"pending",source_attempt_number:1,work_branch:"issue/55+57",
+    status:"pending",source_execution_id:1,work_branch:"issue/55+57",
     branch_members:[55,57],shared_branch_role:"head",commit_sha:$sha,
     intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     target_branch:"main"
@@ -364,7 +364,7 @@ jq -cn --arg sha "${HEAD_SHA}" '{
 }' >"${pending_recovery_dir}/state.json"
 chmod 600 "${pending_recovery_dir}/state.json"
 write_shared_marker 55 57 55 head 29 created false unknown unknown
-pending_recovery_marker="${WORKTREES_ROOT}/issue-55/.req_executor/issue-55/log/mr_result.json"
+pending_recovery_marker="${WORKTREES_ROOT}/issue-55/.req_executor/issue-55/log/execution-1/mr_result.json"
 mv "${pending_recovery_marker}" "${pending_recovery_marker}.missing"
 : >"${LABEL_LOG}"
 mr_recovery_wait="$(phase6_process \
@@ -375,7 +375,7 @@ jq -e '
   .final_status == "blocked"
   and .mr_recovery_pending == true
   and .updated_state.pending_subagents["55"].mr_finalization_retry == true
-  and .updated_state.pending_subagents["55"].mr_finalization_retry_attempt == 1
+  and .updated_state.pending_subagents["55"].mr_finalization_retry_execution_id == 1
 ' <<<"${mr_recovery_wait}" >/dev/null \
   || fail "shared MR recovery wait drained or rewrote the exact claim"
 [ ! -s "${LABEL_LOG}" ] \
@@ -398,7 +398,7 @@ jq -e '
 # reason to retry MR creation forever. Phase 6 must drain it without publishing
 # pr even if the selected historical MR currently looks open.
 write_shared_marker 52 54 52 head 28 created false unknown unknown
-history_conflict_marker="${WORKTREES_ROOT}/issue-52/.req_executor/issue-52/log/mr_result.json"
+history_conflict_marker="${WORKTREES_ROOT}/issue-52/.req_executor/issue-52/log/execution-1/mr_result.json"
 history_conflict_tmp="$(mktemp "${history_conflict_marker}.conflict.XXXXXX")"
 jq '.reason = "shared_mr_history_conflict"' \
   "${history_conflict_marker}" >"${history_conflict_tmp}"
@@ -487,7 +487,7 @@ LIVE_SHARED_MR_IDENTITY_MATCHES=true
 # A non-private marker and a marker symlink are not authority.
 write_shared_marker 81 83 81 head 57
 chmod 644 \
-  "${WORKTREES_ROOT}/issue-81/.req_executor/issue-81/log/mr_result.json"
+  "${WORKTREES_ROOT}/issue-81/.req_executor/issue-81/log/execution-1/mr_result.json"
 bad_mode_resolution="$(phase6_resolve_shared_branch_mr \
   "$(make_shared_state 81 83 81 head)" \
   "$(make_shared_reply 81 83 81 head 57)")" \
@@ -495,10 +495,10 @@ bad_mode_resolution="$(phase6_resolve_shared_branch_mr \
 jq -e '.reply.status == "blocked"' <<<"${bad_mode_resolution}" >/dev/null \
   || fail "mode-644 shared marker was trusted"
 
-symlink_dir="${WORKTREES_ROOT}/issue-91/.req_executor/issue-91/log"
+symlink_dir="${WORKTREES_ROOT}/issue-91/.req_executor/issue-91/log/execution-1"
 mkdir -p "${symlink_dir}"
 ln -s \
-  "${WORKTREES_ROOT}/issue-41/.req_executor/issue-41/log/mr_result.json" \
+  "${WORKTREES_ROOT}/issue-41/.req_executor/issue-41/log/execution-1/mr_result.json" \
   "${symlink_dir}/mr_result.json"
 symlink_resolution="$(phase6_resolve_shared_branch_mr \
   "$(make_shared_state 91 93 91 head)" \
@@ -510,7 +510,7 @@ jq -e '.reply.status == "blocked"' <<<"${symlink_resolution}" >/dev/null \
 # Ordinary non-auto-merge branches retain their existing marker-free behavior.
 ordinary_state="$(jq -cn '{
   pending_subagents:{"101":{
-    attempt_number:1,child_session_key:"child",auto_merge:false,
+    execution_id:1,child_session_key:"child",auto_merge:false,
     branch:"main",merge_target_branch:"main",work_branch:"issue/101"
   }},active_issue_iids:[101],active_issue_sessions:[],completed_iids:[],
   unfinished_iids:[],blocked_iids:[],failed_iids:[],timeout_iids:[],
@@ -518,7 +518,7 @@ ordinary_state="$(jq -cn '{
   quota_completed_this_tick:0,campaign_status:"waiting_for_callbacks"
 }')"
 ordinary_reply="$(jq -cn '{
-  iid:101,attempt_number:1,status:"done",mode_actual:"fresh",
+  iid:101,execution_id:1,status:"done",mode_actual:"fresh",
   work_branch:"issue/101",local_branch:"issue/101",
   commit_sha:"3333333333333333333333333333333333333333",
   merge_request_url:"https://gitlab.example.test/group/repo/-/merge_requests/77",

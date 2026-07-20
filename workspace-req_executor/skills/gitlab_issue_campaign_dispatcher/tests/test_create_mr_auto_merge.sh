@@ -102,7 +102,7 @@ run_create() {
   PATH="${FAKE_BIN}:${PATH}" \
   GLAB_SCENARIO="${scenario}" GLAB_LOG="${case_root}/glab.log" \
   LIST_COUNT_FILE="${case_root}/list.count" API_COUNT_FILE="${case_root}/api.count" \
-  PROJECT=repo GROUP=group ISSUE_IID=42 ATTEMPT_NUMBER=1 ATTEMPT_NUMBER_PADDED=001 \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 EXECUTION_ID=001 \
   ISSUE_MODE=fresh ISSUE_TITLE='测试 issue' \
   WORKTREE_DIR="${worktree}" LOG_DIR="${log_dir}" \
   BRANCH=main MERGE_TARGET_BRANCH=release WORK_BRANCH=issue/42 \
@@ -119,7 +119,7 @@ merged' ] || fail "MR identity/outcome output contract is wrong: ${merged_out}"
 merged_root="${TEST_ROOT}/merged-true"
 jq -e '
   .version == 1 and .iid == 7 and .issue_iid == 42
-  and .attempt_number == 1 and .mr_action == "created"
+  and .execution_id == 1 and .mr_action == "created"
   and .source_branch == "issue/42" and .target_branch == "release"
   and .dependency_base_sha == ""
   and .sha == "0123456789abcdef0123456789abcdef01234567"

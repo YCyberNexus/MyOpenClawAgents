@@ -5,7 +5,7 @@
 # Replaces the SKILL.md prose for the callback wake-up. The orchestrator
 # LLM calls this once per callback with:
 #   - the subagent's compact JSON on stdin (worker_result_json payload)
-#   - IID, ATTEMPT_NUMBER, CALLBACK_RUN_ID and
+#   - IID, EXECUTION_ID, CALLBACK_RUN_ID and
 #     CALLBACK_CHILD_SESSION_KEY via env for an ordinary current callback
 #   - CALLBACK_LABEL when the pending entry persists a child label
 #   - the standard dispatcher env (PROJECT, GROUP, GITLAB_TOKEN, plus
@@ -16,7 +16,7 @@
 #   2. Acquires the dispatcher flock (non-blocking; returns lock_held on miss)
 #   3. Runs scripts/reconcile.sh narrowly for the IID (GitLab is still ground truth)
 #   4. Validates the compact reply against state_schema.md §Compact Subagent Reply
-#   5. Matches against pending_subagents[IID] by iid + attempt_number
+#   5. Matches against pending_subagents[IID] by iid + execution_id
 #   6. On stale/late callback → outputs callback_status=stale_or_already_drained, exits 0
 #   7. Otherwise: runs Phase 6 (label sync, write terminal state files, classify, drain)
 #   8. Decides cleanup action; outputs single-line JSON envelope to stdout
@@ -124,14 +124,14 @@ fi
 STATE_JSON="$(load_state)"
 PENDING_ENTRY="$(printf '%s' "${STATE_JSON}" | jq -c --argjson iid "${IID}" '.pending_subagents[($iid|tostring)] // null')"
 if [ "${PENDING_ENTRY}" != "null" ]; then
-  AUTH_PENDING_ATTEMPT="$(jq -r '.attempt_number' <<<"${PENDING_ENTRY}")"
+  AUTH_PENDING_EXECUTION_ID="$(jq -r '.execution_id' <<<"${PENDING_ENTRY}")"
   if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ]; then
     # Internal completion/timeout reconciliation has its own
     # job/generation/token-digest fence below and is not a runtime callback.
-    ATTEMPT_NUMBER="${ATTEMPT_NUMBER:-${AUTH_PENDING_ATTEMPT}}"
+    EXECUTION_ID="${EXECUTION_ID:-${AUTH_PENDING_EXECUTION_ID}}"
   else
     if ! CALLBACK_AUTH_MODE="$(completion_authenticate_pending \
-        "${PENDING_ENTRY}" "${ATTEMPT_NUMBER:-}" \
+        "${PENDING_ENTRY}" "${EXECUTION_ID:-}" \
         "${CALLBACK_RUN_ID:-}" "${CALLBACK_CHILD_SESSION_KEY:-}" \
         "${CALLBACK_LABEL:-}")"; then
       wrapper_log followup "callback rejected iid=${IID}: completion identity mismatch"
@@ -143,13 +143,13 @@ if [ "${PENDING_ENTRY}" != "null" ]; then
       }'
       exit 3
     fi
-    if [ "${CALLBACK_AUTH_MODE}" = legacy ] && [ -z "${ATTEMPT_NUMBER:-}" ]; then
-      ATTEMPT_NUMBER="${AUTH_PENDING_ATTEMPT}"
+    if [ "${CALLBACK_AUTH_MODE}" = legacy ] && [ -z "${EXECUTION_ID:-}" ]; then
+      EXECUTION_ID="${AUTH_PENDING_EXECUTION_ID}"
     fi
   fi
 fi
 
-wrapper_log followup "callback received iid=${IID} attempt=${ATTEMPT_NUMBER:-?}"
+wrapper_log followup "callback received iid=${IID} execution_id=${EXECUTION_ID:-?}"
 
 # Phase 6 step 0 — narrow reconcile (best-effort; failure does NOT abort).
 # The GitLab live state is consulted again so any reviewer relabel between
@@ -174,12 +174,12 @@ if [ "${PENDING_ENTRY}" != "null" ]; then
 fi
 if [ "${PENDING_ENTRY}" = "null" ]; then
   # Phase 6 may already have atomically drained pending while retaining a
-  # claim-bound durable intent. Match only this callback's IID+attempt, then
+  # claim-bound durable intent. Match only this callback's IID+execution ID, then
   # require the intent key to equal its canonical stable event before replay.
-  RECOVERY_ATTEMPT="${ATTEMPT_NUMBER:-0}"
+  RECOVERY_EXECUTION_ID="${EXECUTION_ID:-0}"
   if ! RECOVERY_INTENT="$(phase6_find_driven_handoff_intent \
-      "${STATE_JSON}" "${IID}" "${RECOVERY_ATTEMPT}")"; then
-    echo "dispatch_followup.sh: invalid durable handoff intent for iid=${IID} attempt=${RECOVERY_ATTEMPT}" >&2
+      "${STATE_JSON}" "${IID}" "${RECOVERY_EXECUTION_ID}")"; then
+    echo "dispatch_followup.sh: invalid durable handoff intent for iid=${IID} execution_id=${RECOVERY_EXECUTION_ID}" >&2
     exit 3
   fi
   if [ "${RECOVERY_INTENT}" != "null" ]; then
@@ -210,16 +210,16 @@ if [ "${PENDING_ENTRY}" = "null" ]; then
       esac
     fi
     wrapper_log followup \
-      "durable handoff replay iid=${IID} attempt=${RECOVERY_ATTEMPT} event_id=${RECOVERY_EVENT_ID} import_status=${RECOVERY_IMPORT_STATUS} drain_rc=${RECOVERY_DRAIN_RC}"
+      "durable handoff replay iid=${IID} execution_id=${RECOVERY_EXECUTION_ID} event_id=${RECOVERY_EVENT_ID} import_status=${RECOVERY_IMPORT_STATUS} drain_rc=${RECOVERY_DRAIN_RC}"
     jq -nc \
       --argjson iid "${IID}" \
-      --argjson attempt_number "${RECOVERY_ATTEMPT}" \
+      --argjson execution_id "${RECOVERY_EXECUTION_ID}" \
       --arg handoff_event_id "${RECOVERY_EVENT_ID}" \
       --arg handoff_path "${RECOVERY_HANDOFF_PATH}" \
       --arg handoff_import_status "${RECOVERY_IMPORT_STATUS}" '{
       callback_status:"handoff_recovered",
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       handoff_event_id:$handoff_event_id,
       handoff_path:$handoff_path,
       handoff_import_status:$handoff_import_status,
@@ -229,8 +229,8 @@ if [ "${PENDING_ENTRY}" = "null" ]; then
     }'
     exit 0
   fi
-  jq -nc --argjson iid "${IID}" --argjson att "${ATTEMPT_NUMBER:-0}" \
-    '{callback_status:"stale_or_already_drained", iid:$iid, attempt_number:$att,
+  jq -nc --argjson iid "${IID}" --argjson att "${EXECUTION_ID:-0}" \
+    '{callback_status:"stale_or_already_drained", iid:$iid, execution_id:$att,
       chat_summary:("stale callback: no pending entry for #" + ($iid|tostring))}'
   exit 0
 fi
@@ -263,7 +263,7 @@ if [ "${INTERNAL_CLAIM_RECONCILE}" = 1 ]; then
   fi
 fi
 
-PENDING_ATTEMPT="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.attempt_number')"
+PENDING_EXECUTION_ID="$(printf '%s' "${PENDING_ENTRY}" | jq -r '.execution_id')"
 PENDING_SHARED_BRANCH="$(jq -r '
   (.work_branch | type == "string"
     and test("^issue/[1-9][0-9]*\\+[1-9][0-9]*$"))
@@ -339,10 +339,10 @@ recover_current_mr_reply() {
   local marker=""
   if [ "${PENDING_SHARED_BRANCH}" = true ]; then
     marker="$(phase6_read_shared_branch_marker \
-      "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}" 2>/dev/null || true)"
+      "${STATE_JSON}" "${IID}" "${PENDING_EXECUTION_ID}" 2>/dev/null || true)"
     [ -n "${marker}" ] || return 1
     phase6_reply_from_shared_branch_marker \
-      "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}"
+      "${STATE_JSON}" "${IID}" "${PENDING_EXECUTION_ID}"
     return
   fi
   # Marker reconcile is an optimistic probe that may run while create_mr.sh is
@@ -353,13 +353,13 @@ recover_current_mr_reply() {
   # fresh live verification.
   if [ "${MARKER_RECONCILE}" = 1 ]; then
     marker="$(phase6_read_auto_merge_marker \
-      "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}" 2>/dev/null || true)"
+      "${STATE_JSON}" "${IID}" "${PENDING_EXECUTION_ID}" 2>/dev/null || true)"
     [ -n "${marker}" ] || return 1
     [ "$(jq -r '.reason' <<<"${marker}")" != exact_mr_verification_pending ] \
       || return 1
   fi
   phase6_reply_from_auto_merge_marker \
-    "${STATE_JSON}" "${IID}" "${PENDING_ATTEMPT}"
+    "${STATE_JSON}" "${IID}" "${PENDING_EXECUTION_ID}"
 }
 
 # A verified MR whose `pr` or `finish` transition failed is durably marked on the
@@ -369,23 +369,23 @@ recover_current_mr_reply() {
 # independently re-verified on every retry.
 COMPLETION_LABEL_RETRY_ACTIVE=false
 COMPLETION_LABEL_RETRY_KIND=""
-COMPLETION_LABEL_RETRY_ATTEMPT=""
+COMPLETION_LABEL_RETRY_EXECUTION_ID=""
 if [ "$(jq -r '.finish_label_retry // false' <<<"${PENDING_ENTRY}")" = true ]; then
   COMPLETION_LABEL_RETRY_KIND=finish
-  COMPLETION_LABEL_RETRY_ATTEMPT="$(jq -r \
-    '.finish_label_retry_attempt // empty' <<<"${PENDING_ENTRY}")"
+  COMPLETION_LABEL_RETRY_EXECUTION_ID="$(jq -r \
+    '.finish_label_retry_execution_id // empty' <<<"${PENDING_ENTRY}")"
 elif [ "$(jq -r '.mr_label_retry // false' <<<"${PENDING_ENTRY}")" = true ]; then
   COMPLETION_LABEL_RETRY_KIND=pr
-  COMPLETION_LABEL_RETRY_ATTEMPT="$(jq -r \
-    '.mr_label_retry_attempt // empty' <<<"${PENDING_ENTRY}")"
+  COMPLETION_LABEL_RETRY_EXECUTION_ID="$(jq -r \
+    '.mr_label_retry_execution_id // empty' <<<"${PENDING_ENTRY}")"
 fi
 if [ -n "${COMPLETION_LABEL_RETRY_KIND}" ]; then
-  if [[ "${COMPLETION_LABEL_RETRY_ATTEMPT}" =~ ^[1-9][0-9]*$ ]] \
-      && [ "${COMPLETION_LABEL_RETRY_ATTEMPT}" -eq "${PENDING_ATTEMPT}" ]; then
+  if [[ "${COMPLETION_LABEL_RETRY_EXECUTION_ID}" =~ ^[1-9][0-9]*$ ]] \
+      && [ "${COMPLETION_LABEL_RETRY_EXECUTION_ID}" -eq "${PENDING_EXECUTION_ID}" ]; then
     COMPLETION_LABEL_RETRY_ACTIVE=true
   else
     wrapper_log followup \
-      "ignored stale/invalid completion-label retry fence iid=${IID} pending_attempt=${PENDING_ATTEMPT} retry_attempt=${COMPLETION_LABEL_RETRY_ATTEMPT:-missing} kind=${COMPLETION_LABEL_RETRY_KIND}"
+      "ignored stale/invalid completion-label retry fence iid=${IID} pending_execution_id=${PENDING_EXECUTION_ID} retry_execution_id=${COMPLETION_LABEL_RETRY_EXECUTION_ID:-missing} kind=${COMPLETION_LABEL_RETRY_KIND}"
   fi
 fi
 if [ "${COMPLETION_LABEL_RETRY_ACTIVE}" = true ]; then
@@ -394,12 +394,12 @@ if [ "${COMPLETION_LABEL_RETRY_ACTIVE}" = true ]; then
   if [ -n "${RECOVERED_AUTO_MERGE_REPLY}" ]; then
     RAW_REPLY="${RECOVERED_AUTO_MERGE_REPLY}"
     wrapper_log followup \
-      "recovered durable completion-label retry iid=${IID} attempt=${PENDING_ATTEMPT} kind=${COMPLETION_LABEL_RETRY_KIND}"
+      "recovered durable completion-label retry iid=${IID} execution_id=${PENDING_EXECUTION_ID} kind=${COMPLETION_LABEL_RETRY_KIND}"
   else
-    jq -nc --argjson iid "${IID}" --argjson attempt_number "${PENDING_ATTEMPT}" '{
+    jq -nc --argjson iid "${IID}" --argjson execution_id "${PENDING_EXECUTION_ID}" '{
       callback_status:"marker_not_ready",
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       chat_summary:("completion-label retry marker is not ready for #" + ($iid|tostring))
     }'
     exit 0
@@ -412,7 +412,7 @@ fi
 # its final compact line. A merge into a non-default target may also leave the
 # Issue open, so timeout reconciliation must discover it. Claim/callback
 # authentication above remains the authorization fence; the marker only
-# supplies exact current-attempt identity, and Phase 6 independently verifies
+# supplies exact current-execution identity, and Phase 6 independently verifies
 # it against GitLab. A parseable `done` callback is not replaced, so forged
 # done identity still fails the marker equality check in Phase 6.
 RAW_REPLY_STATUS="$(jq -r '
@@ -427,7 +427,7 @@ if { [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
   if [ -n "${RECOVERED_AUTO_MERGE_REPLY}" ]; then
     RAW_REPLY="${RECOVERED_AUTO_MERGE_REPLY}"
     wrapper_log followup \
-      "recovered exact MR marker iid=${IID} attempt=${PENDING_ATTEMPT} before empty-result synthesis"
+      "recovered exact MR marker iid=${IID} execution_id=${PENDING_EXECUTION_ID} before empty-result synthesis"
   fi
 fi
 
@@ -441,10 +441,10 @@ if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
     && { [ "${MARKER_RECONCILE}" = 1 ] \
       || { [ "${COMPLETED_RECONCILE}" = 1 ] \
         && [ "${PENDING_MR_RECOVERY}" = true ]; }; }; then
-  jq -nc --argjson iid "${IID}" --argjson attempt_number "${PENDING_ATTEMPT}" '{
+  jq -nc --argjson iid "${IID}" --argjson execution_id "${PENDING_EXECUTION_ID}" '{
     callback_status:"marker_not_ready",
     iid:$iid,
-    attempt_number:$attempt_number,
+    execution_id:$execution_id,
     chat_summary:("trusted MR marker is not ready for #" + ($iid|tostring))
   }'
   exit 0
@@ -459,7 +459,7 @@ if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ] \
     && [ "${TIMEOUT_RECONCILE}" = 1 ] \
     && [ "$(jq -r '.auto_merge // false' <<<"${PENDING_ENTRY}")" = true ]; then
   RAW_REPLY="$(phase6_synthesize_blocked \
-    "${IID}" "${PENDING_ATTEMPT}" \
+    "${IID}" "${PENDING_EXECUTION_ID}" \
     "automatic merge marker was not recoverable before the running deadline" \
     | jq -c '.status = "done" | .block_reason = ""')"
 fi
@@ -470,14 +470,14 @@ if [ "${RESULT_RECONCILE}" = 1 ] \
 fi
 if [ -z "${RAW_REPLY//[$' \t\r\n']/}" ]; then
   if [ "${SYNTH_STATUS}" = "timeout" ]; then
-    REPLY_JSON="$(phase6_synthesize_timeout "${IID}" "${PENDING_ATTEMPT}" \
+    REPLY_JSON="$(phase6_synthesize_timeout "${IID}" "${PENDING_EXECUTION_ID}" \
       "callback worker_result_json was empty after ${ELAPSED_S}s >= acpx_timeout_seconds(${ACPX_TIMEOUT_S})-60s — timeout-shaped termination, parked without retry")"
   else
-    REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_ATTEMPT}" \
+    REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${PENDING_EXECUTION_ID}" \
       "callback worker_result_json was empty")"
   fi
 else
-  REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_ATTEMPT}" "${SYNTH_STATUS}")"
+  REPLY_JSON="$(phase6_normalize_reply "${RAW_REPLY}" "${IID}" "${PENDING_EXECUTION_ID}" "${SYNTH_STATUS}")"
 fi
 
 # IID cross-check. phase6_normalize_reply preserves a parseable reply's iid, so
@@ -491,12 +491,12 @@ if [ "${REPLY_IID}" != "${IID}" ]; then
   exit 0
 fi
 
-# Attempt-number cross-check (Phase 6 validation rule 2).
-REPLY_ATTEMPT="$(printf '%s' "${REPLY_JSON}" | jq -r '.attempt_number')"
-if [ "${REPLY_ATTEMPT}" != "${PENDING_ATTEMPT}" ]; then
-  jq -nc --argjson iid "${IID}" --arg att "${REPLY_ATTEMPT}" \
-    '{callback_status:"stale_or_already_drained", iid:$iid, attempt_number:$att,
-      chat_summary:("stale callback: reply attempt=" + ($att|tostring) + " does not match pending attempt for #" + ($iid|tostring))}'
+# Execution-identity cross-check (Phase 6 validation rule 2).
+REPLY_EXECUTION_ID="$(printf '%s' "${REPLY_JSON}" | jq -r '.execution_id')"
+if [ "${REPLY_EXECUTION_ID}" != "${PENDING_EXECUTION_ID}" ]; then
+  jq -nc --argjson iid "${IID}" --arg att "${REPLY_EXECUTION_ID}" \
+    '{callback_status:"stale_or_already_drained", iid:$iid, execution_id:$att,
+      chat_summary:("stale callback: execution identity does not match pending state for #" + ($iid|tostring))}'
   exit 0
 fi
 
@@ -528,7 +528,7 @@ if [ "${REPLY_STATUS}" = done ] \
     && phase6_evidence_has_finish "${IID}" "$(cat "${RECON_EVIDENCE_PATH}")"; then
   TRUSTED_COMPLETION_OVERRIDE=preserve
   wrapper_log followup \
-    "preserving live finish for ordinary late done iid=${IID} attempt=${REPLY_ATTEMPT}"
+    "preserving live finish for ordinary late done iid=${IID} execution_id=${REPLY_EXECUTION_ID}"
 fi
 if [ "${PENDING_MR_RECOVERY}" = true ] \
     && [ "${LIVE_COMPLETED_EVIDENCE}" = true ]; then
@@ -563,7 +563,7 @@ if [ "${REPLY_STATUS}" != "done" ] \
         end
     ')"
     COMPLETED_INTENT="$(phase6_build_driven_handoff_intent \
-      "${PENDING_ENTRY}" "${IID}" "${REPLY_ATTEMPT}" \
+      "${PENDING_ENTRY}" "${IID}" "${REPLY_EXECUTION_ID}" \
       skipped "" "${COMPLETED_REASON}")"
     COMPLETED_EVENT_ID="$(jq -r '.handoff.event_id' <<<"${COMPLETED_INTENT}")"
     COMPLETED_STATE="$(phase6_put_driven_handoff_intent \
@@ -609,7 +609,7 @@ if [ "${REPLY_STATUS}" != "done" ] \
       "live-completed handoff iid=${IID} event_id=${COMPLETED_EVENT_ID} import_status=${COMPLETED_IMPORT_STATUS} drain_rc=${COMPLETED_DRAIN_RC}"
     jq -nc \
       --argjson iid "${IID}" \
-      --argjson attempt_number "${REPLY_ATTEMPT}" \
+      --argjson execution_id "${REPLY_EXECUTION_ID}" \
       --arg block_reason "${COMPLETED_REASON}" \
       --argjson cleanup "${COMPLETED_CLEANUP}" \
       --argjson remaining_pending_iids "${COMPLETED_REMAINING}" \
@@ -618,7 +618,7 @@ if [ "${REPLY_STATUS}" != "done" ] \
       --arg handoff_import_status "${COMPLETED_IMPORT_STATUS}" '{
       callback_status:"handled",
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       terminal_status:"skipped",
       merge_request_url:"",
       block_reason:$block_reason,
@@ -691,7 +691,7 @@ if [ "${IS_SCHEDULER_DRIVEN}" = true ]; then
   case "${FINAL_STATUS}" in
     done|failed|timeout)
       HANDOFF_INTENT="$(phase6_build_driven_handoff_intent \
-        "${PENDING_ENTRY}" "${IID}" "${REPLY_ATTEMPT}" \
+        "${PENDING_ENTRY}" "${IID}" "${REPLY_EXECUTION_ID}" \
         "${FINAL_STATUS}" "${MR_URL}" "${BLOCK_REASON}")"
       HANDOFF_EVENT_ID="$(jq -r '.handoff.event_id' <<<"${HANDOFF_INTENT}")"
       NEW_STATE="$(phase6_put_driven_handoff_intent \
@@ -816,7 +816,7 @@ case "${FINAL_STATUS}" in
       set +e
       PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
       REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
-      IID="${IID}" ATTEMPT_NUMBER="${REPLY_ATTEMPT}" \
+      IID="${IID}" EXECUTION_ID="${REPLY_EXECUTION_ID}" \
       FINAL_STATUS="${FINAL_STATUS}" MR_URL="${MR_URL}" WIKI_URL="${WIKI_URL}" BLOCK_REASON="${BLOCK_REASON}" \
       bash "${SCRIPT_DIR}/post_result_note.sh" >/dev/null 2>>"${DISPATCHER_LOG_DIR}/wrapper.log"
       RN_RC=$?
@@ -828,7 +828,7 @@ esac
 
 jq -nc \
   --argjson iid "${IID}" \
-  --argjson attempt_number "${REPLY_ATTEMPT}" \
+  --argjson execution_id "${REPLY_EXECUTION_ID}" \
   --arg terminal_status "${FINAL_STATUS}" \
   --arg merge_request_url "${MR_URL}" \
   --arg block_reason "${BLOCK_REASON}" \
@@ -841,7 +841,7 @@ jq -nc \
   {
     callback_status: "handled",
     iid: $iid,
-    attempt_number: $attempt_number,
+    execution_id: $execution_id,
     terminal_status: $terminal_status,
     merge_request_url: $merge_request_url,
     block_reason: $block_reason,
@@ -857,4 +857,4 @@ jq -nc \
      }
      end)'
 
-wrapper_log followup "callback handled iid=${IID} attempt=${REPLY_ATTEMPT} final_status=${FINAL_STATUS} cleanup=${CLEANUP_ACTION}"
+wrapper_log followup "callback handled iid=${IID} execution_id=${REPLY_EXECUTION_ID} final_status=${FINAL_STATUS} cleanup=${CLEANUP_ACTION}"

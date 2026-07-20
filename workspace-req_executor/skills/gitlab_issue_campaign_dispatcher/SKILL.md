@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-20.7] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-20.8] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -44,12 +44,11 @@ All agent runtime files live INSIDE the cloned repo under the fixed
 `${REPO_PATH}/.req_executor/` directory — campaign state, dispatcher logs,
 locks, per-issue state/logs/summaries, and one shared per-issue linked
 git worktree per IID at `${REPO_PATH}/.req_executor/.worktrees/issue-<iid>/`.
-The worktree, runtime directories, log directory, and local `issue/<iid>`
-branch are reused across every attempt of an IID. None contains the attempt
-number. `attempt_number` remains a state and callback identity fence. Later
-runs reset the fixed local branch to their selected base and overwrite current
-result evidence in the issue-local log; ordinary runs create no per-attempt
-archives.
+The worktree, output directory, and local `issue/<iid>` branch are reused across
+executions of an IID. Every launch receives a random opaque `execution_id` and
+isolated state/log paths. The ID is a callback identity fence, not a sequence or
+run counter. Later runs reset the fixed local branch to their selected base;
+earlier execution evidence is never overwritten by a new launch.
 See [`references/paths.md`](references/paths.md) for the complete layout.
 
 ## Issue dependency branch baseline
@@ -174,12 +173,12 @@ the fixed executor boundary.
 
 | Layer | File | Contract |
 | -- | -- | -- |
-| Secret-free spawn bootstrap | `${LOG_DIR}/spawn_payload.txt` | This is the **only** content sent as `sessions_spawn(task=...)`. It contains only issue/job identity plus the absolute manifest path, SHA-256, byte count, and fail-closed validation instructions. |
-| Private outer executor payload | `${LOG_DIR}/executor_payload.txt`, described by mode-600 `${LOG_DIR}/spawn_manifest.json` | Rendered from [`references/executor_prompt.md`](references/executor_prompt.md). The manifest identity fields `project`, `job_id`, `iid`, and `attempt_number` are top-level fields; there is no nested `identity` object. After validating manifest identity, mode, SHA-256, and byte count, the OUTER subagent makes one long `run_executor_attempt.sh` call and echoes its final compact JSON. Neither file contains a GitLab token. |
+| Secret-free spawn bootstrap | `${LOG_DIR}/spawn_payload-<execution_id>.txt` | This is the **only** content sent as `sessions_spawn(task=...)`. It contains only issue/job identity plus the absolute manifest path, SHA-256, byte count, and fail-closed validation instructions. |
+| Private outer executor payload | `${LOG_DIR}/executor_payload-<execution_id>.txt`, described by mode-600 `${LOG_DIR}/spawn_manifest-<execution_id>.json` | Rendered from [`references/executor_prompt.md`](references/executor_prompt.md). The manifest identity fields `project`, `job_id`, `iid`, and `execution_id` are top-level fields; there is no nested `identity` object. After validating manifest identity, mode, SHA-256, and byte count, the OUTER subagent makes one long `run_executor_attempt.sh` call and echoes its final compact JSON. Neither file contains a GitLab token. |
 | Inner Claude Code prompt | `${LOG_DIR}/prompt.txt` | Written by `build_prompt.sh`; the fixed acpx invocation reads it. Dependency attempts use the pinned raw Claude ACP adapter instead of project/npm agent resolution. It tells the INNER session what issue work to implement. |
 
-**HARD RULE: neither `${LOG_DIR}/prompt.txt` nor
-`${LOG_DIR}/executor_payload.txt` is ever sent directly to `sessions_spawn`.**
+**HARD RULE: neither `${LOG_DIR}/prompt.txt` nor the execution-scoped private
+executor payload is ever sent directly to `sessions_spawn`.**
 The LLM must send the exact contents of `payload_path` from a ready
 `dispatch_entries[]` or `spawn_grants[]` item, without alteration. Its
 `expected_task_sha256` and `expected_task_bytes` identify those exact bootstrap
@@ -244,7 +243,7 @@ reduced to fixed wrapper calls and strict JSON branches.
          sleep envelope.backoff_seconds   # IDENTICAL payload next try
      if ack is null:
        cd "${SKILL_DIR}" && \
-         IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
+         IID=<entry.iid> EXECUTION_ID=<entry.execution_id> \
          EXPECTED_TASK_SHA256=<entry.expected_task_sha256> \
          EXPECTED_TASK_BYTES=<entry.expected_task_bytes> \
          STATUS=launch_failed LAUNCH_ATTEMPTS=<attempts> \
@@ -255,7 +254,7 @@ reduced to fixed wrapper calls and strict JSON branches.
        # session is detectable — almost always action == "skip" here.
      else:
        cd "${SKILL_DIR}" && \
-         IID=<entry.iid> ATTEMPT_NUMBER=<entry.attempt_number> \
+         IID=<entry.iid> EXECUTION_ID=<entry.execution_id> \
          EXPECTED_TASK_SHA256=<entry.expected_task_sha256> \
          EXPECTED_TASK_BYTES=<entry.expected_task_bytes> \
          STATUS=spawned RUN_ID=<ack.runId> \
@@ -453,7 +452,7 @@ input only and is rejected by req_dispatcher as a public receipt.
 ```
 
 For a successful spawn, the result JSON contains exactly
-`job_id`, `claim_generation`, `project`, `iid`, `attempt_number`,
+`job_id`, `claim_generation`, `project`, `iid`, `execution_id`,
 `expected_task_sha256`, `expected_task_bytes`,
 `status:"spawned"`, `run_id`, and `child_session_key`. For exhausted launch
 retries it contains the same identity plus `status:"launch_failed"`,
@@ -733,7 +732,7 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Pending eviction (`stuck_after_minutes` plus trigger-scope eviction) | `dispatch_prepare_tick.sh` pending-eviction block |
 | Reconcile + disk-cache correction + Source-of-Truth Policy | `dispatch_prepare_tick.sh` steps 10–11; `dispatch_followup.sh` step 2 |
 | Eligibility batch formation (backlog → blocked retry, quota cap) | `dispatch_prepare_tick.sh` step 16 |
-| Per-IID prep (allocate_attempt, prepare_attempt, claude_settings copy, glab issue read, label transitions to `doing`, build_prompt, state-file init) | `dispatch_prepare_tick.sh` step 20 |
+| Per-IID prep (allocate_execution_id, prepare_attempt, claude_settings copy, glab issue read, label transitions to `doing`, build_prompt, state-file init) | `dispatch_prepare_tick.sh` step 20 |
 | Executor prompt rendering + sentinel check | `dispatch_prepare_tick.sh` step 20.8–20.9 |
 | `pending_subagents` placeholder + post-launch writeback | `dispatch_prepare_tick.sh` step 19; `dispatch_record_spawn.sh` |
 | Phase 6 validation + label sync + state writes + classification + drain | `dispatch_followup.sh` + `_dispatch_lib.sh::phase6_process` |
@@ -868,8 +867,8 @@ sibling folders:
 
 - [`references/dispatcher_wrappers.md`](references/dispatcher_wrappers.md) — the **canonical** input/output contract for the three wrappers. Read this whenever you need to know what a wrapper expects or emits.
 - [`references/trigger_command.md`](references/trigger_command.md) — trigger spec, required fields, optional fields, override semantics. The wrapper validates per this file.
-- [`references/state_schema.md`](references/state_schema.md) — `campaign_state.json`, per-issue state, per-attempt state, compact subagent reply schemas; Phase 6 Write Mapping; wrapper-side write ownership.
-- [`references/executor_prompt.md`](references/executor_prompt.md) — the fixed-format private outer executor template written to `${LOG_DIR}/executor_payload.txt`; `spawn_payload.txt` is the secret-free validation bootstrap.
+- [`references/state_schema.md`](references/state_schema.md) — `campaign_state.json`, per-issue state, per-execution state, compact subagent reply schemas; Phase 6 Write Mapping; wrapper-side write ownership.
+- [`references/executor_prompt.md`](references/executor_prompt.md) — the fixed-format private outer executor template written to the execution-scoped payload file; the matching spawn payload is the secret-free validation bootstrap.
 - [`references/paths.md`](references/paths.md) — full path layout (dispatcher + per-issue subtrees + per-issue worktrees).
 - [`references/glab_commands.md`](references/glab_commands.md) — the workspace-wide allowed `glab` command list (G1–G13). Wrappers and subagent scripts both consume this.
 - [`references/label_lifecycle.md`](references/label_lifecycle.md) — workflow label transitions.
@@ -888,7 +887,7 @@ payload before making the verified payload's single long
 `run_executor_attempt.sh` call. **It does NOT load this SKILL, NOT read
 SOUL.md / AGENTS.md, NOT call `sessions_spawn` / `sessions_history`,
 and NOT directly write dispatcher terminal state.** The fixed wrapper writes
-issue-local recovery artifacts containing the current attempt identity and
+issue-local recovery artifacts containing the current execution identity and
 prints the compact JSON. That reply
 is normally accepted inside a protected native `task_completion` event (or
 bounded authenticated history recovery) through

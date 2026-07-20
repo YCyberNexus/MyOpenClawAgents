@@ -121,7 +121,7 @@ write_campaign_state() {
     require_labels_match:"or",tick_seq:2,
     active_issue_iids:(if $with_pending then [1] else [] end),
     active_issue_sessions:(if $with_pending then ["issue-project-1"] else [] end),
-    pending_subagents:(if $with_pending then {"1":{attempt_number:1,run_id:"run-1",
+    pending_subagents:(if $with_pending then {"1":{execution_id:1,run_id:"run-1",
       child_session_key:"agent:child:one",spawned_at:$now,placeholder:false,
       acpx_timeout_seconds:18000}} else {} end),
     blocked_at_tick_by_iid:{},unfinished_iids:[],

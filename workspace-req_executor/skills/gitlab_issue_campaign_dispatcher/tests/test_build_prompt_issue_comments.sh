@@ -76,7 +76,7 @@ if grep -Fq '旧执行总结' "${fresh_prompt}" \
 fi
 
 continue_prompt="$(run_builder continue)"
-grep -Fq "# Historical attempt summaries (from older ${AGENT_PREFIX} runs)" \
+grep -Fq "# Historical run summaries (from older ${AGENT_PREFIX} runs)" \
   "${continue_prompt}"
 grep -Fq '旧执行总结' "${continue_prompt}"
 grep -Fq '请同时修复评论里提到的边界条件' "${continue_prompt}"

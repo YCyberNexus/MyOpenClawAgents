@@ -36,7 +36,7 @@ issue #N 被 req_executor 处理到终态（`pr` 普通成功 / `finish` 自动�
 3. **git_issuer（创建流程新增一步）**：从文本解析出 origin（和解析 project 一样）；建好 issue 后，把 origin 以**隐藏标记 note** 写到 issue 上（§4）。**不要写进 description**——description 是给 Claude Code 读的需求正文，混入元数据会污染它。
 4. **req_executor（新增能力，在 `workspace-req_executor`）**：Phase 6 到达终态时，读 issue 的 `req_origin` 标记（req_executor 本就用 `glab` 读 issue notes / G1b），把结果回报出去。
    - ⚠️ **事实纠正（历史背景）**：该能力是**从零新增**，不是"复用既有基建"——执行器骨架（acpx_auto_tester 原版）当时并无任何 notify 实现（`SOUL.md`/`CLAUDE.md` 里的 "optional notify_channel" 只是字面提法，`scripts/` 里 grep `notify` 为空），req_executor 这份实现是随整份复制带过来的。
-   - **选定机制 = option A（发 `req_result` note + 114 轮询）**：req_executor 在 issue 上用 G9 发一条结构化 note `<!-- req_result v1 {"iid":N,"status":"done|failed|timeout","attempt":K,"mr_url":...,"wiki_url":...,"reason":...,"ts":"...","origin":{...}} -->`，由 114 轮询/webhook 拿到再投递给企微用户。纯 glab、req_executor 侧零待对齐、不依赖任何跨区 push 原语。完整字段以 §7（与 `post_result_note.sh` writer 同源）为准——`status` 是 note 自带的 `done|failed|timeout`，**不是** GitLab 标签 `pr`/`finish`/`failed-*`。
+   - **选定机制 = option A（发 `req_result` note + 114 轮询）**：req_executor 在 issue 上用 G9 发一条结构化 note `<!-- req_result v2 {"iid":N,"status":"done|failed|timeout","execution_id":K,"mr_url":...,"wiki_url":...,"reason":...,"ts":"...","origin":{...}} -->`，由 114 轮询/webhook 拿到再投递给企微用户。`execution_id` 是随机幂等身份，不是执行次数；含次数的 v1 已停用。完整字段以 §7（与 `post_result_note.sh` writer 同源）为准——`status` 是 note 自带的 `done|failed|timeout`，**不是** GitLab 标签 `pr`/`finish`/`failed-*`。
    - **终态触发集**：req_executor 的 `final_status ∈ {done, failed, timeout}` 才发（`done`=成功、`failed`=终态失败、`timeout`）；**`blocked` 不发**（可重试态，否则每次 attempt 刷屏）。
    - **落地形态**：`post_result_note.sh`（G1b 读 `req_origin` → G9 发 `req_result`），在 `dispatch_followup.sh` 终态处 best-effort 调用（`set +e` 隔离，绝不污染 stdout/打断 Phase 6），用 trigger 开关 `result_note_enabled`（默认 off）门控，现有部署不受影响。
 
@@ -77,7 +77,7 @@ git_issuer 在 issue 上发一条隐藏标记 note（仿 req_executor 自己的 
 
 - [ ] **114**：origin 元数据放进文本的确切格式；以及接收端如何把 req_executor 的结果通知投给对应用户（经 channel / 跨区回传）。
 - [ ] **git_issuer**：创建流程加"解析 origin + 写 `req_origin v1` 标记 note"；supersede 时复制 `req_origin` 到新 issue。
-- [x] **req_executor（option A，已实现，默认 off）**：已落地 `workspace-req_executor/skills/gitlab_issue_campaign_dispatcher/scripts/post_result_note.sh`（G1b 读 `req_origin` → G9 发 `req_result` note，含 `{iid,status,attempt,mr_url,wiki_url,reason,ts,origin}`）+ `dispatch_followup.sh` 终态(done/failed/timeout) best-effort 调用（`set +e` 隔离、stdout→/dev/null、无 `req_origin` 即 no-op）+ trigger 开关 `result_note_enabled`(默认 off，carry-forward) + glab_commands §G14 / SOUL / AGENTS / CLAUDE / state_schema(step 10) / trigger 同步。该实现最初在 acpx_auto_tester 落地（`SKILL_VERSION=2026-06-26.1`，经 bash -n + jq 单测 + 2 轮 code-review 子代理零问题放行），随后随 workspace 整份复制进 req_executor、逐字一致。**开启前置：git_issuer 写 `req_origin` + 114 轮询 `req_result` 两侧就绪后，在 trigger 设 `result_note_enabled=true`。** 本机不能跑 acpx，只做了 `bash -n` + jq 单测 + 评审。
+- [x] **req_executor（option A，已实现，默认 off）**：已落地 `workspace-req_executor/skills/gitlab_issue_campaign_dispatcher/scripts/post_result_note.sh`（G1b 读 `req_origin` → G9 发 `req_result` note，含 `{iid,status,execution_id,mr_url,wiki_url,reason,ts,origin}`）+ `dispatch_followup.sh` 终态(done/failed/timeout) best-effort 调用（`set +e` 隔离、stdout→/dev/null、无 `req_origin` 即 no-op）+ trigger 开关 `result_note_enabled`(默认 off，carry-forward)。`execution_id` 仅用于同一结果幂等，不记录执行次数。**开启前置：git_issuer 写 `req_origin` + 114 轮询 `req_result` 两侧就绪后，在 trigger 设 `result_note_enabled=true`。**
 - [ ] **通知文案**最终确定。
 
 ## 8. 边界

@@ -75,14 +75,14 @@ atomic `campaign_state.json` persistence as the corresponding `spawned` or
 
 - `version:1`, `job_id`, positive `claim_generation`;
 - `claim_token_sha256` (never the private token itself);
-- `iid`, `attempt_number`, and `outcome` (`spawned|launch_failed`);
+- `iid`, `execution_id`, and `outcome` (`spawned|launch_failed`);
 - exact `ack`: `run_id+child_session_key` or
   `launch_attempts+launch_error`;
 - `recorded_at` and the exact public project recorder `result`.
 
 The stored `result` is also an exact, typed authorization boundary. For
 `spawned` it has only `status:"spawned"`, matching positive `iid` and
-`attempt_number`, non-negative integer `remaining_pending_count`, and a
+`execution_id`, non-negative integer `remaining_pending_count`, and a
 non-empty control-free `chat_summary`. For `launch_failed` it has only those
 common result fields plus `status:"launch_failed_recorded"`,
 `final_status:"blocked"`, and `cleanup`. Cleanup is exactly either
@@ -111,25 +111,25 @@ a two-member record never receives that compatibility default. Phase 6 reads
 only this trusted pending configuration, not callback-authored labels.
 
 Dependency and branch identity are committed in two phases. Before worktree
-preparation, `attempt_state.json` binds `work_branch`, `branch_members`,
+preparation, immutable `executions/execution-<execution_id>.json` binds `work_branch`, `branch_members`,
 `shared_branch_role`, `expected_work_branch_sha`,
 `expected_commit_parent_sha`, and the all-null or
 all-present `dependency_iid` / `dependency_branch` / `dependency_base_sha`
-tuple to the exact IID, attempt, title, mode, merge policy, and target. A shared
+tuple to the exact IID, execution identity, title, mode, merge policy, and target. A shared
 head requires a null dependency tuple. A shared tail requires the complete
 tuple with `dependency_iid=head`, `dependency_branch=work_branch`; in fresh mode
 `expected_work_branch_sha` must equal `dependency_base_sha`. Every shared
-attempt requires a full `expected_commit_parent_sha`; for C it equals
+execution requires a full `expected_commit_parent_sha`; for C it equals
 `dependency_base_sha`, while for A it is the frozen target baseline. At that point
 `state.json` retains the last successfully pushed identity and stores the new
-values only under `proposed_*` plus `preparing_attempt_number`.
+values only under `proposed_*` plus `preparing_execution_id`.
 
 Only after `run_executor_attempt.sh` has pushed the exact remote branch,
 matched it to the returned commit, and verified the dependency history does it
 promote the identity in `state.json`. The promoted fields include
 `work_branch`, `branch_members`, `shared_branch_role`, `work_branch_sha`, the
 dependency tuple, `dependency_history_verified:true`,
-`dependency_pinned_attempt_number`, and `dependency_history_updated_at`.
+`dependency_pinned_execution_id`, and `dependency_history_updated_at`.
 For fresh C, the commit must have A's frozen SHA as its only parent and the push
 uses that same SHA as an explicit lease. For continued C, the lease is the old
 C tip while the new commit's sole parent remains A, so C1 is replaced by C2
@@ -143,7 +143,7 @@ Before C starts, `migrate_shared_dependency_head.sh` moves an ordinary completed
 A from `issue/A` to `issue/A+C` without changing A's commit. A's state first
 adds `branch_migration` with `version:1`, `status:"pending"`, ordered
 `head_iid`/`tail_iid`, `from_branch`, `to_branch`, exact `commit_sha`, frozen
-`target_branch`, old MR IID/URL, random 64-hex `intent_id`, source attempt, and
+`target_branch`, old MR IID/URL, random 64-hex `intent_id`, source execution ID, and
 `started_at`. The script creates the new ref with an empty lease, closes the
 old MR, creates one replacement MR, and deletes the old ref with an exact A-SHA
 lease. Every external mutation is rediscovered and identity-checked on replay.
@@ -159,7 +159,7 @@ old ordinary MR remains closed in GitLab history, but steady state has exactly
 one open shared MR.
 
 After C's shared push is verified, `state.json.mr_finalization` first has exactly
-`status:"pending"`, `source_attempt_number`, `work_branch`, ordered
+`status:"pending"`, `source_execution_id`, `work_branch`, ordered
 `branch_members`, `shared_branch_role`, `commit_sha`, a 64-lowercase-hex
 `intent_id`, and `target_branch`. The A migration creates the high-entropy
 intent and embeds it in the replacement MR description; C inherits the same
@@ -168,7 +168,7 @@ This checkpoint authorizes only MR finalization for the already-pushed commit;
 it never authorizes acpx, stage, commit, or push. A missing/invalid current-
 attempt marker keeps the same pending claim with
 `mr_finalization_retry:true` and
-`mr_finalization_retry_attempt:<attempt>`. The heartbeat repeats all private
+`mr_finalization_retry_execution_id:<execution_id>`. The heartbeat repeats all private
 state, local HEAD, and remote-tip checks before entering the MR-only path.
 An exact marker whose prior observation is `unknown` is identity evidence only:
 it can select the MR IID/URL for Phase 6, but only a fresh GitLab GET can
@@ -185,7 +185,7 @@ Phase 6 promotes a successful shared result to
 `web_url`, the unchanged `intent_id`, role-specific `mr_action`, and
 `verified_at`. Before reuse, C
 requires A's durable `done` state to carry this exact binding for the A commit,
-members, branch, head role, frozen target, and latest pinned attempt. The only
+members, branch, head role, frozen target, and latest pinned execution. The only
 open MR returned by GitLab must have the same URL/IID. Phase 6 performs both an
 exact-IID GET and a source-branch open-list read, while C's release gate repeats
 the same uniqueness and identity checks. They require `state=opened`, current
@@ -206,10 +206,10 @@ requires its private done state, exact ordinary ref SHA, and unique live MR.
 If the exact merge is verified but the atomic `finish` update fails,
 Phase 6 keeps the claim in `pending_subagents[iid]` and adds
 `finish_label_retry:true` plus
-`finish_label_retry_attempt:<current positive attempt>`. Reconciliation may
-then override even a non-empty killed/failure callback with current-attempt
+`finish_label_retry_execution_id:<current execution_id>`. Reconciliation may
+then override even a non-empty killed/failure callback with current-execution
 marker recovery, but only when that retry attempt exactly equals the pending
-claim's `attempt_number`. A missing, invalid, or stale retry-attempt fence is
+claim's `execution_id`. A missing, invalid, or stale retry-attempt fence is
 ignored and cannot hijack a later attempt. The retry re-verifies the exact MR
 against GitLab before trying only the `finish` transition; it does not rerun
 Issue work or drain the scheduler slot early.
@@ -284,9 +284,33 @@ Path:
 
 ```text
 ${REPO_PATH}/.req_executor/issues/issue-<iid>/state.json
-${REPO_PATH}/.req_executor/issues/issue-<iid>/attempt_state.json
+${REPO_PATH}/.req_executor/issues/issue-<iid>/executions/execution-<execution_id>.json
 ${REPO_PATH}/.req_executor/issues/issue-<iid>/summary.md
 ```
+
+New `execution_id` values are randomly generated opaque positive integers below
+`2^48`. They never represent execution order or a cumulative count. An upgrade
+never derives an execution identity from a legacy counter. If legacy pending or
+handoff state is still active, project admission returns
+`legacy_execution_identity_drain_required`; operators must drain it with the old
+release before activating the new release. `load_state` is a pure reader because
+completion ingestion also uses it without `campaign.lock`.
+
+Only after pending work and handoff intents are both empty does a dispatcher
+holding the exclusive project lock perform the one-time filesystem sweep. It
+removes retired count fields from campaign and per-Issue state and replaces a
+legacy `attempt_state.json` with a count-free deprecation tombstone. After the
+sweep succeeds, `campaign_state.json.execution-identity-v2-migrated` prevents
+repeated full per-Issue scans; it contains only
+`{version:2,completed:true,requires_quiescent_lock:true}`. The earlier
+version-1 marker is not trusted because it could have been written by an
+unlocked reader; it is replaced only after the same locked, quiescent sweep.
+
+Old-schema hot files under the executor scheduler's `launch_actions/` are not
+rewritten. The batch tick returns a bounded `legacy_execution_schema` /
+`drain_required` operation, blocks new spawns, and leaves the action byte-stable
+so the old release can finish it. Invalid files that match neither schema remain
+hard failures.
 
 Legacy pre-batch `RUN_SINGLE_ISSUE` state may also contain:
 
@@ -311,7 +335,7 @@ heartbeat may instead consume the file through claim-fenced result reconcile
 when OpenClaw does not schedule the final model turn. The object has exactly:
 
 - `iid`
-- `attempt_number`
+- `execution_id`
 - `status`: `done`, `no_changes`, `blocked`, `failed`, or `timeout`
 - `mode_actual`, `work_branch`, `local_branch`
 - `commit_sha`, `merge_request_url`, `mr_action`
@@ -329,9 +353,9 @@ atomically writes:
 ${LOG_DIR}/acpx_terminal.json
 ```
 
-Its exact version-1 object contains `version`, `iid`, `attempt_number`,
+Its exact version-1 object contains `version`, `iid`, `execution_id`,
 `exit_code`, and `completed_at_epoch`. This marker is not a terminal Issue
 result; it only proves that acpx itself is no longer running and starts the
 bounded post-acpx watchdog.
 
-`dispatch_followup.sh` validates the IID and attempt number against `pending_subagents` before mutating state.
+`dispatch_followup.sh` validates the IID and execution identity against `pending_subagents` before mutating state.

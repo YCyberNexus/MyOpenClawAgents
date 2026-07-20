@@ -41,7 +41,7 @@ if ! INPUT_JSON="$(jq -ce '
     and (.project | type == "string"
       and test("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)+$"))
     and (.iid | type == "number" and . == floor and . > 0)
-    and (.attempt_number | type == "number" and . == floor and . > 0);
+    and (.execution_id | type == "number" and . == floor and . > 0);
   def task_identity:
     (.expected_task_sha256 | type == "string"
       and test("^[0-9a-f]{64}$"))
@@ -55,10 +55,10 @@ if ! INPUT_JSON="$(jq -ce '
     then error("invalid common fields")
   elif .status == "spawned" then
     if ((keys | sort) == [
-        "attempt_number","child_session_key","claim_generation","iid",
+        "child_session_key","claim_generation","execution_id","iid",
         "job_id","project","run_id","status"
       ] or (keys | sort) == [
-        "attempt_number","child_session_key","claim_generation",
+        "child_session_key","claim_generation","execution_id",
         "expected_task_bytes","expected_task_sha256","iid",
         "job_id","project","run_id","status"
       ])
@@ -67,10 +67,10 @@ if ! INPUT_JSON="$(jq -ce '
     then . else error("invalid spawned result") end
   elif .status == "launch_failed" then
     if ((keys | sort) == [
-        "attempt_number","claim_generation","iid","job_id","launch_attempts",
+        "claim_generation","execution_id","iid","job_id","launch_attempts",
         "launch_error","project","status"
       ] or (keys | sort) == [
-        "attempt_number","claim_generation","expected_task_bytes",
+        "claim_generation","execution_id","expected_task_bytes",
         "expected_task_sha256","iid","job_id","launch_attempts",
         "launch_error","project","status"
       ])
@@ -150,7 +150,7 @@ JOB_ID="$(jq -r '.job_id' <<<"${INPUT_JSON}")"
 CLAIM_GENERATION="$(jq -r '.claim_generation' <<<"${INPUT_JSON}")"
 PROJECT_FULL="$(jq -r '.project' <<<"${INPUT_JSON}")"
 IID="$(jq -r '.iid' <<<"${INPUT_JSON}")"
-ATTEMPT_NUMBER="$(jq -r '.attempt_number' <<<"${INPUT_JSON}")"
+EXECUTION_ID="$(jq -r '.execution_id' <<<"${INPUT_JSON}")"
 RESULT_STATUS="$(jq -r '.status' <<<"${INPUT_JSON}")"
 EXPECTED_TASK_SHA256_INPUT="$(jq -r '.expected_task_sha256 // empty' <<<"${INPUT_JSON}")"
 EXPECTED_TASK_BYTES_INPUT="$(jq -r '.expected_task_bytes // empty' <<<"${INPUT_JSON}")"
@@ -172,6 +172,9 @@ source "${SCRIPT_DIR}/_driven_launch_coordinator.sh"
 dlc_open "${JOB_ID}"
 trap dlc_close EXIT
 ACTION_JSON="$(dlc_read)" || die "durable launch action is invalid"
+if [ "$(jq -r '.legacy_execution_schema // false' <<<"${ACTION_JSON}")" = true ]; then
+  die "legacy execution schema must drain before this release can record runtime acknowledgement"
+fi
 if [ "${ACTION_JSON}" = null ]; then
   # No coordinator action exists yet (for example an older tick emitted the
   # grant). Recover the exact current claim under scheduler.lock.
@@ -206,7 +209,7 @@ if [ "${ACTION_JSON}" = null ]; then
     --arg job_id "${JOB_ID}" \
     --arg project "${PROJECT_FULL}" \
     --argjson iid "${IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg expected_task_sha256 "${EXPECTED_TASK_SHA256_INPUT}" \
     --argjson expected_task_bytes "${EXPECTED_TASK_BYTES_INPUT}" \
     --argjson claim_generation "${CLAIM_GENERATION}" \
@@ -218,7 +221,7 @@ if [ "${ACTION_JSON}" = null ]; then
       job_id:$job_id,
       project:$project,
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       expected_task_sha256:$expected_task_sha256,
       expected_task_bytes:$expected_task_bytes,
       claim_generation:$claim_generation,
@@ -248,7 +251,7 @@ else
       --arg job_id "${JOB_ID}" \
       --arg project "${PROJECT_FULL}" \
       --argjson iid "${IID}" \
-      --argjson attempt_number "${ATTEMPT_NUMBER}" \
+      --argjson execution_id "${EXECUTION_ID}" \
       --argjson claim_generation "${CLAIM_GENERATION}" \
       --arg expected_task_sha256 "${EXPECTED_TASK_SHA256_INPUT}" \
       --argjson expected_task_bytes "${EXPECTED_TASK_BYTES_INPUT}" \
@@ -257,7 +260,7 @@ else
       .job_id == $job_id
       and .project == $project
       and .iid == $iid
-      and .attempt_number == $attempt_number
+      and .execution_id == $execution_id
       and .claim_generation == $claim_generation
       and .expected_task_sha256 == $expected_task_sha256
       and .expected_task_bytes == $expected_task_bytes
@@ -320,7 +323,7 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
     set +e
     PROJECT_OUTPUT="$(PROJECT="${PROJECT_SLUG}" GROUP="${GROUP_EFF}" \
       GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" REPO_PARENT_PATH="${PROJECT_REPO_PARENT}" \
-      IID="${IID}" ATTEMPT_NUMBER="${ATTEMPT_NUMBER}" STATUS=spawned \
+      IID="${IID}" EXECUTION_ID="${EXECUTION_ID}" STATUS=spawned \
       DRIVEN_JOB_ID="${JOB_ID}" \
       DRIVEN_CLAIM_GENERATION="${CLAIM_GENERATION}" \
       DRIVEN_CLAIM_TOKEN="${CLAIM_TOKEN}" \
@@ -335,7 +338,7 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
     set +e
     PROJECT_OUTPUT="$(PROJECT="${PROJECT_SLUG}" GROUP="${GROUP_EFF}" \
       GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" REPO_PARENT_PATH="${PROJECT_REPO_PARENT}" \
-      IID="${IID}" ATTEMPT_NUMBER="${ATTEMPT_NUMBER}" STATUS=launch_failed \
+      IID="${IID}" EXECUTION_ID="${EXECUTION_ID}" STATUS=launch_failed \
       DRIVEN_JOB_ID="${JOB_ID}" \
       DRIVEN_CLAIM_GENERATION="${CLAIM_GENERATION}" \
       DRIVEN_CLAIM_TOKEN="${CLAIM_TOKEN}" \
@@ -350,7 +353,7 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
   if [ "${PROJECT_RC}" -ne 0 ] || ! jq -e \
       --arg result_status "${RESULT_STATUS}" \
       --argjson iid "${IID}" \
-      --argjson attempt "${ATTEMPT_NUMBER}" '
+      --argjson attempt "${EXECUTION_ID}" '
       def clean_string:
         type == "string" and length > 0
         and (explode | all(. >= 32 and . != 127));
@@ -370,24 +373,24 @@ if [ "${CURRENT_STAGE}" = ack_received ]; then
       if $result_status == "spawned" then
         type == "object"
         and (keys | sort) == [
-          "attempt_number","chat_summary","iid",
+          "chat_summary","execution_id","iid",
           "remaining_pending_count","status"
         ]
         and .status == "spawned"
         and .iid == $iid
-        and .attempt_number == $attempt
+        and .execution_id == $attempt
         and (.remaining_pending_count | type == "number"
           and . == floor and . >= 0)
         and (.chat_summary | clean_string)
       elif $result_status == "launch_failed" then
         type == "object"
         and (keys | sort) == [
-          "attempt_number","chat_summary","cleanup","final_status","iid",
+          "chat_summary","cleanup","execution_id","final_status","iid",
           "remaining_pending_count","status"
         ]
         and .status == "launch_failed_recorded"
         and .iid == $iid
-        and .attempt_number == $attempt
+        and .execution_id == $attempt
         and .final_status == "blocked"
         and (.remaining_pending_count | type == "number"
           and . == floor and . >= 0)

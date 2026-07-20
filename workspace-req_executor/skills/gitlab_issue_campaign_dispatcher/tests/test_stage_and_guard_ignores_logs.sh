@@ -11,7 +11,7 @@ PROJECT_NAME="req_executor_test"
 REPO_PATH="${REPO_PARENT}/${PROJECT_NAME}"
 WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-7"
 OUTPUT_DIR="${WORKTREE_DIR}/.req_executor/issue-7/output"
-LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-7/log"
+LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-7/log/execution-1"
 
 mkdir -p "${WORKTREE_DIR}" "${OUTPUT_DIR}" "${LOG_DIR}"
 git -C "${WORKTREE_DIR}" init -q
@@ -41,7 +41,7 @@ result="$(
   REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="local-gitlab.invalid:9443" \
   REPO_PARENT_PATH="${REPO_PARENT}" \
   ISSUE_IID=7 \
-  ATTEMPT_NUMBER=1 \
+  EXECUTION_ID=1 \
   bash "${STAGE_SCRIPT}"
 )"
 

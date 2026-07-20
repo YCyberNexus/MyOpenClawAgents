@@ -68,6 +68,9 @@ dlc_open "${JOB_ID}"
 trap dlc_close EXIT
 ACTION_JSON="$(dlc_read)" || die "durable launch action is invalid"
 [ "${ACTION_JSON}" != null ] || die "durable launch action does not exist"
+if [ "$(jq -r '.legacy_execution_schema // false' <<<"${ACTION_JSON}")" = true ]; then
+  die "legacy execution schema must drain before runtime reconciliation"
+fi
 
 if [ "${RESOLUTION}" = not_found ]; then
   EVIDENCE="$(jq -r '.evidence' <<<"${INPUT_JSON}")"
@@ -173,7 +176,7 @@ fi
 
 PROJECT_FULL="$(jq -r '.project' <<<"${ACTION_JSON}")"
 IID="$(jq -r '.iid' <<<"${ACTION_JSON}")"
-ATTEMPT_NUMBER="$(jq -r '.attempt_number' <<<"${ACTION_JSON}")"
+EXECUTION_ID="$(jq -r '.execution_id' <<<"${ACTION_JSON}")"
 dlc_close
 trap - EXIT
 
@@ -182,14 +185,14 @@ POST_INPUT="$(jq -cn \
   --argjson claim_generation "${CLAIM_GENERATION}" \
   --arg project "${PROJECT_FULL}" \
   --argjson iid "${IID}" \
-  --argjson attempt_number "${ATTEMPT_NUMBER}" \
+  --argjson execution_id "${EXECUTION_ID}" \
   --arg run_id "$(jq -r '.run_id' <<<"${INPUT_JSON}")" \
   --arg child_session_key "$(jq -r '.child_session_key' <<<"${INPUT_JSON}")" '{
   job_id:$job_id,
   claim_generation:$claim_generation,
   project:$project,
   iid:$iid,
-  attempt_number:$attempt_number,
+  execution_id:$execution_id,
   status:"spawned",
   run_id:$run_id,
   child_session_key:$child_session_key

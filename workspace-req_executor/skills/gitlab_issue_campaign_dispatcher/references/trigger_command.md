@@ -50,7 +50,7 @@ and return its sole compact JSON object. Bare integers and `Ns` are seconds;
 `Nm` is minutes and `Nh` is hours. The wrapper persists
 `acpx_timeout_seconds` in executor-wide scheduler state under the scheduler
 lock. The tracked initialization default is `3600` seconds. Updates apply only
-to future attempts; pending and running attempts keep their spawn-time value.
+to future executions; pending and running executions keep their spawn-time value.
 The result reports future dispatcher-side budgets derived as agent turn
 `acpx+3600`, exec tool `acpx+3900`, legacy queue reclaim `acpx+4200`, and stuck
 eviction `ceil((acpx+4200)/60)+20`. The command never changes OpenClaw global
@@ -130,7 +130,7 @@ least `acpx_timeout_seconds + 2400`.
 New child completions arrive as protected OpenClaw `task_completion` events and
 are passed intact to `scripts/ingest_subagent_completion.sh`; the runtime does
 not synthesize `RUN_CHILD_COMPLETION_CALLBACK`. The ingester authenticates the
-run id, child session key, label, IID, attempt, and runtime provenance before
+run id, child session key, label, IID, execution ID, and runtime provenance before
 calling `dispatch_followup.sh`. `RUN_CHILD_COMPLETION_CALLBACK` remains only for
 pre-upgrade pending records explicitly marked `completion_auth:"legacy"`.
 Campaign scalars are loaded from persisted state; completion inputs do not
@@ -268,7 +268,7 @@ those records without making every periodic tick scan the full history.
 The response has exactly `status`, `spawn_grants`, `reconcile_actions`,
 `cleanup_actions`, `operation_results`, `max_launch_retries`, `backoff_seconds`, and
 `chat_summary`. Each `spawn_grants[]` item contains only `job_id`,
-`claim_generation`, `project`, `iid`, `attempt_number`, `child_label`, and an
+`claim_generation`, `project`, `iid`, `execution_id`, `child_label`, and an
 absolute `payload_path`. Read that file and call `sessions_spawn` serially. Feed
 the runtime result to `record_executor_batch_spawn.sh`; never call claim/bind or
 scheduler record helpers directly.

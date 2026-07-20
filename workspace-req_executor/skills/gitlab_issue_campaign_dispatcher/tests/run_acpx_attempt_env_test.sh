@@ -11,7 +11,7 @@ REPO_PARENT="${TEST_ROOT}/repos"
 PROJECT_NAME="req_executor_test"
 REPO_PATH="${REPO_PARENT}/${PROJECT_NAME}"
 WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-9"
-LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
+LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-1"
 OUTPUT_DIR="${WORKTREE_DIR}/.req_executor/issue-9/output"
 TRUSTED_ADAPTER_ROOT="${TEST_ROOT}/trusted-adapter"
 
@@ -130,7 +130,7 @@ CI_JOB_TOKEN="test-ci-job-token" \
 JOB_TOKEN="test-job-token" \
 WIKI_GITLAB_TOKEN="test-wiki-token" \
 ISSUE_IID=9 \
-ATTEMPT_NUMBER=1 \
+EXECUTION_ID=1 \
 ACPX_TIMEOUT_SECONDS=60 \
 REPO_PARENT_PATH="${REPO_PARENT}" \
   bash "${RUN_SCRIPT}" >"${TEST_ROOT}/stdout"
@@ -139,11 +139,11 @@ grep -q '^ACPX_EXIT=0$' "${TEST_ROOT}/stdout"
 grep -q '^OK$' "${LOG_DIR}/claude_result.txt"
 jq -e '
   (keys | sort) == [
-    "attempt_number","completed_at_epoch","exit_code","iid","version"
+    "completed_at_epoch","execution_id","exit_code","iid","version"
   ]
   and .version == 1
   and .iid == 9
-  and .attempt_number == 1
+  and .execution_id == 1
   and .exit_code == 0
   and (.completed_at_epoch | type == "number" and . > 0)
 ' "${LOG_DIR}/acpx_terminal.json" >/dev/null
@@ -154,7 +154,7 @@ jq -e '
 set +e
 PATH=".:${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
-ISSUE_IID=9 ATTEMPT_NUMBER=5 ACPX_TIMEOUT_SECONDS=60 \
+ISSUE_IID=9 EXECUTION_ID=5 ACPX_TIMEOUT_SECONDS=60 \
 REPO_PATH="${REPO_PATH}" REPO_PARENT_PATH= \
   "${BASH}" "${RUN_SCRIPT}" >"${TEST_ROOT}/relative-path-stdout" \
     2>"${TEST_ROOT}/relative-path-stderr"
@@ -176,7 +176,7 @@ chmod +x "${MALICIOUS_PATH_BIN}/dirname"
 set +e
 PATH="${MALICIOUS_PATH_BIN}:${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
-ISSUE_IID=9 ATTEMPT_NUMBER=6 ACPX_TIMEOUT_SECONDS=60 \
+ISSUE_IID=9 EXECUTION_ID=6 ACPX_TIMEOUT_SECONDS=60 \
 REPO_PATH="${REPO_PATH}" REPO_PARENT_PATH= \
   "${BASH}" "${RUN_SCRIPT}" >"${TEST_ROOT}/repo-path-stdout" \
     2>"${TEST_ROOT}/repo-path-stderr"
@@ -189,7 +189,7 @@ grep -Fq 'PATH must contain only trusted absolute directories before bootstrap' 
 
 # A dependency-based attempt must disable every project customization source,
 # including transitive hooks/MCP/memory that cannot be safely parsed in Bash.
-SAFE_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
+SAFE_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-3"
 mkdir -p "${SAFE_LOG_DIR}"
 printf '只输出 OK\n' >"${SAFE_LOG_DIR}/prompt.txt"
 printf 'registry=https://attacker.invalid/\n' >"${WORKTREE_DIR}/.npmrc"
@@ -197,7 +197,7 @@ printf '{"agents":{"claude":{"command":"./evil-acp"}},"mcpServers":[{"command":"
   >"${WORKTREE_DIR}/.acpxrc.json"
 PATH="${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
-ISSUE_IID=9 ATTEMPT_NUMBER=3 ACPX_TIMEOUT_SECONDS=60 \
+ISSUE_IID=9 EXECUTION_ID=3 ACPX_TIMEOUT_SECONDS=60 \
 DEPENDENCY_BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
 REPO_PARENT_PATH="${REPO_PARENT}" ACPX_EXPECT_SAFE_MODE=1 \
 ACPX_EXPECT_CLAUDE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
@@ -214,7 +214,7 @@ grep -Fq "CLAUDE_AGENT_ACP_EXECUTABLE=${TRUSTED_ADAPTER_CANONICAL}/dist/index.js
 # The ACP adapter's bundled executable is not a sufficient guarantee: a
 # dependency attempt must stop before acpx when the explicitly selected Claude
 # Code executable cannot prove --safe-mode support.
-LEGACY_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
+LEGACY_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-4"
 mkdir -p "${LEGACY_LOG_DIR}"
 printf '只输出 OK\n' >"${LEGACY_LOG_DIR}/prompt.txt"
 : >"${LEGACY_LOG_DIR}/acpx_terminal.json"
@@ -222,7 +222,7 @@ chmod 600 "${LEGACY_LOG_DIR}/acpx_terminal.json"
 set +e
 PATH="${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
-ISSUE_IID=9 ATTEMPT_NUMBER=4 ACPX_TIMEOUT_SECONDS=60 \
+ISSUE_IID=9 EXECUTION_ID=4 ACPX_TIMEOUT_SECONDS=60 \
 DEPENDENCY_BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
 CLAUDE_CODE_EXECUTABLE="${BIN_DIR}/legacy-claude" \
 REPO_PARENT_PATH="${REPO_PARENT}" \
@@ -238,12 +238,12 @@ grep -Fq 'CLAUDE_CODE_EXECUTABLE does not support --safe-mode' \
 # A tool-side SIGTERM must kill the inner process group and still leave a
 # terminal marker before the wrapper exits 124. The all-in-one outer wrapper
 # can then persist a timeout result that the heartbeat safely recognizes.
-SIGNAL_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
+SIGNAL_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-2"
 mkdir -p "${SIGNAL_LOG_DIR}"
 printf '只输出 OK\n' >"${SIGNAL_LOG_DIR}/prompt.txt"
 PATH="${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
-ISSUE_IID=9 ATTEMPT_NUMBER=2 ACPX_TIMEOUT_SECONDS=60 \
+ISSUE_IID=9 EXECUTION_ID=2 ACPX_TIMEOUT_SECONDS=60 \
 REPO_PARENT_PATH="${REPO_PARENT}" ACPX_TEST_SLEEP=1 \
   bash "${RUN_SCRIPT}" >"${TEST_ROOT}/signal-stdout" 2>"${TEST_ROOT}/signal-stderr" &
 signal_runner_pid=$!
@@ -257,7 +257,7 @@ set -e
 jq -e '
   .version == 1
   and .iid == 9
-  and .attempt_number == 2
+  and .execution_id == 2
   and .exit_code == 124
   and (.completed_at_epoch | type == "number" and . > 0)
 ' "${SIGNAL_LOG_DIR}/acpx_terminal.json" >/dev/null

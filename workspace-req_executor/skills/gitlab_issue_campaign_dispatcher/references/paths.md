@@ -33,7 +33,8 @@ ${REPO_PATH}/
     issues/
       issue-<iid>/
         state.json
-        attempt_state.json
+        executions/
+          execution-<execution_id>.json
         summary.md
         dispatch_origin.json
     .worktrees/
@@ -42,6 +43,7 @@ ${REPO_PATH}/
           issue-<iid>/
             output/
             log/
+              execution-<execution_id>/
 ```
 
 ## Key Variables
@@ -53,18 +55,20 @@ ${REPO_PATH}/
 | `ISSUES_ROOT` | `${RESULT_ROOT}/issues` |
 | `WORKTREES_ROOT` | `${RESULT_ROOT}/.worktrees` |
 | `ISSUE_ROOT` | `${ISSUES_ROOT}/issue-${ISSUE_IID}` |
+| `EXECUTIONS_ROOT` | `${ISSUE_ROOT}/executions` |
 | `WORKTREE_DIR` | `${WORKTREES_ROOT}/issue-${ISSUE_IID}` |
 | `ISSUE_WORKTREE_REL` | `.req_executor/issue-${ISSUE_IID}` |
 | `OUTPUT_DIR` | `${WORKTREE_DIR}/${ISSUE_WORKTREE_REL}/output` |
-| `ISSUE_LOG_REL` | `${ISSUE_WORKTREE_REL}/log` |
+| `EXECUTION_STATE_FILE` | `${EXECUTIONS_ROOT}/execution-${EXECUTION_ID}.json` |
+| `ISSUE_LOG_REL` | `${ISSUE_WORKTREE_REL}/log/execution-${EXECUTION_ID}` |
 | `LOG_DIR` | `${WORKTREE_DIR}/${ISSUE_LOG_REL}` |
 
 `clone_or_pull.sh` appends `/.req_executor/` and `logs/` to `${REPO_PATH}/.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes `${LOG_DIR}` plus any `logs/` path from the commit index, so logs stay local and do not appear in MR changes.
 
 Claude Code is invoked only through `scripts/run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs the fixed acpx command against `${LOG_DIR}/prompt.txt`.
 
-The worktree, output directory, log directory, and `LOCAL_ISSUE_BRANCH=issue/<iid>`
-are fixed for one Issue and do not contain `ATTEMPT_NUMBER`. The attempt number
-remains inside state and recovery JSON for stale-callback rejection. Before a
-new run starts, the fixed `acpx_terminal.json`, `worker_result.json`, and
-`mr_result.json` files are invalidated; later writes replace them atomically.
+The worktree, output directory, and `LOCAL_ISSUE_BRANCH=issue/<iid>` are fixed
+for one Issue. `EXECUTION_ID` is random and opaque; it selects an isolated state
+file and log directory and fences stale callbacks without recording a run
+number. Recovery files are atomically written only inside that execution's log
+directory.

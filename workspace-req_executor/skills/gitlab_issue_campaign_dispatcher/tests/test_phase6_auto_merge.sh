@@ -90,7 +90,7 @@ make_state() {
   local iid="$1"
   jq -cn --argjson iid "${iid}" '{
     pending_subagents:{($iid|tostring):{
-      attempt_number:1,child_session_key:"child",
+      execution_id:1,child_session_key:"child",
       auto_merge:true,branch:"develop",merge_target_branch:"release"
     }},
     active_issue_iids:[$iid],active_issue_sessions:[],
@@ -103,7 +103,7 @@ make_state() {
 make_reply() {
   local iid="$1"
   jq -cn --argjson iid "${iid}" '{
-    iid:$iid,attempt_number:1,status:"done",mode_actual:"fresh",
+    iid:$iid,execution_id:1,status:"done",mode_actual:"fresh",
     work_branch:("issue/" + ($iid|tostring)),
     local_branch:("issue/" + ($iid|tostring)),
     commit_sha:"0123456789abcdef0123456789abcdef01234567",
@@ -115,7 +115,7 @@ make_reply() {
 
 write_marker() {
   local iid="$1" mode="${2:-600}" marker_path marker_dir
-  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log"
+  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log/execution-1"
   marker_path="${marker_dir}/mr_result.json"
   mkdir -p "${marker_dir}"
   jq -cn --argjson iid "${iid}" '{
@@ -126,7 +126,7 @@ write_marker() {
     sha:"0123456789abcdef0123456789abcdef01234567",
     observed_state:"merged",outcome:"merged",verified:true,
     merge_attempted:true,merge_api_succeeded:true,reason:"verified_merged",
-    mr_action:"created",issue_iid:$iid,attempt_number:1,auto_merge:true
+    mr_action:"created",issue_iid:$iid,execution_id:1,auto_merge:true
   }' >"${marker_path}"
   chmod "${mode}" "${marker_path}"
 }
@@ -182,7 +182,7 @@ missing_out="$(phase6_process "$(make_state 10)" "$(make_reply 10)" false)" \
   || fail "missing-marker Phase 6 call failed"
 jq -e '
   .final_status == "failed"
-  and (.final_reply.block_reason | contains("trusted current-attempt MR marker"))
+  and (.final_reply.block_reason | contains("trusted current-execution MR marker"))
 ' <<<"${missing_out}" >/dev/null || fail "missing marker did not fail closed"
 [ ! -s "${LABEL_LOG}" ] || fail "missing marker changed live labels"
 
@@ -214,7 +214,7 @@ write_marker 13
 recovered_reply="$(phase6_reply_from_auto_merge_marker "$(make_state 13)" 13 1)" \
   || fail "trusted marker recovery did not produce a compact reply"
 jq -e '
-  .iid == 13 and .attempt_number == 1 and .status == "done"
+  .iid == 13 and .execution_id == 1 and .status == "done"
   and .work_branch == "issue/13"
   and .merge_request_url == "https://gitlab.example.test/group/repo/-/merge_requests/13"
   and .commit_sha == "0123456789abcdef0123456789abcdef01234567"
@@ -242,7 +242,7 @@ jq -e '
   and .final_reply.status == "blocked"
   and (.updated_state.pending_subagents["14"] != null)
   and .updated_state.pending_subagents["14"].finish_label_retry == true
-  and .updated_state.pending_subagents["14"].finish_label_retry_attempt == 1
+  and .updated_state.pending_subagents["14"].finish_label_retry_execution_id == 1
   and ((.updated_state.completed_iids // []) | index(14) == null)
 ' <<<"${retry_out}" >/dev/null \
   || fail "finish-label failure drained or completed the pending claim"
@@ -281,7 +281,7 @@ jq -e '
 : >"${LABEL_LOG}"
 export VERIFY_SCENARIO=merged
 write_marker 16
-legacy_marker_path="${WORKTREES_ROOT}/issue-16/.req_executor/issue-16/log/mr_result.json"
+legacy_marker_path="${WORKTREES_ROOT}/issue-16/.req_executor/issue-16/log/execution-1/mr_result.json"
 jq 'del(.dependency_base_sha)' "${legacy_marker_path}" \
   >"${legacy_marker_path}.legacy"
 mv "${legacy_marker_path}.legacy" "${legacy_marker_path}"
@@ -293,7 +293,7 @@ jq -e '.final_status == "done"' <<<"${legacy_marker_out}" >/dev/null \
 
 : >"${LABEL_LOG}"
 write_marker 17
-dependent_legacy_marker_path="${WORKTREES_ROOT}/issue-17/.req_executor/issue-17/log/mr_result.json"
+dependent_legacy_marker_path="${WORKTREES_ROOT}/issue-17/.req_executor/issue-17/log/execution-1/mr_result.json"
 jq 'del(.dependency_base_sha)' "${dependent_legacy_marker_path}" \
   >"${dependent_legacy_marker_path}.legacy"
 mv "${dependent_legacy_marker_path}.legacy" "${dependent_legacy_marker_path}"
@@ -307,7 +307,7 @@ dependent_legacy_out="$(phase6_process "${dependent_state}" "$(make_reply 17)" f
   || fail "dependent legacy-marker rejection path failed"
 jq -e '
   .final_status == "failed"
-  and (.final_reply.block_reason | contains("trusted current-attempt MR marker"))
+  and (.final_reply.block_reason | contains("trusted current-execution MR marker"))
 ' <<<"${dependent_legacy_out}" >/dev/null \
   || fail "dependent attempt accepted a marker without dependency identity"
 

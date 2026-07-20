@@ -149,7 +149,7 @@ jq -nc '[
 ]' >"${path}"
 printf '%s\n' "${path}"
 EOF
-cat >"${FIXTURE_SCRIPTS}/allocate_attempt.sh" <<'EOF'
+cat >"${FIXTURE_SCRIPTS}/allocate_execution_id.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "${IID}" >>"${TEST_ALLOC_LOG}"
@@ -250,10 +250,10 @@ if [ "${state_branch}" = "issue/${MIGRATION_HEAD_IID}" ]; then
     | .shared_branch_role="head"
     | .work_branch_sha=$sha
     | .dependency_history_verified=true
-    | .dependency_pinned_attempt_number=.latest_attempt_number
+    | .dependency_pinned_execution_id=.latest_execution_id
     | .merge_request_url="https://gitlab.test/group/project/-/merge_requests/17"
     | .mr_finalization={
-        status:"verified_open",source_attempt_number:.latest_attempt_number,
+        status:"verified_open",source_execution_id:.latest_execution_id,
         work_branch:$branch,branch_members:[$head,$tail],
         shared_branch_role:"head",commit_sha:$sha,
         intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -269,7 +269,7 @@ if [ "${state_branch}" = "issue/${MIGRATION_HEAD_IID}" ]; then
         new_mr_iid:17,
         new_mr_url:"https://gitlab.test/group/project/-/merge_requests/17",
         intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-        source_attempt_number:.latest_attempt_number,
+        source_execution_id:.latest_execution_id,
         started_at:"2026-07-20T00:00:00Z",
         completed_at:"2026-07-20T00:00:01Z"
       }
@@ -402,7 +402,7 @@ jq -n --arg now "${NOW}" '{
   max_concurrent_subagents:4,stuck_after_minutes:332,acpx_timeout_seconds:18000,
   issue_iids_whitelist:[1],require_labels:[],require_labels_match:"or",
   tick_seq:7,active_issue_iids:[1],active_issue_sessions:["issue-project-1"],
-  pending_subagents:{"1":{attempt_number:1,run_id:"old-run",
+  pending_subagents:{"1":{execution_id:1,run_id:"old-run",
     child_session_key:"agent:child:one",spawned_at:$now,placeholder:false,
     acpx_timeout_seconds:18000}},
   blocked_at_tick_by_iid:{},unfinished_iids:[],completed_iids:[],blocked_iids:[],
@@ -557,7 +557,7 @@ printf '%s' "${OUTPUT}" | jq -e '
   and .pending_iids == [1,2,3,6]
   and [.dispatch_entries[].iid] == [2,3,6]
   and (all(.dispatch_entries[];
-    (.attempt_number == 1)
+    (.execution_id == 1)
     and (.child_label | type == "string")
     and (.payload_path | type == "string")
     and (.expected_task_sha256 | test("^[0-9a-f]{64}$"))
@@ -595,7 +595,7 @@ for iid in 2 3 6; do
     || fail "spawn bootstrap for IID ${iid} is not mode 600"
   grep -Fq '# REQ_EXECUTOR_SPAWN_BOOTSTRAP_V1' "${PAYLOAD_PATH}" \
     || fail "sessions_spawn task for IID ${iid} is not the small bootstrap"
-  grep -Fq "top-level project, job_id, iid, and attempt_number fields (there is no nested identity object)" \
+  grep -Fq "top-level project, job_id, iid, and execution_id fields (there is no nested identity object)" \
     "${PAYLOAD_PATH}" \
     || fail "spawn bootstrap for IID ${iid} leaves manifest identity nesting ambiguous"
   MODE_HELPER="$(sed -n \
@@ -639,7 +639,7 @@ for iid in 2 3 6; do
     and .project == "group/project"
     and .job_id == $expected_job_id
     and .iid == $iid
-    and .attempt_number == 1
+    and .execution_id == 1
     and (has("identity") | not)
     and (.executor_payload_sha256 | test("^[0-9a-f]{64}$"))
     and (.executor_payload_bytes | type == "number" and . > 0)
@@ -1226,11 +1226,11 @@ mkdir -p "${PROJECT_REPO}/.req_executor/issues/issue-9"
   '{iid:9,status:"done",commit_sha:$sha,work_branch:"issue/9+2",
     branch_members:[9,2],shared_branch_role:"head",
     work_branch_sha:$sha,dependency_history_verified:true,
-    latest_attempt_number:1,dependency_pinned_attempt_number:1,
+    latest_execution_id:1,dependency_pinned_execution_id:1,
     dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
     merge_request_url:"https://gitlab.test/group/project/-/merge_requests/17",
     mr_finalization:{
-      status:"verified_open",source_attempt_number:1,
+      status:"verified_open",source_execution_id:1,
       work_branch:"issue/9+2",branch_members:[9,2],shared_branch_role:"head",
       commit_sha:$sha,
       intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1282,7 +1282,7 @@ cp "${VALID_DEPENDENCY_STATE}" \
 write_terminal_race_state
 UNSETTLED_STATE_TMP="$(mktemp "${STATE_FILE}.dependency-unsettled.XXXXXX")"
 jq --arg now "${NOW}" '.pending_subagents["9"] = {
-    attempt_number:1,run_id:"run-A",child_session_key:"child-A",
+    execution_id:1,run_id:"run-A",child_session_key:"child-A",
     spawned_at:$now,placeholder:false,acpx_timeout_seconds:18000,
     auto_merge:false,branch:"main",merge_target_branch:"main",
     work_branch:"issue/9+2",branch_members:[9,2],shared_branch_role:"head",

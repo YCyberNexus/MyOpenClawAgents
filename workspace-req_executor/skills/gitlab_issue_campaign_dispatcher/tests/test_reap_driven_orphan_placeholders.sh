@@ -26,36 +26,36 @@ write_state() {
     project:"repo",
     pending_subagents:({
       "4":{
-        attempt_number:1,run_id:null,child_session_key:null,
+        execution_id:1,run_id:null,child_session_key:null,
         spawned_at:null,placeholder:true,
         memberships_source:"scheduler_active_job",
         job_id:"old-batch:snapshot-4",claim_generation:0,claim_token:null
       }
     } + (if $only_orphan then {} else {
       "5":{
-        attempt_number:1,run_id:null,child_session_key:null,
+        execution_id:1,run_id:null,child_session_key:null,
         spawned_at:null,placeholder:true,
         memberships_source:"scheduler_active_job",
         job_id:"active-batch:snapshot-5",claim_generation:1,claim_token:"active"
       },
       "6":{
-        attempt_number:2,run_id:null,child_session_key:null,
+        execution_id:2,run_id:null,child_session_key:null,
         spawned_at:null,placeholder:true,
         memberships_source:"scheduler_active_job",
         job_id:"launch-batch:snapshot-6",claim_generation:1,claim_token:"launch"
       },
       "7":{
-        attempt_number:1,run_id:"run-7",child_session_key:"agent:req_executor:7",
+        execution_id:1,run_id:"run-7",child_session_key:"agent:req_executor:7",
         spawned_at:"2026-07-14T00:00:00Z",placeholder:false,
         memberships_source:"scheduler_active_job",job_id:"running:snapshot-7"
       },
       "8":{
-        attempt_number:1,run_id:null,child_session_key:null,
+        execution_id:1,run_id:null,child_session_key:null,
         spawned_at:null,placeholder:true,
         memberships_source:"scheduler_active_job"
       },
       "9":{
-        attempt_number:1,run_id:null,child_session_key:null,
+        execution_id:1,run_id:null,child_session_key:null,
         spawned_at:null,placeholder:true
       }
     } end)),
@@ -83,7 +83,7 @@ first_output="$(run_reaper "${protected_input}")" || fail "first reaper call fai
 jq -e '
   .status == "reaped"
   and .reaped_entries == [{
-    iid:4,job_id:"old-batch:snapshot-4",attempt_number:1
+    iid:4,job_id:"old-batch:snapshot-4",execution_id:1
   }]
   and ([.protected_entries[].iid] | sort) == [5,6]
   and .unresolved_iids == [8]

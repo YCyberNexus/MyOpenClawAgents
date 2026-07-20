@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Persist the executor-wide acpx cap for future attempts.
+# Persist the executor-wide acpx cap for future executions.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

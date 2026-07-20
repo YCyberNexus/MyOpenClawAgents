@@ -65,11 +65,11 @@ EOF
 chmod +x "${FOLLOWUP_SCRIPTS}"/*.sh
 
 write_followup_state() {
-  local attempt_number="$1"
+  local execution_id="$1"
   local claim_generation="$2"
   local claim_token="$3"
   jq -cnS \
-    --argjson attempt_number "${attempt_number}" \
+    --argjson execution_id "${execution_id}" \
     --argjson claim_generation "${claim_generation}" \
     --arg claim_token "${claim_token}" '{
     project:"repo",
@@ -80,8 +80,8 @@ write_followup_state() {
     kill_subagent_on_terminal:false,
     pending_subagents:{
       "42":{
-        attempt_number:$attempt_number,
-        run_id:("run-42-" + ($attempt_number|tostring)),
+        execution_id:$execution_id,
+        run_id:("run-42-" + ($execution_id|tostring)),
         child_session_key:"agent:req_executor:subagent:42",
         spawned_at:"2026-07-11T00:00:00Z",
         placeholder:false,
@@ -147,7 +147,7 @@ EOF
 chmod +x "${FAKE_IMPORTER}"
 
 run_followup() {
-  local attempt_number="$1"
+  local execution_id="$1"
   local claim_generation="$2"
   local claim_token="$3"
   local import_result="$4"
@@ -156,7 +156,7 @@ run_followup() {
 
   printf '%s\n' "{
     \"iid\":42,
-    \"attempt_number\":${attempt_number},
+    \"execution_id\":${execution_id},
     \"status\":\"done\",
     \"merge_request_url\":\"https://gitlab.example/group/repo/-/merge_requests/9\"
   }" | \
@@ -168,8 +168,8 @@ run_followup() {
   GITLAB_API_PROTOCOL=https \
   REPO_PARENT_PATH="${FOLLOWUP_PARENT}" \
   IID=42 \
-  ATTEMPT_NUMBER="${attempt_number}" \
-  CALLBACK_RUN_ID="run-42-${attempt_number}" \
+  EXECUTION_ID="${execution_id}" \
+  CALLBACK_RUN_ID="run-42-${execution_id}" \
   CALLBACK_CHILD_SESSION_KEY="agent:req_executor:subagent:42" \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
   DRIVEN_HANDOFF_TEST_FAULT="${fault}" \
@@ -236,7 +236,7 @@ jq -e --arg event_id "${EVENT_1}" '
   and .completed_iids == [42]
   and (.driven_handoff_intents | keys) == [$event_id]
   and .driven_handoff_intents[$event_id].version == 1
-  and .driven_handoff_intents[$event_id].attempt_number == 1
+  and .driven_handoff_intents[$event_id].execution_id == 1
   and .driven_handoff_intents[$event_id].handoff == {
     version:1,
     event_id:$event_id,
@@ -287,7 +287,7 @@ RECOVERY_OUTPUT="$(run_followup 1 1 claim-token-42 success)"
 jq -e --arg event_id "${EVENT_1}" '
   .callback_status == "handoff_recovered"
   and .iid == 42
-  and .attempt_number == 1
+  and .execution_id == 1
   and .handoff_event_id == $event_id
   and .handoff_import_status == "imported"
   and .handoff_path != ""
@@ -360,7 +360,7 @@ NOOP_CALLBACK_OUTPUT="$(run_followup 2 2 claim-token-43 success)"
 jq -e '
   .callback_status == "stale_or_already_drained"
   and .iid == 42
-  and .attempt_number == 2
+  and .execution_id == 2
 ' <<<"${NOOP_CALLBACK_OUTPUT}" >/dev/null \
   || fail "completed callback replay was not idempotently stale"
 [ "$(wc -l <"${FOLLOWUP_IMPORT_LOG}" | tr -d ' ')" = 3 ] \

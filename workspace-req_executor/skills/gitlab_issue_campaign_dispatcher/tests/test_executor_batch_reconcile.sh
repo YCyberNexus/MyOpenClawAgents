@@ -42,14 +42,14 @@ set -euo pipefail
 input="$(cat)"
 jq -e '
   (keys | sort) == [
-    "attempt_number","child_session_key","claim_generation","iid",
+    "child_session_key","claim_generation","execution_id","iid",
     "job_id","project","run_id","status"
   ]
   and .job_id == "A:snapshot-0"
   and .claim_generation == 1
   and .project == "group/repo"
   and .iid == 42
-  and .attempt_number == 1
+  and .execution_id == 1
   and .status == "spawned"
   and .run_id == "runtime-run-1"
   and .child_session_key == "agent:req_executor:subagent:runtime-1"
@@ -76,7 +76,7 @@ write_fixture() {
 EOF
   jq -cnS '{
     version:1,job_id:"A:snapshot-0",project:"group/repo",iid:42,
-    batch_id:"A",snapshot_index:0,attempt_number:1,
+    batch_id:"A",snapshot_index:0,execution_id:1,
     child_label:"#42-att-001",payload_path:"/private/payload/path",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42,

@@ -149,7 +149,7 @@ PREP_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=2 ATTEMPT_NUMBER=1 ISSUE_MODE=fresh \
+  ISSUE_IID=2 EXECUTION_ID=1 ISSUE_MODE=fresh \
   BRANCH=issue/9 CONFIG_BRANCH=main DEPENDENCY_BASE_SHA="${PINNED_SHA}" \
     bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
 )" || fail "prepare_attempt rejected a valid pinned dependency"
@@ -184,34 +184,37 @@ WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-2"
 [ -z "$(git -C "${WORKTREE_DIR}" diff --name-only --diff-filter=D)" ] \
   || fail "sanitized dependency-only control paths became forbidden deletions"
 
-# A later run of the same Issue reuses both the local branch and the fixed log
-# directory. Durable evidence is replaced with a fresh private inode, even if
-# the old path is not writable or is a hard link; no attempt archive or
-# numbered local branch is created.
-ISSUE_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-2/log"
-printf '{"attempt_number":1}\n' >"${ISSUE_LOG_DIR}/acpx_terminal.json"
-chmod 000 "${ISSUE_LOG_DIR}/acpx_terminal.json"
+# A later execution of the same Issue reuses the local branch but receives an
+# isolated log directory. Earlier evidence remains immutable, and fresh files
+# are created privately for the new execution.
+ISSUE_LOG_ROOT="${WORKTREE_DIR}/.req_executor/issue-2/log"
+FIRST_EXECUTION_LOG_DIR="${ISSUE_LOG_ROOT}/execution-1"
+SECOND_EXECUTION_LOG_DIR="${ISSUE_LOG_ROOT}/execution-2"
+printf '{"execution_id":1}\n' >"${FIRST_EXECUTION_LOG_DIR}/acpx_terminal.json"
+chmod 000 "${FIRST_EXECUTION_LOG_DIR}/acpx_terminal.json"
 HARDLINK_TARGET="${TEST_ROOT}/worker-result-hardlink-target.json"
 printf '{"sentinel":"must-survive"}\n' >"${HARDLINK_TARGET}"
-ln "${HARDLINK_TARGET}" "${ISSUE_LOG_DIR}/worker_result.json"
-printf '{"attempt_number":1}\n' >"${ISSUE_LOG_DIR}/mr_result.json"
-chmod 600 "${ISSUE_LOG_DIR}/mr_result.json"
+ln "${HARDLINK_TARGET}" "${FIRST_EXECUTION_LOG_DIR}/worker_result.json"
+printf '{"execution_id":1}\n' >"${FIRST_EXECUTION_LOG_DIR}/mr_result.json"
+chmod 600 "${FIRST_EXECUTION_LOG_DIR}/mr_result.json"
 PREP_REUSE_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=2 ATTEMPT_NUMBER=2 ISSUE_MODE=fresh \
+  ISSUE_IID=2 EXECUTION_ID=2 ISSUE_MODE=fresh \
   BRANCH=issue/9 CONFIG_BRANCH=main DEPENDENCY_BASE_SHA="${PINNED_SHA}" \
     bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
 )" || fail "prepare_attempt rejected fixed issue-local reuse"
 [ "$(sed -n '2p' <<<"${PREP_REUSE_OUTPUT}")" = issue/2 ] \
   || fail "later run did not reuse the fixed issue-local branch"
 for evidence_name in acpx_terminal.json worker_result.json mr_result.json; do
-  [ ! -s "${ISSUE_LOG_DIR}/${evidence_name}" ] \
-    || fail "later run retained stale ${evidence_name} content"
-  [ "$(file_mode "${ISSUE_LOG_DIR}/${evidence_name}")" = 600 ] \
-    || fail "later run did not make ${evidence_name} private"
+  [ ! -e "${SECOND_EXECUTION_LOG_DIR}/${evidence_name}" ] \
+    || fail "new execution inherited stale ${evidence_name} content"
 done
+[ -s "${FIRST_EXECUTION_LOG_DIR}/acpx_terminal.json" ] \
+  || fail "new execution modified earlier terminal evidence"
+[ -s "${FIRST_EXECUTION_LOG_DIR}/mr_result.json" ] \
+  || fail "new execution modified earlier MR evidence"
 [ "$(cat "${HARDLINK_TARGET}")" = '{"sentinel":"must-survive"}' ] \
   || fail "later run truncated the hard-linked evidence target"
 [ -z "$(git -C "${REPO_PATH}" for-each-ref \
@@ -226,7 +229,7 @@ set +e
 CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
 GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
 GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-ISSUE_IID=8 ATTEMPT_NUMBER=1 ISSUE_MODE=fresh \
+ISSUE_IID=8 EXECUTION_ID=1 ISSUE_MODE=fresh \
 BRANCH=issue/12 CONFIG_BRANCH=main \
 DEPENDENCY_BASE_SHA="${MALICIOUS_FILTER_SHA}" \
   bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh" \
@@ -247,7 +250,7 @@ SYMLINK_CONTROL_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=5 ATTEMPT_NUMBER=1 ISSUE_MODE=fresh \
+  ISSUE_IID=5 EXECUTION_ID=1 ISSUE_MODE=fresh \
   BRANCH=issue/11 CONFIG_BRANCH=main \
   DEPENDENCY_BASE_SHA="${MALICIOUS_CLAUDE_SHA}" \
     bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
@@ -266,7 +269,7 @@ set +e
 CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
 GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
 GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-ISSUE_IID=4 ATTEMPT_NUMBER=1 ISSUE_MODE=fresh \
+ISSUE_IID=4 EXECUTION_ID=1 ISSUE_MODE=fresh \
 BRANCH=issue/10 CONFIG_BRANCH=main \
 DEPENDENCY_BASE_SHA="${MALICIOUS_RUNTIME_SHA}" \
   bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh" \
@@ -288,7 +291,7 @@ SAFE_RETRY_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=4 ATTEMPT_NUMBER=2 ISSUE_MODE=fresh \
+  ISSUE_IID=4 EXECUTION_ID=2 ISSUE_MODE=fresh \
   BRANCH=main CONFIG_BRANCH=main \
     bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
 )" || fail "safe retry could not recover from a rejected runtime symlink"
@@ -314,7 +317,7 @@ PINNED_CONTINUE_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=6 ATTEMPT_NUMBER=3 ISSUE_MODE=continue \
+  ISSUE_IID=6 EXECUTION_ID=3 ISSUE_MODE=continue \
   BRANCH=main CONFIG_BRANCH=main CONTINUE_BASE_REQUIRED=true \
   CONTINUE_BASE_SHA="${VERIFIED_CONTINUE_SHA}" \
   CONTINUE_BASE_REF=refs/heads/issue/6 \
@@ -341,7 +344,7 @@ SHARED_CONTINUE_OUTPUT="$(
   CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=13 ATTEMPT_NUMBER=2 ISSUE_MODE=continue \
+  ISSUE_IID=13 EXECUTION_ID=2 ISSUE_MODE=continue \
   BRANCH=main CONFIG_BRANCH=main WORK_BRANCH=issue/9+13 \
   SHARED_BRANCH_ROLE=tail DEPENDENCY_BASE_SHA="${PINNED_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${PINNED_SHA}" \
@@ -371,7 +374,7 @@ set +e
 CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=7 ATTEMPT_NUMBER=2 ISSUE_MODE=continue \
+  ISSUE_IID=7 EXECUTION_ID=2 ISSUE_MODE=continue \
   BRANCH=main CONFIG_BRANCH=main CONTINUE_BASE_REQUIRED=true \
   CONTINUE_BASE_SHA="${VERIFIED_CONTINUE_SHA}" \
   CONTINUE_BASE_REF=refs/remotes/origin/issue/7 \
@@ -394,7 +397,7 @@ set +e
 CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
   GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
   GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
-  ISSUE_IID=3 ATTEMPT_NUMBER=1 ISSUE_MODE=continue \
+  ISSUE_IID=3 EXECUTION_ID=1 ISSUE_MODE=continue \
   BRANCH=main CONFIG_BRANCH=main CONTINUE_BASE_REQUIRED=true \
   CONTINUE_BASE_SHA=ffffffffffffffffffffffffffffffffffffffff \
   CONTINUE_BASE_REF=refs/remotes/origin/issue/3 \

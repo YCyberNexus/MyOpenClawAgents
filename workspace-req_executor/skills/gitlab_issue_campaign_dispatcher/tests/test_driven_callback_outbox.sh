@@ -66,7 +66,7 @@ mkdir -p \
 jq -cnS '{
   pending_subagents:{
     "42":{
-      attempt_number:1,
+      execution_id:1,
       job_id:"batch-A:snapshot-0",
       batch_id:"batch-A",
       snapshot_index:0,
@@ -1763,7 +1763,7 @@ jq -cnS '{
   kill_subagent_on_terminal:false,
   pending_subagents:{
     "42":{
-      attempt_number:1,
+      execution_id:1,
       run_id:"run-42",
       child_session_key:"agent:req_executor:subagent:42",
       spawned_at:"2026-07-11T00:00:00Z",
@@ -1795,7 +1795,7 @@ cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/campaign-state-baseline.json"
 : >"${FOLLOWUP_IMPORT_LOG}"
 
 write_followup_auto_merge_marker() {
-  local marker_dir="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log"
+  local marker_dir="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/execution-1"
   mkdir -p "${marker_dir}"
   jq -cn '{
     version:1,iid:9,
@@ -1804,7 +1804,7 @@ write_followup_auto_merge_marker() {
     sha:"0123456789abcdef0123456789abcdef01234567",
     observed_state:"merged",outcome:"merged",verified:true,
     merge_attempted:true,merge_api_succeeded:true,reason:"verified_merged",
-    mr_action:"created",issue_iid:42,attempt_number:1,auto_merge:true
+    mr_action:"created",issue_iid:42,execution_id:1,auto_merge:true
   }' >"${marker_dir}/mr_result.json"
   chmod 600 "${marker_dir}/mr_result.json"
 }
@@ -1998,10 +1998,10 @@ jq -cn '{
   iid:42,status:"doing",work_branch:"issue/42+43",
   branch_members:[42,43],shared_branch_role:"head",
   dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
-  dependency_pinned_attempt_number:1,dependency_history_verified:true,
+  dependency_pinned_execution_id:1,dependency_history_verified:true,
   work_branch_sha:"0123456789abcdef0123456789abcdef01234567",
   mr_finalization:{
-    status:"pending",source_attempt_number:1,
+    status:"pending",source_execution_id:1,
     work_branch:"issue/42+43",branch_members:[42,43],
     shared_branch_role:"head",
     commit_sha:"0123456789abcdef0123456789abcdef01234567",
@@ -2012,7 +2012,7 @@ jq -cn '{
 chmod 600 "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/state.json"
 : >"${FOLLOWUP_LABEL_LOG}"
 shared_failure_reply="$(jq -cn '{
-  iid:42,attempt_number:1,status:"blocked",mode_actual:"fresh",
+  iid:42,execution_id:1,status:"blocked",mode_actual:"fresh",
   work_branch:"issue/42+43",local_branch:"issue/42",
   commit_sha:"0123456789abcdef0123456789abcdef01234567",
   merge_request_url:"",mr_action:"none",wiki_url:"",
@@ -2023,7 +2023,7 @@ shared_failure_reply="$(jq -cn '{
 shared_ghost_out="$(printf '%s' "${shared_failure_reply}" | \
   PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
-  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 EXECUTION_ID=1 \
   CALLBACK_RUN_ID=run-42 \
   CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
   RECONCILE_LIVE_COMPLETED=true \
@@ -2035,7 +2035,7 @@ jq -e '
   || fail "shared failure callback was drained by the completed-ghost path"
 jq -e '
   .pending_subagents["42"].mr_finalization_retry == true
-  and .pending_subagents["42"].mr_finalization_retry_attempt == 1
+  and .pending_subagents["42"].mr_finalization_retry_execution_id == 1
 ' "${FOLLOWUP_STATE}" >/dev/null \
   || fail "shared failure callback did not preserve the exact MR recovery claim"
 [ ! -s "${FOLLOWUP_LABEL_LOG}" ] \
@@ -2080,7 +2080,7 @@ jq '.pending_subagents["42"] += {
 }' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.marker-pending"
 mv "${FOLLOWUP_STATE}.marker-pending" "${FOLLOWUP_STATE}"
 write_followup_auto_merge_marker
-PENDING_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/mr_result.json"
+PENDING_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/execution-1/mr_result.json"
 jq '.verified=false
   | .outcome="unknown"
   | .observed_state="unknown"
@@ -2111,7 +2111,7 @@ cmp -s "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-marker-pending.json" \
 
 # A wrapper may be killed after GitLab merged a non-default-target MR but before
 # worker_result.json was written. Such a merge need not close the Issue, so the
-# due timeout path must recover the private current-attempt marker, independently
+# due timeout path must recover the private current-execution marker, independently
 # verify the exact MR, add finish, and emit done instead of synthesizing timeout.
 cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 jq '.pending_subagents["42"] += {
@@ -2142,7 +2142,7 @@ jq -e '
   and .terminal_status == "done"
   and .merge_request_url == "https://gitlab.example/group/repo/-/merge_requests/9"
 ' <<<"${marker_timeout_out}" >/dev/null \
-  || fail "timeout reconcile did not recover a merged current-attempt marker"
+  || fail "timeout reconcile did not recover a merged current-execution marker"
 [ "$(cat "${FOLLOWUP_LABEL_LOG}")" = 'add:finish' ] \
   || fail "marker recovery did not perform one atomic finish transition"
 jq -e '
@@ -2157,7 +2157,7 @@ if [ -d "${FOLLOWUP_REPO}/.req_executor/issues/issue-42/driven_handoffs" ]; then
 fi
 
 # A platform-generated failed/killed callback can race after the fixed wrapper
-# has already persisted the exact current-attempt MR marker. Even without a
+# has already persisted the exact current-execution MR marker. Even without a
 # prior finish-label failure flag, the callback must enter the same independent
 # MR verification path and converge the merged result instead of downgrading it.
 cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
@@ -2170,13 +2170,13 @@ mv "${FOLLOWUP_STATE}.post-merge-kill" "${FOLLOWUP_STATE}"
 : >"${FOLLOWUP_LABEL_LOG}"
 post_merge_killed_out="$(printf '%s\n' '{
   "iid":42,
-  "attempt_number":1,
+  "execution_id":1,
   "status":"failed",
   "block_reason":"platform killed outer task before final compact reply"
 }' | \
   PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
-  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 EXECUTION_ID=1 \
   CALLBACK_RUN_ID=run-42 \
   CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
@@ -2236,10 +2236,10 @@ jq -e '
   || fail "finish-label failure did not stay pending and retryable"
 jq -e '
   .pending_subagents["42"].finish_label_retry == true
-  and .pending_subagents["42"].finish_label_retry_attempt == 1
+  and .pending_subagents["42"].finish_label_retry_execution_id == 1
   and ((.completed_iids // []) | index(42) == null)
 ' "${FOLLOWUP_STATE}" >/dev/null \
-  || fail "finish-label failure omitted its current-attempt durable fence"
+  || fail "finish-label failure omitted its current-execution durable fence"
 [ ! -s "${FOLLOWUP_IMPORT_LOG}" ] \
   || fail "finish-label failure emitted a terminal scheduler handoff"
 [ "$(cat "${FOLLOWUP_LABEL_LOG}")" = 'add:finish' ] \
@@ -2248,13 +2248,13 @@ jq -e '
 : >"${FOLLOWUP_IMPORT_LOG}"
 finish_retry_killed_out="$(printf '%s\n' '{
   "iid":42,
-  "attempt_number":1,
+  "execution_id":1,
   "status":"failed",
   "block_reason":"native child killed after marker recovery"
 }' | \
   PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
-  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 EXECUTION_ID=1 \
   CALLBACK_RUN_ID=run-42 \
   CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
@@ -2268,7 +2268,7 @@ jq -e '
   and .terminal_status == "done"
   and .merge_request_url == "https://gitlab.example/group/repo/-/merge_requests/9"
 ' <<<"${finish_retry_killed_out}" >/dev/null \
-  || fail "current-attempt finish retry was downgraded by a killed callback"
+  || fail "current-execution finish retry was downgraded by a killed callback"
 [ "$(cat "${FOLLOWUP_LABEL_LOG}")" = $'add:finish\nadd:finish' ] \
   || fail "finish retry did not perform exactly two atomic finish attempts"
 jq -e '
@@ -2289,22 +2289,22 @@ jq '.pending_subagents["42"] += {
   auto_merge:true,
   merge_target_branch:"release",
   finish_label_retry:true,
-  finish_label_retry_attempt:99
+  finish_label_retry_execution_id:99
 }' "${FOLLOWUP_STATE}" >"${FOLLOWUP_STATE}.stale-finish-retry"
 mv "${FOLLOWUP_STATE}.stale-finish-retry" "${FOLLOWUP_STATE}"
-STALE_FENCE_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/mr_result.json"
+STALE_FENCE_MARKER="${FOLLOWUP_REPO}/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/execution-1/mr_result.json"
 mv "${STALE_FENCE_MARKER}" "${STALE_FENCE_MARKER}.held-for-stale-fence-test"
 : >"${FOLLOWUP_IMPORT_LOG}"
 : >"${FOLLOWUP_LABEL_LOG}"
 stale_finish_retry_out="$(printf '%s\n' '{
   "iid":42,
-  "attempt_number":1,
+  "execution_id":1,
   "status":"failed",
   "block_reason":"current native failure"
 }' | \
   PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
-  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 EXECUTION_ID=1 \
   CALLBACK_RUN_ID=run-42 \
   CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \
@@ -2339,13 +2339,13 @@ cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 : >"${FOLLOWUP_LABEL_LOG}"
 late_done_out="$(printf '%s\n' '{
   "iid":42,
-  "attempt_number":1,
+  "execution_id":1,
   "status":"done",
   "merge_request_url":"https://gitlab.example/group/repo/-/merge_requests/8"
 }' | \
   PROJECT=repo PROJECT_FULL=group/repo GROUP=group GITLAB_TOKEN=fake-token \
   GITLAB_HOST=gitlab.example GITLAB_API_PROTOCOL=https \
-  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 ATTEMPT_NUMBER=1 \
+  REPO_PARENT_PATH="${FOLLOWUP_PARENT}" IID=42 EXECUTION_ID=1 \
   CALLBACK_RUN_ID=run-42 \
   CALLBACK_CHILD_SESSION_KEY='agent:req_executor:subagent:42' \
   RECONCILE_LIVE_FINISH=true \
@@ -2373,7 +2373,7 @@ cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 : >"${FOLLOWUP_IMPORT_LOG}"
 durable_result_followup_out="$(printf '%s\n' '{
   "iid":42,
-  "attempt_number":1,
+  "execution_id":1,
   "status":"done",
   "mode_actual":"fresh",
   "work_branch":"issue/42",
@@ -2429,7 +2429,7 @@ cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 FOLLOWUP_OUTPUT="$(
   printf '%s\n' '{
     "iid":42,
-    "attempt_number":1,
+    "execution_id":1,
     "status":"done",
     "merge_request_url":"https://gitlab.example/group/repo/-/merge_requests/9"
   }' | \
@@ -2441,7 +2441,7 @@ FOLLOWUP_OUTPUT="$(
   GITLAB_API_PROTOCOL=https \
   REPO_PARENT_PATH="${FOLLOWUP_PARENT}" \
   IID=42 \
-  ATTEMPT_NUMBER=1 \
+  EXECUTION_ID=1 \
   CALLBACK_RUN_ID=run-42 \
   CALLBACK_CHILD_SESSION_KEY=agent:req_executor:subagent:42 \
   DRIVEN_HANDOFF_IMPORTER="${FAKE_IMPORTER}" \

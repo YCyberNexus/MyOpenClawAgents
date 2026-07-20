@@ -30,7 +30,7 @@ esac
 EOF
 chmod +x "${FAKE_BIN}/glab"
 
-LOG_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-7/.req_executor/issue-7/log"
+LOG_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-7/.req_executor/issue-7/log/execution-1"
 mkdir -p "${LOG_DIR}"
 printf 'prompt body\n' >"${LOG_DIR}/prompt.txt"
 printf 'claude result\n' >"${LOG_DIR}/claude_result.txt"
@@ -43,7 +43,7 @@ GLAB_CALLS="${GLAB_CALLS}" \
 PATH="${FAKE_BIN}:${PATH}" \
 REPO_PATH="${REPO_PATH}" \
 ISSUE_IID=7 \
-ATTEMPT_NUMBER=1 \
+EXECUTION_ID=1 \
 bash "${UPLOAD_SCRIPT}" >/dev/null
 
 api_calls=0

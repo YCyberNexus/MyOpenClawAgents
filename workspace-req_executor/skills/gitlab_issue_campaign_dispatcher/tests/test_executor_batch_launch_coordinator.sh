@@ -63,13 +63,13 @@ if [ "${PROJECT_FAIL_ONCE:-0}" = 1 ] \
 fi
 printf 'project:%s:%s\n' "${STATUS}" "${JOB_ID_FOR_TEST:-unknown}" >>"${CALL_LOG}"
 if [ "${STATUS}" = spawned ]; then
-  jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" '{
-    status:"spawned",iid:$iid,attempt_number:$attempt,
+  jq -cn --argjson iid "${IID}" --argjson attempt "${EXECUTION_ID}" '{
+    status:"spawned",iid:$iid,execution_id:$attempt,
     remaining_pending_count:1,chat_summary:"recorded"
   }'
 else
-  jq -cn --argjson iid "${IID}" --argjson attempt "${ATTEMPT_NUMBER}" '{
-    status:"launch_failed_recorded",iid:$iid,attempt_number:$attempt,
+  jq -cn --argjson iid "${IID}" --argjson attempt "${EXECUTION_ID}" '{
+    status:"launch_failed_recorded",iid:$iid,execution_id:$attempt,
     final_status:"blocked",
     cleanup:{action:"skip",target:"",reason:"no_child_session_key"},
     remaining_pending_count:0,chat_summary:"recorded"
@@ -138,10 +138,10 @@ cat >"${FAKE_BIN}/malformed-project-record.sh" <<'EOF'
 set -euo pipefail
 jq -cn \
   --argjson iid "${IID}" \
-  --argjson attempt "${ATTEMPT_NUMBER}" '{
+  --argjson attempt "${EXECUTION_ID}" '{
   status:"launch_failed_recorded",
   iid:$iid,
-  attempt_number:$attempt,
+  execution_id:$attempt,
   final_status:"unknown",
   cleanup:{},
   remaining_pending_count:0,
@@ -206,8 +206,31 @@ write_emitted_action() {
     --arg token "${token}" \
     --argjson attempt "${attempt}" '{
     version:1,job_id:$job_id,project:"group/repo",iid:42,
-    batch_id:"A",snapshot_index:0,attempt_number:$attempt,
+    batch_id:"A",snapshot_index:0,execution_id:$attempt,
     child_label:"#42-att-001",payload_path:"/private/payload",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:42,
+    claim_generation:$generation,claim_token:$token,
+    stage:"action_emitted",outcome:null,ack:null,
+    created_at:1,updated_at:1
+  }' >"${action_file}"
+  chmod 600 "${action_file}"
+}
+
+write_legacy_emitted_action() {
+  local job_id="$1" generation="$2" token="$3" legacy_number="$4"
+  local digest action_file
+  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  mkdir -p "${SCHEDULER_ROOT}/launch_actions"
+  action_file="${SCHEDULER_ROOT}/launch_actions/${digest}.json"
+  jq -cnS \
+    --arg job_id "${job_id}" \
+    --argjson generation "${generation}" \
+    --arg token "${token}" \
+    --argjson legacy_number "${legacy_number}" '{
+    version:1,job_id:$job_id,project:"group/repo",iid:42,
+    batch_id:"A",snapshot_index:0,attempt_number:$legacy_number,
+    child_label:"#42-att-legacy",payload_path:"/private/payload",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42,
     claim_generation:$generation,claim_token:$token,
@@ -233,7 +256,7 @@ spawn_input() {
     claim_generation:$generation,
     project:"group/repo",
     iid:42,
-    attempt_number:$attempt,
+    execution_id:$attempt,
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42,
     status:"spawned",
@@ -252,7 +275,7 @@ launch_failed_input() {
     claim_generation:$generation,
     project:"group/repo",
     iid:42,
-    attempt_number:$attempt,
+    execution_id:$attempt,
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
     expected_task_bytes:42,
     status:"launch_failed",
@@ -354,7 +377,7 @@ write_project_pending() {
     blocked_retry_limit:3,
     pending_subagents:{
       "42":{
-        attempt_number:$attempt,
+        execution_id:$attempt,
         job_id:$job_id,
         batch_id:"A",
         snapshot_index:0,
@@ -387,7 +410,7 @@ run_project_record_direct() {
   PATH="${FAKE_BIN}:${PATH}" GLAB_BIN="${FAKE_BIN}/glab" \
   PROJECT=repo GROUP=group GITLAB_TOKEN=fixture-token \
   REPO_PARENT_PATH="${TEST_ROOT}/repos/group" \
-  IID=42 ATTEMPT_NUMBER="${attempt}" STATUS="${status}" \
+  IID=42 EXECUTION_ID="${attempt}" STATUS="${status}" \
   DRIVEN_JOB_ID="${job_id}" \
   DRIVEN_CLAIM_GENERATION="${generation}" \
   DRIVEN_CLAIM_TOKEN="${token}" \
@@ -444,6 +467,34 @@ run_scheduler_launch_failed_direct() {
   CLAIM_GENERATION="${generation}" CLAIM_TOKEN="${token}" \
     bash "${SCHEDULER_RECORD_SCRIPT}"
 }
+
+# A hot action written by the old schema is an explicit rolling-upgrade gate.
+# The global tick must keep the file byte-stable and return a bounded envelope
+# instead of aborting all scheduler recovery as corrupt state.
+SCHEDULER_ROOT="${TEST_ROOT}/scheduler-legacy-schema"
+mkdir -p "${SCHEDULER_ROOT}"
+write_scheduler_job 'A:legacy-schema' 1 'private-legacy-claim'
+write_legacy_emitted_action 'A:legacy-schema' 1 'private-legacy-claim' 7
+legacy_action_file="$(find "${SCHEDULER_ROOT}/launch_actions" -maxdepth 1 \
+  -type f -name '*.json' -print -quit)"
+cp "${legacy_action_file}" "${TEST_ROOT}/legacy-action.before.json"
+legacy_gate_output="$(run_recovery_tick)" \
+  || fail "legacy execution-schema gate crashed the global tick"
+jq -e '
+  .status == "tick_failed"
+  and .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "launch_coordinator"
+    and .status == "legacy_execution_schema"
+    and .action == "drain_required"
+  )] | length) == 1
+' <<<"${legacy_gate_output}" >/dev/null \
+  || fail "legacy execution schema was not isolated behind a drain gate"
+cmp -s "${legacy_action_file}" "${TEST_ROOT}/legacy-action.before.json" \
+  || fail "new tick rewrote the old coordinator identity"
+
+SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
+mkdir -p "${SCHEDULER_ROOT}"
 
 # Crash after ack persistence: no project/scheduler record happened. A later
 # tick alone must retain a temporary project failure, then resume project and

@@ -6,7 +6,7 @@
 # Required env vars:
 #   WORKTREE_DIR             repo root cwd for git commands
 #   ISSUE_IID                from env_paths.sh
-#   ATTEMPT_NUMBER_PADDED    e.g. "001"
+#   EXECUTION_ID            opaque execution identity
 #   LOCAL_ISSUE_BRANCH       "issue/<iid>"
 #   WORK_BRANCH              `issue/<iid>` or shared `issue/<head>+<tail>`
 #   EXPECTED_WORK_BRANCH_SHA  optional full old remote tip used only as the
@@ -29,7 +29,7 @@ source "${SCRIPT_DIR}/env_paths.sh"
 source "${SCRIPT_DIR}/git_network_guard.sh"
 GIT_NETWORK_GUARD_CONTEXT=commit_and_push
 
-: "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" \
+: "${WORKTREE_DIR:?}" "${ISSUE_IID:?}" "${EXECUTION_ID:?}" \
   "${LOCAL_ISSUE_BRANCH:?}" "${WORK_BRANCH:?}" "${ISSUE_TITLE:?}"
 EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
 EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
@@ -56,7 +56,7 @@ cd "${WORKTREE_DIR}"
 git_network_guard_assert_repo "${WORKTREE_DIR}"
 
 git -c core.hooksPath=/dev/null -c commit.gpgSign=false commit -m \
-  "fix(issue-${ISSUE_IID}): ${ISSUE_TITLE} (attempt ${ATTEMPT_NUMBER_PADDED})"
+  "fix(issue-${ISSUE_IID}): ${ISSUE_TITLE}"
 NEW_COMMIT_SHA="$(GIT_NO_REPLACE_OBJECTS=1 \
   git rev-parse --verify 'HEAD^{commit}')"
 if ! [[ "${NEW_COMMIT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then

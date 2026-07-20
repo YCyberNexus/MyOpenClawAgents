@@ -17,7 +17,7 @@
 #                        for free via blocked_iids).
 #
 # Required env:
-#   PROJECT, GROUP, GITLAB_TOKEN, IID, ATTEMPT_NUMBER, STATUS,
+#   PROJECT, GROUP, GITLAB_TOKEN, IID, EXECUTION_ID, STATUS,
 #   EXPECTED_TASK_SHA256, EXPECTED_TASK_BYTES
 #   When STATUS=spawned:        RUN_ID, CHILD_SESSION_KEY
 #   When STATUS=launch_failed:  LAUNCH_ATTEMPTS (default 3), LAUNCH_ERROR
@@ -27,7 +27,7 @@
 #   DRIVEN_JOB_ID, DRIVEN_CLAIM_GENERATION, DRIVEN_CLAIM_TOKEN
 #
 # Stdout: one-line JSON envelope describing the recorded outcome:
-#   {"status":"spawned|launch_failed_recorded", "iid":N, "attempt_number":N,
+#   {"status":"spawned|launch_failed_recorded", "iid":N, "execution_id":N,
 #    "remaining_pending_count":N, "cleanup":{...} (only for launch_failed),
 #    "chat_summary":"..."}
 #
@@ -48,13 +48,13 @@ set -euo pipefail
 : "${GROUP:?dispatch_record_spawn.sh: GROUP must be set}"
 : "${GITLAB_TOKEN:?dispatch_record_spawn.sh: GITLAB_TOKEN must be set}"
 : "${IID:?dispatch_record_spawn.sh: IID must be set}"
-: "${ATTEMPT_NUMBER:?dispatch_record_spawn.sh: ATTEMPT_NUMBER must be set}"
+: "${EXECUTION_ID:?dispatch_record_spawn.sh: EXECUTION_ID must be set}"
 : "${STATUS:?dispatch_record_spawn.sh: STATUS must be set (spawned|launch_failed)}"
 : "${EXPECTED_TASK_SHA256:?dispatch_record_spawn.sh: EXPECTED_TASK_SHA256 must be set}"
 : "${EXPECTED_TASK_BYTES:?dispatch_record_spawn.sh: EXPECTED_TASK_BYTES must be set}"
 
 case "${IID}" in *[!0-9]*|"") echo "dispatch_record_spawn.sh: IID must be a positive integer" >&2; exit 2 ;; esac
-case "${ATTEMPT_NUMBER}" in *[!0-9]*|"") echo "dispatch_record_spawn.sh: ATTEMPT_NUMBER must be a positive integer" >&2; exit 2 ;; esac
+case "${EXECUTION_ID}" in *[!0-9]*|"") echo "dispatch_record_spawn.sh: EXECUTION_ID must be a positive integer" >&2; exit 2 ;; esac
 [[ "${EXPECTED_TASK_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
   || { echo "dispatch_record_spawn.sh: EXPECTED_TASK_SHA256 must be 64 lowercase hex" >&2; exit 2; }
 case "${EXPECTED_TASK_BYTES}" in
@@ -171,7 +171,7 @@ if [ "${DRIVEN_MODE}" = true ]; then
         );
       if type == "object"
         and (keys | sort) == [
-          "ack","attempt_number","claim_generation","claim_token_sha256",
+          "ack","claim_generation","claim_token_sha256","execution_id",
           "expected_task_bytes","expected_task_sha256","iid","job_id",
           "outcome","recorded_at","result","version"
         ]
@@ -180,7 +180,7 @@ if [ "${DRIVEN_MODE}" = true ]; then
         and (.claim_generation | type == "number" and . == floor and . > 0)
         and (.claim_token_sha256 | type == "string" and test("^[0-9a-f]{64}$"))
         and (.iid | type == "number" and . == floor and . > 0)
-        and (.attempt_number | type == "number" and . == floor and . > 0)
+        and (.execution_id | type == "number" and . == floor and . > 0)
         and (.expected_task_sha256 | type == "string"
           and test("^[0-9a-f]{64}$"))
         and (.expected_task_bytes | type == "number"
@@ -193,7 +193,7 @@ if [ "${DRIVEN_MODE}" = true ]; then
             and (.ack.child_session_key | clean_string)
             and (.result | type == "object")
             and (.result | keys | sort) == [
-              "attempt_number","chat_summary","iid",
+              "chat_summary","execution_id","iid",
               "remaining_pending_count","status"
             ]
             and .result.status == "spawned")
@@ -203,7 +203,7 @@ if [ "${DRIVEN_MODE}" = true ]; then
             and (.ack.launch_error | clean_string)
             and (.result | type == "object")
             and (.result | keys | sort) == [
-              "attempt_number","chat_summary","cleanup","final_status","iid",
+              "chat_summary","cleanup","execution_id","final_status","iid",
               "remaining_pending_count","status"
             ]
             and .result.status == "launch_failed_recorded"
@@ -212,7 +212,7 @@ if [ "${DRIVEN_MODE}" = true ]; then
               | ($result.cleanup | valid_cleanup($result.final_status))))
         )
         and .result.iid == .iid
-        and .result.attempt_number == .attempt_number
+        and .result.execution_id == .execution_id
         and (.result.remaining_pending_count | type == "number"
           and . == floor and . >= 0)
         and (.result.chat_summary | clean_string)
@@ -228,13 +228,13 @@ if [ "${DRIVEN_MODE}" = true ]; then
         --arg job_id "${DRIVEN_JOB_ID_INPUT}" \
         --argjson generation "${DRIVEN_CLAIM_GENERATION_INPUT}" \
         --arg token "${DRIVEN_CLAIM_TOKEN_INPUT}" \
-        --argjson attempt "${ATTEMPT_NUMBER}" \
+        --argjson attempt "${EXECUTION_ID}" \
         --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
         --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" '
         .job_id == $job_id
         and .claim_generation == $generation
         and .claim_token == $token
-        and .attempt_number == $attempt
+        and .execution_id == $attempt
         and .expected_task_sha256 == $expected_task_sha256
         and .expected_task_bytes == $expected_task_bytes
       ' <<<"${PENDING}" >/dev/null; then
@@ -253,14 +253,14 @@ if [ "${DRIVEN_MODE}" = true ]; then
         --argjson generation "${DRIVEN_CLAIM_GENERATION_INPUT}" \
         --arg token_sha256 "${DRIVEN_CLAIM_TOKEN_SHA256}" \
         --argjson iid "${IID}" \
-        --argjson attempt "${ATTEMPT_NUMBER}" \
+        --argjson attempt "${EXECUTION_ID}" \
         --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
         --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" '
         .job_id == $job_id
         and .claim_generation == $generation
         and .claim_token_sha256 == $token_sha256
         and .iid == $iid
-        and .attempt_number == $attempt
+        and .execution_id == $attempt
         and .expected_task_sha256 == $expected_task_sha256
         and .expected_task_bytes == $expected_task_bytes
       ' <<<"${DRIVEN_RECEIPT}" >/dev/null; then
@@ -287,9 +287,9 @@ else
     echo "dispatch_record_spawn.sh: no pending entry for iid=${IID} — refusing to record" >&2
     exit 2
   fi
-  PENDING_ATTEMPT="$(printf '%s' "${PENDING}" | jq -r '.attempt_number')"
-  if [ "${PENDING_ATTEMPT}" != "${ATTEMPT_NUMBER}" ]; then
-    echo "dispatch_record_spawn.sh: attempt_number mismatch (pending=${PENDING_ATTEMPT} caller=${ATTEMPT_NUMBER})" >&2
+  PENDING_EXECUTION_ID="$(printf '%s' "${PENDING}" | jq -r '.execution_id')"
+  if [ "${PENDING_EXECUTION_ID}" != "${EXECUTION_ID}" ]; then
+    echo "dispatch_record_spawn.sh: execution_id mismatch (pending=${PENDING_EXECUTION_ID} caller=${EXECUTION_ID})" >&2
     exit 2
   fi
   if ! jq -e \
@@ -310,7 +310,7 @@ build_driven_receipt() {
     --argjson claim_generation "${DRIVEN_CLAIM_GENERATION_INPUT}" \
     --arg claim_token_sha256 "${DRIVEN_CLAIM_TOKEN_SHA256}" \
     --argjson iid "${IID}" \
-    --argjson attempt_number "${ATTEMPT_NUMBER}" \
+    --argjson execution_id "${EXECUTION_ID}" \
     --arg expected_task_sha256 "${EXPECTED_TASK_SHA256}" \
     --argjson expected_task_bytes "${EXPECTED_TASK_BYTES}" \
     --arg outcome "${STATUS}" \
@@ -322,7 +322,7 @@ build_driven_receipt() {
       claim_generation:$claim_generation,
       claim_token_sha256:$claim_token_sha256,
       iid:$iid,
-      attempt_number:$attempt_number,
+      execution_id:$execution_id,
       expected_task_sha256:$expected_task_sha256,
       expected_task_bytes:$expected_task_bytes,
       outcome:$outcome,
@@ -366,20 +366,20 @@ case "${STATUS}" in
     REMAINING="$(printf '%s' "${NEW_STATE}" | jq -r '.pending_subagents | keys | length')"
     RESULT_JSON="$(jq -cn \
       --argjson iid "${IID}" \
-      --argjson att "${ATTEMPT_NUMBER}" \
+      --argjson att "${EXECUTION_ID}" \
       --argjson remaining "${REMAINING}" \
-      --arg chat "spawned #${IID} att=${ATTEMPT_NUMBER}" '
-      {status:"spawned", iid:$iid, attempt_number:$att,
+      --arg chat "spawned executor for #${IID}" '
+      {status:"spawned", iid:$iid, execution_id:$att,
        remaining_pending_count:$remaining, chat_summary:$chat}')"
     NEW_STATE="$(install_driven_receipt "${NEW_STATE}" "${RESULT_JSON}" "${NOW}")"
     persist_state "${NEW_STATE}"
 
-    wrapper_log record_spawn "spawned iid=${IID} attempt=${ATTEMPT_NUMBER} run_id=${RUN_ID}"
+    wrapper_log record_spawn "spawned iid=${IID} execution_id=${EXECUTION_ID} run_id=${RUN_ID}"
     printf '%s\n' "${RESULT_JSON}"
     ;;
   launch_failed)
     BLOCK_REASON="sessions_spawn failed after ${LAUNCH_ATTEMPTS} attempts (2s backoff): ${LAUNCH_ERROR}"
-    REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${ATTEMPT_NUMBER}" "${BLOCK_REASON}")"
+    REPLY_JSON="$(phase6_synthesize_blocked "${IID}" "${EXECUTION_ID}" "${BLOCK_REASON}")"
     # Run Phase 6 with is_launch_synth=true so retry_count is NOT incremented.
     PHASE6_OUT="$(phase6_process "${STATE_JSON}" "${REPLY_JSON}" "true")"
     NEW_STATE="$(printf '%s' "${PHASE6_OUT}" | jq -c '.updated_state')"
@@ -390,18 +390,18 @@ case "${STATUS}" in
     NOW="$(utc_now)"
     RESULT_JSON="$(jq -cn \
       --argjson iid "${IID}" \
-      --argjson att "${ATTEMPT_NUMBER}" \
+      --argjson att "${EXECUTION_ID}" \
       --arg final_status "${FINAL_STATUS}" \
       --argjson cleanup "${CLEANUP}" \
       --argjson remaining "${REMAINING}" \
-      --arg chat "launch_failed #${IID} att=${ATTEMPT_NUMBER} attempts=${LAUNCH_ATTEMPTS} → blocked" '
-      {status:"launch_failed_recorded", iid:$iid, attempt_number:$att,
+      --arg chat "executor launch failed for #${IID} → blocked" '
+      {status:"launch_failed_recorded", iid:$iid, execution_id:$att,
        final_status:$final_status, cleanup:$cleanup,
        remaining_pending_count:$remaining, chat_summary:$chat}')"
     NEW_STATE="$(install_driven_receipt "${NEW_STATE}" "${RESULT_JSON}" "${NOW}")"
     persist_state "${NEW_STATE}"
 
-    wrapper_log record_spawn "launch_failed iid=${IID} attempt=${ATTEMPT_NUMBER} attempts=${LAUNCH_ATTEMPTS} err=${LAUNCH_ERROR}"
+    wrapper_log record_spawn "launch_failed iid=${IID} execution_id=${EXECUTION_ID} launch_tries=${LAUNCH_ATTEMPTS} err=${LAUNCH_ERROR}"
 
     printf '%s\n' "${RESULT_JSON}"
     ;;

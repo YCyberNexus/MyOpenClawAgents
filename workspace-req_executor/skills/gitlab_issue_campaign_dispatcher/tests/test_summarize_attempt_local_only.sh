@@ -34,8 +34,12 @@ export PROJECT_URI=group%2Frepo
 EOF
   chmod +x "${fake_scripts}/summarize_attempt.sh"
 
-  PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
-  ISSUE_IID=42 ATTEMPT_NUMBER_PADDED=001 ISSUE_MODE=fresh \
+  identity_env=(EXECUTION_ID=001)
+  if [ "${workspace}" != workspace-req_executor ]; then
+    identity_env=(ATTEMPT_NUMBER_PADDED=001)
+  fi
+  env "${identity_env[@]}" PATH="${FAKE_BIN}:${PATH}" GLAB_LOG="${GLAB_LOG}" \
+  ISSUE_IID=42 ISSUE_MODE=fresh \
   ATTEMPT_DIR="${issue_root}" ISSUE_ROOT="${issue_root}" \
   LOG_DIR="${log_dir}" SUMMARY_FILE="${summary_file}" \
   ATTEMPT_STATUS=done SUMMARY_POST_TO_ISSUE=true \

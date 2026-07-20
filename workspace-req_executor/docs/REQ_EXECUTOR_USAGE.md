@@ -233,6 +233,13 @@ callback `openclaw` 子进程继承 executor 当前环境，包括按既定优�
 - 本地 `REPO_PARENT_PATH`、`EXECUTOR_SCHEDULER_ROOT`、初始 `EXECUTOR_MAX_CONCURRENCY`、初始 `EXECUTOR_ACPX_TIMEOUT_SECONDS`、`EXECUTOR_RUNNING_LEASE_SECONDS`、`EXECUTOR_AGENT` 或 `DISPATCHER_CALLBACK_TARGET` 只能通过进程环境或 ignored `config/campaign_defaults.local.env` 覆盖；显式 scheduler 进程环境优先，并须在 intake、tick、import、delivery 使用同一组值。`/slot` 和 `/timeout-executor` 写入的共享运行时值优先于初始配置。tracked 配置继续保留蓝区 GitLab host/protocol、token 注入、callback 和 `/data` 默认，不写本机路径或测试 endpoint。
 - I1 schema 滚动升级必须先暂停新的执行请求，排空或停止旧 executor，部署并验证新版 executor 后，最后升级 dispatcher。旧 executor 的严格 I1 白名单不认识 `auto_merge` 与 `merge_target_branch`；新版 dispatcher 即使对普通请求也固定发送 `auto_merge=false`，所以任何新版 I1 都不得投递到旧 executor，自动合并请求也不得尝试降级执行。回滚时先停新入口与双方 tick，先回滚 dispatcher 或继续保留新版 executor；只有确认不会再发送新字段后才能回滚 executor。未完成自动合并 intent 保留在 durable state，等待兼容版本恢复。
 - 升级时先排空 req_dispatcher 的旧 FIFO。旧 active/queue 非空期间，新 batch 只保持 `waiting_for_legacy_drain`，不与旧 single active 重叠；清空后由 `RUN_EXECUTOR_BATCH_TICK` 推进新 scheduler。
+- 从顺序执行次数升级到随机 `execution_id` 时，也必须先用旧版本排空项目的
+  `pending_subagents`、`driven_handoff_intents` 和 executor scheduler 中的旧版
+  `launch_actions`。新版本不会根据旧次数推导身份：项目侧返回
+  `legacy_execution_identity_drain_required`；scheduler tick 返回
+  `legacy_execution_schema`/`drain_required` 并暂停新 spawn，同时保持旧 action
+  原字节不变。项目完全静默后，新版本才会在持有 `campaign.lock` 时执行一次
+  旧次数字段清理。
 - 认证回调上线前已经存在于 executor 私有 scheduler 根、且同时缺少 `executor_agent` 与 `callback_nonce` 的旧 request/outbox，会在读取时一次性显式标记为 `legacy_pre_upgrade`，并用 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 加 `worker_result_json=<严格八字段 I3>` 完成旧 mirror。dispatcher 仍接受旧 marker 以兼容已发出的在途消息。新 I1 始终强制 nonce、executor 与固定 target；触发输入不能请求或伪造 `legacy_pre_upgrade`。
 - 新旧锁目录滚动升级默认保留 86400 秒兼容窗口（起点持久化在 scheduler 根的 `lock_layout_v2.json`）。窗口内新进程同时获取旧、新两条 callback/launch 锁；窗口后才在双锁保护下把旧锁移出热目录。只有确认所有旧 executor 进程已停止，才可用 `DRIVEN_LEGACY_LOCK_COMPAT_SECONDS=0` 提前结束窗口。
 - 回滚时先停止新的 batch 入口和周期 tick。可先排空，也可保留 scheduler state、batch snapshot、handoff 与 callback outbox 等 durable 记录等待恢复；不得删除运行时 state/outbox，也不得用新 batch ID 替代未完成批次。
@@ -283,13 +290,14 @@ it is not visible in an individual `sessions_spawn` call.
 ${REPO_PATH}/.req_executor/
   _dispatcher/
   issues/issue-<iid>/
+    executions/execution-<execution_id>.json
   .worktrees/issue-<iid>/
     .req_executor/issue-<iid>/output/
-    .req_executor/issue-<iid>/log/
+    .req_executor/issue-<iid>/log/execution-<execution_id>/
 ```
 
 The outer subagent calls `run_executor_attempt.sh` exactly once. That fixed
-wrapper owns the full attempt and persists `${LOG_DIR}/worker_result.json`.
+wrapper owns the full execution and persists `${LOG_DIR}/worker_result.json`.
 Inside it, `run_acpx_attempt.sh` runs from `${WORKTREE_DIR}` and invokes:
 
 ```bash
@@ -299,6 +307,6 @@ acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"
 The acpx invocation logic is intentionally centralized in that script. It
 also writes `${LOG_DIR}/acpx_terminal.json` before returning to the wrapper.
 
-`${WORKTREE_DIR}`、`${OUTPUT_DIR}`、`${LOG_DIR}` 与本地 `issue/<iid>` 分支均按
-Issue 固定，不按 attempt 分目录或分支。`attempt_number` 继续写入 marker、结果和状态文件，
-用于拒绝过期回调；后续运行会在同一 Issue 日志目录中覆盖当前结果证据。
+`${WORKTREE_DIR}`、`${OUTPUT_DIR}` 与本地 `issue/<iid>` 分支均按 Issue 固定。
+每次启动生成随机、不递增的 `execution_id`，并写入独立的状态文件与日志目录，用于拒绝
+过期回调；它不表达该 Issue 已运行多少次，后续执行也不会覆盖前一次的运行证据。

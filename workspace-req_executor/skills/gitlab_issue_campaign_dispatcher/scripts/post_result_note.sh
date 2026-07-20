@@ -20,7 +20,7 @@
 # 可选：
 #   MR_URL                               成功时的 MR URL
 #   BLOCK_REASON                         失败/超时原因
-#   ATTEMPT_NUMBER                       用于幂等（同一 attempt 不重复发）
+#   EXECUTION_ID                        用于同一执行结果的幂等去重
 set -euo pipefail
 
 # 与其它自包含 glab 脚本一致：source env_paths.sh 即完成 glab 鉴权并导出 PROJECT_URI。
@@ -38,7 +38,7 @@ esac
 MR_URL="${MR_URL:-}"
 WIKI_URL="${WIKI_URL:-}"
 BLOCK_REASON="${BLOCK_REASON:-}"
-ATTEMPT_NUMBER="${ATTEMPT_NUMBER:-}"
+EXECUTION_ID="${EXECUTION_ID:-}"
 
 # 1) G1b — 读 issue notes，取最后一条 req_origin 标记里的 JSON 负载。
 NOTES_JSON="$(glab api --paginate "projects/${PROJECT_URI}/issues/${IID}/notes?sort=asc&order_by=created_at")"
@@ -56,20 +56,20 @@ if [ "${ORIGIN_NODE}" = "null" ] || [ -z "${ORIGIN_NODE}" ]; then
   exit 0
 fi
 
-# 幂等：同一 attempt 已发过 req_result 就跳过（跨 attempt 不去重——续测成功该再报一次）。
-if [ -n "${ATTEMPT_NUMBER}" ]; then
-  if printf '%s' "${NOTES_JSON}" | jq -e --arg a "${ATTEMPT_NUMBER}" '
+# 幂等：同一 execution_id 已发过 req_result 就跳过；后续独立执行仍可再次回报。
+if [ -n "${EXECUTION_ID}" ]; then
+  if printf '%s' "${NOTES_JSON}" | jq -e --arg a "${EXECUTION_ID}" '
       any(.[]; (.system == false)
-        and (.body | test("req_result v1 [^>]*\"attempt\":" + $a + "[,}]")))' >/dev/null 2>&1; then
-    echo "post_result_note: req_result for #${IID} attempt=${ATTEMPT_NUMBER} already present; skip" >&2
+        and (.body | test("req_result v2 [^>]*\"execution_id\":" + $a + "[,}]")))' >/dev/null 2>&1; then
+    echo "post_result_note: req_result for #${IID} execution_id=${EXECUTION_ID} already present; skip" >&2
     exit 0
   fi
 fi
 
 # 2) 拼 req_result note：第一行隐藏标记（114 解析）+ 一行人读摘要。
 TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-ATTEMPT_JSON="null"
-case "${ATTEMPT_NUMBER}" in ''|*[!0-9]*) ATTEMPT_JSON="null" ;; *) ATTEMPT_JSON="${ATTEMPT_NUMBER}" ;; esac
+EXECUTION_ID_JSON="null"
+case "${EXECUTION_ID}" in ''|*[!0-9]*) EXECUTION_ID_JSON="null" ;; *) EXECUTION_ID_JSON="${EXECUTION_ID}" ;; esac
 
 RESULT_PAYLOAD="$(jq -nc \
   --argjson iid "${IID}" \
@@ -77,10 +77,10 @@ RESULT_PAYLOAD="$(jq -nc \
   --arg mr_url "${MR_URL}" \
   --arg wiki_url "${WIKI_URL}" \
   --arg reason "${BLOCK_REASON}" \
-  --argjson attempt "${ATTEMPT_JSON}" \
+  --argjson execution_id "${EXECUTION_ID_JSON}" \
   --arg ts "${TS}" \
   --argjson origin "${ORIGIN_NODE}" '
-  {iid:$iid, status:$status, attempt:$attempt,
+  {iid:$iid, status:$status, execution_id:$execution_id,
    mr_url:($mr_url|select(.!="")//null),
    wiki_url:($wiki_url|select(.!="")//null),
    reason:($reason|select(.!="")//null),
@@ -89,7 +89,7 @@ RESULT_PAYLOAD="$(jq -nc \
 BODY_FILE="$(mktemp)"
 trap 'rm -f "${BODY_FILE}"' EXIT
 {
-  printf '<!-- req_result v1 %s -->\n' "${RESULT_PAYLOAD}"
+  printf '<!-- req_result v2 %s -->\n' "${RESULT_PAYLOAD}"
   case "${FINAL_STATUS}" in
     done)
       printf '✅ 自动测试完成：issue #%s。' "${IID}"
@@ -109,4 +109,4 @@ trap 'rm -f "${BODY_FILE}"' EXIT
 
 # 3) G9 — 发 note（-F body=@file 避免多行/JSON 的引号问题）。
 glab api --method POST "projects/${PROJECT_URI}/issues/${IID}/notes" -F "body=@${BODY_FILE}" >/dev/null
-echo "post_result_note: req_result posted iid=${IID} status=${FINAL_STATUS} attempt=${ATTEMPT_NUMBER:-?}" >&2
+echo "post_result_note: req_result posted iid=${IID} status=${FINAL_STATUS} execution_id=${EXECUTION_ID:-?}" >&2
