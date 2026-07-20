@@ -1,6 +1,6 @@
 # req_executor Runtime Contract
 
-`req_executor` executes GitLab issues from the requirement pipeline. It does not assume a project-specific test framework or material directory. The issue title, description, prior attempt summaries, and reviewer comments are rendered into `${LOG_DIR}/prompt.txt`.
+`req_executor` executes GitLab issues from the requirement pipeline. It does not assume a project-specific test framework or material directory. The issue title, description, and all non-system issue comments are rendered into `${LOG_DIR}/prompt.txt` in every mode; continue mode also separates historical agent summaries.
 
 `/slot <正整数>` 只调用 `set_executor_slots.sh`。该 wrapper 在 scheduler lock 下持久化所有
 batch session 共享的物理并发上限；不得由 LLM 修改配置文件或 scheduler JSON。

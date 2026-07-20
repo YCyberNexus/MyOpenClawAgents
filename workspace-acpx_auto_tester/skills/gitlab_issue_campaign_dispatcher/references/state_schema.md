@@ -282,7 +282,7 @@ Initialized by `scripts/allocate_attempt.sh` (which the dispatcher runs before e
 
 Path: `${ATTEMPT_STATE_FILE}` = `${ATTEMPT_DIR}/attempt_state.json`
 
-Each attempt overwrites this file with the current attempt's details. Older local attempt-state files are not preserved on disk; durable history is kept in the monotonically increasing attempt counters, local attempt logs, and GitLab attempt-summary notes for successful `done` attempts.
+Each attempt overwrites this file with the current attempt's details. Older local attempt-state files are not preserved on disk; durable history is kept in the monotonically increasing attempt counters, local attempt logs, branches, and merge requests. New attempt summaries are local-only; historical GitLab attempt-summary notes from older deployments may still exist.
 
 ```json
 {
@@ -303,7 +303,7 @@ Each attempt overwrites this file with the current attempt's details. Older loca
   "status": "done",
   "block_reason": null,
   "summary_file": "/data/<project>/<RESULT_BASENAME>/issues/issue-14/summary.md",
-  "summary_posted_to_issue": true
+  "summary_posted_to_issue": false
 }
 ```
 
@@ -314,13 +314,13 @@ Each attempt overwrites this file with the current attempt's details. Older loca
 | `mode_actual`             | what `prepare_attempt.sh` ended up running (continue can downgrade to fresh)              |
 | `mode_downgraded_from`    | non-null only when `mode_actual=fresh` but `mode_requested=continue` and the remote branch was missing |
 | `no_reviewer_comments`    | continue mode only — true if `build_prompt.sh` reported `CONTINUE_MODE_NO_REVIEWER_COMMENTS=true` |
-| `prior_attempt_count`     | continue mode only — number of past `acpx_auto_tester:attempt-summary` notes (plus legacy pre-rename attempt-summary notes) the prompt included |
+| `prior_attempt_count`     | continue mode only — number of historical `acpx_auto_tester:attempt-summary` notes (plus legacy pre-rename attempt-summary notes) the prompt included |
 | `local_branch`            | per-attempt local branch (`${LOCAL_ATTEMPT_BRANCH}`)                                      |
 | `log_dir`                 | `${LOG_DIR}` for this attempt                                                             |
 | `wiki_artifacts_file`     | `${LOG_DIR}/wiki_artifacts.md` once `upload_attempt_artifacts.sh` has posted Wiki links to GitLab |
 | `attempt_artifacts_posted_to_wiki` | true after `prompt.txt`, `claude_result.txt`, and optional `report.html` were published to the project Wiki and linked from the issue |
 | `summary_file`            | `${SUMMARY_FILE}` once `summarize_attempt.sh` has run                                     |
-| `summary_posted_to_issue` | true after the summary was successfully posted as a GitLab issue note                     |
+| `summary_posted_to_issue` | compatibility field; always false because summaries remain local                           |
 
 The dispatcher's Phase 4 prep initializes `attempt_started_at`, `mode_*`, `no_reviewer_comments`, `prior_attempt_count`, `local_branch`, `log_dir`, `status="in_progress"` before spawn. The dispatcher's Phase 6 follow-up writes the terminal `status` / `attempt_finished_at` / `commit_sha` / `wiki_artifacts_file` / `attempt_artifacts_posted_to_wiki` / `summary_posted_to_issue` / `block_reason` from the subagent's compact JSON reply. The subagent does NOT write this file.
 
@@ -346,7 +346,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
   "wiki_url": "https://gitlab.example.com/group/project/-/wikis/issue-14/attempt-003-prompt",
   "labels_added": ["done", "pr"],
   "labels_removed": ["doing"],
-  "summary_posted": true,
+  "summary_posted": false,
   "block_reason": "",
   "log_dir": "/data/<project>/<RESULT_BASENAME>/.worktrees/issue-14/<RESULT_BASENAME>/issue-14/log/attempt-003"
 }
@@ -368,7 +368,7 @@ The subagent returns a single compact JSON line on the LAST line of its turn. Th
 | `wiki_url`           | string          | First Wiki page URL printed by `upload_attempt_artifacts.sh`. Empty if Step 5 did not run. |
 | `labels_added`       | array of string | The labels the subagent ADDED in Steps 6 / 7b or fail-flow label sync (e.g. `["done","pr"]` for done, `["blocked"]` for a blocked failure before done). |
 | `labels_removed`     | array of string | The labels the subagent REMOVED in Step 6 or fail-flow label sync (e.g. `["doing"]`). |
-| `summary_posted`     | bool            | `true` iff `summarize_attempt.sh` posted a GitLab issue note. Failure paths set `SUMMARY_POST_TO_ISSUE=false`, so this is normally `false` even when `${SUMMARY_FILE}` was written locally. |
+| `summary_posted`     | bool            | compatibility field; always `false` because `summarize_attempt.sh` writes only `${SUMMARY_FILE}` locally. |
 | `block_reason`       | string          | Required non-empty when `status` is `blocked`, `failed`, or `timeout`; empty `""` otherwise. For `timeout`, the value typically reads `acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap`. |
 | `log_dir`            | string          | Absolute path; mirrors `${LOG_DIR}`. Helps the dispatcher locate logs without re-deriving paths. |
 

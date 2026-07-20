@@ -188,7 +188,7 @@ cat >"${FAKE_SCRIPTS}/summarize_attempt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'summarize:%s\n' "${SUMMARY_POST_TO_ISSUE}" >>"${ORDER_LOG}"
-printf '%s\n' 'SUMMARY_POSTED=true' >&2
+printf '%s\n' 'SUMMARY_POSTED=false' >&2
 printf '%s\n' "${ISSUE_ROOT}/summary.md"
 EOF
 chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_SCRIPTS}"/*.sh
@@ -242,7 +242,7 @@ label:remove:doing
 label:add:done
 mr:main:false:0123456789abcdef0123456789abcdef01234567
 label:add:pr
-summarize:true'
+summarize:false'
 [ "$(cat "${ORDER_LOG}")" = "${expected_order}" ] \
   || fail "attempt steps did not stay in one deterministic sequence: $(cat "${ORDER_LOG}")"
 
@@ -258,7 +258,7 @@ jq -e '
   and .mr_action == "created"
   and .labels_added == ["pr"]
   and .labels_removed == ["doing","done"]
-  and .summary_posted == true
+  and .summary_posted == false
   and .block_reason == ""
 ' "${result_file}" >/dev/null \
   || fail "durable worker result does not match the successful attempt"
@@ -303,7 +303,7 @@ label:remove:doing
 label:add:done
 mr:release:true:0123456789abcdef0123456789abcdef01234567
 label:add:finish
-summarize:true'
+summarize:false'
 [ "$(cat "${ORDER_LOG}")" = "${expected_merged_order}" ] \
   || fail "verified merged order/target is wrong: $(cat "${ORDER_LOG}")"
 
@@ -408,8 +408,8 @@ jq -e '
 if grep -Fq 'label:add:finish' "${ORDER_LOG}"; then
   fail "ordinary rapidly-merged MR received finish"
 fi
-grep -Fxq 'summarize:true' "${ORDER_LOG}" \
-  || fail "ordinary successful MR path unexpectedly suppressed its summary"
+grep -Fxq 'summarize:false' "${ORDER_LOG}" \
+  || fail "ordinary successful MR path attempted to post its summary"
 printf '%s\n' "${ordinary_merged_output}" | tail -n 1 | jq -e '.status == "done"' >/dev/null \
   || fail "ordinary rapidly-merged wrapper result is invalid"
 

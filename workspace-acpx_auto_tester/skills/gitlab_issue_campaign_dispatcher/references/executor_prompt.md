@@ -296,7 +296,7 @@ Step 8 — ADD `pr` label
 
 Step 9 — SUMMARIZE
   ATTEMPT_STATUS=<status from above> \
-    SUMMARY_POST_TO_ISSUE=<true|false> \
+    SUMMARY_POST_TO_ISSUE=false \
     COMMIT_SHA=<commit_sha or empty> MERGE_REQUEST_URL=<merge_request_url or empty> \
     BLOCK_REASON=<set only when ATTEMPT_STATUS in {blocked,failed,timeout}> \
     PROJECT={PROJECT} GROUP={GROUP} GITLAB_TOKEN={GITLAB_TOKEN} \
@@ -305,10 +305,9 @@ Step 9 — SUMMARIZE
     REPO_PATH={REPO_PATH} \
     RESULT_BASENAME={RESULT_BASENAME} DATA_BASENAME={DATA_BASENAME} \
     bash {SCRIPTS_DIR}/summarize_attempt.sh
-  CAPTURE: summary_posted (true only when the script reports SUMMARY_POSTED=true; false for local-only failure summaries or script failure).
+  CAPTURE: summary_posted=false. The script always writes the local summary and never posts an issue note.
   Run this on EVERY terminal path — done, no_changes, blocked, failed, timeout.
-  Use SUMMARY_POST_TO_ISSUE=true only for ATTEMPT_STATUS=done; use false for blocked, failed, no_changes, and timeout.
-  Failure paths MUST keep evidence local only: do NOT publish failed/blocked evidence to GitLab Wiki, and set SUMMARY_POST_TO_ISSUE=false so the summary remains at {ISSUE_ROOT}/summary.md without an issue note. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
+  Every path keeps the summary at {ISSUE_ROOT}/summary.md without creating an issue note. Failure paths also MUST NOT publish failed/blocked evidence to GitLab Wiki. Blocked attempts may still carry a pushed commit_sha when the BLOCKED_PUSH flow successfully force-pushed partial work.
 
 Step 10 — REPLY
   Output ONE compact JSON object on the LAST line of your turn. No surrounding prose, no code fences, no logs, no diffs:
@@ -323,7 +322,7 @@ Step 10 — REPLY
   - status = timeout        ONLY emitted from the TIMEOUT_FLOW (acpx_exit ∈ {124,137}, tool-side timeout, or the whole-run {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap from <constraints>). block_reason MUST be non-empty (typically "acpx exec exceeded {ACPX_TIMEOUT_SECONDS}s wall-clock cap", or "executor exceeded {ACPX_TIMEOUT_MINUTES}-minute wall-clock cap" for the whole-run cap). merge_request_url MUST be empty and mr_action MUST be "none" — the timeout flow does NOT open an MR. labels_added MUST include "timeout"; labels_removed MUST include "doing".
   - labels_added / labels_removed: the actual transitions you performed. For done: ["pr"] added, ["doing","done"] removed (pr replaces done — done was a transient set in Step 6 then removed when pr is added). For blocked before `done`: ["blocked-cc"] added, ["doing"] removed. For blocked after `done` but before `pr`: include both "done" and "blocked-cc" in labels_added, and do NOT include "pr". For timeout: ["timeout"] added, ["doing"] removed.
   - mr_action = none when no MR step ran (no_changes / blocked before Step 7 / BLOCKED_PUSH / timeout).
-  - summary_posted = true only when the summary was posted as a GitLab issue note. For local-only failure summaries (incl. timeout), use false.
+  - summary_posted = false for every outcome; summaries are local-only.
   - Empty fields use the literal "" (not null) — the dispatcher tolerates both, but "" keeps the JSON small.
 
   This single JSON line is the ONLY artifact the dispatcher reads from your reply. Do NOT additionally write the terminal issue state or attempt state files yourself; the dispatcher (Phase 6) writes those files from this JSON.

@@ -319,6 +319,9 @@ when OpenClaw does not schedule the final model turn. The object has exactly:
 - `labels_added`, `labels_removed`, `summary_posted`
 - `block_reason`, `log_dir`
 
+`summary_posted` is retained for callback-schema compatibility and is always
+`false`; `summarize_attempt.sh` writes only the local `summary.md` file.
+
 Immediately after the inner acpx process exits, `run_acpx_attempt.sh` also
 atomically writes:
 

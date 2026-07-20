@@ -29,7 +29,7 @@ ${REPO_PATH}/                                            ← parent checkout (de
             issue-<iid>/                                 ← per-issue subtree (lives OUTSIDE worktree, so state survives worktree teardown)
                 state.json                               (cross-attempt)
                 attempt_state.json                       (current attempt; overwritten each attempt)
-                summary.md                               (latest summary; mirror of GitLab issue comment)
+                summary.md                               (latest local summary; never posted as an issue comment)
         .worktrees/                                      ← ${WORKTREES_ROOT}; per-issue linked worktrees (one per IID)
             issue-<iid>/                                 ← ${WORKTREE_DIR}; acpx cwd; created on attempt 1 via
                                                             `git worktree add -B`, reused on attempt N>1 via in-place
@@ -103,7 +103,7 @@ When `ISSUE_IID` is set, `env_paths.sh` requires `ATTEMPT_NUMBER` and additional
 | `OUTPUT_DIR`              | `${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/hulat-spec-issue${ISSUE_IID}` | only committable spec result directory; lives INSIDE the shared worktree (shared across attempts of this IID) |
 | `LOG_DIR`                 | `${WORKTREE_DIR}/${RESULT_BASENAME}/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}` | current-attempt log files INSIDE the shared worktree (still attempt-scoped so successive attempts don't overwrite each other); `prompt.txt` + `claude_result.txt` force-added into the MR diff, other files locally ignored and removed with the worktree |
 | `ATTEMPT_STATE_FILE`      | `${ATTEMPT_DIR}/attempt_state.json`                                                  | current-attempt metadata; overwritten each attempt             |
-| `SUMMARY_FILE`            | `${ATTEMPT_DIR}/summary.md`                                                          | latest local attempt summary; successful done attempts also post it as a GitLab issue comment |
+| `SUMMARY_FILE`            | `${ATTEMPT_DIR}/summary.md`                                                          | latest local attempt summary; never posted as a GitLab issue comment |
 | `LOCAL_ATTEMPT_BRANCH`    | `${WORK_BRANCH}-att${ATTEMPT_NUMBER_PADDED}`                                         | per-attempt local branch (force-pushed to `${WORK_BRANCH}`)    |
 
 `ATTEMPT_NUMBER` itself comes from the dispatcher: `scripts/allocate_attempt.sh` increments `attempts_total` in the per-issue state file and prints the new number. The dispatcher passes that number through to all later prep scripts AND embeds it into the rendered subagent prompt — `env_paths.sh` refuses to load if `ATTEMPT_NUMBER` is missing while `ISSUE_IID` is set.

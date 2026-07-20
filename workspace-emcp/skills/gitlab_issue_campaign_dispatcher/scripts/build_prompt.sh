@@ -2,15 +2,15 @@
 # build_prompt.sh — generate ${LOG_DIR}/prompt.txt from the live issue
 # title/description/notes plus a small instruction header.
 #
-# The prompt has up to three input sections (continue mode):
+# The prompt has these input sections:
 #   - Issue title + description
+#   - Issue comments          (all non-system notes, excluding agent-posted
+#                              summaries and artifact-link notes)
+#
+# Continue mode also includes:
 #   - Past attempt summaries  (notes posted by acpx_auto_tester itself, marked
 #                              with <!-- acpx_auto_tester:attempt-summary ... -->;
 #                              legacy pre-rename markers are also recognized)
-#   - Reviewer comments       (all OTHER non-system notes, excluding
-#                              agent-posted Wiki artifact notes)
-#
-# In fresh mode only the first section is included.
 #
 # Required env vars (from env_paths.sh + glab_auth.sh + trigger):
 #   GITLAB_HOST, PROJECT_URI,
@@ -99,7 +99,8 @@ ISSUE_JSON="$(glab api \
 ISSUE_TITLE="$(echo "${ISSUE_JSON}" | jq -r '.title // ""')"
 ISSUE_DESC="$(echo "${ISSUE_JSON}" | jq -r '.description // ""')"
 
-# 2. Notes (continue mode only).
+# 2. Notes. Issue comments are prompt input in every mode. Continue mode also
+# separates historical agent summaries into their own context block.
 PAST_ATTEMPTS_BLOCK=""
 REVIEWER_BLOCK=""
 NO_REVIEWER_COMMENTS=true
@@ -109,9 +110,22 @@ LEGACY_AGENT_MARKER_PREFIX="uiauto""tester"
 SUMMARY_MARKER_RE="<!-- (${CURRENT_AGENT_MARKER_PREFIX}|${LEGACY_AGENT_MARKER_PREFIX}):attempt-summary v[0-9]+ "
 AUTO_MARKER_RE="<!-- (${CURRENT_AGENT_MARKER_PREFIX}|${LEGACY_AGENT_MARKER_PREFIX}):attempt-(summary|attachments|wiki-artifacts) v[0-9]+ "
 
+NOTES_JSON="$(glab api --paginate \
+  "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at")"
+
+REVIEWER_BLOCK="$(echo "${NOTES_JSON}" | jq -r --arg marker_re "${AUTO_MARKER_RE}" '
+  [ .[] | select(.system == false)
+        | select(.body | test($marker_re) | not) | .body ]
+  | if length == 0 then "" else (join("\n---\n")) end
+')"
+
+if [ -z "${REVIEWER_BLOCK}" ]; then
+  REVIEWER_BLOCK="(no issue comments)"
+else
+  NO_REVIEWER_COMMENTS=false
+fi
+
 if [ "${ISSUE_MODE}" = "continue" ]; then
-  NOTES_JSON="$(glab api --paginate \
-    "projects/${PROJECT_URI}/issues/${ISSUE_IID}/notes?sort=asc&order_by=created_at")"
 
   # Split notes:
   #   agent-posted summaries → match the marker comment
@@ -127,20 +141,8 @@ if [ "${ISSUE_MODE}" = "continue" ]; then
           | select(.body | test($marker_re)) ] | length
   ')"
 
-  REVIEWER_BLOCK="$(echo "${NOTES_JSON}" | jq -r --arg marker_re "${AUTO_MARKER_RE}" '
-    [ .[] | select(.system == false)
-          | select(.body | test($marker_re) | not) | .body ]
-    | if length == 0 then "" else (join("\n---\n")) end
-  ')"
-
   if [ -z "${PAST_ATTEMPTS_BLOCK}" ]; then
-    PAST_ATTEMPTS_BLOCK="(no prior attempt summaries found — this is unusual; treat the issue branch's existing commits as authoritative for prior work)"
-  fi
-
-  if [ -z "${REVIEWER_BLOCK}" ]; then
-    REVIEWER_BLOCK="(no reviewer comments — please review the prior attempt summaries above plus the existing diff and decide whether the work is acceptable as-is)"
-  else
-    NO_REVIEWER_COMMENTS=false
+    PAST_ATTEMPTS_BLOCK="(no historical agent-posted summaries; inspect the issue branch's existing commits and diff for prior work)"
   fi
 fi
 
@@ -187,14 +189,17 @@ EOF
 
   if [ "${ISSUE_MODE}" = "continue" ]; then
     cat <<EOF
-# Past attempt summaries (auto-posted by acpx_auto_tester)
+# Historical attempt summaries (from older acpx_auto_tester runs)
 ${PAST_ATTEMPTS_BLOCK}
-
-# Reviewer comments (everything else, chronological)
-${REVIEWER_BLOCK}
 
 EOF
   fi
+
+  cat <<EOF
+# Issue comments (non-system, chronological)
+${REVIEWER_BLOCK}
+
+EOF
 
   cat <<EOF
 # Working environment

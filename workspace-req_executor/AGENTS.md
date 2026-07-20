@@ -50,7 +50,7 @@ Core contract:
 - A heartbeat may claim-fence and process a durable worker result, or emit one
   `cleanup_actions[]` kill after the post-acpx watchdog expires. This is the
   recovery path when OpenClaw does not schedule the outer model's final turn.
-- `build_prompt.sh` writes `${LOG_DIR}/prompt.txt` from the issue title, description, prior summaries, and reviewer comments.
+- `build_prompt.sh` writes `${LOG_DIR}/prompt.txt` from the issue title, description, and all non-system issue comments in every mode; continue mode also separates historical agent summaries.
 - Runtime state lives under `${REPO_PATH}/.req_executor/`.
 - There are no runtime basename, project data directory, or UI account-pool trigger/config fields.
 - `clone_or_pull.sh` locally ignores `/.req_executor/` and `logs/`; `stage_and_guard.sh` force-adds only the current issue's output and removes `${LOG_DIR}` / `logs/` paths from the commit index.
