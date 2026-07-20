@@ -175,13 +175,13 @@ if [ "${TEST_EXPECT_CONTINUE_BASE_REQUIRED_IID:-}" = "${ISSUE_IID}" ] \
 fi
 if [ "${TEST_EXPECT_CONTINUE_BASE_REQUIRED_IID:-}" = "${ISSUE_IID}" ] \
     && [[ "${CONTINUE_BASE_REF:-}" != "refs/remotes/origin/${WORK_BRANCH}" ]] \
-    && ! [[ "${CONTINUE_BASE_REF:-}" =~ ^refs/heads/issue/${ISSUE_IID}-att[0-9]+$ ]]; then
+    && [ "${CONTINUE_BASE_REF:-}" != "refs/heads/issue/${ISSUE_IID}" ]; then
   echo "missing exact CONTINUE_BASE_REF for ${ISSUE_IID}" >&2
   exit 90
 fi
 source "${SCRIPT_DIR}/env_paths.sh"
 mkdir -p "${WORKTREE_DIR}/.git" "${WORKTREE_DIR}/.claude" "${LOG_DIR}" "${OUTPUT_DIR}"
-local_branch="issue/${ISSUE_IID}-att$(printf '%03d' "${ATTEMPT_NUMBER}")"
+local_branch="issue/${ISSUE_IID}"
 if [ -n "${SHARED_BRANCH_ROLE:-}" ]; then
   if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
     prepared_parent_sha="${EXPECTED_COMMIT_PARENT_SHA:?}"

@@ -93,9 +93,9 @@ issue/<A IID>+<C IID>
 ```
 
 例如 A=`41`、C=`43`，A 完成时先存在 `issue/41`；C 被处理时，executor 将 A 的同一个提交迁移到
-`issue/41+43`，此后 A、C 的 canonical work branch 都绑定为该组合分支。A 的本地 attempt 分支仍是
-`issue/41-attNNN`，C 的本地 attempt 分支仍是 `issue/43-attNNN`，因此两个 worktree 不会尝试检出
-同一个本地分支。一次正常 fresh 流程的最终提交历史严格为
+`issue/41+43`，此后 A、C 的 canonical work branch 都绑定为该组合分支。A 的固定本地分支是
+`issue/41`，C 的固定本地分支是 `issue/43`，因此两个 worktree 不会尝试检出同一个本地分支。
+不同 attempt 不再创建新的本地分支。一次正常 fresh 流程的最终提交历史严格为
 `target -> commit(A) -> commit(C)`；独立 issueB 继续使用 `issue/<B IID>`，可以和 A 并行。
 
 A 完成普通流程后，C 会等待 A 具有稳定的 `pr` 或 `finish` 标签，且没有 `continue`、`doing`、
@@ -285,7 +285,7 @@ ${REPO_PATH}/.req_executor/
   issues/issue-<iid>/
   .worktrees/issue-<iid>/
     .req_executor/issue-<iid>/output/
-    .req_executor/issue-<iid>/log/attempt-NNN/
+    .req_executor/issue-<iid>/log/
 ```
 
 The outer subagent calls `run_executor_attempt.sh` exactly once. That fixed
@@ -298,3 +298,7 @@ acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"
 
 The acpx invocation logic is intentionally centralized in that script. It
 also writes `${LOG_DIR}/acpx_terminal.json` before returning to the wrapper.
+
+`${WORKTREE_DIR}`、`${OUTPUT_DIR}`、`${LOG_DIR}` 与本地 `issue/<iid>` 分支均按
+Issue 固定，不按 attempt 分目录或分支。`attempt_number` 继续写入 marker、结果和状态文件，
+用于拒绝过期回调；后续运行会在同一 Issue 日志目录中覆盖当前结果证据。

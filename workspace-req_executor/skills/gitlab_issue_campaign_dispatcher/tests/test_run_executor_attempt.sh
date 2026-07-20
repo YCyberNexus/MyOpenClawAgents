@@ -28,13 +28,13 @@ set -euo pipefail
 printf -v ATTEMPT_NUMBER_PADDED '%03d' "${ATTEMPT_NUMBER}"
 export WORKTREE_DIR="${REPO_PATH}/worktree"
 export OUTPUT_DIR="${WORKTREE_DIR}/.req_executor/issue-${ISSUE_IID}/output"
-export LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-${ISSUE_IID}/log/attempt-${ATTEMPT_NUMBER_PADDED}"
+export LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-${ISSUE_IID}/log"
 export ISSUE_ROOT="${REPO_PATH}/.req_executor/issues/issue-${ISSUE_IID}"
 export ISSUES_ROOT="${REPO_PATH}/.req_executor/issues"
 export ATTEMPT_STATE_FILE="${ISSUE_ROOT}/attempt_state.json"
 export ISSUE_STATE_FILE="${ISSUE_ROOT}/state.json"
 export WORK_BRANCH="${WORK_BRANCH:-issue/${ISSUE_IID}}"
-export LOCAL_ATTEMPT_BRANCH="issue/${ISSUE_IID}-att${ATTEMPT_NUMBER_PADDED}"
+export LOCAL_ISSUE_BRANCH="issue/${ISSUE_IID}"
 mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}" "${ISSUE_ROOT}"
 EOF
 
@@ -246,7 +246,7 @@ summarize:true'
 [ "$(cat "${ORDER_LOG}")" = "${expected_order}" ] \
   || fail "attempt steps did not stay in one deterministic sequence: $(cat "${ORDER_LOG}")"
 
-result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/attempt-003/worker_result.json"
+result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/worker_result.json"
 [ -f "${result_file}" ] || fail "durable worker_result.json was not written"
 result_line="$(printf '%s\n' "${wrapper_output}" | tail -n 1)"
 if ! diff -u <(jq -S . <<<"${result_line}") <(jq -S . "${result_file}") >/dev/null; then
@@ -307,7 +307,7 @@ summarize:true'
 [ "$(cat "${ORDER_LOG}")" = "${expected_merged_order}" ] \
   || fail "verified merged order/target is wrong: $(cat "${ORDER_LOG}")"
 
-merged_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/attempt-004/worker_result.json"
+merged_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/worker_result.json"
 merged_line="$(printf '%s\n' "${merged_output}" | tail -n 1)"
 diff -u <(jq -S . <<<"${merged_line}") <(jq -S . "${merged_result_file}") >/dev/null \
   || fail "verified merged compact result was not durable"
@@ -340,7 +340,7 @@ unknown_output="$(
   BRANCH=main MERGE_TARGET_BRANCH=release AUTO_MERGE=true ACPX_TIMEOUT_SECONDS=60 \
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "unknown merge state incorrectly failed the executor wrapper"
-unknown_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/attempt-005/worker_result.json"
+unknown_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/worker_result.json"
 jq -e '
   .status == "done"
   and .labels_added == ["pr"]
@@ -370,7 +370,7 @@ label_failure_output="$(
   BRANCH=main MERGE_TARGET_BRANCH=release AUTO_MERGE=true ACPX_TIMEOUT_SECONDS=60 \
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "terminal label failure incorrectly failed the executor wrapper"
-label_failure_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/attempt-006/worker_result.json"
+label_failure_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/worker_result.json"
 jq -e '
   .status == "done"
   and .merge_request_url == "https://gitlab.example.test/group/repo/-/merge_requests/7"
@@ -398,7 +398,7 @@ ordinary_merged_output="$(
   BRANCH=main MERGE_TARGET_BRANCH=release AUTO_MERGE=false ACPX_TIMEOUT_SECONDS=60 \
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "ordinary rapidly-merged wrapper run failed"
-ordinary_merged_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/attempt-007/worker_result.json"
+ordinary_merged_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/worker_result.json"
 jq -e '
   .status == "done"
   and .labels_added == ["pr"]
@@ -414,7 +414,7 @@ printf '%s\n' "${ordinary_merged_output}" | tail -n 1 | jq -e '.status == "done"
   || fail "ordinary rapidly-merged wrapper result is invalid"
 
 # The outer model may not omit or replace a dependency tuple. The fixed
-# attempt-local identity is authoritative, and an exact tuple still runs.
+# attempt-number identity is authoritative, and an exact tuple still runs.
 DEPENDENCY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 write_attempt_state 8 false main 9 issue/9 "${DEPENDENCY_SHA}"
 set +e
@@ -445,7 +445,7 @@ printf '%s\n' "${exact_dependency_output}" | tail -n 1 \
   || fail "exact dependency run did not produce a successful compact result"
 jq -e --arg dependency_sha "${DEPENDENCY_SHA}" \
   '.dependency_base_sha == $dependency_sha' \
-  "${REPO_PATH}/worktree/.req_executor/issue-42/log/attempt-008/mr_result.json" \
+  "${REPO_PATH}/worktree/.req_executor/issue-42/log/mr_result.json" \
   >/dev/null || fail "dependency SHA did not reach MR finalization"
 
 # Legacy ordinary-state completion is allowed only when the entire dependency
@@ -600,7 +600,7 @@ valid_shared_tail_output="$(
   || fail "shared MR retry reran commit/push"
 printf '%s\n' "${valid_shared_tail_output}" | tail -n 1 | jq -e '
   .status == "done" and .work_branch == "issue/9+42"
-  and .local_branch == "issue/42-att011" and .mr_action == "reused"
+  and .local_branch == "issue/42" and .mr_action == "reused"
 ' >/dev/null || fail "shared tail did not persist the reused MR result"
 jq -e --arg sha "${SHARED_A_SHA}" '
   .work_branch == "issue/9+42" and .branch_members == [9,42]

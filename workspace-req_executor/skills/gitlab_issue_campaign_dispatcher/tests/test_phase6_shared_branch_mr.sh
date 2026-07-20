@@ -168,7 +168,7 @@ make_shared_reply() {
     --arg action "${action}" '{
       iid:$iid,attempt_number:1,status:"done",mode_actual:"fresh",
       work_branch:("issue/" + ($head|tostring) + "+" + ($tail|tostring)),
-      local_branch:("issue/" + ($iid|tostring) + "-att001"),
+      local_branch:("issue/" + ($iid|tostring)),
       commit_sha:$commit_sha,
       merge_request_url:("https://gitlab.example.test/group/repo/-/merge_requests/"
         + ($mr_iid|tostring)),
@@ -190,7 +190,7 @@ write_shared_marker() {
   else
     [ -n "${action}" ] || action=created
   fi
-  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log/attempt-001"
+  marker_dir="${WORKTREES_ROOT}/issue-${iid}/.req_executor/issue-${iid}/log"
   marker_path="${marker_dir}/mr_result.json"
   issue_dir="${ISSUES_ROOT}/issue-${iid}"
   mkdir -p "${marker_dir}" "${issue_dir}"
@@ -364,7 +364,7 @@ jq -cn --arg sha "${HEAD_SHA}" '{
 }' >"${pending_recovery_dir}/state.json"
 chmod 600 "${pending_recovery_dir}/state.json"
 write_shared_marker 55 57 55 head 29 created false unknown unknown
-pending_recovery_marker="${WORKTREES_ROOT}/issue-55/.req_executor/issue-55/log/attempt-001/mr_result.json"
+pending_recovery_marker="${WORKTREES_ROOT}/issue-55/.req_executor/issue-55/log/mr_result.json"
 mv "${pending_recovery_marker}" "${pending_recovery_marker}.missing"
 : >"${LABEL_LOG}"
 mr_recovery_wait="$(phase6_process \
@@ -398,7 +398,7 @@ jq -e '
 # reason to retry MR creation forever. Phase 6 must drain it without publishing
 # pr even if the selected historical MR currently looks open.
 write_shared_marker 52 54 52 head 28 created false unknown unknown
-history_conflict_marker="${WORKTREES_ROOT}/issue-52/.req_executor/issue-52/log/attempt-001/mr_result.json"
+history_conflict_marker="${WORKTREES_ROOT}/issue-52/.req_executor/issue-52/log/mr_result.json"
 history_conflict_tmp="$(mktemp "${history_conflict_marker}.conflict.XXXXXX")"
 jq '.reason = "shared_mr_history_conflict"' \
   "${history_conflict_marker}" >"${history_conflict_tmp}"
@@ -487,7 +487,7 @@ LIVE_SHARED_MR_IDENTITY_MATCHES=true
 # A non-private marker and a marker symlink are not authority.
 write_shared_marker 81 83 81 head 57
 chmod 644 \
-  "${WORKTREES_ROOT}/issue-81/.req_executor/issue-81/log/attempt-001/mr_result.json"
+  "${WORKTREES_ROOT}/issue-81/.req_executor/issue-81/log/mr_result.json"
 bad_mode_resolution="$(phase6_resolve_shared_branch_mr \
   "$(make_shared_state 81 83 81 head)" \
   "$(make_shared_reply 81 83 81 head 57)")" \
@@ -495,10 +495,10 @@ bad_mode_resolution="$(phase6_resolve_shared_branch_mr \
 jq -e '.reply.status == "blocked"' <<<"${bad_mode_resolution}" >/dev/null \
   || fail "mode-644 shared marker was trusted"
 
-symlink_dir="${WORKTREES_ROOT}/issue-91/.req_executor/issue-91/log/attempt-001"
+symlink_dir="${WORKTREES_ROOT}/issue-91/.req_executor/issue-91/log"
 mkdir -p "${symlink_dir}"
 ln -s \
-  "${WORKTREES_ROOT}/issue-41/.req_executor/issue-41/log/attempt-001/mr_result.json" \
+  "${WORKTREES_ROOT}/issue-41/.req_executor/issue-41/log/mr_result.json" \
   "${symlink_dir}/mr_result.json"
 symlink_resolution="$(phase6_resolve_shared_branch_mr \
   "$(make_shared_state 91 93 91 head)" \
@@ -519,7 +519,7 @@ ordinary_state="$(jq -cn '{
 }')"
 ordinary_reply="$(jq -cn '{
   iid:101,attempt_number:1,status:"done",mode_actual:"fresh",
-  work_branch:"issue/101",local_branch:"issue/101-att001",
+  work_branch:"issue/101",local_branch:"issue/101",
   commit_sha:"3333333333333333333333333333333333333333",
   merge_request_url:"https://gitlab.example.test/group/repo/-/merge_requests/77",
   mr_action:"created",wiki_url:"",labels_added:[],labels_removed:[],

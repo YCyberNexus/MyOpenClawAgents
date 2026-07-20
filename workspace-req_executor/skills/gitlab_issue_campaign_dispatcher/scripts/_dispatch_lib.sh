@@ -880,10 +880,10 @@ phase6_normalize_reply() {
   '
 }
 
-# Read the exact MR identity produced by the fixed outer wrapper for one
-# issue/attempt. The compact callback is not trusted to choose which MR is
-# verified: it must agree with this mode-600 attempt-local marker, whose source
-# branch is additionally pinned to the canonical `issue/<iid>` branch.
+# Read the exact MR identity produced by the fixed outer wrapper. The compact
+# callback is not trusted to choose which MR is verified: it must agree with
+# the mode-600 marker in the issue-local log directory. The marker payload is
+# still fenced by attempt_number.
 phase6_file_mode() {
   local path="$1" mode
   if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
@@ -902,14 +902,12 @@ phase6_file_owner() {
   fi
 }
 
-phase6_auto_merge_marker_path() {
-  local iid="$1" attempt_number="$2" attempt_padded
+phase6_mr_marker_path() {
+  local iid="$1"
   [[ "${iid}" =~ ^[1-9][0-9]*$ ]] || return 1
-  [[ "${attempt_number}" =~ ^[1-9][0-9]*$ ]] || return 1
   [ -n "${WORKTREES_ROOT:-}" ] || return 1
-  printf -v attempt_padded '%03d' "${attempt_number}"
   printf '%s\n' \
-    "${WORKTREES_ROOT}/issue-${iid}/${REQ_EXECUTOR_DIR:-.req_executor}/issue-${iid}/log/attempt-${attempt_padded}/mr_result.json"
+    "${WORKTREES_ROOT}/issue-${iid}/${REQ_EXECUTOR_DIR:-.req_executor}/issue-${iid}/log/mr_result.json"
 }
 
 # Output the validated marker or return non-zero. State supplies the trusted
@@ -932,7 +930,7 @@ phase6_read_auto_merge_marker() {
       && ! [[ "${dependency_base_sha}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
     return 1
   fi
-  marker_path="$(phase6_auto_merge_marker_path "${iid}" "${attempt_number}")" || return 1
+  marker_path="$(phase6_mr_marker_path "${iid}")" || return 1
   [ -f "${marker_path}" ] && [ ! -L "${marker_path}" ] || return 1
   marker_mode="$(phase6_file_mode "${marker_path}")" || return 1
   [ "${marker_mode}" = 600 ] || return 1
@@ -994,13 +992,13 @@ phase6_reply_from_auto_merge_marker() {
   local state_json="$1" iid="$2" attempt_number="$3" marker marker_path log_dir
   marker="$(phase6_read_auto_merge_marker \
     "${state_json}" "${iid}" "${attempt_number}")" || return 1
-  marker_path="$(phase6_auto_merge_marker_path "${iid}" "${attempt_number}")" || return 1
+  marker_path="$(phase6_mr_marker_path "${iid}")" || return 1
   log_dir="$(dirname "${marker_path}")"
   jq -nc \
     --argjson iid "${iid}" \
     --argjson attempt_number "${attempt_number}" \
     --arg work_branch "$(jq -r '.source_branch' <<<"${marker}")" \
-    --arg local_branch "issue/${iid}-att$(printf '%03d' "${attempt_number}")" \
+    --arg local_branch "issue/${iid}" \
     --arg commit_sha "$(jq -r '.sha' <<<"${marker}")" \
     --arg merge_request_url "$(jq -r '.web_url' <<<"${marker}")" \
     --arg mr_action "$(jq -r '.mr_action' <<<"${marker}")" \
@@ -1063,8 +1061,7 @@ phase6_read_shared_branch_marker() {
   checkpoint="$(phase6_read_shared_mr_checkpoint \
     "${state_json}" "${iid}" "${attempt_number}")" || return 1
   intent_id="$(jq -r '.intent_id' <<<"${checkpoint}")"
-  marker_path="$(phase6_auto_merge_marker_path \
-    "${iid}" "${attempt_number}")" || return 1
+  marker_path="$(phase6_mr_marker_path "${iid}")" || return 1
   [ -f "${marker_path}" ] && [ ! -L "${marker_path}" ] || return 1
   marker_mode="$(phase6_file_mode "${marker_path}")" || return 1
   marker_owner="$(phase6_file_owner "${marker_path}")" || return 1
@@ -1134,14 +1131,13 @@ phase6_reply_from_shared_branch_marker() {
   local marker marker_path log_dir
   marker="$(phase6_read_shared_branch_marker \
     "${state_json}" "${iid}" "${attempt_number}")" || return 1
-  marker_path="$(phase6_auto_merge_marker_path \
-    "${iid}" "${attempt_number}")" || return 1
+  marker_path="$(phase6_mr_marker_path "${iid}")" || return 1
   log_dir="$(dirname "${marker_path}")"
   jq -nc \
     --argjson iid "${iid}" \
     --argjson attempt_number "${attempt_number}" \
     --arg work_branch "$(jq -r '.source_branch' <<<"${marker}")" \
-    --arg local_branch "issue/${iid}-att$(printf '%03d' "${attempt_number}")" \
+    --arg local_branch "issue/${iid}" \
     --arg commit_sha "$(jq -r '.sha' <<<"${marker}")" \
     --arg merge_request_url "$(jq -r '.web_url' <<<"${marker}")" \
     --arg mr_action "$(jq -r '.mr_action' <<<"${marker}")" \
@@ -1718,8 +1714,8 @@ _label_op() {
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   # ATTEMPT_NUMBER=1 is a placeholder — env_paths.sh requires the var
-  # when ISSUE_IID is set, but set_issue_label.sh itself never reads any
-  # attempt-scoped path (it only touches the GitLab issue label set).
+  # when ISSUE_IID is set, but set_issue_label.sh itself only touches the
+  # GitLab issue label set.
   PROJECT="${PROJECT}" GROUP="${GROUP}" GITLAB_TOKEN="${GITLAB_TOKEN}" \
     REPO_PARENT_PATH="${REPO_PARENT_PATH}" \
     ISSUE_IID="${iid}" ATTEMPT_NUMBER=1 \
@@ -1757,10 +1753,9 @@ phase6_write_state_files() {
   local issue_root="${ISSUES_ROOT}/issue-${iid}"
   local attempt_padded
   attempt_padded="$(printf '%03d' "${attempt_number}")"
-  local attempt_dir="${issue_root}"
-  local attempt_state_file="${attempt_dir}/attempt_state.json"
+  local attempt_state_file="${issue_root}/attempt_state.json"
   local issue_state_file="${issue_root}/state.json"
-  local summary_file="${attempt_dir}/summary.md"
+  local summary_file="${issue_root}/summary.md"
 
   mkdir -p "${issue_root}"
 
@@ -1838,6 +1833,8 @@ phase6_write_state_files() {
         mode: $reply.mode_actual,
         attempts_total: (if ($prior.attempts_total // 0) >= $attempt_number then $prior.attempts_total else $attempt_number end),
         latest_attempt_number: $attempt_number,
+        # Keep the legacy state key for persisted-schema compatibility. Its
+        # value is the fixed issue root and is not an attempt-specific path.
         latest_attempt_dir: $issue_root,
         retry_count: $new_retry_count,
         block_reason: (if ($reply.block_reason // "") == "" then null else $reply.block_reason end),

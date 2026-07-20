@@ -14,8 +14,8 @@
 #   ISSUE_IID                from env_paths.sh
 #   ATTEMPT_NUMBER_PADDED    e.g. "001"
 #   ISSUE_MODE               "fresh" or "continue"
-#   ATTEMPT_DIR              issue dir for the current attempt
-#   LOG_DIR                  current-attempt log dir
+#   ISSUE_ROOT               persistent issue directory
+#   LOG_DIR                  fixed issue-local log dir
 #   SUMMARY_FILE             ${ISSUE_ROOT}/summary.md
 #
 # Optional env vars:
@@ -43,7 +43,7 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/env_paths.sh"
 : "${GITLAB_HOST:?run scripts/glab_auth.sh first}"
 : "${PROJECT_URI:?run scripts/glab_auth.sh first}"
 : "${ISSUE_IID:?}" "${ATTEMPT_NUMBER_PADDED:?}" "${ISSUE_MODE:?}" \
-  "${ATTEMPT_DIR:?}" "${LOG_DIR:?}" "${SUMMARY_FILE:?}"
+  "${ISSUE_ROOT:?}" "${LOG_DIR:?}" "${SUMMARY_FILE:?}"
 
 ATTEMPT_STATUS="${ATTEMPT_STATUS:-unknown}"
 COMMIT_SHA="${COMMIT_SHA:-}"

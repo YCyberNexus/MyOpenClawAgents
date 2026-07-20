@@ -155,7 +155,7 @@ WORKER_42="$(jq -cnS '{
   status:"done",
   mode_actual:"auto",
   work_branch:"issue/42",
-  local_branch:"issue/42-att001",
+  local_branch:"issue/42",
   commit_sha:"0123456789abcdef",
   merge_request_url:"https://gitlab.local/group/repo/-/merge_requests/42",
   mr_action:"created",

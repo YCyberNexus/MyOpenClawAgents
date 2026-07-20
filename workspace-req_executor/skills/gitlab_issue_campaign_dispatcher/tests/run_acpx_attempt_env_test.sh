@@ -11,7 +11,7 @@ REPO_PARENT="${TEST_ROOT}/repos"
 PROJECT_NAME="req_executor_test"
 REPO_PATH="${REPO_PARENT}/${PROJECT_NAME}"
 WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-9"
-LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/attempt-001"
+LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
 OUTPUT_DIR="${WORKTREE_DIR}/.req_executor/issue-9/output"
 TRUSTED_ADAPTER_ROOT="${TEST_ROOT}/trusted-adapter"
 
@@ -189,7 +189,7 @@ grep -Fq 'PATH must contain only trusted absolute directories before bootstrap' 
 
 # A dependency-based attempt must disable every project customization source,
 # including transitive hooks/MCP/memory that cannot be safely parsed in Bash.
-SAFE_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/attempt-003"
+SAFE_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
 mkdir -p "${SAFE_LOG_DIR}"
 printf '只输出 OK\n' >"${SAFE_LOG_DIR}/prompt.txt"
 printf 'registry=https://attacker.invalid/\n' >"${WORKTREE_DIR}/.npmrc"
@@ -214,9 +214,11 @@ grep -Fq "CLAUDE_AGENT_ACP_EXECUTABLE=${TRUSTED_ADAPTER_CANONICAL}/dist/index.js
 # The ACP adapter's bundled executable is not a sufficient guarantee: a
 # dependency attempt must stop before acpx when the explicitly selected Claude
 # Code executable cannot prove --safe-mode support.
-LEGACY_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/attempt-004"
+LEGACY_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
 mkdir -p "${LEGACY_LOG_DIR}"
 printf '只输出 OK\n' >"${LEGACY_LOG_DIR}/prompt.txt"
+: >"${LEGACY_LOG_DIR}/acpx_terminal.json"
+chmod 600 "${LEGACY_LOG_DIR}/acpx_terminal.json"
 set +e
 PATH="${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
@@ -231,12 +233,12 @@ set -e
 [ "${legacy_rc}" -eq 2 ]
 grep -Fq 'CLAUDE_CODE_EXECUTABLE does not support --safe-mode' \
   "${TEST_ROOT}/legacy-stderr"
-[ ! -e "${LEGACY_LOG_DIR}/acpx_terminal.json" ]
+[ ! -s "${LEGACY_LOG_DIR}/acpx_terminal.json" ]
 
 # A tool-side SIGTERM must kill the inner process group and still leave a
 # terminal marker before the wrapper exits 124. The all-in-one outer wrapper
 # can then persist a timeout result that the heartbeat safely recognizes.
-SIGNAL_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/attempt-002"
+SIGNAL_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log"
 mkdir -p "${SIGNAL_LOG_DIR}"
 printf '只输出 OK\n' >"${SIGNAL_LOG_DIR}/prompt.txt"
 PATH="${BIN_DIR}:${PATH}" \

@@ -34,10 +34,15 @@ ${REPO_PATH}/
     issues/issue-<iid>/
     .worktrees/issue-<iid>/
       .req_executor/issue-<iid>/output/
-      .req_executor/issue-<iid>/log/attempt-NNN/
+      .req_executor/issue-<iid>/log/
 ```
 
 `clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes any `logs/` path plus `${LOG_DIR}` from the commit index.
+
+The worktree, output directory, log directory, and local Git branch are fixed
+per Issue and do not contain `attempt_number`. That number remains only as a
+state/callback identity fence. Later runs overwrite current-result evidence in
+the same issue-local log directory.
 
 ## Removed Legacy Inputs
 

@@ -446,8 +446,8 @@ trap - TERM INT HUP
 # Persist a machine-readable terminal marker before returning control to the
 # outer agent. OpenClaw can occasionally finish this long synchronous tool call
 # without scheduling the model's next turn. The executor heartbeat uses this
-# attempt-scoped marker to distinguish that post-acpx stall from an inner acpx
-# process that is still legitimately running.
+# issue-local marker, fenced by attempt_number in its payload, to distinguish
+# that post-acpx stall from an inner acpx process that is still legitimately running.
 if ! write_terminal_marker "${acpx_exit}"; then
   # The marker is a recovery aid, not the source of truth for this live tool
   # result. Preserve the existing ACPX_EXIT contract if the disk write fails.

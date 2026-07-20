@@ -32,7 +32,7 @@
 #   ISSUE_MODE      "fresh" or "continue" (kept for log correlation only;
 #                   no longer changes MR rotation behavior)
 #   ISSUE_TITLE     short human title for the MR title
-#   LOG_DIR         where mr_description.md lives (under WORKTREE_DIR/.req_executor/issue-<iid>/log/attempt-NNN)
+#   LOG_DIR         fixed issue-local log directory
 #   BRANCH          default target branch
 #   MERGE_TARGET_BRANCH  MR target branch (optional; falls back to BRANCH)
 #   AUTO_MERGE      true|false (optional; default false)
@@ -291,7 +291,7 @@ if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
   fi
 fi
 
-# Preserve any exact prior MR identity before retiring the attempt-local marker.
+# Preserve any exact prior MR identity before invalidating the issue-local marker.
 # A recovery call may re-verify this MR, but it must never use a closed or moved
 # MR as permission to create a replacement and violate the one-MR invariant.
 if [ "${SHARED_BRANCH_ROLE}" = head ] \
@@ -334,11 +334,21 @@ if [ "${SHARED_BRANCH_ROLE}" = head ] \
   fi
 fi
 
-# A prior attempt-local file is untrusted input because the inner model can
-# write inside LOG_DIR.  Retire it before any GitLab mutation; only this outer
-# fixed script may create the marker consumed for recovery below.
+# An existing issue-local file is untrusted input because the inner model can
+# write inside LOG_DIR. Invalidate a regular file before any GitLab mutation;
+# quarantine unsafe filesystem shapes without assigning them an attempt path.
+# Only this fixed script may create the marker consumed for recovery below.
 if [ -e "${MR_RESULT_FILE}" ] || [ -L "${MR_RESULT_FILE}" ]; then
-  mv "${MR_RESULT_FILE}" "${MR_RESULT_FILE}.stale.$$.${RANDOM}"
+  if [ -L "${MR_RESULT_FILE}" ] || [ ! -f "${MR_RESULT_FILE}" ]; then
+    MR_QUARANTINE_ROOT="${WORKTREES_ROOT:-${WORK_ROOT}}/.quarantine/issue-${ISSUE_IID}"
+    mkdir -p "${MR_QUARANTINE_ROOT}"
+    mv "${MR_RESULT_FILE}" \
+      "${MR_QUARANTINE_ROOT}/unsafe-mr-result.quarantined.$$.${RANDOM}"
+  else
+    MR_RESULT_RESET_TMP="$(umask 077; mktemp "${LOG_DIR}/.mr-result-reset.XXXXXX")"
+    chmod 600 "${MR_RESULT_RESET_TMP}"
+    mv -f "${MR_RESULT_RESET_TMP}" "${MR_RESULT_FILE}"
+  fi
 fi
 
 case "${ISSUE_MODE}" in

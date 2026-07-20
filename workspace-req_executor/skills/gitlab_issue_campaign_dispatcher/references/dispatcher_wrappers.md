@@ -52,7 +52,7 @@ The fresh C worktree is based on A's verified immutable SHA while direct control
 paths at any depth (`.claude/`, `CLAUDE.md`, `CLAUDE.local.md`, `.mcp.json`,
 `.acpxrc.json`) come from the original trusted `CONFIG_BRANCH`. Ordinary
 business scripts remain part of the baseline; this overlay is not an OS
-sandbox. A and C keep different IID-local attempt branches but push to the same
+sandbox. A and C keep different fixed IID-local branches but push to the same
 frozen remote branch. C receives A's SHA as both dependency baseline and exact
 lease; its commit must have exactly that one parent. Continue may resume only
 when durable state binds the exact shared branch, members, roles, dependency
@@ -152,7 +152,7 @@ inside one bounded Bash process. It atomically persists mode-600
 `run_acpx_attempt.sh` separately persists mode-600
 `${LOG_DIR}/acpx_terminal.json` immediately after the inner process exits.
 
-`run_executor_batch_tick.sh` checks those attempt-scoped files only for an
+`run_executor_batch_tick.sh` checks those issue-local files only for an
 exact currently pending job/generation. A worker result is sent through the
 claim-fenced durable-result followup mode and produces `cleanup_actions[]`.
 An acpx-only marker produces cleanup only after the post-acpx grace period, so

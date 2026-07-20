@@ -19,9 +19,9 @@
 #      `${OUTPUT_DIR}` is force-added by `stage_and_guard.sh`, and the stage
 #      guard removes `logs/` paths from the index before commit.
 #
-# The MAIN repo's working tree is the only issue execution cwd. The
-# dispatcher serializes issue attempts, and prepare_attempt.sh switches this
-# checkout onto a per-attempt local branch before acpx runs.
+# The parent clone owns the shared Git object database. Each Issue executes in
+# one linked worktree, and prepare_attempt.sh switches that worktree onto the
+# fixed issue-local branch before acpx runs.
 #
 # Required env vars:
 #   REPO_PATH               from env_paths.sh (default /data/${PROJECT}; trigger
