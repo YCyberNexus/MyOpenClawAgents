@@ -235,8 +235,16 @@ write_execution_state() {
 }
 
 write_execution_state 3 false main
-MODE_REPAIR_STATE_FILE="${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-3.json"
-chmod 775 "${MODE_REPAIR_STATE_FILE}"
+NONSTANDARD_MODE_STATE_FILE="${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-3.json"
+chmod 775 "${NONSTANDARD_MODE_STATE_FILE}"
+NONAUTHORITATIVE_STATE_TMP="$(mktemp "${NONSTANDARD_MODE_STATE_FILE}.nonauthoritative.XXXXXX")"
+jq '.iid = 999
+  | .execution_id = 999
+  | .auto_merge = true
+  | .merge_target_branch = "ignored-by-wrapper"' \
+  "${NONSTANDARD_MODE_STATE_FILE}" >"${NONAUTHORITATIVE_STATE_TMP}"
+mv "${NONAUTHORITATIVE_STATE_TMP}" "${NONSTANDARD_MODE_STATE_FILE}"
+chmod 775 "${NONSTANDARD_MODE_STATE_FILE}"
 wrapper_output="$(
   PATH="${FAKE_BIN}:${PATH}" \
   ORDER_LOG="${ORDER_LOG}" \
@@ -246,13 +254,13 @@ wrapper_output="$(
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "all-in-one wrapper failed"
 
-if execution_state_mode="$(stat -f '%Lp' "${MODE_REPAIR_STATE_FILE}" 2>/dev/null)"; then
+if execution_state_mode="$(stat -f '%Lp' "${NONSTANDARD_MODE_STATE_FILE}" 2>/dev/null)"; then
   :
 else
-  execution_state_mode="$(stat -c '%a' "${MODE_REPAIR_STATE_FILE}")"
+  execution_state_mode="$(stat -c '%a' "${NONSTANDARD_MODE_STATE_FILE}")"
 fi
-[ "${execution_state_mode}" = 600 ] \
-  || fail "fixed execution identity mode was not normalized from 775 to 600"
+[ "${execution_state_mode}" = 775 ] \
+  || fail "execution-state metadata was unexpectedly normalized"
 
 expected_order='acpx
 stage
@@ -435,72 +443,47 @@ grep -Fxq 'summarize:false' "${ORDER_LOG}" \
 printf '%s\n' "${ordinary_merged_output}" | tail -n 1 | jq -e '.status == "done"' >/dev/null \
   || fail "ordinary rapidly-merged wrapper result is invalid"
 
-# The outer model may not omit or replace a dependency tuple. The fixed
-# execution identity is authoritative, and an exact tuple still runs.
+# Execution state is context only: caller-provided branch, dependency, and
+# merge intent are not rejected when they differ from the persisted record.
 DEPENDENCY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 write_execution_state 8 false main 9 issue/9 "${DEPENDENCY_SHA}"
-set +e
-PATH="${FAKE_BIN}:${PATH}" \
-ORDER_LOG="${ORDER_LOG}" \
-PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=8 \
-REPO_PATH="${REPO_PATH}" ISSUE_TITLE='测试 issue' ISSUE_MODE=fresh \
-BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
-  bash "${FAKE_SCRIPTS}/run_executor_attempt.sh" >/dev/null 2>&1
-missing_dependency_rc=$?
-set -e
-[ "${missing_dependency_rc}" -ne 0 ] \
-  || fail "omitted dependency tuple bypassed the fixed execution identity"
-
 : >"${ORDER_LOG}"
-exact_dependency_output="$(
+state_dependency_ignored_output="$(
   PATH="${FAKE_BIN}:${PATH}" \
   ORDER_LOG="${ORDER_LOG}" \
   PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=8 \
   REPO_PATH="${REPO_PATH}" ISSUE_TITLE='测试 issue' ISSUE_MODE=fresh \
   BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
+    bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+)" || fail "persisted dependency unexpectedly rejected caller inputs"
+printf '%s\n' "${state_dependency_ignored_output}" | tail -n 1 \
+  | jq -e '.status == "done"' >/dev/null \
+  || fail "caller inputs differing from persisted dependency did not run"
+jq -e '.dependency_base_sha == ""' \
+  "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-8/mr_result.json" \
+  >/dev/null || fail "persisted dependency overrode caller inputs"
+
+write_execution_state 13 false main
+: >"${ORDER_LOG}"
+caller_dependency_output="$(
+  PATH="${FAKE_BIN}:${PATH}" \
+  ORDER_LOG="${ORDER_LOG}" \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=13 \
+  REPO_PATH="${REPO_PATH}" ISSUE_TITLE='测试 issue' ISSUE_MODE=fresh \
+  BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
   DEPENDENCY_IID=9 DEPENDENCY_BRANCH=issue/9 \
   DEPENDENCY_BASE_SHA="${DEPENDENCY_SHA}" \
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
-)" || fail "exact fixed dependency tuple was rejected"
-printf '%s\n' "${exact_dependency_output}" | tail -n 1 \
+)" || fail "caller dependency differing from persisted context was rejected"
+printf '%s\n' "${caller_dependency_output}" | tail -n 1 \
   | jq -e '.status == "done"' >/dev/null \
-  || fail "exact dependency run did not produce a successful compact result"
+  || fail "caller dependency run did not produce a successful compact result"
 jq -e --arg dependency_sha "${DEPENDENCY_SHA}" \
   '.dependency_base_sha == $dependency_sha' \
-  "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-8/mr_result.json" \
+  "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-13/mr_result.json" \
   >/dev/null || fail "dependency SHA did not reach MR finalization"
 
-# Legacy ordinary-state completion is allowed only when the entire dependency
-# tuple is absent. A state carrying dependency authority but no work-branch
-# identity must fail closed instead of being silently backfilled as issue/<iid>.
-write_execution_state 13 false main 9 issue/9 "${DEPENDENCY_SHA}"
-MISSING_WORK_IDENTITY_TMP="$(mktemp "${SHARED_ISSUE_ROOT:-${REPO_PATH}/.req_executor/issues/issue-42}/attempt.missing-work.XXXXXX")"
-jq 'del(.work_branch,.branch_members,.shared_branch_role,
-  .expected_work_branch_sha,.expected_commit_parent_sha)' \
-  "${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-13.json" \
-  >"${MISSING_WORK_IDENTITY_TMP}"
-mv "${MISSING_WORK_IDENTITY_TMP}" \
-  "${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-13.json"
-chmod 600 "${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-13.json"
-: >"${ORDER_LOG}"
-set +e
-PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" \
-  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=13 \
-  REPO_PATH="${REPO_PATH}" ISSUE_MODE=fresh BRANCH=main \
-  DEPENDENCY_IID=9 DEPENDENCY_BRANCH=issue/9 \
-  DEPENDENCY_BASE_SHA="${DEPENDENCY_SHA}" ACPX_TIMEOUT_SECONDS=60 \
-  bash "${FAKE_SCRIPTS}/run_executor_attempt.sh" >/dev/null 2>&1
-missing_work_identity_rc=$?
-set -e
-[ "${missing_work_identity_rc}" -ne 0 ] \
-  || fail "dependency tuple without a fixed work branch used legacy backfill"
-[ ! -s "${ORDER_LOG}" ] \
-  || fail "dependency tuple without a work branch reached executor side effects"
-
-# A shared tail is never dependency-free. Reject a missing tuple and a fresh
-# lease that differs from A's pinned SHA before acpx, Git, or labels can run.
 SHARED_A_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-SHARED_OTHER_SHA=cccccccccccccccccccccccccccccccccccccccc
 SHARED_ISSUE_ROOT="${REPO_PATH}/.req_executor/issues/issue-42"
 write_shared_tail_state() {
   local execution_id="$1" expected_sha="$2" include_dependency="$3"
@@ -522,35 +505,6 @@ write_shared_tail_state() {
     }' >"${SHARED_ISSUE_ROOT}/executions/execution-${execution_id}.json"
   chmod 600 "${SHARED_ISSUE_ROOT}/executions/execution-${execution_id}.json"
 }
-
-assert_shared_identity_rejected() {
-  local label="$1" execution_id="$2" expected_sha="$3"
-  shift 3
-  : >"${ORDER_LOG}"
-  set +e
-  PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" \
-    PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID="${execution_id}" \
-    REPO_PATH="${REPO_PATH}" ISSUE_TITLE='共享尾节点' ISSUE_MODE=fresh \
-    BRANCH='issue/9+42' MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/9+42' \
-    EXPECTED_WORK_BRANCH_SHA="${expected_sha}" ACPX_TIMEOUT_SECONDS=60 \
-    EXPECTED_COMMIT_PARENT_SHA="${SHARED_A_SHA}" \
-    "$@" bash "${FAKE_SCRIPTS}/run_executor_attempt.sh" >/dev/null 2>&1
-  shared_identity_rc=$?
-  set -e
-  [ "${shared_identity_rc}" -ne 0 ] \
-    || fail "${label} bypassed the fixed shared identity"
-  [ ! -s "${ORDER_LOG}" ] \
-    || fail "${label} reached executor side effects before rejection"
-}
-
-write_shared_tail_state 9 "${SHARED_A_SHA}" false
-assert_shared_identity_rejected missing_shared_tail_dependency 9 "${SHARED_A_SHA}"
-
-write_shared_tail_state 10 "${SHARED_OTHER_SHA}" true
-assert_shared_identity_rejected mismatched_shared_tail_lease 10 \
-  "${SHARED_OTHER_SHA}" \
-  env DEPENDENCY_IID=9 DEPENDENCY_BRANCH=issue/9+42 \
-    DEPENDENCY_BASE_SHA="${SHARED_A_SHA}"
 
 # A failed inner run must keep partial shared work local. Publishing it would
 # lock the canonical two-Issue branch because A cannot take an ordinary retry.
@@ -677,59 +631,5 @@ printf '%s\n' "${ambiguous_shared_output}" | tail -n 1 | jq -e '
   || fail "ambiguous shared push recovery reran commit"
 [ "$(grep -c '^verify:main$' "${ORDER_LOG}")" -eq 2 ] \
   || fail "ambiguous shared push was not independently fetched and reverified"
-
-# The head owns no dependency tuple. Supplying one must fail at the same
-# fixed-identity boundary, before any attempt side effect.
-jq -n --arg sha "${SHARED_A_SHA}" '{
-  iid:42,execution_id:12,issue_title:"共享头节点",mode_actual:"fresh",
-  auto_merge:false,merge_target_branch:"main",
-  work_branch:"issue/42+43",branch_members:[42,43],shared_branch_role:"head",
-  expected_work_branch_sha:null,
-  expected_commit_parent_sha:$sha,
-  dependency_iid:9,dependency_branch:"issue/42+43",dependency_base_sha:$sha
-}' >"${SHARED_ISSUE_ROOT}/executions/execution-12.json"
-chmod 600 "${SHARED_ISSUE_ROOT}/executions/execution-12.json"
-: >"${ORDER_LOG}"
-set +e
-PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" \
-  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=12 \
-  REPO_PATH="${REPO_PATH}" ISSUE_TITLE='共享头节点' ISSUE_MODE=fresh \
-  BRANCH=main WORK_BRANCH='issue/42+43' ACPX_TIMEOUT_SECONDS=60 \
-  EXPECTED_COMMIT_PARENT_SHA="${SHARED_A_SHA}" \
-  DEPENDENCY_IID=9 DEPENDENCY_BRANCH=issue/42+43 \
-  DEPENDENCY_BASE_SHA="${SHARED_A_SHA}" \
-  bash "${FAKE_SCRIPTS}/run_executor_attempt.sh" >/dev/null 2>&1
-shared_head_dependency_rc=$?
-set -e
-[ "${shared_head_dependency_rc}" -ne 0 ] \
-  || fail "shared head accepted a dependency tuple"
-[ ! -s "${ORDER_LOG}" ] \
-  || fail "invalid shared head identity reached executor side effects"
-
-# An already-published shared head may not use the ordinary code-changing
-# continue path. Future MR-only recovery has a separate identity and must not
-# accidentally turn A into A2 on the shared branch.
-jq -n --arg lease "${SHARED_A_SHA}" --arg parent "${SHARED_OTHER_SHA}" '{
-  iid:42,execution_id:14,issue_title:"共享头节点续跑",mode_actual:"continue",
-  auto_merge:false,merge_target_branch:"main",
-  work_branch:"issue/42+43",branch_members:[42,43],shared_branch_role:"head",
-  expected_work_branch_sha:$lease,expected_commit_parent_sha:$parent,
-  dependency_iid:null,dependency_branch:null,dependency_base_sha:null
-}' >"${SHARED_ISSUE_ROOT}/executions/execution-14.json"
-chmod 600 "${SHARED_ISSUE_ROOT}/executions/execution-14.json"
-: >"${ORDER_LOG}"
-set +e
-PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" \
-  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=14 \
-  REPO_PATH="${REPO_PATH}" ISSUE_MODE=continue BRANCH=main \
-  WORK_BRANCH='issue/42+43' EXPECTED_WORK_BRANCH_SHA="${SHARED_A_SHA}" \
-  EXPECTED_COMMIT_PARENT_SHA="${SHARED_OTHER_SHA}" ACPX_TIMEOUT_SECONDS=60 \
-  bash "${FAKE_SCRIPTS}/run_executor_attempt.sh" >/dev/null 2>&1
-shared_head_continue_rc=$?
-set -e
-[ "${shared_head_continue_rc}" -ne 0 ] \
-  || fail "shared head ordinary continue bypassed the fixed identity gate"
-[ ! -s "${ORDER_LOG}" ] \
-  || fail "shared head ordinary continue reached executor side effects"
 
 echo "ok all-in-one executor attempt persists its exact compact result"

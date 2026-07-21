@@ -124,6 +124,12 @@ execution requires a full `expected_commit_parent_sha`; for C it equals
 `state.json` retains the last successfully pushed identity and stores the new
 values only under `proposed_*` plus `preparing_execution_id`.
 
+`run_executor_attempt.sh` does not use this file as an authorization or
+consistency gate. Its IID, execution ID, branch, dependency, and merge inputs
+come from the rendered wrapper invocation. When readable, the execution file
+supplies only optional title and shared-branch display context; missing,
+malformed, mismatched, or nonstandard file metadata does not reject a run.
+
 Only after `run_executor_attempt.sh` has pushed the exact remote branch,
 matched it to the returned commit, and verified the dependency history does it
 promote the identity in `state.json`. The promoted fields include

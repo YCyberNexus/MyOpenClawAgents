@@ -31,14 +31,14 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-CALLER_AUTO_MERGE="${AUTO_MERGE:-false}"
-CALLER_MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
-CALLER_DEPENDENCY_IID="${DEPENDENCY_IID:-}"
-CALLER_DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH:-}"
-CALLER_DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
-CALLER_WORK_BRANCH="${WORK_BRANCH:-}"
-CALLER_EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
-CALLER_EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
+MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
+DEPENDENCY_IID="${DEPENDENCY_IID:-}"
+DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH:-}"
+DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+WORK_BRANCH="${WORK_BRANCH:-issue/${ISSUE_IID}}"
+EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
+EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
 
 execution_state_file_mode() {
   local path="$1"
@@ -58,203 +58,22 @@ execution_state_file_owner() {
   fi
 }
 
-# The outer model only copies the deterministic wrapper invocation. It is not
-# an authority for merge intent or dependency identity. Load those values from
-# the private state written before worktree preparation, and reject omission or
-# substitution rather than silently defaulting to a non-dependent run.
-: "${EXECUTION_STATE_FILE:?run_executor_attempt.sh: EXECUTION_STATE_FILE must be set}"
-if [ ! -f "${EXECUTION_STATE_FILE}" ] || [ -L "${EXECUTION_STATE_FILE}" ]; then
-  echo "run_executor_attempt.sh: fixed execution identity is missing or not a regular file" >&2
-  exit 2
+# Execution state is optional context only. It no longer authorizes or rejects
+# caller-provided IID, execution ID, branch, dependency, or merge intent.
+EXECUTION_STATE_CONTEXT='{}'
+if [ -f "${EXECUTION_STATE_FILE}" ] && [ ! -L "${EXECUTION_STATE_FILE}" ]; then
+  EXECUTION_STATE_CONTEXT="$(jq -c \
+    'if type == "object" then . else {} end' \
+    "${EXECUTION_STATE_FILE}" 2>/dev/null || printf '{}')"
 fi
-EXECUTION_STATE_MODE="$(execution_state_file_mode "${EXECUTION_STATE_FILE}")" || true
-EXECUTION_STATE_OWNER="$(execution_state_file_owner "${EXECUTION_STATE_FILE}")" || true
-EXECUTION_STATE_BYTES="$(wc -c <"${EXECUTION_STATE_FILE}" 2>/dev/null | tr -d '[:space:]')"
-if [ "${EXECUTION_STATE_OWNER}" != "$(id -u)" ] \
-    || ! [[ "${EXECUTION_STATE_BYTES}" =~ ^[1-9][0-9]*$ ]] \
-    || [ "${EXECUTION_STATE_BYTES}" -gt 65536 ]; then
-  echo "run_executor_attempt.sh: fixed execution identity has unsafe metadata" >&2
-  exit 2
-fi
-if [ "${EXECUTION_STATE_MODE}" != 600 ]; then
-  PRIOR_EXECUTION_STATE_MODE="${EXECUTION_STATE_MODE:-unknown}"
-  if ! chmod 600 "${EXECUTION_STATE_FILE}"; then
-    echo "run_executor_attempt.sh: fixed execution identity mode could not be normalized to 600" >&2
-    exit 2
-  fi
-  EXECUTION_STATE_MODE="$(execution_state_file_mode "${EXECUTION_STATE_FILE}")" || true
-  EXECUTION_STATE_OWNER="$(execution_state_file_owner "${EXECUTION_STATE_FILE}")" || true
-  EXECUTION_STATE_BYTES="$(wc -c <"${EXECUTION_STATE_FILE}" 2>/dev/null | tr -d '[:space:]')"
-  if [ "${EXECUTION_STATE_MODE}" != 600 ] \
-      || [ "${EXECUTION_STATE_OWNER}" != "$(id -u)" ] \
-      || ! [[ "${EXECUTION_STATE_BYTES}" =~ ^[1-9][0-9]*$ ]] \
-      || [ "${EXECUTION_STATE_BYTES}" -gt 65536 ]; then
-    echo "run_executor_attempt.sh: fixed execution identity remains unsafe after mode normalization" >&2
-    exit 2
-  fi
-  echo "run_executor_attempt.sh: normalized fixed execution identity mode from ${PRIOR_EXECUTION_STATE_MODE} to 600" >&2
-fi
-
-if ! TRUSTED_EXECUTION_IDENTITY="$(jq -ce \
-    --argjson iid "${ISSUE_IID}" \
-    --argjson execution_id "${EXECUTION_ID}" '
-    def absent_or_empty: . == null or . == "";
-    if type == "object"
-        and (has("work_branch") | not)
-        and (.dependency_iid? | absent_or_empty)
-        and (.dependency_branch? | absent_or_empty)
-        and (.dependency_base_sha? | absent_or_empty) then
-      . + {
-        work_branch:("issue/" + ($iid | tostring)),
-        branch_members:[$iid],
-        shared_branch_role:null,
-        expected_work_branch_sha:null,
-        expected_commit_parent_sha:null
-      }
-    else . end
-    |
-    if type == "object"
-      and .iid == $iid
-      and .execution_id == $execution_id
-      and (.issue_title | type == "string" and length > 0 and length <= 1024)
-      and (.mode_actual == "fresh" or .mode_actual == "continue")
-      and (.auto_merge | type == "boolean")
-      and (.merge_target_branch | type == "string" and length > 0)
-      and (.work_branch | type == "string")
-      and (.branch_members | type == "array")
-      and (
-        (.work_branch == ("issue/" + ($iid | tostring))
-          and .branch_members == [$iid]
-          and (.shared_branch_role // null) == null)
-        or
-        ((.branch_members | length) == 2
-          and all(.branch_members[];
-            type == "number" and . == floor and . > 0)
-          and .branch_members[0] != .branch_members[1]
-          and (.branch_members | index($iid) != null)
-          and .work_branch == ("issue/" + (.branch_members[0] | tostring)
-            + "+" + (.branch_members[1] | tostring))
-          and .shared_branch_role ==
-            (if $iid == .branch_members[0] then "head" else "tail" end)
-          and .auto_merge == false)
-      )
-      and (((.expected_work_branch_sha // null) == null)
-        or (.expected_work_branch_sha | type == "string"
-          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")))
-      and (((.expected_commit_parent_sha // null) == null)
-        or (.expected_commit_parent_sha | type == "string"
-          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")))
-      and (if (.branch_members | length) == 2 then
-        if .shared_branch_role == "head" then
-          (.dependency_iid // null) == null
-          and (.dependency_branch // null) == null
-          and (.dependency_base_sha // null) == null
-        else
-          .shared_branch_role == "tail"
-          and (.dependency_iid | type == "number" and . == floor and . > 0)
-          and .dependency_iid == .branch_members[0]
-          and .dependency_branch == .work_branch
-          and (.dependency_base_sha | type == "string"
-            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-        end
-      else
-        ((.dependency_iid // null) == null
-          and (.dependency_branch // null) == null
-          and (.dependency_base_sha // null) == null)
-        or ((.dependency_iid | type == "number" and . == floor and . > 0)
-          and .dependency_branch == ("issue/" + (.dependency_iid | tostring))
-          and (.dependency_base_sha | type == "string"
-            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")))
-      end)
-      and (if (.branch_members | length) == 2 then
-        (.expected_commit_parent_sha | type == "string"
-          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-        and if .shared_branch_role == "head" then
-          .mode_actual == "fresh"
-          and (.expected_work_branch_sha // null) == null
-        else
-          (.expected_work_branch_sha | type == "string")
-          and ((.expected_commit_parent_sha | ascii_downcase)
-            == (.dependency_base_sha | ascii_downcase))
-          and (if .mode_actual == "fresh" then
-            ((.expected_work_branch_sha | ascii_downcase)
-              == (.dependency_base_sha | ascii_downcase))
-          else true end)
-        end
-      else (.expected_commit_parent_sha // null) == null end)
-    then {
-      mode_actual:.mode_actual,
-      issue_title:.issue_title,
-      auto_merge:.auto_merge,
-      merge_target_branch:.merge_target_branch,
-      work_branch:.work_branch,
-      branch_members:.branch_members,
-      shared_branch_role:(.shared_branch_role // null),
-      expected_work_branch_sha:(.expected_work_branch_sha // null),
-      expected_commit_parent_sha:(.expected_commit_parent_sha // null),
-      dependency_iid:(.dependency_iid // null),
-      dependency_branch:(.dependency_branch // null),
-      dependency_base_sha:(.dependency_base_sha // null)
-    }
-    else error("invalid fixed execution identity") end
-  ' "${EXECUTION_STATE_FILE}" 2>/dev/null)"; then
-  echo "run_executor_attempt.sh: fixed execution identity is invalid" >&2
-  exit 2
-fi
-
-AUTO_MERGE="$(jq -r '.auto_merge' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-ISSUE_TITLE="$(jq -r '.issue_title' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-MERGE_TARGET_BRANCH="$(jq -r '.merge_target_branch' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-DEPENDENCY_IID="$(jq -r '.dependency_iid // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-DEPENDENCY_BRANCH="$(jq -r '.dependency_branch // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-DEPENDENCY_BASE_SHA="$(jq -r '.dependency_base_sha // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-WORK_BRANCH="$(jq -r '.work_branch' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-BRANCH_MEMBERS_JSON="$(jq -c '.branch_members' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-SHARED_BRANCH_ROLE="$(jq -r '.shared_branch_role // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-EXPECTED_WORK_BRANCH_SHA="$(jq -r '.expected_work_branch_sha // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-EXPECTED_COMMIT_PARENT_SHA="$(jq -r '.expected_commit_parent_sha // ""' <<<"${TRUSTED_EXECUTION_IDENTITY}")"
-if [ "${ISSUE_MODE}" != "$(jq -r '.mode_actual' <<<"${TRUSTED_EXECUTION_IDENTITY}")" ] \
-    || [ "${CALLER_AUTO_MERGE}" != "${AUTO_MERGE}" ] \
-    || [ "${CALLER_MERGE_TARGET_BRANCH}" != "${MERGE_TARGET_BRANCH}" ] \
-    || [ "${CALLER_DEPENDENCY_IID}" != "${DEPENDENCY_IID}" ] \
-    || [ "${CALLER_DEPENDENCY_BRANCH}" != "${DEPENDENCY_BRANCH}" ] \
-    || [ "${CALLER_DEPENDENCY_BASE_SHA}" != "${DEPENDENCY_BASE_SHA}" ] \
-    || [ "${CALLER_WORK_BRANCH}" != "${WORK_BRANCH}" ] \
-    || [ "${CALLER_EXPECTED_WORK_BRANCH_SHA}" != "${EXPECTED_WORK_BRANCH_SHA}" ] \
-    || [ "${CALLER_EXPECTED_COMMIT_PARENT_SHA}" != "${EXPECTED_COMMIT_PARENT_SHA}" ]; then
-  echo "run_executor_attempt.sh: caller inputs do not match the fixed execution identity" >&2
-  exit 2
-fi
-
-case "${AUTO_MERGE}" in
-  true|false) ;;
-  *)
-    echo "run_executor_attempt.sh: AUTO_MERGE must be true or false" >&2
-    exit 2
-    ;;
-esac
-if [ -z "${MERGE_TARGET_BRANCH}" ]; then
-  echo "run_executor_attempt.sh: MERGE_TARGET_BRANCH or BRANCH must be non-empty" >&2
-  exit 2
-fi
-if [ -n "${DEPENDENCY_IID}${DEPENDENCY_BRANCH}${DEPENDENCY_BASE_SHA}" ]; then
-  if ! [[ "${DEPENDENCY_IID}" =~ ^[1-9][0-9]*$ ]] \
-      || ! [[ "${DEPENDENCY_BASE_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
-    echo "run_executor_attempt.sh: dependency identity must be a complete IID/branch/full-SHA tuple" >&2
-    exit 2
-  fi
-  if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ]; then
-    if [ "${SHARED_BRANCH_ROLE}" != tail ] \
-        || [ "${DEPENDENCY_IID}" != "$(jq -r '.[0]' <<<"${BRANCH_MEMBERS_JSON}")" ] \
-        || [ "${DEPENDENCY_BRANCH}" != "${WORK_BRANCH}" ]; then
-      echo "run_executor_attempt.sh: shared dependency identity does not match the fixed work branch" >&2
-      exit 2
-    fi
-  elif [ "${DEPENDENCY_BRANCH}" != "issue/${DEPENDENCY_IID}" ]; then
-    echo "run_executor_attempt.sh: dependency branch does not match its IID" >&2
-    exit 2
-  fi
-fi
+ISSUE_TITLE="${ISSUE_TITLE:-$(jq -r \
+  --arg fallback "Issue #${ISSUE_IID}" \
+  '.issue_title // $fallback' <<<"${EXECUTION_STATE_CONTEXT}")}"
+BRANCH_MEMBERS_JSON="${BRANCH_MEMBERS_JSON:-$(jq -c \
+  --argjson iid "${ISSUE_IID}" \
+  '.branch_members // [$iid]' <<<"${EXECUTION_STATE_CONTEXT}")}"
+SHARED_BRANCH_ROLE="${SHARED_BRANCH_ROLE:-$(jq -r \
+  '.shared_branch_role // ""' <<<"${EXECUTION_STATE_CONTEXT}")}"
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
