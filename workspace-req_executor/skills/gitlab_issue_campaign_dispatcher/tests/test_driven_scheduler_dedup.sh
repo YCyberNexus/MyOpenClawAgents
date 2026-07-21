@@ -395,8 +395,8 @@ jq -e '
   and .active_count == 2
 ' <<<"${next_intent_reserve}" >/dev/null
 
-# A conflicting physical job at the head of one batch must not block a later
-# runnable snapshot item from using a free slot in the same round.
+# A conflicting physical job at the head of one batch blocks every later Issue
+# from the same repository, even when the global repository limit has room.
 SCHEDULER_ROOT="${TEST_ROOT}/head-of-line-scheduler"
 CONFIG_DIR="${TEST_ROOT}/head-of-line-config"
 mkdir -p "${CONFIG_DIR}"
@@ -430,16 +430,17 @@ jq '.batch_order = ["A","C"]' \
   "${SCHEDULER_ROOT}/scheduler_state.json"
 
 head_of_line_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
-expected_head_of_line='[{"batch_id":"A","iid":7},{"batch_id":"C","iid":8}]'
+expected_head_of_line='[{"batch_id":"A","iid":7}]'
 actual_head_of_line="$(jq -c '[.grants[] | {batch_id,iid}]' <<<"${head_of_line_reserve}")"
 if [ "${actual_head_of_line}" != "${expected_head_of_line}" ]; then
-  echo "expected blocked C#7 to yield to runnable C#8: ${expected_head_of_line}, got ${actual_head_of_line}" >&2
+  echo "expected repository-serial head-of-line blocking: ${expected_head_of_line}, got ${actual_head_of_line}" >&2
   exit 1
 fi
 jq -e '
   .memberships["0"].status == "pending"
   and (.memberships["0"].blocked_by_job_id | type == "string")
-  and .memberships["1"].status == "reserved"
+  and (.memberships | has("1") | not)
+  and .next_snapshot_index == 1
 ' "${SCHEDULER_ROOT}/batches/C/state.json" >/dev/null
 
 # Missing entry_mode always normalizes to auto, including force reruns. It must
@@ -581,13 +582,12 @@ legacy_pending_reserve="$(
 )"
 if ! jq -e '
   [.grants[] | {batch_id,iid}] == [
-    {batch_id:"Q",iid:41},
-    {batch_id:"W",iid:42}
+    {batch_id:"Q",iid:41}
   ]
-  and .active_count == 2
-  and .available_slots == 1
+  and .active_count == 1
+  and .available_slots == 2
 ' <<<"${legacy_pending_reserve}" >/dev/null; then
-  echo "expected migrated pending grants without legacy running replay, got ${legacy_pending_reserve}" >&2
+  echo "expected one repository-serial migrated pending grant, got ${legacy_pending_reserve}" >&2
   exit 1
 fi
 jq -e '
@@ -595,17 +595,30 @@ jq -e '
   and .active_jobs["Q:snapshot-0"].reservation_seq == 2
   and .active_jobs["Q:snapshot-0"].claim_generation == 0
   and .active_jobs["Q:snapshot-0"].claim_token == null
-  and .active_jobs["W:snapshot-0"].reservation_seq == 3
-  and .active_jobs["W:snapshot-0"].status == "reserved"
-  and .active_jobs["W:snapshot-0"].claim_generation == 0
-  and .active_jobs["W:snapshot-0"].claim_token == null
+  and (.active_jobs | has("W:snapshot-0") | not)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
-jq -e '.memberships["0"].status == "reserved"' \
+jq -e '.memberships["0"].status == "pending"' \
   "${SCHEDULER_ROOT}/batches/W/state.json" >/dev/null
+
+legacy_q_claim="$(
+  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='Q:snapshot-0' STATUS=preparing \
+    NOW_EPOCH=302 bash "${RECORD}"
+)"
+legacy_q_token="$(jq -r '.claim_token' <<<"${legacy_q_claim}")"
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID='Q:snapshot-0' STATUS=terminal \
+  TERMINAL_STATUS=done CLAIM_TOKEN="${legacy_q_token}" NOW_EPOCH=303 \
+  bash "${RECORD}" >/dev/null
+legacy_w_reserve="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=304 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,iid}] == [{batch_id:"W",iid:42}]
+  and .active_count == 1
+' <<<"${legacy_w_reserve}" >/dev/null
 
 legacy_w_claim="$(
   CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=preparing \
-    NOW_EPOCH=302 bash "${RECORD}"
+    NOW_EPOCH=305 bash "${RECORD}"
 )"
 legacy_w_token="$(jq -r '.claim_token' <<<"${legacy_w_claim}")"
 jq -e '
@@ -613,11 +626,11 @@ jq -e '
   and (.claim_token | type == "string" and length > 0)
 ' <<<"${legacy_w_claim}" >/dev/null
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=spawned \
-  CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=303 \
+  CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=306 \
   bash "${RECORD}" >/dev/null
 CONFIG_DIR="${CONFIG_DIR}" JOB_ID='W:snapshot-0' STATUS=terminal \
   TERMINAL_STATUS=done \
-  CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=304 \
+  CLAIM_TOKEN="${legacy_w_token}" NOW_EPOCH=307 \
   bash "${RECORD}" >/dev/null
 jq -e '.active_jobs | has("W:snapshot-0") | not' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null

@@ -32,7 +32,8 @@ Core contract:
 - `RUN_EXECUTOR_BATCH_TICK` runs the exact bare Path D wrapper command. Never read config or `*.env` files and never inject credentials, paths, hosts, or
   scheduler settings into that command; the wrapper resolves them privately.
 - `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
-  never edit deployment config or scheduler JSON in the orchestrator.
+  it limits parallel repositories, while Issues in one repository stay
+  serial. Never edit deployment config or scheduler JSON in the orchestrator.
 - `/timeout-executor` changes the future-attempt acpx cap only through
   `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap,
   future dispatcher outer budgets are derived from scheduler state, and the

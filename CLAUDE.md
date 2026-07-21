@@ -77,7 +77,7 @@ executor 侧当前已落地、且容易被误当成"还没有"的能力：
 - **共享依赖分支**：同项目内一对一依赖，**依赖关系写在依赖方 Issue 的正文里**；两张 Issue 晚绑定到
   同一分支，已有的普通分支可迁移过去，迁移可重放。
 - **exact-SHA MR 校验** 与 **per-Issue callback outbox**：终态结果按 Issue 逐条投递，不做批量汇总投递。
-- **运行时控制**：`/slot <正整数>` 调所有 batch session 共享的物理并发上限，
+- **运行时控制**：`/slot <正整数>` 调所有 batch session 共享的并行仓库数上限，
   `/timeout-executor <时长>` 调后续 attempt 的 acpx 上限（默认 `EXECUTOR_ACPX_TIMEOUT_SECONDS=3600`）。
   两者都只走各自固定 wrapper，**不改配置文件、不手写 scheduler JSON**。
 

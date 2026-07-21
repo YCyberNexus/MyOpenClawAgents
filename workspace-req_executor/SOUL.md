@@ -21,9 +21,11 @@ A heartbeat tick runs only the exact bare Path D wrapper command. It never
 reads config or `*.env` files and never copies credentials or deployment values
 into a tool call; the wrapper resolves all configuration privately.
 
-The executor-wide slot ceiling is runtime state shared by every batch session
-under one `EXECUTOR_SCHEDULER_ROOT`. Lowering it does not cancel existing work;
-new reservations pause until the active count falls below the new ceiling.
+The executor-wide repository-slot ceiling is runtime state shared by every
+batch session under one `EXECUTOR_SCHEDULER_ROOT`. At most one Issue per GitLab
+repository may be active, while distinct repositories run in parallel.
+Lowering the ceiling does not cancel existing work; new repository reservations
+pause until the active repository count falls below the new ceiling.
 The executor-wide acpx cap is also shared runtime state. Its tracked default is
 one hour and `/timeout-executor` may set 60 seconds through 5 hours without editing
 the skill or deployment files. req_dispatcher derives future outer deadlines

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Persist an executor-wide physical concurrency ceiling from `/slot N`.
+# Persist the executor-wide parallel-repository ceiling from `/slot N`.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +21,7 @@ fi
 SLOT_COUNT_TEXT="${BASH_REMATCH[1]}"
 if [ "${#SLOT_COUNT_TEXT}" -gt 10 ] \
   || [ "${SLOT_COUNT_TEXT}" -gt 2147483647 ]; then
-  slot_failure "slot number must be between 1 and 2147483647"
+  slot_failure "parallel project limit must be between 1 and 2147483647"
 fi
 SLOT_COUNT="${SLOT_COUNT_TEXT}"
 
@@ -51,7 +51,7 @@ fi
 PREVIOUS_SLOT_COUNT="$(jq -r \
   --argjson configured_max "${EXECUTOR_MAX_CONCURRENCY}" \
   '.max_concurrency // $configured_max' <<<"${SCHEDULER_STATE}")"
-ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
+ACTIVE_COUNT="$(jq -r '[.active_jobs[].project] | unique | length' <<<"${SCHEDULER_STATE}")"
 UPDATED_STATE="$(jq -c --argjson slots "${SLOT_COUNT}" '
   .max_concurrency = $slots
   | if has("pending_transaction")
@@ -75,16 +75,16 @@ else
 fi
 
 jq -cn \
-  --argjson slot_count "${SLOT_COUNT}" \
-  --argjson previous_slot_count "${PREVIOUS_SLOT_COUNT}" \
-  --argjson active_count "${ACTIVE_COUNT}" \
-  --argjson available_slots "${AVAILABLE_SLOTS}" \
+  --argjson parallel_project_limit "${SLOT_COUNT}" \
+  --argjson previous_parallel_project_limit "${PREVIOUS_SLOT_COUNT}" \
+  --argjson active_project_count "${ACTIVE_COUNT}" \
+  --argjson available_project_slots "${AVAILABLE_SLOTS}" \
   --argjson draining "${DRAINING}" '
   {
     status:"success",
-    slot_count:$slot_count,
-    previous_slot_count:$previous_slot_count,
-    active_count:$active_count,
-    available_slots:$available_slots,
+    parallel_project_limit:$parallel_project_limit,
+    previous_parallel_project_limit:$previous_parallel_project_limit,
+    active_project_count:$active_project_count,
+    available_project_slots:$available_project_slots,
     draining:$draining
   }'

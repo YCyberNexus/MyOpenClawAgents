@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-21.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-21.5] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler that serializes Issues per GitLab repository while running distinct repositories in parallel, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -387,6 +387,10 @@ non-advancing/unsafe cursors and bounded-scan overflow, requires two consecutive
 normalized full scans to agree before freezing, OPEN filtering, immutable snapshot creation,
 batch idempotency, strict round-robin reservation, live preflight, claim
 allocation and binding, claim-0 skips, project handoff import, and outbox drain.
+The scheduler ceiling counts distinct repositories. A project topup derives
+`max_concurrent_subagents` and `hourly_issue_quota` from its already-authorized
+grant count, never from the executor-wide `/slot` value; normal state therefore
+uses `1` and cannot turn repository capacity into same-repository concurrency.
 The agent-wide topup transaction processes at most 256 candidate jobs and 32
 skip-refill rounds under a 90-second phase deadline; each project topup process
 also has a 75-second wall-clock cap. Every child process and nested scheduler or
@@ -394,7 +398,7 @@ launch-coordinator lock uses the smaller of its own cap and the remaining phase
 budget. Reaching an outer budget releases the lock and leaves unprocessed
 reserved jobs for the next tick.
 Dependency-only deferrals are transactionally returned to `retry_wait` after
-ordinary skip/refill processing. They do not retain a physical slot, and normal
+ordinary skip/refill processing. They do not retain a repository slot, and normal
 pending/lazy snapshot work is reserved before retrying those deferred entries.
 The external I1 shape is the selector and callback-routing schema documented in
 `references/trigger_command.md`. The wrapper resolves `GITLAB_TOKEN` using the
@@ -603,12 +607,13 @@ one-concurrency scheduled campaign.
 ```
 
 The wrapper accepts exactly `/slot` followed by one positive decimal integer.
-It updates the executor-wide `max_concurrency` stored in the shared scheduler
-state under the scheduler lock. Every batch session using the same
-`EXECUTOR_SCHEDULER_ROOT` observes the new value. Lowering the ceiling does not
-cancel running or already-reserved jobs; reservation stays at capacity until
-the active count naturally falls below the new value. The LLM never edits
-`scheduler_state.json` or deployment config itself.
+It updates the executor-wide `max_concurrency`, whose value is the maximum
+number of parallel GitLab repositories, in shared scheduler state under the
+scheduler lock. Every batch session using the same `EXECUTOR_SCHEDULER_ROOT`
+observes the new value. One repository runs at most one Issue at a time.
+Lowering the ceiling does not cancel running jobs; reservation stays at
+capacity until the active repository count naturally falls below the new
+value. The LLM never edits `scheduler_state.json` or deployment config itself.
 
 ### Path G — `/timeout-executor <duration>` runtime control
 
@@ -630,7 +635,7 @@ by req_dispatcher on later calls. It never changes OpenClaw global
 `runTimeoutSeconds`. The tracked initialization default is one hour.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
-the next tick imports it, releases the physical slot, fans out every attached
+the next tick imports it, releases the repository slot, fans out every attached
 batch membership, and retries each I3 outbox item until the dispatcher returns
 the matching accepted acknowledgement. Callback delivery is never a best-effort
 direct send from the LLM. Each drain has a bounded send budget and persists

@@ -21,8 +21,8 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `execute_issue`：只调 `submit_executor_batch.sh`；支持 single/iid_list/range/open_unfinished/open_label。
 - `create_and_execute`：git_issuer 严格成功后，把返回 Issue URL 交同一个 batch wrapper。
 - `clarify_or_reject`：不调用下游。
-- `/slot <正整数>`：只调 `set_executor_slots.sh`，由它把命令发送到默认 executor 主 session；
-  dispatcher 不直接修改调度状态。
+- `/slot <正整数>`：只调 `set_executor_slots.sh`，由它把命令发送到默认 executor 主 session，
+  调整并行仓库数上限；同仓库 Issue 仍串行，dispatcher 不直接修改调度状态。
 - `/timeout-executor <时长>`：只调 `set_executor_acpx_timeout.sh`，持久化后续
   attempt 的 acpx 超时，并让 dispatcher 后续从 scheduler state 派生外层预算；
   OpenClaw 全局 timeout 不变，在途任务使用已持久化的创建时预算，不受调低操作影响。

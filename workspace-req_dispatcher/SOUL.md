@@ -47,8 +47,8 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
     drain；重复事件不重复计数或生成通知 item。
 10. zero-match 只生成稳定 `<batch_id>:no-matches` intent 和一次“无匹配 OPEN Issue”通知。
 11. 同步只回最小 ack；每项终态异步逐条通知，不播报进度，不额外发送批次汇总。
-12. `/slot` 只调整默认 executor 的共享物理并发上限；所有同 scheduler root 的 batch session
-    共同生效，缩容不取消已有任务。
+12. `/slot` 只调整默认 executor 的共享并行仓库数上限；同仓库 Issue 串行，不同仓库并行；
+    所有同 scheduler root 的 batch session 共同生效，缩容不取消已有任务。
 13. `/timeout-executor` 只调整默认 executor 后续 attempt 的 acpx 上限；在途
     attempt 及旧 FIFO active/pending 继续使用启动或创建时的固定值。
 

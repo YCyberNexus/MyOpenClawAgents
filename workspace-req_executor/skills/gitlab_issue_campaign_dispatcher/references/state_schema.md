@@ -229,7 +229,11 @@ ${EXECUTOR_SCHEDULER_ROOT}/scheduler_state.json
 
 In addition to `version`, `round_robin_cursor`, `batch_order`, and
 `active_jobs`, version 1 may contain positive-integer `max_concurrency` and
-`acpx_timeout_seconds` from 60 through 18000. They are written only by
+`acpx_timeout_seconds` from 60 through 18000. `max_concurrency` is the maximum
+number of distinct active GitLab repositories, not an Issue count. New state
+admits at most one active job per repository; during upgrade, multiple legacy
+started jobs may drain naturally while redundant legacy `reserved` jobs return
+to pending. The runtime values are written only by
 `set_executor_slots.sh` and `set_executor_acpx_timeout.sh` under
 `scheduler.lock` and override deployment initialization defaults for later
 batch sessions. A `pending_transaction.scheduler_state` carries the same

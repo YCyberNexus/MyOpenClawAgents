@@ -1,6 +1,6 @@
 # State Schema
 
-`req_dispatcher` 只保存控制面小状态，不保存 executor 的 IID snapshot、物理槽位、worktree、
+`req_dispatcher` 只保存控制面小状态，不保存 executor 的 IID snapshot、仓库槽位、worktree、
 campaign state 或 claim token。所有文件由 `env_paths.sh` 从 `STATE_ROOT` 派生，
 并共用 `pending.lock`；网络调用永远在共享锁外。
 

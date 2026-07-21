@@ -152,7 +152,7 @@ esac
 : "${GITLAB_HOST:?dispatch_driven_topup.sh: GITLAB_HOST missing from gitlab.env}"
 : "${GITLAB_API_PROTOCOL:?dispatch_driven_topup.sh: GITLAB_API_PROTOCOL missing from gitlab.env}"
 REPO_PARENT_EFF="${REPO_PARENT_PATH:-/data}"
-MAX_CONCURRENT_EFF="${EXECUTOR_MAX_CONCURRENCY:-3}"
+MAX_CONCURRENT_EFF="${EXECUTOR_MAX_CONCURRENCY:-10}"
 case "${MAX_CONCURRENT_EFF}" in
   ''|*[!0-9]*) die "EXECUTOR_MAX_CONCURRENCY must be a positive integer" ;;
 esac
@@ -165,12 +165,11 @@ if [ "${ACPX_TIMEOUT_EFF}" -lt 60 ] || [ "${ACPX_TIMEOUT_EFF}" -gt 18000 ]; then
   die "EXECUTOR_ACPX_TIMEOUT_SECONDS must be between 60 and 18000"
 fi
 GRANT_COUNT="$(printf '%s' "${REQUEST_JSON}" | jq -r '.grants | length')"
-if [ "${GRANT_COUNT}" -gt "${MAX_CONCURRENT_EFF}" ]; then
-  # A grant already owns a physical scheduler slot. If /slot lowered the
-  # ceiling after reservation, finish launching those durable grants while
-  # preventing any later reservation from exceeding the new ceiling.
-  MAX_CONCURRENT_EFF="${GRANT_COUNT}"
-fi
+# The executor-wide value limits distinct repositories; it must never become
+# per-repository Issue concurrency. Normal scheduler state grants exactly one
+# job for this project. A larger legacy grant set only represents jobs that
+# predate the repository-serial upgrade and still need recovery/reconciliation.
+PROJECT_GRANT_CAPACITY="${GRANT_COUNT}"
 
 if ! RESOLVED_REPO_PATH="$(
   PROJECT_FULL="${PROJECT_FULL}" \
@@ -188,7 +187,7 @@ IID_MIN="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | min')"
 IID_MAX="$(printf '%s' "${REQUEST_JSON}" | jq -r '[.grants[].iid] | max')"
 
 # Dependency branch planning needs the complete immutable membership of each
-# represented batch, not merely the IIDs that won a physical slot this round.
+# represented batch, not merely the IIDs that won a repository slot this round.
 # Keep this planning scope separate from issue_iids: only grants are executable.
 # A bounded scope preserves the scheduler's small-topup contract; a dependent
 # encountered in a larger/incomplete scope fails closed in the project layer.
@@ -257,8 +256,8 @@ group=${GROUP_EFF}
 issue_iids=${IID_CSV}
 issue_min_iid=${IID_MIN}
 issue_max_iid=${IID_MAX}
-hourly_issue_quota=${MAX_CONCURRENT_EFF}
-max_concurrent_subagents=${MAX_CONCURRENT_EFF}
+hourly_issue_quota=${PROJECT_GRANT_CAPACITY}
+max_concurrent_subagents=${PROJECT_GRANT_CAPACITY}
 max_runtime_minutes=300
 blocked_retry_limit=3
 blocked_cooldown_ticks=1
