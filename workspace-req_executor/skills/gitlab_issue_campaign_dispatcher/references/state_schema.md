@@ -126,9 +126,18 @@ values only under `proposed_*` plus `preparing_execution_id`.
 
 `run_executor_attempt.sh` does not use this file as an authorization or
 consistency gate. Its IID, execution ID, branch, dependency, and merge inputs
-come from the rendered wrapper invocation. When readable, the execution file
-supplies only optional title and shared-branch display context; missing,
-malformed, mismatched, or nonstandard file metadata does not reject a run.
+come from the rendered wrapper invocation. Before sourcing the path bootstrap
+or creating runtime output, it validates `ISSUE_IID` and `WORK_BRANCH` and
+derives branch identity directly from them: `issue/<iid>` means ordered
+`branch_members:[iid]` with a null shared role, while a distinct two-member
+`issue/<head>+<tail>` containing the current IID means ordered
+`branch_members:[head,tail]` with role `head` or `tail` according to the IID's
+position. Every other ordinary or shared shape fails without side effects.
+Caller-provided branch-member/role environment leftovers and execution-file
+fields cannot override this derivation. When readable, the execution file may
+supply only the optional string `issue_title`; missing, malformed, forged,
+mismatched, or nonstandard file metadata does not reject a run and no other
+field is read as runtime context.
 
 Only after `run_executor_attempt.sh` has pushed the exact remote branch,
 matched it to the returned commit, and verified the dependency history does it

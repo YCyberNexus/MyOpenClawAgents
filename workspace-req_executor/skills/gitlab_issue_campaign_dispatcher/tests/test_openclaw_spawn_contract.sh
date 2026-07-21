@@ -26,6 +26,18 @@ grep -Fq 'env -u PROJECT -u GROUP -u PROJECT_FULL' "${SKILL_DIR}/SKILL.md" \
   || fail "native completion must clear ambient project routing"
 grep -Fq -- '-u PROJECT_URI -u REPO_PATH' "${SKILL_DIR}/SKILL.md" \
   || fail "native completion must clear ambient repo routing"
+grep -Fq "ingest_subagent_completion.sh <<'COMPLETION_EOF'" "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion ingester does not require a Bash heredoc"
+grep -Fq 'does not deliver a tool argument named `stdin`' "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion path does not explain OpenClaw stdin semantics"
+grep -Fq 'never use an `stdin` tool argument' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "workspace rules do not forbid the ignored exec stdin argument"
+grep -Fq 'first tool call in this turn' "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion does not forbid tool discovery before ingestion"
+grep -Fq 'only permitted later tool call is the exact best-effort' "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion cleanup exception is not narrowly specified"
+grep -Fq 'raw internal completion context' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "workspace rules do not require the minimal 4.9 selector"
 if grep -Fq -- '-u REPO_PARENT_PATH' "${SKILL_DIR}/SKILL.md"; then
   fail "native completion must preserve the deployment clone-root override"
 fi
@@ -33,12 +45,19 @@ grep -Fq 'openclaw_4_9_terminal_reference' "${SKILL_DIR}/SKILL.md" \
   || fail "4.9 native completion must use the terminal reference selector"
 grep -Fq 'priority than every command first-line route' "${SKILL_DIR}/SKILL.md" \
   || fail "protected native completion must outrank command routing"
+grep -Fq 'Any embedded' "${SKILL_DIR}/SKILL.md" \
+  && grep -Fq 'runtime Action asking for a normal user-facing delivery' "${SKILL_DIR}/SKILL.md" \
+  || fail "runtime delivery prose must not override Path B"
 grep -Fq 'edit, patch, or debug `ingest_subagent_completion.sh`' "${SKILL_DIR}/SKILL.md" \
   || fail "completion rejection must not trigger script debugging"
+grep -Fq 'never call `run_executor_batch_tick.sh` before' "${SKILL_DIR}/SKILL.md" \
+  || fail "native completion must ingest before any heartbeat"
 grep -Fq 'protected native subagent completion' "${WORKSPACE_DIR}/AGENTS.md" \
   || fail "executor bootstrap rules must route protected completions first"
 grep -Fq 'A protected native subagent completion has higher routing priority' "${WORKSPACE_DIR}/SOUL.md" \
   || fail "executor soul must route protected completions before command text"
+grep -Fq 'never summarizes the untrusted child Result' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "native completion must not be converted into a user-facing summary"
 grep -Fq 'Do not Read any config or *.env file' "${SKILL_DIR}/SKILL.md" \
   || fail "heartbeat tick must not expose private config to the model"
 grep -Fq 'Never read config or `*.env` files' "${WORKSPACE_DIR}/AGENTS.md" \
@@ -47,6 +66,41 @@ grep -Fq 'Exact `RUN_DRIVEN_ISSUE_BATCH` → Path C' "${SKILL_DIR}/SKILL.md" \
   || fail "executor skill must route batch intake before heartbeat tick"
 grep -Fq '`RUN_DRIVEN_ISSUE_BATCH` is never a heartbeat tick' "${WORKSPACE_DIR}/AGENTS.md" \
   || fail "executor bootstrap rules must distinguish batch intake from tick"
+
+PATH_C_SECTION="$(sed -n '/^### Path C /,/^### Path D /p' "${SKILL_DIR}/SKILL.md")"
+PATH_D_SECTION="$(sed -n '/^### Path D /,/^### Path E /p' "${SKILL_DIR}/SKILL.md")"
+PATH_E_SECTION="$(sed -n '/^### Path E /,/^### Path F /p' "${SKILL_DIR}/SKILL.md")"
+grep -Fq 'MUST NOT call' <<<"${PATH_C_SECTION}" \
+  && grep -Fq '`sessions_yield` anywhere in this turn' <<<"${PATH_C_SECTION}" \
+  || fail "Path C must absolutely forbid sessions_yield"
+if grep -Fq 'Path D steps 3–5' <<<"${PATH_C_SECTION}"; then
+  fail "Path C must not inherit Path D termination step 5"
+fi
+grep -Fq "record_executor_batch_spawn.sh <<'JSON_EOF'" <<<"${PATH_D_SECTION}" \
+  || fail "Path D must show strict JSON stdin recorder invocation"
+grep -Fq 'Do not pass JOB_ID, CLAIM_GENERATION' <<<"${PATH_D_SECTION}" \
+  || fail "Path D must forbid the unrelated environment-variable recorder contract"
+grep -Fq 'On Path D only' <<<"${PATH_D_SECTION}" \
+  || fail "post-recorder sessions_yield must be scoped to Path D"
+grep -Fq 'MUST NOT call' <<<"${PATH_E_SECTION}" \
+  && grep -Fq '`sessions_yield` anywhere in this turn' <<<"${PATH_E_SECTION}" \
+  || fail "Path E must absolutely forbid sessions_yield"
+grep -Fq 'recorder is the mandatory next tool call' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "executor bootstrap rules must persist spawn ack before yielding"
+
+RECORDER_STDERR="$(mktemp "${TMPDIR:-/tmp}/req-executor-recorder-empty-stdin.XXXXXX")"
+set +e
+JOB_ID=ignored CLAIM_GENERATION=1 PROJECT=group/repo IID=1 EXECUTION_ID=1 \
+STATUS=spawned RUN_ID=ignored CHILD_SESSION_KEY=ignored \
+  bash "${SKILL_DIR}/scripts/record_executor_batch_spawn.sh" \
+  </dev/null 2>"${RECORDER_STDERR}"
+RECORDER_RC=$?
+set -e
+[ "${RECORDER_RC}" -eq 2 ] \
+  || fail "recorder accepted environment fields without strict JSON stdin"
+grep -Fq 'stdin must be one strict spawned or launch_failed result object' \
+  "${RECORDER_STDERR}" \
+  || fail "recorder empty-stdin rejection was not explicit"
 [ "$(cat "${WORKSPACE_DIR}/HEARTBEAT.md")" = 'RUN_EXECUTOR_BATCH_TICK' ] \
   || fail "executor deployment artifact must keep durable-result recovery heartbeat active"
 

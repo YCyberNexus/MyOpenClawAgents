@@ -79,7 +79,7 @@ if ! INPUT_JSON="$(jq -ce '
         and (explode | all(. >= 32 and . != 127)))
     then . else error("invalid launch_failed result") end
   else error("unsupported status") end
-' 2>/dev/null)"; then
+' 2>/dev/null)" || [ -z "${INPUT_JSON}" ]; then
   die "stdin must be one strict spawned or launch_failed result object"
 fi
 

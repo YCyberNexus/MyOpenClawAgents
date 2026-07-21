@@ -14,7 +14,9 @@ fail() {
 [ -x "${TICK_SCRIPT}" ] || fail "run_executor_batch_tick.sh is missing or not executable"
 [ -x "${RECORD_RESULT_SCRIPT}" ] || fail "record_executor_batch_spawn.sh is missing or not executable"
 
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-batch-tick.XXXXXX")"
+TMP_PARENT="${TMPDIR:-/tmp}"
+TMP_PARENT="${TMP_PARENT%/}"
+TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-batch-tick.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
 FAKE_BIN="${TEST_ROOT}/fake-bin"
@@ -277,7 +279,32 @@ if [ "${DRIVEN_RESULT_RECONCILE:-0}" = 1 ]; then
   fi
   jq -e --argjson iid "${IID}" \
     ".iid == \$iid and .status == \"done\"" <<<"${worker_result}" >/dev/null
-  if [ "${RESULT_TEST_RELEASE:-0}" = 1 ]; then
+  if [ "${RACE_TEST_DURABLE_IMPORT:-0}" = 1 ]; then
+    race_claim_token="$(jq -r --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
+      ".active_jobs[\$job_id].claim_token" \
+      "${SCHEDULER_ROOT}/scheduler_state.json")"
+    race_mr_url="$(jq -r .merge_request_url <<<"${worker_result}")"
+    race_handoff_dir="${SCHEDULER_ROOT}/race-handoffs"
+    race_handoff_file="${race_handoff_dir}/${DRIVEN_RECONCILE_JOB_ID}:claim-${DRIVEN_RECONCILE_CLAIM_GENERATION}:terminal-1.json"
+    mkdir -p "${race_handoff_dir}"
+    jq -cnS \
+      --arg event_id "${DRIVEN_RECONCILE_JOB_ID}:claim-${DRIVEN_RECONCILE_CLAIM_GENERATION}:terminal-1" \
+      --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
+      --argjson claim_generation "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
+      --arg claim_token "${race_claim_token}" \
+      --arg project "${RACE_PROJECT:?}" \
+      --argjson iid "${IID}" \
+      --arg mr_url "${race_mr_url}" \
+      "{
+        version:1,event_id:\$event_id,job_id:\$job_id,memberships:[],
+        memberships_source:\"scheduler_active_job\",
+        claim_generation:\$claim_generation,claim_token:\$claim_token,
+        project:\$project,iid:\$iid,status:\"done\",mr_url:\$mr_url,reason:null
+      }" >"${race_handoff_file}"
+    CONFIG_DIR="${CONFIG_DIR}" HANDOFF_FILE="${race_handoff_file}" \
+      NOW_EPOCH="${RACE_IMPORT_NOW_EPOCH:-2000000001}" \
+      bash "${RACE_REAL_IMPORT_HANDOFF_CMD:?}" >/dev/null
+  elif [ "${RESULT_TEST_RELEASE:-0}" = 1 ]; then
     jq --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
       "del(.active_jobs[\$job_id])" "${SCHEDULER_ROOT}/scheduler_state.json" \
       >"${SCHEDULER_ROOT}/scheduler_state.result.json"
@@ -320,7 +347,22 @@ if [ "${DRIVEN_COMPLETED_RECONCILE:-0}" = 1 ]; then
   printf "completed:%s:%s:%s\n" \
     "${DRIVEN_RECONCILE_JOB_ID}" "${DRIVEN_RECONCILE_CLAIM_GENERATION}" \
     "${DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256}" >>"${ORDER_LOG}"
-  if [ "${COMPLETION_TEST_RELEASE:-0}" = 1 ]; then
+  if [ "${RACE_TEST_DURABLE_IMPORT:-0}" = 1 ]; then
+    race_skip_entry="$(jq -cnS \
+      --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
+      --arg batch_id "${RACE_BATCH_ID:?}" \
+      --argjson snapshot_index "${RACE_SNAPSHOT_INDEX:-0}" \
+      --arg project "${RACE_PROJECT:?}" \
+      --argjson iid "${IID}" \
+      "{
+        job_id:\$job_id,batch_id:\$batch_id,snapshot_index:\$snapshot_index,
+        project:\$project,iid:\$iid,status:\"skipped\",reason:\"pr\"
+      }")"
+    printf "%s" "${race_skip_entry}" | CONFIG_DIR="${CONFIG_DIR}" \
+      bash "${RACE_REAL_IMPORT_SKIP_CMD:?}" >/dev/null
+    jq -cn --argjson iid "${IID}" \
+      "{callback_status:\"handled\",iid:\$iid,terminal_status:\"skipped\"}"
+  elif [ "${COMPLETION_TEST_RELEASE:-0}" = 1 ]; then
     jq --arg job_id "${DRIVEN_RECONCILE_JOB_ID}" \
       "del(.active_jobs[\$job_id])" "${SCHEDULER_ROOT}/scheduler_state.json" \
       >"${SCHEDULER_ROOT}/scheduler_state.completed.json"
@@ -720,11 +762,10 @@ grep -q '^topup:A:snapshot-0$' "${ORDER_LOG}" \
   || fail "running job was not sent back through the project campaign"
 archive_launch_actions continuation
 
-# A live preflight may report that a continuation now looks closed/pr-labeled.
-# While the exact project pending entry still exists, the tick must re-check
-# the current claim and GitLab completion through dispatch_followup, then write
-# a claim-bound skipped handoff immediately instead of waiting for the running
-# timeout lease.
+# A live preflight may report that a continuation now looks closed/pr-labeled
+# because the same still-running attempt just wrote its MR. While the exact
+# project pending entry remains, the tick must preserve the current claim for
+# the native callback or durable-result recovery instead of synthesizing skip.
 : >"${ORDER_LOG}"
 cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 {"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
@@ -756,25 +797,217 @@ running_skip_output="$(COMPLETION_TEST_RELEASE=1 run_tick)" \
   || fail "running preflight-skip tick failed"
 grep -q '^reap:A:snapshot-0$' "${ORDER_LOG}" \
   || fail "orphan reaper did not protect the current scheduler active job"
-grep -Eq '^completed:A:snapshot-0:2:[0-9a-f]{64}$' "${ORDER_LOG}" \
-  || fail "running completion did not receive the exact hashed claim fence"
+if grep -q '^completed:' "${ORDER_LOG}"; then
+  fail "active pending continuation entered generic completion reconciliation"
+fi
 if grep -q 'continuation-private-claim' "${ORDER_LOG}" \
     || grep -q 'continuation-private-claim' <<<"${running_skip_output}"; then
-  fail "running completion recovery exposed the private claim token"
+  fail "suppressed running preflight exposed the private claim token"
 fi
 jq -e '
   .spawn_grants == []
   and ([.operation_results[]
     | select(.operation == "running_preflight_skip"
       and .job_id == "A:snapshot-0"
-      and .status == "handoff_recorded"
-      and .claim_generation == 2)]
+      and .project == "group/repo"
+      and .iid == 42
+      and .status == "suppressed_active_pending")]
     | length) == 1
   and ([.operation_results[]
     | select(.operation == "synthetic_skip" and .job_id == "A:snapshot-0")]
     | length) == 0
 ' <<<"${running_skip_output}" >/dev/null \
-  || fail "running continuation did not produce an immediate claim-bound handoff"
+  || fail "running continuation preflight was not explicitly suppressed"
+jq -e '
+  .active_jobs["A:snapshot-0"].status == "running"
+  and .active_jobs["A:snapshot-0"].claim_generation == 2
+  and .active_jobs["A:snapshot-0"].claim_token == "continuation-private-claim"
+  and (.active_jobs["A:snapshot-0"].finalization // null) == null
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "suppressed running preflight did not preserve the active claim"
+
+# Deterministically reproduce the heartbeat race: the initial durable-result
+# scan sees no worker result, then project topup publishes that result while
+# also observing its freshly-created MR as a live-preflight skip. The first
+# tick must retain the claim; the next durable-result pass imports done through
+# the real scheduler handoff path, preserving its MR URL and terminal counters.
+RACE_BATCH_ID=A
+RACE_JOB_ID='A:snapshot-0'
+RACE_PROJECT='group/repo'
+RACE_CLAIM_TOKEN='race-private-claim'
+RACE_MR_URL='https://gitlab.example.test/group/repo/-/merge_requests/42'
+RACE_RESULT_LOG_DIR="${TEST_ROOT}/repos/group/repo/.req_executor/.worktrees/issue-42/.req_executor/issue-42/log/execution-7"
+RACE_CAMPAIGN_DIR="${TEST_ROOT}/repos/group/repo/.req_executor/_dispatcher"
+mkdir -p "${SCHEDULER_ROOT}/batches/${RACE_BATCH_ID}" \
+  "${RACE_CAMPAIGN_DIR}" "${RACE_RESULT_LOG_DIR}"
+jq -cnS \
+  --arg batch_id "${RACE_BATCH_ID}" \
+  --arg project "${RACE_PROJECT}" '{
+  version:1,batch_id:$batch_id,correlation_id:"race-correlation",
+  project:$project,selector:{type:"single",iid:42},force_rerun_pr:false,
+  auto_merge:false,dispatcher_callback_target:"agent:req_dispatcher:main",
+  executor_agent:"req_executor",callback_nonce:("d" * 64),branch:null,
+  merge_target_branch:null
+}' >"${SCHEDULER_ROOT}/batches/${RACE_BATCH_ID}/request.json"
+jq -cnS --arg project "${RACE_PROJECT}" \
+  '{version:1,project:$project,iids:[42]}' \
+  >"${SCHEDULER_ROOT}/batches/${RACE_BATCH_ID}/snapshot.json"
+jq -cnS \
+  --arg batch_id "${RACE_BATCH_ID}" \
+  --arg job_id "${RACE_JOB_ID}" '{
+  version:1,terminal_counts_version:1,batch_id:$batch_id,status:"running",
+  matched_count:1,terminal_count:0,done_count:0,failed_count:0,
+  timeout_count:0,skipped_count:0,next_snapshot_index:1,
+  request_digest:"race-request",snapshot_digest:"race-snapshot",
+  memberships:{"0":{
+    snapshot_index:0,iid:42,status:"running",job_id:$job_id
+  }}
+}' >"${SCHEDULER_ROOT}/batches/${RACE_BATCH_ID}/state.json"
+jq -cnS \
+  --arg batch_id "${RACE_BATCH_ID}" \
+  --arg job_id "${RACE_JOB_ID}" \
+  --arg project "${RACE_PROJECT}" \
+  --arg claim_token "${RACE_CLAIM_TOKEN}" '{
+  version:1,round_robin_cursor:$batch_id,batch_order:[$batch_id],
+  active_jobs:{($job_id):{
+    job_id:$job_id,physical_key:($project + "#42"),project:$project,iid:42,
+    branch:null,entry_mode:"auto",force_rerun_pr:false,auto_merge:false,
+    merge_target_branch:null,status:"running",reservation_seq:1,
+    reserved_at:1,updated_at:2000000000,claim_generation:7,
+    claim_token:$claim_token,finalization:null,
+    owner:{batch_id:$batch_id,snapshot_index:0},
+    memberships:[{batch_id:$batch_id,snapshot_index:0}]
+  }}
+}' >"${SCHEDULER_ROOT}/scheduler_state.json"
+jq -cnS \
+  --arg job_id "${RACE_JOB_ID}" \
+  --arg batch_id "${RACE_BATCH_ID}" \
+  --arg claim_token "${RACE_CLAIM_TOKEN}" '{
+  project:"repo",repo_path:"unused",blocked_retry_limit:3,tick_seq:1,
+  result_note_enabled:false,kill_subagent_on_terminal:false,
+  pending_subagents:{"42":{
+    execution_id:7,run_id:"race-run-42",
+    child_session_key:"agent:req_executor:subagent:race-42",
+    child_label:"#42-att-007",spawned_at:"2026-07-21T00:00:00Z",
+    placeholder:false,acpx_timeout_seconds:18000,
+    job_id:$job_id,batch_id:$batch_id,snapshot_index:0,
+    branch:null,work_branch:"issue/42",entry_mode:"auto",
+    force_rerun_pr:false,memberships_source:"scheduler_active_job",
+    claim_generation:7,claim_token:$claim_token,
+    bound_at:"2026-07-21T00:00:01Z"
+  }},
+  active_issue_iids:[42],active_issue_sessions:["issue-repo-42"],
+  blocked_at_tick_by_iid:{},unfinished_iids:[],completed_iids:[],
+  blocked_iids:[],failed_iids:[],timeout_iids:[],
+  campaign_status:"waiting_for_callbacks"
+}' >"${RACE_CAMPAIGN_DIR}/campaign_state.json"
+cat >"${FAKE_BIN}/dispatch_driven_topup.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+request="\$(cat)"
+jq -e '
+  [.grants[] | {job_id,project,iid}]
+    == [{job_id:"${RACE_JOB_ID}",project:"${RACE_PROJECT}",iid:42}]
+' <<<"\${request}" >/dev/null
+printf "topup:%s\n" "\$(jq -r '.grants | map(.job_id) | join(",")' <<<"\${request}")" >>"\${ORDER_LOG}"
+jq -cnS --arg log_dir "${RACE_RESULT_LOG_DIR}" --arg mr_url "${RACE_MR_URL}" '{
+  iid:42,execution_id:7,status:"done",mode_actual:"fresh",
+  work_branch:"issue/42",local_branch:"issue/42",
+  commit_sha:"0123456789abcdef",merge_request_url:\$mr_url,
+  mr_action:"created",wiki_url:"",labels_added:["pr"],
+  labels_removed:["doing","done"],summary_posted:true,
+  block_reason:"",log_dir:\$log_dir
+}' >"${RACE_RESULT_LOG_DIR}/worker_result.json"
+jq -cnS '{
+  version:1,iid:42,execution_id:7,exit_code:0,completed_at_epoch:2000000000
+}' >"${RACE_RESULT_LOG_DIR}/acpx_terminal.json"
+printf "%s\n" race-result-published >>"\${ORDER_LOG}"
+jq -cn '{
+  status:"ready",dispatch_entries:[],pending_iids:[42],
+  skipped_entries:[{
+    job_id:"${RACE_JOB_ID}",batch_id:"${RACE_BATCH_ID}",snapshot_index:0,
+    project:"${RACE_PROJECT}",iid:42,status:"skipped",reason:"pr"
+  }]
+}'
+EOF
+chmod +x "${FAKE_BIN}/dispatch_driven_topup.sh"
+
+race_preflight_output="$(
+  RACE_TEST_DURABLE_IMPORT=1 \
+  RACE_BATCH_ID="${RACE_BATCH_ID}" RACE_SNAPSHOT_INDEX=0 \
+  RACE_PROJECT="${RACE_PROJECT}" \
+  RACE_REAL_IMPORT_SKIP_CMD="${SKILL_DIR}/scripts/import_driven_skipped.sh" \
+  RACE_REAL_IMPORT_HANDOFF_CMD="${SKILL_DIR}/scripts/import_driven_handoff.sh" \
+  run_tick
+)" || fail "deterministic active-result preflight race tick failed"
+grep -qx 'race-result-published' "${ORDER_LOG}" \
+  || fail "race fixture did not publish the durable result during topup"
+if grep -q '^result:' "${ORDER_LOG}"; then
+  fail "initial race tick saw a result that was published after its scan"
+fi
+if grep -q '^completed:' "${ORDER_LOG}"; then
+  fail "initial race tick terminalized its own in-flight MR preflight"
+fi
+jq -e '
+  .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "running_preflight_skip"
+    and .job_id == "A:snapshot-0"
+    and .status == "suppressed_active_pending")] | length) == 1
+' <<<"${race_preflight_output}" >/dev/null \
+  || fail "race tick did not suppress the active pending preflight skip"
+jq -e --arg token "${RACE_CLAIM_TOKEN}" '
+  .active_jobs["A:snapshot-0"].status == "running"
+  and .active_jobs["A:snapshot-0"].claim_generation == 7
+  and .active_jobs["A:snapshot-0"].claim_token == $token
+  and (.active_jobs["A:snapshot-0"].finalization // null) == null
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "race tick did not retain the exact callback claim"
+jq -e '
+  .terminal_count == 0 and .done_count == 0 and .skipped_count == 0
+' "${SCHEDULER_ROOT}/batches/${RACE_BATCH_ID}/state.json" >/dev/null \
+  || fail "race preflight mutated terminal counters before result recovery"
+
+race_recovery_output="$(
+  RACE_TEST_DURABLE_IMPORT=1 \
+  RACE_BATCH_ID="${RACE_BATCH_ID}" RACE_SNAPSHOT_INDEX=0 \
+  RACE_PROJECT="${RACE_PROJECT}" \
+  RACE_REAL_IMPORT_SKIP_CMD="${SKILL_DIR}/scripts/import_driven_skipped.sh" \
+  RACE_REAL_IMPORT_HANDOFF_CMD="${SKILL_DIR}/scripts/import_driven_handoff.sh" \
+  SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "retained race result recovery tick failed"
+grep -Eq '^result:A:snapshot-0:7:[0-9a-f]{64}$' "${ORDER_LOG}" \
+  || fail "retained durable result did not use the exact claim fence"
+if grep -q '^completed:' "${ORDER_LOG}"; then
+  fail "durable result recovery re-entered generic completion reconciliation"
+fi
+jq -e '
+  .spawn_grants == []
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "handled")] | length) == 1
+' <<<"${race_recovery_output}" >/dev/null \
+  || fail "retained race result did not complete through durable recovery"
+jq -e '
+  .status == "completed"
+  and .terminal_count == 1
+  and .done_count == 1
+  and .failed_count == 0
+  and .timeout_count == 0
+  and .skipped_count == 0
+  and .memberships["0"].status == "terminal"
+  and .memberships["0"].terminal_status == "done"
+' "${SCHEDULER_ROOT}/batches/${RACE_BATCH_ID}/state.json" >/dev/null \
+  || fail "race result was not counted exactly once as done"
+jq -e --arg mr_url "${RACE_MR_URL}" '
+  .body.status == "done"
+  and .body.mr_url == $mr_url
+' "${SCHEDULER_ROOT}/callback_outbox/${RACE_BATCH_ID}:snapshot-0:terminal-1.json" \
+  >/dev/null || fail "race result callback did not preserve its MR URL"
+jq -e '.active_jobs["A:snapshot-0"] == null' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "durable race result did not release the scheduler claim"
 
 # A scheduler running job may outlive its project pending entry after a
 # blocked attempt was imported. If the next live preflight observes closed/pr,
