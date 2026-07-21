@@ -8,11 +8,13 @@
 # This wrapper keeps the whole deterministic path in one process:
 #
 #   acpx -> stage -> commit/push -> verify -> labels -> MR -> summary
+#        -> persist worker result -> archive terminal LOG_DIR
 #
 # The final compact worker result is written atomically to
-# ${LOG_DIR}/worker_result.json before it is printed. The executor heartbeat can
-# therefore recover the exact result even if OpenClaw never asks the outer model
-# to echo the line and finish its run.
+# ${LOG_DIR}/worker_result.json, then the terminal directory is published on a
+# separate append-only Git branch before the result is printed. The executor
+# heartbeat can therefore recover the exact result even if OpenClaw never asks
+# the outer model to echo the line and finish its run.
 
 set -euo pipefail
 
@@ -569,7 +571,7 @@ run_summary() {
 persist_and_print_result() {
   local result_file="${LOG_DIR}/worker_result.json"
   local result_tmp="${result_file}.tmp.$$"
-  local result
+  local result archive_output
   result="$(jq -cn \
     --argjson iid "${ISSUE_IID}" \
     --argjson execution_id "${EXECUTION_ID}" \
@@ -610,6 +612,15 @@ persist_and_print_result() {
     echo "run_executor_attempt.sh: failed to persist ${result_file}" >&2
     exit 3
   fi
+
+  # worker_result.json is the last per-execution file written by this wrapper.
+  # Archive the now-complete LOG_DIR on a separate append-only Git branch so the
+  # archive cannot move WORK_BRANCH or invalidate its business/MR commit SHA.
+  if ! archive_output="$(bash "${SCRIPT_DIR}/archive_execution_logs.sh")"; then
+    echo "run_executor_attempt.sh: complete execution-log Git archive failed" >&2
+    exit 4
+  fi
+  printf '%s\n' "${archive_output}" >&2
   printf '%s\n' "${result}"
 }
 

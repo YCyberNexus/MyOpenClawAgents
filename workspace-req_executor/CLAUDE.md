@@ -37,7 +37,7 @@ ${REPO_PATH}/
       .req_executor/issue-<iid>/log/
 ```
 
-`clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. `stage_and_guard.sh` force-adds only `${OUTPUT_DIR}` and removes any `logs/` path plus `${LOG_DIR}` from the commit index.
+`clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. When business changes exist, `stage_and_guard.sh` force-adds `${OUTPUT_DIR}` and the complete staging-time `${LOG_DIR}` into the MR. Once `worker_result.json` is durable, `archive_execution_logs.sh` publishes terminal snapshots on append-only branch `req-executor-logs/issue-<iid>/execution-<execution_id>` without moving the business branch; later recovery evidence appends another snapshot. Unrelated `logs/` paths remain outside the commit index.
 
 The worktree, output directory, and local Git branch are fixed per Issue. Each
 run receives a random opaque `execution_id`, an isolated log directory, and an

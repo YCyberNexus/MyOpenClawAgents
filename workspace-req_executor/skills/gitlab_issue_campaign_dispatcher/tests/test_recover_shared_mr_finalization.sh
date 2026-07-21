@@ -21,6 +21,12 @@ cp "${SKILL_DIR}/scripts/recover_shared_mr_finalization.sh" \
 cp "${SKILL_DIR}/scripts/create_mr.sh" \
   "${FIXTURE_SCRIPTS}/create_mr.sh"
 
+cat >"${FIXTURE_SCRIPTS}/archive_execution_logs.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'archive:%s\n' "${EXECUTION_ID:?}" >>"${ARCHIVE_LOG:?}"
+EOF
+
 cat >"${FIXTURE_SCRIPTS}/env_paths.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -175,6 +181,7 @@ EOF
 
 chmod +x "${FIXTURE_SCRIPTS}/recover_shared_mr_finalization.sh" \
   "${FIXTURE_SCRIPTS}/create_mr.sh" \
+  "${FIXTURE_SCRIPTS}/archive_execution_logs.sh" \
   "${FIXTURE_SCRIPTS}/env_paths.sh" \
   "${FIXTURE_SCRIPTS}/git_network_guard.sh" \
   "${FIXTURE_SCRIPTS}/merge_mr.sh" \
@@ -196,6 +203,7 @@ make_case() {
   CASE_GUARD_LOG="${CASE_ROOT}/guard.log"
   CASE_GLAB_LOG="${CASE_ROOT}/glab.log"
   CASE_MERGE_LOG="${CASE_ROOT}/merge.log"
+  CASE_ARCHIVE_LOG="${CASE_ROOT}/archive.log"
   CASE_STDERR="${CASE_ROOT}/stderr.log"
   mkdir -p "${CASE_ISSUES_ROOT}" "${CASE_WORK_ROOT}" \
     "${CASE_WORKTREE}" "${CASE_LOG_DIR}"
@@ -203,6 +211,7 @@ make_case() {
   : >"${CASE_GUARD_LOG}"
   : >"${CASE_GLAB_LOG}"
   : >"${CASE_MERGE_LOG}"
+  : >"${CASE_ARCHIVE_LOG}"
 
   jq -cn \
     --arg commit_sha "${CHECKPOINT_SHA}" \
@@ -248,6 +257,7 @@ run_case() {
     REMOTE_REF_NAME="${REMOTE_REF_NAME:-issue/41+43}" \
     GIT_COMMAND_LOG="${CASE_GIT_LOG}" GUARD_LOG="${CASE_GUARD_LOG}" \
     GLAB_LOG="${CASE_GLAB_LOG}" MERGE_LOG="${CASE_MERGE_LOG}" \
+    ARCHIVE_LOG="${CASE_ARCHIVE_LOG}" \
     FAKE_MR_STATE="${FAKE_MR_STATE:-opened}" \
     FAKE_HISTORY_PAGE_MODE="${FAKE_HISTORY_PAGE_MODE:-}" \
       bash "${FIXTURE_SCRIPTS}/recover_shared_mr_finalization.sh" \
@@ -262,6 +272,7 @@ assert_no_mr_or_git_activity() {
   [ ! -s "${CASE_GUARD_LOG}" ] || fail "$1 unexpectedly queried the remote"
   [ ! -s "${CASE_GLAB_LOG}" ] || fail "$1 unexpectedly entered the MR flow"
   [ ! -s "${CASE_MERGE_LOG}" ] || fail "$1 unexpectedly verified an MR"
+  [ ! -s "${CASE_ARCHIVE_LOG}" ] || fail "$1 unexpectedly archived logs"
 }
 
 # A valid pending checkpoint may only read the fixed local/remote tips and then
@@ -301,6 +312,8 @@ jq -e '
   and .sha == "1111111111111111111111111111111111111111"
 ' "${CASE_LOG_DIR}/mr_result.json" >/dev/null \
   || fail "the MR flow did not persist a verified private marker"
+[ "$(cat "${CASE_ARCHIVE_LOG}")" = 'archive:1' ] \
+  || fail "valid recovery did not append the refreshed terminal log snapshot"
 
 # Exactly 100 history rows means the first page is full, not that history is
 # malformed. Recovery must request page 2, then persist terminal conflict
@@ -386,7 +399,7 @@ make_case checkpoint-mismatch "${MOVED_SHA}"
 run_case "${CHECKPOINT_SHA}" "${CHECKPOINT_SHA}"
 [ "${CASE_RC}" -eq 2 ] \
   || fail "mismatched checkpoint returned rc=${CASE_RC}, expected 2"
-grep -F 'checkpoint does not match the fixed attempt' "${CASE_STDERR}" >/dev/null \
+grep -F 'checkpoint does not match the fixed execution' "${CASE_STDERR}" >/dev/null \
   || fail "mismatched checkpoint did not report the identity rejection"
 assert_no_mr_or_git_activity 'mismatched checkpoint'
 

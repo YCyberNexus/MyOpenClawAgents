@@ -15,6 +15,9 @@ required_contracts=(
   'branch_utils.sh:git_network_guard_run "${repo_path}"'
   'commit_and_push.sh:ls-remote --exit-code --heads origin'
   'commit_and_push.sh:git_network_guard_run "${WORKTREE_DIR}" push'
+  'archive_execution_logs.sh:git_network_guard_run "${WORKTREE_DIR}" push'
+  'archive_execution_logs.sh:git_network_guard_run "${WORKTREE_DIR}" fetch'
+  'archive_execution_logs.sh:git_network_guard_run "${WORKTREE_DIR}"'
   'post_push_verify.sh:git_network_guard_run "${WORKTREE_DIR}" fetch'
 )
 for contract in "${required_contracts[@]}"; do
@@ -28,7 +31,7 @@ done
 
 for file in \
   clone_or_pull.sh prepare_attempt.sh branch_utils.sh \
-  commit_and_push.sh post_push_verify.sh
+  commit_and_push.sh archive_execution_logs.sh post_push_verify.sh
 do
   if grep -Eq '^[[:space:]]*git[[:space:]].*(clone|fetch|ls-remote|push)([[:space:]]|$)' \
       "${SCRIPTS_DIR}/${file}"; then

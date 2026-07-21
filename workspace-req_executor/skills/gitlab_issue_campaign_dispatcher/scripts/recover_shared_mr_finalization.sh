@@ -201,6 +201,14 @@ if ! [[ "${MR_IID}" =~ ^[1-9][0-9]*$ ]] \
   exit 6
 fi
 
+# create_mr.sh may have refreshed mr_result.json after the worker's first log
+# snapshot. Append the new terminal tree to the execution's dedicated archive
+# branch before reporting successful recovery.
+if ! bash "${SCRIPT_DIR}/archive_execution_logs.sh" >/dev/null; then
+  echo "recover_shared_mr_finalization: updated execution-log archive failed" >&2
+  exit 6
+fi
+
 jq -nc \
   --argjson iid "${ISSUE_IID}" \
   --argjson execution_id "${EXECUTION_ID}" \

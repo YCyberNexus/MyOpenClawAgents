@@ -142,8 +142,11 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
   acpx completion and post-acpx finalization.
 - `run_acpx_attempt.sh` remains the only owner of the exact
   `acpx --auth-policy skip claude exec -f` invocation.
-- The wrapper applies bounded timeouts to every post-acpx Git/GitLab step and
-  atomically writes `{LOG_DIR}/worker_result.json` before printing it.
+- The wrapper applies bounded timeouts to every post-acpx Git/GitLab step,
+  atomically writes `{LOG_DIR}/worker_result.json`, archives the complete
+  terminal directory on append-only branch
+  `req-executor-logs/issue-{ISSUE_IID}/execution-{EXECUTION_ID}` without
+  moving the business branch, and only then prints the compact result.
 - The whole outer run remains bounded by the deployment's global subagent
   timeout; the periodic heartbeat additionally reclaims post-acpx stalls.
 - Never paste logs, diffs, prompt contents, or credentials into the reply.

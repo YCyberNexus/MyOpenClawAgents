@@ -3,8 +3,8 @@
 #
 # The cloned project repo IS the agent's entire workspace. The agent's own
 # state and per-issue subtrees live under `${REPO_PATH}/.req_executor/`.
-# Runtime state/log files stay uncommitted there; each issue's committed
-# output is force-added from its own `.req_executor/issue-<iid>/output/`
+# Runtime state stays local there; each issue's committed output and current
+# execution log are force-added from `.req_executor/issue-<iid>/`
 # directory inside the per-issue worktree.
 #
 # The repo clone parent is overridable per project via optional trigger field
@@ -269,8 +269,8 @@ if [ -n "${ISSUE_IID:-}" ]; then
   #
   # Persistent Issue state and the latest summary live in ISSUE_ROOT. Each
   # execution uses an isolated state file and log directory.
-  # stage_and_guard.sh force-adds only OUTPUT_DIR and removes LOG_DIR / logs/
-  # paths from the commit index.
+  # stage_and_guard.sh force-adds OUTPUT_DIR and the complete current LOG_DIR;
+  # unrelated generic logs/ paths stay outside the commit index.
   export WORKTREE_DIR="${WORKTREES_ROOT}/issue-${ISSUE_IID}"
   export ISSUE_WORKTREE_REL="${REQ_EXECUTOR_DIR}/issue-${ISSUE_IID}"
   export ISSUE_LOG_REL="${ISSUE_WORKTREE_REL}/log/execution-${EXECUTION_ID}"

@@ -749,10 +749,10 @@ if [ "${REUSE_EXISTING}" != true ]; then
       echo "Auto-generated MR for issue #${ISSUE_IID} (mode=${ISSUE_MODE})."
     fi
     echo
-    echo "Attempt logs, including prompt.txt, claude_result.txt, raw acpx logs,"
-    echo "and git status/diff snapshots live only in"
-    echo "the shared per-issue worktree on the runner (\`${LOG_DIR}\`) until housekeeping"
-    echo "removes the worktree."
+    echo "The complete staging-time execution log directory is included in this MR."
+    echo "After worker_result.json is durable, the terminal directory is also"
+    echo "published on append-only branch"
+    echo "\`req-executor-logs/issue-${ISSUE_IID}/execution-${EXECUTION_ID}\`."
     echo
     echo "Per-attempt summaries remain in the executor's local issue state and are not posted as issue comments."
     echo

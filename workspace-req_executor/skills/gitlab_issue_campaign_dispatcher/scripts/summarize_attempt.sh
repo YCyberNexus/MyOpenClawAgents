@@ -64,7 +64,7 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence (in-flight, on runner)**: \`${LOG_DIR}\` (lives inside the shared per-issue worktree; removed by housekeeping; not committed into the MR diff)"
+  echo "- **Evidence**: \`${LOG_DIR}\` (staging-time files enter the MR; the terminal directory is archived on \`req-executor-logs/issue-${ISSUE_IID}/execution-${EXECUTION_ID}\`)"
 
   if [ -n "${CHANGED_PREVIEW}" ] && [ "${CHANGED_COUNT}" -gt 0 ]; then
     echo

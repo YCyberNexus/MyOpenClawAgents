@@ -191,6 +191,16 @@ printf 'summarize:%s\n' "${SUMMARY_POST_TO_ISSUE}" >>"${ORDER_LOG}"
 printf '%s\n' 'SUMMARY_POSTED=false' >&2
 printf '%s\n' "${ISSUE_ROOT}/summary.md"
 EOF
+cat >"${FAKE_SCRIPTS}/archive_execution_logs.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ -f "${LOG_DIR}/worker_result.json" ] \
+  || { echo "worker_result.json missing before log archive" >&2; exit 92; }
+printf 'archive:%s\n' "${EXECUTION_ID}" >>"${ORDER_LOG}"
+printf 'LOG_ARCHIVE_REF=refs/heads/req-executor-logs/issue-%s/execution-%s\n' \
+  "${ISSUE_IID}" "${EXECUTION_ID}"
+printf 'LOG_ARCHIVE_COMMIT=%040d\n' 1
+EOF
 chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_SCRIPTS}"/*.sh
 
 write_execution_state() {
@@ -242,7 +252,8 @@ label:remove:doing
 label:add:done
 mr:main:false:0123456789abcdef0123456789abcdef01234567
 label:add:pr
-summarize:false'
+summarize:false
+archive:3'
 [ "$(cat "${ORDER_LOG}")" = "${expected_order}" ] \
   || fail "attempt steps did not stay in one deterministic sequence: $(cat "${ORDER_LOG}")"
 
@@ -303,7 +314,8 @@ label:remove:doing
 label:add:done
 mr:release:true:0123456789abcdef0123456789abcdef01234567
 label:add:finish
-summarize:false'
+summarize:false
+archive:4'
 [ "$(cat "${ORDER_LOG}")" = "${expected_merged_order}" ] \
   || fail "verified merged order/target is wrong: $(cat "${ORDER_LOG}")"
 

@@ -6,7 +6,8 @@
 
 .req_executor/
 
-# Local logs are ignored by the req_executor clone as well. Existing tracked
-# logs are left in history, but stage_and_guard.sh removes logs/ paths from
-# future commit indexes.
+# Generic project logs are ignored by the req_executor clone as well.
+# stage_and_guard.sh still force-adds its singular staging-time LOG_DIR under
+# .req_executor/, and archive_execution_logs.sh publishes the terminal LOG_DIR
+# on its append-only req-executor-logs branch. Unrelated logs/ paths stay out.
 logs/
