@@ -1,0 +1,244 @@
+<mxfile host="app.diagrams.net" agent="Claude" version="24.7.5" type="device">
+  <diagram id="req-pipeline-target-arch" name="req 三件套目标架构">
+    <mxGraphModel dx="1200" dy="800" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2200" pageHeight="1750" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="title" value="req 三件套目标架构（重构方案 · 设计草案，未实施）" style="text;html=1;fontSize=18;fontStyle=1;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="6" width="1100" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="legend" value="&lt;b&gt;图例（主流程编号）&lt;/b&gt;&lt;br&gt;① 企微用户发需求&lt;br&gt;② 智伴转发需求原文（附 origin）&lt;br&gt;③ req_intake 做 NLU → 结构化意图（唯一 LLM 环节）&lt;br&gt;④ MCP tool call 启动 RunWorkflow（idempotency_key 即 workflow id，幂等）&lt;br&gt;⑤ 逐 IID signal_with_start，把本 run 登记为订阅者&lt;br&gt;⑥ 申请 / 发放槽位租约（跨 project 轮转公平）&lt;br&gt;⑦ 共享依赖分支的写入序列化（branch id 即互斥）&lt;br&gt;⑧ workflow 调 activity&lt;br&gt;⑨ activity 内 subprocess 调现有 wrapper（一行不重写）&lt;br&gt;⑩ wrapper 落到 acpx / worktree / 日志归档 / GitLab&lt;br&gt;⑪ 人工改标签 → GitLab webhook（label events）&lt;br&gt;⑫ 接收器 signal 进 IssueWorkflow；已终态则 signal_with_start 复活&lt;br&gt;⑬ Issue 到终态 → 逐订阅者出通知&lt;br&gt;⑭ 经 104 → 114 反向网关推送（唯一放行方向）&lt;br&gt;⑮ 智伴把结果推回企微用户&lt;br&gt;&lt;br&gt;虚线 = 兜底 / 低频路径，不驱动调度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;align=left;spacingLeft=10;spacingRight=8;spacingTop=8;verticalAlign=top;" vertex="1" parent="1">
+          <mxGeometry x="40" y="40" width="400" height="470" as="geometry" />
+        </mxCell>
+
+        <mxCell id="zoneGreen" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="40" y="560" width="160" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="zoneGreenLbl" value="绿区（开放办公网）" style="text;html=1;fontSize=13;fontStyle=1;align=center;fontColor=#2f5b2f;" vertex="1" parent="1">
+          <mxGeometry x="46" y="828" width="148" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="zone114" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="240" y="560" width="200" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="zone114Lbl" value="蓝区 · 114（不动）" style="text;html=1;fontSize=13;fontStyle=1;align=center;fontColor=#1a365d;" vertex="1" parent="1">
+          <mxGeometry x="246" y="828" width="188" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="zone104" value="" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#eef3fb;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="470" y="40" width="1660" height="1420" as="geometry" />
+        </mxCell>
+        <mxCell id="zone104Lbl" value="蓝区 · 104 · 重构后：OpenClaw 只剩 NLU，编排交给常驻控制平面" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#1a365d;" vertex="1" parent="1">
+          <mxGeometry x="490" y="1428" width="900" height="24" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bandIntake" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9e6;strokeColor=#d6b656;" vertex="1" parent="1">
+          <mxGeometry x="495" y="75" width="1620" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bandIntakeLbl" value="① 接入层 — 唯一保留的 LLM" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#7b5e10;" vertex="1" parent="1">
+          <mxGeometry x="505" y="80" width="400" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nIntake" value="&lt;b&gt;req_intake&lt;/b&gt;（OpenClaw agent）&lt;br&gt;动作判定 CREATE / CHANGE / CANCEL / SUPERSEDE / RUN&lt;br&gt;project 归属 · Issue 选择器 · auto_merge · 分支字段&lt;br&gt;否定窗口与歧义澄清&lt;br&gt;&lt;i&gt;不碰任何状态&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="110" width="380" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="nMcp" value="&lt;b&gt;MCP Server&lt;/b&gt;（FastMCP，127.0.0.1）&lt;br&gt;编排器客户端的薄封装&lt;br&gt;submit / get_run / set_slots&lt;br&gt;set_acpx_timeout / cancel_run&lt;br&gt;&lt;i&gt;任何调用 &amp;lt; 1s&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="940" y="110" width="300" height="100" as="geometry" />
+        </mxCell>
+        <mxCell id="nLlmNote" value="&lt;b&gt;LLM 职责边界&lt;/b&gt;：只做自然语言 → 结构化参数。现状 SKILL.md 里约 900 行防御性 prompt（&quot;never add a markdown fence&quot; / &quot;never Read a script&quot; / &quot;never debug a wrapper&quot;）是在约束一个不可靠的状态机执行器 —— 编排搬走后这些围栏失去对象，必须同步瘦身。&lt;br&gt;&lt;b&gt;git_issuer 降级&lt;/b&gt;：不再是独立 agent，而是 intake 层的一个 activity（LLM 判定动作类型，activity 执行 glab 调用）。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#d6b656;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1280" y="110" width="825" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bandCtrl" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3ebf7;strokeColor=#9673a6;" vertex="1" parent="1">
+          <mxGeometry x="495" y="250" width="1205" height="640" as="geometry" />
+        </mxCell>
+        <mxCell id="bandCtrlLbl" value="② 控制平面 — 持久化 / 定时 / 重试 / 互斥 / 取消 / 信号" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#553c9a;" vertex="1" parent="1">
+          <mxGeometry x="505" y="256" width="600" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nRun" value="&lt;b&gt;RunWorkflow&lt;/b&gt;　id = idempotency_key&lt;br&gt;&lt;i&gt;短生命周期&lt;/i&gt;&lt;br&gt;解析选择器 → 冻结快照（两次全扫一致）&lt;br&gt;→ 逐 IID signal_with_start → 聚合通知&lt;br&gt;&lt;b&gt;不持有 Issue 执行状态&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8dff0;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="300" width="340" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nIssue" value="&lt;b&gt;IssueWorkflow&lt;/b&gt;　id = issue-&amp;lt;project&amp;gt;-&amp;lt;iid&amp;gt;&lt;br&gt;&lt;b&gt;长生命周期实体 · id 即互斥锁&lt;/b&gt;&lt;br&gt;&lt;br&gt;持有：状态 · retry_count · 冷却截止 · 订阅者[]&lt;br&gt;状态枚举与 label_lifecycle.md 一一对应&lt;br&gt;&lt;br&gt;　acquire lease&lt;br&gt;　→ prepare（worktree）&lt;br&gt;　→ execute（acpx，唯一真实超时）&lt;br&gt;　→ finalize（push / MR / label）&lt;br&gt;　→ merge（仅 auto_merge）&lt;br&gt;　⇒ finish | pr&lt;br&gt;&lt;br&gt;&lt;b&gt;失败：&lt;/b&gt;retry_count++ → 超 limit ⇒ failed-*&lt;br&gt;　　　否则 set_label(blocked-*) → &lt;b&gt;sleep(冷却)&lt;/b&gt; → 自唤醒&lt;br&gt;&lt;b&gt;超时：&lt;/b&gt;⇒ timeout（不消耗 retry_count）&lt;br&gt;&lt;br&gt;&lt;i&gt;没有任何人来 tick 它&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5f0;strokeColor=#7d5ba6;strokeWidth=2;fontSize=11;align=left;spacingLeft=10;spacingRight=8;verticalAlign=top;spacingTop=6;" vertex="1" parent="1">
+          <mxGeometry x="900" y="300" width="460" height="430" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nSlot" value="&lt;b&gt;SlotPoolWorkflow&lt;/b&gt;（单例）&lt;br&gt;全局槽位租约&lt;br&gt;等待队列按 project 分桶轮转&lt;br&gt;/slot &amp;lt;n&amp;gt; → signal 立即生效&lt;br&gt;&lt;i&gt;缩容不取消在途&lt;/i&gt;&lt;br&gt;历史用 continue_as_new 截断" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8dff0;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1400" y="300" width="280" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nBranch" value="&lt;b&gt;BranchWorkflow&lt;/b&gt;&lt;br&gt;id = branch-&amp;lt;project&amp;gt;-&amp;lt;branch&amp;gt;&lt;br&gt;共享依赖分支写入序列化&lt;br&gt;&lt;b&gt;id 即分支级互斥&lt;/b&gt;&lt;br&gt;A→C 晚绑定 / 迁移可重放" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8dff0;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1400" y="540" width="280" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nNotify" value="&lt;b&gt;notify（终态出口）&lt;/b&gt;&lt;br&gt;逐订阅者投递 finish / pr /&lt;br&gt;failed-* / timeout / skipped&lt;br&gt;&lt;br&gt;同一 Issue 被多个 run 请求 →&lt;br&gt;只加订阅者，&lt;b&gt;不产生第二次执行&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8dff0;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="520" y="560" width="340" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nCtrlNote" value="&lt;b&gt;状态所有权&lt;/b&gt;：引擎事件历史 = 编排真相（控制流唯一权威）｜ GitLab label = 对外投影（人工意图的权威）｜ 本地文件 = 只剩产物，无控制语义。&lt;br&gt;&lt;b&gt;label 不再兼任锁&lt;/b&gt; —— 互斥由 workflow id 唯一性提供；人改标签变成信号，由编排器裁决。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#9673a6;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="775" width="700" height="95" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bandAct" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e6f2ff;strokeColor=#6c8ebf;" vertex="1" parent="1">
+          <mxGeometry x="495" y="920" width="1205" height="150" as="geometry" />
+        </mxCell>
+        <mxCell id="bandActLbl" value="③ 执行平面 — activity（薄适配，无业务判断）" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#1a365d;" vertex="1" parent="1">
+          <mxGeometry x="505" y="926" width="500" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nActivity" value="组装 env → subprocess → 解析 JSON envelope → 类型化返回。&lt;b&gt;判断留在 workflow（可重放）或 shell（已验证），不在这一层。&lt;/b&gt;&lt;br&gt;&lt;b&gt;重试定级（必须逐 wrapper 做）&lt;/b&gt;：幂等只读（GitLab 查询 / post_push_verify）→ 默认重试 ｜ 幂等写且自带栅栏（commit_and_push / set_issue_label / merge_mr）→ 有限次重试 ｜ &lt;b&gt;非幂等重副作用（run_acpx_attempt / create_mr / migrate_shared_dependency_head）→ maximum_attempts=1，失败上抛由 workflow 决策&lt;/b&gt;&lt;br&gt;长任务额外要求：周期 heartbeat；取消时杀子进程&lt;b&gt;进程组&lt;/b&gt;（复用现有 teardown）；凭据现取现用，&lt;b&gt;永不进入入参 / 返回值 / 事件历史&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="955" width="1160" height="105" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bandEff" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#82b366;" vertex="1" parent="1">
+          <mxGeometry x="495" y="1100" width="1205" height="290" as="geometry" />
+        </mxCell>
+        <mxCell id="bandEffLbl" value="④ 效果层 — 现有 shell wrapper（一行不重写）" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#2f5b2f;" vertex="1" parent="1">
+          <mxGeometry x="505" y="1106" width="500" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nShell" value="&lt;b&gt;保留的领域本质（B 类）&lt;/b&gt;：run_executor_attempt / run_acpx_attempt（PATH 白名单 · --safe-mode · 内层 glab 全禁 · 进程组 teardown · token 剥离）｜ create_driven_batch（GraphQL 游标分页 + &lt;b&gt;两次归一化全扫一致才冻结&lt;/b&gt;）｜ merge_mr（exact-GET → SHA-fenced-PUT → exact-GET）｜ commit_and_push / post_push_verify（SHA 栅栏）｜ migrate_shared_dependency_head（可重放检查点）｜ prepare_attempt · stage_and_guard · create_mr · set_issue_label · &lt;b&gt;reconcile&lt;/b&gt; · archive_execution_logs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="520" y="1135" width="980" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="nGitlab" value="&lt;b&gt;蓝区 GitLab&lt;/b&gt;&lt;br&gt;&lt;i&gt;外部真相源&lt;/i&gt;&lt;br&gt;只走 glab&lt;br&gt;（禁 curl / SDK）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1520" y="1135" width="160" height="105" as="geometry" />
+        </mxCell>
+        <mxCell id="nAcpx" value="&lt;b&gt;acpx claude exec&lt;/b&gt;&lt;br&gt;小时级黑盒子进程&lt;br&gt;wall-clock 超时 + 进程组控制" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="550" y="1285" width="280" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="nWorktree" value="&lt;b&gt;Git worktree&lt;/b&gt;&lt;br&gt;按 Issue 固定隔离&lt;br&gt;（非 attempt 级）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="880" y="1285" width="280" height="85" as="geometry" />
+        </mxCell>
+        <mxCell id="nLogsArch" value="&lt;b&gt;日志归档&lt;/b&gt;&lt;br&gt;append-only 分支&lt;br&gt;req-executor-logs/issue-&amp;lt;iid&amp;gt;/…" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1210" y="1285" width="290" height="85" as="geometry" />
+        </mxCell>
+
+        <mxCell id="bandEvt" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fdf0f0;strokeColor=#b85450;" vertex="1" parent="1">
+          <mxGeometry x="1720" y="250" width="395" height="1140" as="geometry" />
+        </mxCell>
+        <mxCell id="bandEvtLbl" value="⑤ 事件入口 — 人工回流" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#8b3a37;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="1355" width="365" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="nWebhookRecv" value="&lt;b&gt;webhook 接收器&lt;/b&gt;&lt;br&gt;（薄 HTTP，127.0.0.1）&lt;br&gt;&lt;br&gt;按 project + iid 推出 workflow id&lt;br&gt;→ signal&lt;br&gt;已终态 → signal_with_start 复活&lt;br&gt;&lt;br&gt;&lt;i&gt;无需查表&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f8d7da;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1850" y="300" width="255" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="nDrift" value="&lt;b&gt;DriftWatchWorkflow&lt;/b&gt;（单例）&lt;br&gt;&lt;b&gt;低频&lt;/b&gt;（15 分钟量级）&lt;br&gt;&lt;br&gt;扫「带 continue / retry 标签&lt;br&gt;但无活跃 workflow」的 Issue&lt;br&gt;调 reconcile.sh 对账&lt;br&gt;&lt;br&gt;&lt;i&gt;只防 webhook 丢事件，&lt;br&gt;不驱动调度&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1850" y="545" width="255" height="190" as="geometry" />
+        </mxCell>
+        <mxCell id="nChanNote" value="&lt;b&gt;人工回流是工作流的一部分，不是异常路径。&lt;/b&gt;&lt;br&gt;&lt;br&gt;评审人的动作：打 continue（MR 已建但 CC 未跑完，从现有工作分支续跑）· 剥 timeout · 加 quality:low（软性模型升级）。&lt;br&gt;&lt;br&gt;&lt;b&gt;冲突裁决：人工操作优先。&lt;/b&gt;GitLab 上的人工标签变更一律视为权威指令。&lt;br&gt;&lt;br&gt;&lt;b&gt;要诚实&lt;/b&gt;：webhook 会丢，对账删不掉。但它从「驱动整个调度回路的分钟级心跳」降级为「只防事件丢失的低频漂移检查」。" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#b85450;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="1850" y="790" width="255" height="330" as="geometry" />
+        </mxCell>
+
+        <mxCell id="nUser" value="企微用户&lt;br&gt;（需求发起人）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=13;arcSize=20;" vertex="1" parent="1">
+          <mxGeometry x="60" y="650" width="120" height="90" as="geometry" />
+        </mxCell>
+        <mxCell id="nZhiban" value="&lt;b&gt;智伴 agent&lt;/b&gt;&lt;br&gt;接收企微需求并转发（附 origin）&lt;br&gt;接收结果并推回企微" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#6c8ebf;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="258" y="645" width="164" height="100" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e1" value="①" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=12;fontColor=#1a365d;labelBackgroundColor=none;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" edge="1" parent="1" source="nUser" target="nZhiban">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e2" value="②" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=12;fontColor=#1a365d;labelBackgroundColor=none;exitX=1;exitY=0.25;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="nZhiban" target="nIntake">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="485" y="670" />
+              <mxPoint x="485" y="160" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e3" value="③" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=12;fontColor=#1a365d;labelBackgroundColor=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="nIntake" target="nMcp">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e4" value="④ start（幂等）" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=11;fontColor=#1a365d;labelBackgroundColor=none;exitX=0.7;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nMcp" target="nRun">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1150" y="290" />
+              <mxPoint x="690" y="290" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e5" value="⑤ signal_with_start" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=11;fontColor=#1a365d;labelBackgroundColor=none;exitX=1;exitY=0.35;exitDx=0;exitDy=0;entryX=0;entryY=0.17;entryDx=0;entryDy=0;" edge="1" parent="1" source="nRun" target="nIssue">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e6" value="⑥ 租约" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#7d5ba6;strokeWidth=2;startArrow=classic;startFill=1;fontSize=11;fontColor=#553c9a;labelBackgroundColor=none;exitX=1;exitY=0.23;exitDx=0;exitDy=0;entryX=0;entryY=0.42;entryDx=0;entryDy=0;" edge="1" parent="1" source="nIssue" target="nSlot">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e7" value="⑦ 分支序列化" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#7d5ba6;strokeWidth=2;startArrow=classic;startFill=1;fontSize=11;fontColor=#553c9a;labelBackgroundColor=none;exitX=1;exitY=0.75;exitDx=0;exitDy=0;entryX=0;entryY=0.42;entryDx=0;entryDy=0;" edge="1" parent="1" source="nIssue" target="nBranch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e8" value="⑧" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=12;fontColor=#1a365d;labelBackgroundColor=none;exitX=0.87;exitY=1;exitDx=0;exitDy=0;entryX=0.672;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nIssue" target="nActivity">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e9" value="⑨ subprocess" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=11;fontColor=#1a365d;labelBackgroundColor=none;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.592;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nActivity" target="nShell">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e10a" value="⑩" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5a8a58;strokeWidth=1;fontSize=11;fontColor=#2f5b2f;labelBackgroundColor=none;exitX=0.173;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nShell" target="nAcpx">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10b" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5a8a58;strokeWidth=1;exitX=0.51;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nShell" target="nWorktree">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10c" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5a8a58;strokeWidth=1;exitX=0.852;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nShell" target="nLogsArch">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e10d" value="glab" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeColor=#5a8a58;strokeWidth=1;fontSize=11;fontColor=#2f5b2f;labelBackgroundColor=none;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="nShell" target="nGitlab">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e11" value="⑪ label events" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#b85450;strokeWidth=2;fontSize=11;fontColor=#8b3a37;labelBackgroundColor=none;exitX=1;exitY=0.24;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="nGitlab" target="nWebhookRecv">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1780" y="1160" />
+              <mxPoint x="1780" y="395" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e12" value="⑫ signal" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#b85450;strokeWidth=2;fontSize=11;fontColor=#8b3a37;labelBackgroundColor=none;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="nWebhookRecv" target="nIssue">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1977" y="245" />
+              <mxPoint x="1130" y="245" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="eDrift" value="低频对账" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#b85450;strokeWidth=1;dashed=1;fontSize=11;fontColor=#8b3a37;labelBackgroundColor=none;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="nDrift" target="nGitlab">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1800" y="640" />
+              <mxPoint x="1800" y="1300" />
+              <mxPoint x="1600" y="1300" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e13" value="⑬ 终态" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=11;fontColor=#1a365d;labelBackgroundColor=none;exitX=0;exitY=0.884;exitDx=0;exitDy=0;entryX=1;entryY=0.59;entryDx=0;entryDy=0;" edge="1" parent="1" source="nIssue" target="nNotify">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e14" value="⑭ 104 → 114 反向网关" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=11;fontColor=#1a365d;labelBackgroundColor=none;exitX=0;exitY=0.765;exitDx=0;exitDy=0;entryX=1;entryY=0.55;entryDx=0;entryDy=0;" edge="1" parent="1" source="nNotify" target="nZhiban">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e15" value="⑮" style="edgeStyle=orthogonalEdgeStyle;rounded=1;jumpStyle=arc;html=1;strokeColor=#2b6cb0;strokeWidth=2;fontSize=12;fontColor=#1a365d;labelBackgroundColor=none;exitX=0;exitY=0.78;exitDx=0;exitDy=0;entryX=1;entryY=0.78;entryDx=0;entryDy=0;" edge="1" parent="1" source="nZhiban" target="nUser">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="noteBox" value="&lt;b&gt;这张图相对现状消掉了什么（A 类妥协产物 · 根因消失后整块归零）&lt;/b&gt;：tick 轮询循环 + blocked_cooldown_ticks 按 tick 计数 ｜ sessions_spawn 三层任务体系（spawn bootstrap / 私有 payload / mode-600 manifest + SHA-256 + 字节数）｜ ingest_subagent_completion.sh（1,035 行）｜ driven_launch_receipts / claim_token_sha256 / claim_generation 授权协议 ｜ I1 / I3 / callback_nonce / outbox / mirror / 三段 receipt ｜ reap_driven_orphan_placeholders 孤儿回收 ｜ exec_tool_timeout / executor_agent_timeout / queue_launch_reclaim_seconds / stuck_after_minutes 派生预算 ｜ dependency_scan_cursor_iid 轮转防饥饿 ｜「严禁并行 spawn」硬规则 ｜ SKILL.md 约 900 行防御性 prompt ｜ execution_id 不可变绑定文件&lt;br&gt;&lt;b&gt;根因&lt;/b&gt;：以上没有一条是领域复杂度，全部是「OpenClaw prompt agent 做不到某件事，于是绕」。&lt;b&gt;最典型的是 driven_launch_receipts —— 那一整套 token + generation + exact typed authorization boundary，唯一目的是回答「我刚才那次 sessions_spawn 到底成功没有」；进程内 fork 一个子进程，这块代码归零。&lt;/b&gt;&lt;br&gt;&lt;b&gt;保留的硬规则&lt;/b&gt;：GitLab 只走 glab（禁 curl / SDK）· 效果层 shell 一行不重写 · No-Fallback（脚本非零 → 读错误、分类、持久化、停止）· 凭据永不进入事件历史 / 入参 / 返回值 · 脚本与测试兼容 jq 1.5 · 仓库内禁 rm · 两台 OpenClaw 互不相通，跨区仅 104 → 114 反向网关放行" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f5f5f5;strokeColor=#666666;fontSize=12;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="1500" width="2120" height="190" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
