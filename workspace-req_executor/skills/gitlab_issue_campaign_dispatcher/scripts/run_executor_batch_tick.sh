@@ -1984,124 +1984,14 @@ if [ "${DRIVEN_COORDINATOR_FAULT:-}" = after_topup_seed ]; then
   exit 83
 fi
 
-# Re-check a running preflight completion against both current scheduler claim
-# identity and GitLab live state. The project wrapper writes the claim-bound
-# skipped handoff intent in the same campaign-state transaction that drains the
-# pending entry, so a callback lost after creating an MR does not wait for the
-# running timeout lease.
-reconcile_running_preflight_completion() {
-  local job_id="$1" project="$2" iid="$3"
-  local current_job claim_generation claim_token_sha256 context
-  local completion_output completion_rc completion_json completion_timeout
-  local completion_lock_timeout context_timeout
-
-  if ! completion_lock_timeout="$(remaining_topup_seconds 5)"; then
-    jq -cn '{status:"deadline"}'
-    return 0
-  fi
-  exec {COMPLETION_SNAPSHOT_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-  if ! flock -w "${completion_lock_timeout}" -x \
-      "${COMPLETION_SNAPSHOT_LOCK_FD}"; then
-    exec {COMPLETION_SNAPSHOT_LOCK_FD}>&-
-    jq -cn '{status:"lock_held"}'
-    return 0
-  fi
-  current_job="$(jq -c --arg job_id "${job_id}" \
-    '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
-  flock -u "${COMPLETION_SNAPSHOT_LOCK_FD}"
-  exec {COMPLETION_SNAPSHOT_LOCK_FD}>&-
-
-  if ! jq -e \
-      --arg job_id "${job_id}" \
-      --arg project "${project}" \
-      --argjson iid "${iid}" '
-      type == "object"
-      and .job_id == $job_id
-      and .project == $project
-      and .iid == $iid
-      and .status == "running"
-      and (.finalization // null) == null
-      and (.claim_generation | type == "number"
-        and . == floor and . > 0)
-      and (.claim_token | type == "string" and length > 0)
-    ' <<<"${current_job}" >/dev/null; then
-    jq -cn '{status:"stale_scheduler"}'
-    return 0
-  fi
-
-  claim_generation="$(jq -r '.claim_generation' <<<"${current_job}")"
-  claim_token_sha256="$(printf '%s' \
-    "$(jq -r '.claim_token' <<<"${current_job}")" | dlc_sha256)" \
-    || return 2
-  if ! context_timeout="$(remaining_topup_seconds 10)"; then
-    jq -cn '{status:"deadline"}'
-    return 0
-  fi
-  context="$(project_context "${project}" "${context_timeout}")" || return 2
-
-  if ! completion_timeout="$(remaining_topup_seconds 15)"; then
-    jq -cn '{status:"deadline"}'
-    return 0
-  fi
-
-  set +e
-  completion_output="$(printf '' | \
-    PROJECT="$(jq -r '.slug' <<<"${context}")" \
-    GROUP="$(jq -r '.group' <<<"${context}")" \
-    GITLAB_TOKEN="${GITLAB_TOKEN_EFF}" \
-    REPO_PARENT_PATH="$(jq -r '.repo_parent' <<<"${context}")" \
-    IID="${iid}" DRIVEN_COMPLETED_RECONCILE=1 \
-    DRIVEN_RECONCILE_JOB_ID="${job_id}" \
-    DRIVEN_RECONCILE_CLAIM_GENERATION="${claim_generation}" \
-    DRIVEN_RECONCILE_CLAIM_TOKEN_SHA256="${claim_token_sha256}" \
-      timeout --kill-after=1s "${completion_timeout}s" \
-        bash "${EXPIRE_RUNNING_CMD}" 2>/dev/null)"
-  completion_rc=$?
-  set -e
-  if [ "${completion_rc}" -eq 124 ] || [ "${completion_rc}" -eq 137 ]; then
-    jq -cn '{status:"timeout"}'
-    return 0
-  fi
-  if [ "${completion_rc}" -ne 0 ] || ! completion_json="$(printf '%s' "${completion_output}" | jq -ce \
-      --argjson iid "${iid}" '
-      if type == "object"
-        and .iid == $iid
-        and (.callback_status == "handled"
-          or .callback_status == "marker_not_ready"
-          or .callback_status == "not_completed"
-          or .callback_status == "stale_claim"
-          or .callback_status == "stale_or_already_drained"
-          or .callback_status == "lock_held")
-        and (if .callback_status == "handled"
-          then (.terminal_status == "skipped"
-            or .terminal_status == "done"
-            or .terminal_status == "failed"
-            or .terminal_status == "blocked")
-          else true end)
-      then . else error("invalid completion reconcile envelope") end
-    ' 2>/dev/null)"; then
-    jq -cn '{status:"failed"}'
-    return 0
-  fi
-
-  jq -cn \
-    --arg status "$(jq -r '.callback_status' <<<"${completion_json}")" \
-    --arg terminal_status "$(jq -r '.terminal_status // ""' <<<"${completion_json}")" \
-    --argjson claim_generation "${claim_generation}" '{
-    status:$status,
-    claim_generation:$claim_generation
-  } + (if $terminal_status == "" then {}
-       else {terminal_status:$terminal_status} end)'
-}
-
-# Every live-preflight skip is terminalized through its exact scheduler claim:
-# claim-0 for a fresh reservation, or a claim-fenced project handoff for a
-# running continuation. This guarantees zero new spawn for skips and releases
-# slots before actionable claims are emitted.
+# A fresh reservation or a running continuation with no exact project pending
+# entry is terminalized through its current scheduler claim. A running job that
+# still owns the exact project pending entry is left to its native callback or
+# durable-result recovery, because its own in-flight MR can trigger preflight.
 import_candidate_skips() {
   local candidate_set="$1"
   local grant job_id project iid skipped skipped_count skip_output skip_rc skip_status
-  local completion_result completion_status completion_terminal_status skip_timeout
+  local skip_timeout
   LAST_IMPORTED_SKIP_COUNT=0
   while IFS= read -r grant; do
     [ -n "${grant}" ] || continue
@@ -2122,64 +2012,21 @@ import_candidate_skips() {
       if jq -e --arg project "${project}" --argjson iid "${iid}" '
           any(.[]; .project == $project and .iid == $iid)
         ' <<<"${PROJECT_PENDING_ENTRIES}" >/dev/null; then
-        completion_result="$(reconcile_running_preflight_completion \
-          "${job_id}" "${project}" "${iid}")" || completion_result='{"status":"failed"}'
-        completion_status="$(jq -r '.status' <<<"${completion_result}")"
-        case "${completion_status}" in
-          handled)
-            completion_terminal_status="$(jq -r '.terminal_status' \
-              <<<"${completion_result}")"
-            if [ "${completion_terminal_status}" = blocked ]; then
-              append_operation "$(jq -cn \
-                --arg job_id "${job_id}" \
-                --argjson claim_generation \
-                  "$(jq -r '.claim_generation' <<<"${completion_result}")" '{
-                operation:"running_preflight_skip",
-                job_id:$job_id,
-                status:"marker_retry_pending",
-                terminal_status:"blocked",
-                claim_generation:$claim_generation
-              }')"
-            else
-              append_operation "$(jq -cn \
-                --arg job_id "${job_id}" \
-                --arg terminal_status "${completion_terminal_status}" \
-                --argjson claim_generation \
-                  "$(jq -r '.claim_generation' <<<"${completion_result}")" '{
-                operation:"running_preflight_skip",
-                job_id:$job_id,
-                status:"handoff_recorded",
-                terminal_status:$terminal_status,
-                claim_generation:$claim_generation
-              }')"
-              LAST_IMPORTED_SKIP_COUNT=$((LAST_IMPORTED_SKIP_COUNT + 1))
-            fi
-            ;;
-          marker_not_ready|not_completed|stale_claim|stale_or_already_drained|lock_held|stale_scheduler)
-            append_operation "$(jq -cn \
-              --arg job_id "${job_id}" \
-              --arg status "${completion_status}" '{
-              operation:"running_preflight_skip",job_id:$job_id,status:$status
-            }')"
-            ;;
-          deadline|timeout)
-            append_operation "$(jq -cn \
-              --arg job_id "${job_id}" \
-              --arg status "${completion_status}" '{
-              operation:"running_preflight_skip",job_id:$job_id,status:$status
-            }')"
-            HAD_FAILURE=true
-            TOPUP_PHASE_EXHAUSTED=true
-            record_topup_budget child_timeout
-            break
-            ;;
-          *)
-            append_operation "$(jq -cn --arg job_id "${job_id}" '{
-              operation:"running_preflight_skip",job_id:$job_id,status:"failed"
-            }')"
-            HAD_FAILURE=true
-            ;;
-        esac
+        # The live preflight can observe an MR written by this still-running
+        # attempt after the heartbeat's durable-result scan. While the exact
+        # project pending entry remains, that observation is advisory: keep
+        # the current claim for its native callback or the next durable-result
+        # recovery instead of racing both paths with a synthetic completion.
+        append_operation "$(jq -cn \
+          --arg job_id "${job_id}" \
+          --arg project "${project}" \
+          --argjson iid "${iid}" '{
+          operation:"running_preflight_skip",
+          job_id:$job_id,
+          project:$project,
+          iid:$iid,
+          status:"suppressed_active_pending"
+        }')"
         continue
       fi
     fi

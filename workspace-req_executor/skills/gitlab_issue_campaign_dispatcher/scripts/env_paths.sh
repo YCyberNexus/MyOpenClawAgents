@@ -478,11 +478,14 @@ unset __GITLAB_AUTH_REQUIRED
 unset __RESOLVED_REPO_PARENT_PATH __RESOLVED_REPO_PATH
 
 # ─── 4. Project handle ────────────────────────────────────────────
-if [ -z "${PROJECT_FULL:-}" ]; then
-  : "${GROUP:?env_paths.sh: GROUP must be set to compute PROJECT_FULL}"
+# A fixed wrapper supplies GROUP + PROJECT. Derive both downstream handles
+# from that pair every time so an ambient PROJECT_FULL or PROJECT_URI from a
+# previous project cannot redirect Git or API operations. Callers that only
+# have a canonical PROJECT_FULL may continue to omit GROUP.
+if [ -n "${GROUP:-}" ]; then
   export PROJECT_FULL="${GROUP}/${PROJECT}"
+else
+  : "${PROJECT_FULL:?env_paths.sh: GROUP or PROJECT_FULL must be set}"
 fi
-if [ -z "${PROJECT_URI:-}" ]; then
-  PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
-  export PROJECT_URI
-fi
+PROJECT_URI="$(printf %s "${PROJECT_FULL}" | jq -sRr @uri)"
+export PROJECT_URI

@@ -55,4 +55,50 @@ case "$(printf '%s\n' "${PATHS_EXECUTION_8}" | sed -n '3p')" in
   *) echo "second execution did not receive an isolated log path" >&2; exit 1 ;;
 esac
 
+derived_project_identity="$(
+  PROJECT="req_executor_test" \
+    GROUP="claw_gitlab" \
+    PROJECT_FULL="stale_group/stale_project" \
+    PROJECT_URI="stale_group%2Fstale_project" \
+    REPO_PARENT_PATH="${REPO_PARENT}" \
+    ISSUE_IID="42" \
+    EXECUTION_ID="9" \
+    GITLAB_HOST="local-gitlab.invalid:9443" \
+    GITLAB_API_PROTOCOL="https" \
+    GITLAB_TOKEN="test-token" \
+    REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
+    REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="local-gitlab.invalid:9443" \
+    bash -c 'source "$1"; printf "%s\n%s\n" "${PROJECT_FULL}" "${PROJECT_URI}"' \
+      _ "${SKILL_DIR}/scripts/env_paths.sh"
+)"
+[ "$(printf '%s\n' "${derived_project_identity}" | sed -n '1p')" = \
+    "claw_gitlab/req_executor_test" ] \
+  || { echo "ambient PROJECT_FULL overrode GROUP + PROJECT" >&2; exit 1; }
+[ "$(printf '%s\n' "${derived_project_identity}" | sed -n '2p')" = \
+    "claw_gitlab%2Freq_executor_test" ] \
+  || { echo "ambient PROJECT_URI was not re-derived" >&2; exit 1; }
+
+project_full_only_identity="$(
+  env -u GROUP \
+    PROJECT="req_executor_test" \
+    PROJECT_FULL="division/platform/req_executor_test" \
+    PROJECT_URI="stale_project_uri" \
+    REPO_PARENT_PATH="${REPO_PARENT}" \
+    ISSUE_IID="42" \
+    EXECUTION_ID="10" \
+    GITLAB_HOST="local-gitlab.invalid:9443" \
+    GITLAB_API_PROTOCOL="https" \
+    GITLAB_TOKEN="test-token" \
+    REQ_EXECUTOR_GITLAB_LOCAL_TEST_MODE=true \
+    REQ_EXECUTOR_GITLAB_ALLOWED_HOSTS="local-gitlab.invalid:9443" \
+    bash -c 'source "$1"; printf "%s\n%s\n" "${PROJECT_FULL}" "${PROJECT_URI}"' \
+      _ "${SKILL_DIR}/scripts/env_paths.sh"
+)"
+[ "$(printf '%s\n' "${project_full_only_identity}" | sed -n '1p')" = \
+    "division/platform/req_executor_test" ] \
+  || { echo "PROJECT_FULL-only compatibility was broken" >&2; exit 1; }
+[ "$(printf '%s\n' "${project_full_only_identity}" | sed -n '2p')" = \
+    "division%2Fplatform%2Freq_executor_test" ] \
+  || { echo "PROJECT_FULL-only URI was not re-derived" >&2; exit 1; }
+
 echo "ok env_paths derives stable issue branches and isolated execution paths"

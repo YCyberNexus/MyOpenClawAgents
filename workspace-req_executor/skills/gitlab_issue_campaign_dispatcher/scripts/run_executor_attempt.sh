@@ -19,12 +19,55 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=env_paths.sh
-source "${SCRIPT_DIR}/env_paths.sh"
 
+# Reject an invalid caller identity before env_paths.sh can create or migrate
+# any runtime directories.  The work branch itself is the canonical source of
+# ordinary/shared membership for this invocation; the execution-state file is
+# deliberately not involved in this derivation.
 : "${PROJECT:?}" "${GROUP:?}" "${ISSUE_IID:?}" "${EXECUTION_ID:?}"
 : "${ISSUE_MODE:?run_executor_attempt.sh: ISSUE_MODE must be set}"
 : "${BRANCH:?run_executor_attempt.sh: BRANCH must be set}"
+
+if ! [[ "${ISSUE_IID}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "run_executor_attempt.sh: ISSUE_IID must be a positive integer without leading zeros" >&2
+  exit 2
+fi
+
+WORK_BRANCH="${WORK_BRANCH:-issue/${ISSUE_IID}}"
+BRANCH_MEMBERS_JSON=""
+SHARED_BRANCH_ROLE=""
+if [ "${WORK_BRANCH}" = "issue/${ISSUE_IID}" ]; then
+  BRANCH_MEMBERS_JSON="[${ISSUE_IID}]"
+elif [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]]; then
+  SHARED_HEAD_IID="${BASH_REMATCH[1]}"
+  SHARED_TAIL_IID="${BASH_REMATCH[2]}"
+  if [ "${SHARED_HEAD_IID}" = "${SHARED_TAIL_IID}" ]; then
+    echo "run_executor_attempt.sh: shared WORK_BRANCH members must be distinct" >&2
+    exit 2
+  elif [ "${ISSUE_IID}" = "${SHARED_HEAD_IID}" ]; then
+    SHARED_BRANCH_ROLE=head
+  elif [ "${ISSUE_IID}" = "${SHARED_TAIL_IID}" ]; then
+    SHARED_BRANCH_ROLE=tail
+  else
+    echo "run_executor_attempt.sh: current ISSUE_IID must belong to shared WORK_BRANCH" >&2
+    exit 2
+  fi
+  BRANCH_MEMBERS_JSON="[${SHARED_HEAD_IID},${SHARED_TAIL_IID}]"
+else
+  echo "run_executor_attempt.sh: WORK_BRANCH must be issue/<current IID> or a two-member issue/<head IID>+<tail IID> branch containing the current IID" >&2
+  exit 2
+fi
+
+case "${ISSUE_MODE}" in
+  fresh|continue) ;;
+  *)
+    echo "run_executor_attempt.sh: ISSUE_MODE must be fresh or continue" >&2
+    exit 2
+    ;;
+esac
+
+# shellcheck source=env_paths.sh
+source "${SCRIPT_DIR}/env_paths.sh"
 
 if ! command -v jq >/dev/null 2>&1; then
   echo "run_executor_attempt.sh: jq is required" >&2
@@ -36,7 +79,6 @@ MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
 DEPENDENCY_IID="${DEPENDENCY_IID:-}"
 DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH:-}"
 DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
-WORK_BRANCH="${WORK_BRANCH:-issue/${ISSUE_IID}}"
 EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
 EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
 
@@ -58,30 +100,18 @@ execution_state_file_owner() {
   fi
 }
 
-# Execution state is optional context only. It no longer authorizes or rejects
-# caller-provided IID, execution ID, branch, dependency, or merge intent.
-EXECUTION_STATE_CONTEXT='{}'
+# Execution state is optional title context only. It never supplies business
+# identity and does not authorize or reject any caller-provided input.
+EXECUTION_STATE_ISSUE_TITLE=""
 if [ -f "${EXECUTION_STATE_FILE}" ] && [ ! -L "${EXECUTION_STATE_FILE}" ]; then
-  EXECUTION_STATE_CONTEXT="$(jq -c \
-    'if type == "object" then . else {} end' \
-    "${EXECUTION_STATE_FILE}" 2>/dev/null || printf '{}')"
+  EXECUTION_STATE_ISSUE_TITLE="$(jq -er '
+    if type == "object"
+      and (.issue_title | type) == "string"
+      and .issue_title != ""
+    then .issue_title else empty end
+  ' "${EXECUTION_STATE_FILE}" 2>/dev/null || true)"
 fi
-ISSUE_TITLE="${ISSUE_TITLE:-$(jq -r \
-  --arg fallback "Issue #${ISSUE_IID}" \
-  '.issue_title // $fallback' <<<"${EXECUTION_STATE_CONTEXT}")}"
-BRANCH_MEMBERS_JSON="${BRANCH_MEMBERS_JSON:-$(jq -c \
-  --argjson iid "${ISSUE_IID}" \
-  '.branch_members // [$iid]' <<<"${EXECUTION_STATE_CONTEXT}")}"
-SHARED_BRANCH_ROLE="${SHARED_BRANCH_ROLE:-$(jq -r \
-  '.shared_branch_role // ""' <<<"${EXECUTION_STATE_CONTEXT}")}"
-
-case "${ISSUE_MODE}" in
-  fresh|continue) ;;
-  *)
-    echo "run_executor_attempt.sh: ISSUE_MODE must be fresh or continue" >&2
-    exit 2
-    ;;
-esac
+ISSUE_TITLE="${ISSUE_TITLE:-${EXECUTION_STATE_ISSUE_TITLE:-Issue #${ISSUE_IID}}}"
 
 ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-3600}"
 case "${ACPX_TIMEOUT_SECONDS}" in

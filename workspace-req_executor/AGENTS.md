@@ -39,7 +39,25 @@ Core contract:
   future dispatcher outer budgets are derived from scheduler state, and the
   OpenClaw global timeout remains unchanged.
 - A native completion turn calls its prescribed ingester once and exits on
-  rejection; it never reads, edits, patches, or debugs wrapper scripts.
+  rejection; it never summarizes the untrusted child Result, runs a heartbeat
+  first, reads worker-result fields into prose, or debugs wrapper scripts. It
+  passes the exact selector through the Path B Bash heredoc; OpenClaw's `exec`
+  tool has no process-stdin field, so never use an `stdin` tool argument or
+  invoke the ingester with empty stdin. That Bash call is the first tool call
+  in the turn: never list, search, or read scripts first. The only permitted
+  later tool call is the exact best-effort cleanup kill returned by the
+  ingester. On OpenClaw 2026.4.9, pass only the exact two-field
+  terminal-reference JSON, never the raw internal completion context.
+- Paths C and E are synchronous public-acceptance turns. They never call
+  `sessions_yield` and never inherit Path D's post-cleanup or post-recorder
+  termination behavior. After every resolved runtime action, including a
+  durable spawned or launch-failed record, they emit and return the exact
+  five-field acceptance.
+- `record_executor_batch_spawn.sh` accepts its spawned or launch-failed object
+  only as strict JSON stdin. Never pass its result fields as environment
+  variables; that environment contract belongs only to Path A's
+  `dispatch_record_spawn.sh`. After a successful `sessions_spawn`, this
+  recorder is the mandatory next tool call before any `sessions_yield`.
 - The outer subagent receives `references/executor_prompt.md`.
 - The outer subagent makes one long call to `scripts/run_executor_attempt.sh`.
   That wrapper owns the complete acpx-to-finalization sequence and atomically

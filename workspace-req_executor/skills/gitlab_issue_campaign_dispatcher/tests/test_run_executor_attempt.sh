@@ -89,6 +89,9 @@ cat >"${FAKE_SCRIPTS}/commit_and_push.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' commit >>"${ORDER_LOG}"
+if [ -n "${COMMIT_TITLE_CAPTURE_FILE:-}" ]; then
+  printf '%s\n' "${ISSUE_TITLE}" >"${COMMIT_TITLE_CAPTURE_FILE}"
+fi
 printf '%s\n' 0123456789abcdef0123456789abcdef01234567
 [ "${COMMIT_TEST_EXIT:-0}" -eq 0 ] || exit "${COMMIT_TEST_EXIT}"
 EOF
@@ -110,9 +113,18 @@ cat >"${FAKE_SCRIPTS}/create_mr.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 fixed_intent_id=""
-if [[ "${WORK_BRANCH}" == issue/*+* ]]; then
-  fixed_branch_members="$(jq -c '.branch_members' "${EXECUTION_STATE_FILE}")"
-  fixed_shared_role="$(jq -r '.shared_branch_role' "${EXECUTION_STATE_FILE}")"
+if [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]]; then
+  fixed_shared_head="${BASH_REMATCH[1]}"
+  fixed_shared_tail="${BASH_REMATCH[2]}"
+  fixed_branch_members="[${fixed_shared_head},${fixed_shared_tail}]"
+  if [ "${ISSUE_IID}" = "${fixed_shared_head}" ]; then
+    fixed_shared_role=head
+  elif [ "${ISSUE_IID}" = "${fixed_shared_tail}" ]; then
+    fixed_shared_role=tail
+  else
+    echo "fake create_mr: current Issue is not a shared branch member" >&2
+    exit 97
+  fi
   fixed_intent_id="$(jq -r '.mr_finalization.intent_id' "${ISSUE_STATE_FILE}")"
   jq -e \
     --argjson execution_id "${EXECUTION_ID}" \
@@ -203,6 +215,33 @@ printf 'LOG_ARCHIVE_COMMIT=%040d\n' 1
 EOF
 chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_SCRIPTS}"/*.sh
 
+# Invalid ordinary/shared branch identities must fail before env_paths.sh can
+# create even the per-Issue runtime tree.  Use a fresh repo path for every
+# shape so any bootstrap side effect is directly observable.
+while IFS='|' read -r invalid_name invalid_branch; do
+  invalid_repo="${TEST_ROOT}/invalid-${invalid_name}/repo"
+  set +e
+  invalid_output="$({
+    PATH="${FAKE_BIN}:${PATH}" \
+    ORDER_LOG="${ORDER_LOG}" \
+    PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 \
+    REPO_PATH="${invalid_repo}" ISSUE_MODE=fresh BRANCH=main \
+    WORK_BRANCH="${invalid_branch}" ACPX_TIMEOUT_SECONDS=60 \
+      bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+  } 2>&1)"
+  invalid_rc=$?
+  set -e
+  [ "${invalid_rc}" -eq 2 ] \
+    || fail "invalid ${invalid_name} branch returned ${invalid_rc}: ${invalid_output}"
+  [ ! -e "${invalid_repo}" ] \
+    || fail "invalid ${invalid_name} branch reached env_paths side effects"
+done <<'EOF'
+ordinary-other-iid|issue/41
+shared-duplicate|issue/42+42
+shared-nonmember|issue/9+10
+shared-malformed|issue/9+42+77
+EOF
+
 write_execution_state() {
   local execution_id="$1" auto_merge="$2" target_branch="$3"
   local dependency_iid="${4:-}" dependency_branch="${5:-}"
@@ -241,7 +280,10 @@ NONAUTHORITATIVE_STATE_TMP="$(mktemp "${NONSTANDARD_MODE_STATE_FILE}.nonauthorit
 jq '.iid = 999
   | .execution_id = 999
   | .auto_merge = true
-  | .merge_target_branch = "ignored-by-wrapper"' \
+  | .merge_target_branch = "ignored-by-wrapper"
+  | .work_branch = "issue/9+42"
+  | .branch_members = [9,42]
+  | .shared_branch_role = "tail"' \
   "${NONSTANDARD_MODE_STATE_FILE}" >"${NONAUTHORITATIVE_STATE_TMP}"
 mv "${NONAUTHORITATIVE_STATE_TMP}" "${NONSTANDARD_MODE_STATE_FILE}"
 chmod 775 "${NONSTANDARD_MODE_STATE_FILE}"
@@ -295,11 +337,14 @@ jq -e '
   .dependency_iid == null
   and .dependency_branch == null
   and .dependency_base_sha == null
+  and .work_branch == "issue/42"
+  and .branch_members == [42]
+  and .shared_branch_role == null
   and .work_branch_sha == "0123456789abcdef0123456789abcdef01234567"
   and .dependency_history_verified == true
   and .dependency_pinned_execution_id == 3
 ' "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
-  || fail "successful push did not bind durable dependency history to its remote SHA"
+  || fail "successful push did not bind its caller-derived ordinary identity"
 jq -e 'has("mr_finalization") | not' \
   "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
   || fail "ordinary branch unexpectedly wrote a shared MR pending checkpoint"
@@ -448,11 +493,12 @@ printf '%s\n' "${ordinary_merged_output}" | tail -n 1 | jq -e '.status == "done"
 DEPENDENCY_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 write_execution_state 8 false main 9 issue/9 "${DEPENDENCY_SHA}"
 : >"${ORDER_LOG}"
+STATE_TITLE_CAPTURE="${TEST_ROOT}/state-title.txt"
 state_dependency_ignored_output="$(
   PATH="${FAKE_BIN}:${PATH}" \
-  ORDER_LOG="${ORDER_LOG}" \
+  ORDER_LOG="${ORDER_LOG}" COMMIT_TITLE_CAPTURE_FILE="${STATE_TITLE_CAPTURE}" \
   PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=8 \
-  REPO_PATH="${REPO_PATH}" ISSUE_TITLE='测试 issue' ISSUE_MODE=fresh \
+  REPO_PATH="${REPO_PATH}" ISSUE_MODE=fresh \
   BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "persisted dependency unexpectedly rejected caller inputs"
@@ -462,6 +508,8 @@ printf '%s\n' "${state_dependency_ignored_output}" | tail -n 1 \
 jq -e '.dependency_base_sha == ""' \
   "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-8/mr_result.json" \
   >/dev/null || fail "persisted dependency overrode caller inputs"
+[ "$(cat "${STATE_TITLE_CAPTURE}")" = '测试 issue' ] \
+  || fail "execution state did not supply its optional issue title"
 
 write_execution_state 13 false main
 : >"${ORDER_LOG}"
@@ -482,6 +530,35 @@ jq -e --arg dependency_sha "${DEPENDENCY_SHA}" \
   '.dependency_base_sha == $dependency_sha' \
   "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-13/mr_result.json" \
   >/dev/null || fail "dependency SHA did not reach MR finalization"
+
+# A malformed execution file is ignored as optional context.  The wrapper
+# falls back to the deterministic title and still derives ordinary membership
+# from WORK_BRANCH even when stale identity variables are also present.
+BROKEN_ORDINARY_STATE_FILE="${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-14.json"
+printf '%s\n' '{"issue_title":' >"${BROKEN_ORDINARY_STATE_FILE}"
+chmod 600 "${BROKEN_ORDINARY_STATE_FILE}"
+BROKEN_TITLE_CAPTURE="${TEST_ROOT}/broken-ordinary-title.txt"
+: >"${ORDER_LOG}"
+broken_ordinary_output="$(
+  PATH="${FAKE_BIN}:${PATH}" \
+  ORDER_LOG="${ORDER_LOG}" COMMIT_TITLE_CAPTURE_FILE="${BROKEN_TITLE_CAPTURE}" \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=14 \
+  REPO_PATH="${REPO_PATH}" ISSUE_MODE=fresh BRANCH=main \
+  BRANCH_MEMBERS_JSON='[9,42]' SHARED_BRANCH_ROLE=tail \
+  ACPX_TIMEOUT_SECONDS=60 \
+    bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+)" || fail "malformed ordinary execution context rejected the caller identity"
+printf '%s\n' "${broken_ordinary_output}" | tail -n 1 \
+  | jq -e '.status == "done" and .work_branch == "issue/42"' >/dev/null \
+  || fail "malformed ordinary execution context changed the result identity"
+[ "$(cat "${BROKEN_TITLE_CAPTURE}")" = 'Issue #42' ] \
+  || fail "malformed execution context did not use the fallback title"
+jq -e '
+  .work_branch == "issue/42"
+  and .branch_members == [42]
+  and .shared_branch_role == null
+' "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
+  || fail "malformed execution context or stale variables changed ordinary membership"
 
 SHARED_A_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 SHARED_ISSUE_ROOT="${REPO_PATH}/.req_executor/issues/issue-42"
@@ -510,6 +587,9 @@ write_shared_tail_state() {
 # lock the canonical two-Issue branch because A cannot take an ordinary retry.
 : >"${ORDER_LOG}"
 write_shared_tail_state 15 "${SHARED_A_SHA}" true
+printf '%s\n' '{"branch_members":' \
+  >"${SHARED_ISSUE_ROOT}/executions/execution-15.json"
+chmod 600 "${SHARED_ISSUE_ROOT}/executions/execution-15.json"
 partial_shared_output="$(
   PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" ACPX_TEST_EXIT=1 \
   PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=15 \
@@ -543,6 +623,15 @@ fi
 
 : >"${ORDER_LOG}"
 write_shared_tail_state 11 "${SHARED_A_SHA}" true
+FORGED_SHARED_STATE_FILE="${SHARED_ISSUE_ROOT}/executions/execution-11.json"
+FORGED_SHARED_STATE_TMP="$(mktemp "${FORGED_SHARED_STATE_FILE}.forged.XXXXXX")"
+jq '
+  .work_branch = "issue/77+42"
+  | .branch_members = [77,42]
+  | .shared_branch_role = "head"
+' "${FORGED_SHARED_STATE_FILE}" >"${FORGED_SHARED_STATE_TMP}"
+mv "${FORGED_SHARED_STATE_TMP}" "${FORGED_SHARED_STATE_FILE}"
+chmod 600 "${FORGED_SHARED_STATE_FILE}"
 mkdir -p "${REPO_PATH}/.req_executor/issues/issue-9"
 jq -n --arg sha "${SHARED_A_SHA}" '{
   iid:9,status:"done",latest_execution_id:1,
