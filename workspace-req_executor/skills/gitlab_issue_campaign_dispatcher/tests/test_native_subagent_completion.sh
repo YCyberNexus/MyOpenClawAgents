@@ -24,6 +24,7 @@ OPENCLAW_STATE_ROOT="${TEST_ROOT}/openclaw"
 OPENCLAW_SESSIONS_DIR="${OPENCLAW_STATE_ROOT}/agents/req_executor/sessions"
 STATE_FILE="${REPO_PATH}/.req_executor/_dispatcher/campaign_state.json"
 RECONCILE_CALLS="${TEST_ROOT}/reconcile.calls"
+LABEL_CALLS="${TEST_ROOT}/label.calls"
 mkdir -p \
   "${REPO_PATH}/.git" \
   "${REPO_PATH}/.req_executor/_dispatcher/log" \
@@ -106,6 +107,7 @@ printf '%s\n' "${evidence}"
 EOF
 cat >"${SCRIPTS}/set_issue_label.sh" <<'EOF'
 #!/usr/bin/env bash
+printf '%s:%s\n' "${1:?}" "${2:?}" >>"${LABEL_CALLS:?}"
 exit 0
 EOF
 cat >"${SCRIPTS}/notify_dispatcher.sh" <<'EOF'
@@ -117,7 +119,7 @@ cat >"${SCRIPTS}/post_result_note.sh" <<'EOF'
 exit 0
 EOF
 chmod +x "${SCRIPTS}"/*.sh
-export RECONCILE_CALLS
+export RECONCILE_CALLS LABEL_CALLS
 
 BASELINE="${TEST_ROOT}/baseline.json"
 jq -cnS '{
@@ -764,7 +766,29 @@ assert_internal_rejected multiple_worker_json "${INTERNAL_CONTEXT}"
 reset_internal_state
 reset_internal_evidence
 write_internal_session 'completed without a compact worker reply'
-assert_internal_rejected missing_worker_json "${INTERNAL_CONTEXT}"
+jq -cS --arg spawned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  .pending_subagents["42"].spawned_at = $spawned_at
+' "${STATE_FILE}" >"${STATE_FILE}.missing-worker"
+mv "${STATE_FILE}.missing-worker" "${STATE_FILE}"
+: >"${LABEL_CALLS}"
+run_ingest_self_routed "${INTERNAL_CONTEXT}"
+[ "${RUN_RC}" -eq 0 ] \
+  || fail "authenticated missing worker result was rejected: ${RUN_OUTPUT}; $(cat "${TEST_ROOT}/last-self-ingest.err")"
+jq -e '.callback_status == "handled"
+  and .iid == 42
+  and .execution_id == 1
+  and .terminal_status == "blocked"' <<<"${RUN_OUTPUT}" >/dev/null \
+  || fail "authenticated missing worker result did not enter blocked Phase 6"
+jq -e '(.pending_subagents | has("42") | not)
+  and .blocked_iids == [42]
+  and .completed_iids == []
+  and .timeout_iids == []' "${STATE_FILE}" >/dev/null \
+  || fail "authenticated missing worker result did not release the pending slot"
+jq -e '.status == "blocked" and .block_side == "dispatcher"' \
+  "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
+  || fail "authenticated missing worker result was not classified dispatcher-side"
+grep -qx 'add:blocked-dispatcher' "${LABEL_CALLS}" \
+  || fail "authenticated missing worker result did not replace doing with blocked-dispatcher"
 
 reset_internal_state
 reset_internal_evidence
@@ -816,6 +840,30 @@ run_ingest_self_routed "${SELF_EVENT_611}"
 jq -e '.callback_status == "handled" and .terminal_status == "done"' \
   <<<"${RUN_OUTPUT}" >/dev/null \
   || fail "self-routed 6.11 archive completion did not reach Phase 6"
+
+# The current structured completion route has the same fail-closed recovery:
+# exact durable/runtime identity plus zero worker objects is dispatcher-blocked
+# immediately, while the ambiguous multi-object case above remains rejected.
+reset_state
+MISSING_611_ISSUE_STATE="${REPO_PATH}/.req_executor/issues/issue-42/state.json"
+if [ -f "${MISSING_611_ISSUE_STATE}" ]; then
+  mv "${MISSING_611_ISSUE_STATE}" \
+    "${MISSING_611_ISSUE_STATE}.before-missing-worker-611"
+fi
+jq -cS --arg spawned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" '
+  .pending_subagents["42"].spawned_at = $spawned_at
+' "${STATE_FILE}" >"${STATE_FILE}.missing-worker-611"
+mv "${STATE_FILE}.missing-worker-611" "${STATE_FILE}"
+: >"${LABEL_CALLS}"
+SELF_EVENT_611_MISSING="$(make_611_event 'completed without a compact worker reply')"
+run_ingest_self_routed "${SELF_EVENT_611_MISSING}"
+[ "${RUN_RC}" -eq 0 ] \
+  || fail "self-routed 6.11 missing worker result was rejected: ${RUN_OUTPUT}"
+jq -e '.callback_status == "handled" and .terminal_status == "blocked"' \
+  <<<"${RUN_OUTPUT}" >/dev/null \
+  || fail "self-routed 6.11 missing worker result did not enter blocked Phase 6"
+grep -qx 'add:blocked-dispatcher' "${LABEL_CALLS}" \
+  || fail "self-routed 6.11 missing worker result did not sync blocked-dispatcher"
 
 # Gateway-wide clone defaults are trusted deployment state, not an explicit
 # callback route.  Without PROJECT/GROUP, the process-level parent must win

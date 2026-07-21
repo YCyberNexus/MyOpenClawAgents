@@ -359,3 +359,11 @@ result; it only proves that acpx itself is no longer running and starts the
 bounded post-acpx watchdog.
 
 `dispatch_followup.sh` validates the IID and execution identity against `pending_subagents` before mutating state.
+
+If a runtime-authenticated successful child terminal contains zero strict
+compact worker objects, `ingest_subagent_completion.sh` uses the already-bound
+durable launch IID and execution identity to invoke Phase 6 with a fixed
+non-JSON sentinel. Phase 6 immediately synthesizes `blocked-dispatcher`, unless
+the attempt has already outlived its pinned ACPX budget and therefore qualifies
+as `timeout`. More than one strict worker object remains ambiguous and is
+rejected without state or label mutation.

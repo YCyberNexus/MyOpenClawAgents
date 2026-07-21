@@ -576,6 +576,11 @@ printf '%s' "${OUTPUT}" | jq -e '
 ' >/dev/null || fail "driven topup did not separate executable grants from stable skipped entries"
 
 for iid in 2 3 6; do
+  EXECUTION_STATE_PATH="${PROJECT_REPO}/.req_executor/issues/issue-${iid}/executions/execution-1.json"
+  [ -f "${EXECUTION_STATE_PATH}" ] \
+    || fail "fixed execution identity for IID ${iid} does not exist"
+  [ "$(file_mode "${EXECUTION_STATE_PATH}")" = "600" ] \
+    || fail "fixed execution identity for IID ${iid} is not mode 600 at creation"
   PAYLOAD_PATH="$(printf '%s' "${OUTPUT}" | jq -r --argjson iid "${iid}" \
     '.dispatch_entries[] | select(.iid == $iid) | .payload_path')"
   [ -f "${PAYLOAD_PATH}" ] || fail "driven topup payload_path for IID ${iid} does not exist"

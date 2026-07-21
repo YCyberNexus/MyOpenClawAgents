@@ -70,12 +70,29 @@ fi
 EXECUTION_STATE_MODE="$(execution_state_file_mode "${EXECUTION_STATE_FILE}")" || true
 EXECUTION_STATE_OWNER="$(execution_state_file_owner "${EXECUTION_STATE_FILE}")" || true
 EXECUTION_STATE_BYTES="$(wc -c <"${EXECUTION_STATE_FILE}" 2>/dev/null | tr -d '[:space:]')"
-if [ "${EXECUTION_STATE_MODE}" != 600 ] \
-    || [ "${EXECUTION_STATE_OWNER}" != "$(id -u)" ] \
+if [ "${EXECUTION_STATE_OWNER}" != "$(id -u)" ] \
     || ! [[ "${EXECUTION_STATE_BYTES}" =~ ^[1-9][0-9]*$ ]] \
     || [ "${EXECUTION_STATE_BYTES}" -gt 65536 ]; then
   echo "run_executor_attempt.sh: fixed execution identity has unsafe metadata" >&2
   exit 2
+fi
+if [ "${EXECUTION_STATE_MODE}" != 600 ]; then
+  PRIOR_EXECUTION_STATE_MODE="${EXECUTION_STATE_MODE:-unknown}"
+  if ! chmod 600 "${EXECUTION_STATE_FILE}"; then
+    echo "run_executor_attempt.sh: fixed execution identity mode could not be normalized to 600" >&2
+    exit 2
+  fi
+  EXECUTION_STATE_MODE="$(execution_state_file_mode "${EXECUTION_STATE_FILE}")" || true
+  EXECUTION_STATE_OWNER="$(execution_state_file_owner "${EXECUTION_STATE_FILE}")" || true
+  EXECUTION_STATE_BYTES="$(wc -c <"${EXECUTION_STATE_FILE}" 2>/dev/null | tr -d '[:space:]')"
+  if [ "${EXECUTION_STATE_MODE}" != 600 ] \
+      || [ "${EXECUTION_STATE_OWNER}" != "$(id -u)" ] \
+      || ! [[ "${EXECUTION_STATE_BYTES}" =~ ^[1-9][0-9]*$ ]] \
+      || [ "${EXECUTION_STATE_BYTES}" -gt 65536 ]; then
+    echo "run_executor_attempt.sh: fixed execution identity remains unsafe after mode normalization" >&2
+    exit 2
+  fi
+  echo "run_executor_attempt.sh: normalized fixed execution identity mode from ${PRIOR_EXECUTION_STATE_MODE} to 600" >&2
 fi
 
 if ! TRUSTED_EXECUTION_IDENTITY="$(jq -ce \

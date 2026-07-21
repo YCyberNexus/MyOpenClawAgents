@@ -235,6 +235,8 @@ write_execution_state() {
 }
 
 write_execution_state 3 false main
+MODE_REPAIR_STATE_FILE="${REPO_PATH}/.req_executor/issues/issue-42/executions/execution-3.json"
+chmod 775 "${MODE_REPAIR_STATE_FILE}"
 wrapper_output="$(
   PATH="${FAKE_BIN}:${PATH}" \
   ORDER_LOG="${ORDER_LOG}" \
@@ -243,6 +245,14 @@ wrapper_output="$(
   BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "all-in-one wrapper failed"
+
+if execution_state_mode="$(stat -f '%Lp' "${MODE_REPAIR_STATE_FILE}" 2>/dev/null)"; then
+  :
+else
+  execution_state_mode="$(stat -c '%a' "${MODE_REPAIR_STATE_FILE}")"
+fi
+[ "${execution_state_mode}" = 600 ] \
+  || fail "fixed execution identity mode was not normalized from 775 to 600"
 
 expected_order='acpx
 stage

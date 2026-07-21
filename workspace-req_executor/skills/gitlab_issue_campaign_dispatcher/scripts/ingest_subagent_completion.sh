@@ -981,11 +981,41 @@ if [ "${INTERNAL_CONTEXT_MODE}" = true ] \
     }')"
 fi
 
-if ! WORKER_JSON="$(completion_extract_unique_worker_reply "${ASSISTANT_TEXT}")"; then
+set +e
+WORKER_JSON="$(completion_extract_unique_worker_reply "${ASSISTANT_TEXT}")"
+WORKER_REPLY_RC=$?
+set -e
+
+# A successful native child terminal with no compact worker line means the
+# fixed wrapper returned before it could persist/print its terminal result.
+# At this point the durable launch action and runtime identity are already
+# bound, so use only their routed IID/execution identity and let Phase 6
+# normalize a fixed non-JSON sentinel into blocked-dispatcher (or timeout when
+# the attempt genuinely outlived its pinned ACPX budget). Never do this for an
+# ambiguous result, a legacy route, or a non-success runtime terminal.
+MISSING_WORKER_COMPLETION=false
+RUNTIME_COMPLETED_SUCCESSFULLY=false
+if [ "${INTERNAL_CONTEXT_MODE}" = true ]; then
+  [ "${INTERNAL_REGISTRY_STATUS}" != done ] \
+    || RUNTIME_COMPLETED_SUCCESSFULLY=true
+else
+  case "${RUNTIME_STATUS}" in
+    ok|completed|done) RUNTIME_COMPLETED_SUCCESSFULLY=true ;;
+  esac
+fi
+
+if [ "${WORKER_REPLY_RC}" -eq 0 ]; then
+  IID="$(jq -r '.iid' <<<"${WORKER_JSON}")"
+  EXECUTION_ID="$(jq -r '.execution_id' <<<"${WORKER_JSON}")"
+elif [ "${WORKER_REPLY_RC}" -eq 4 ] \
+    && [ "${ROUTE_MODE}" = durable ] \
+    && [ "${RUNTIME_COMPLETED_SUCCESSFULLY}" = true ]; then
+  MISSING_WORKER_COMPLETION=true
+  IID="${ROUTED_IID}"
+  EXECUTION_ID="${ROUTED_EXECUTION_ID}"
+else
   reject_completion invalid_or_ambiguous_worker_json
 fi
-IID="$(jq -r '.iid' <<<"${WORKER_JSON}")"
-EXECUTION_ID="$(jq -r '.execution_id' <<<"${WORKER_JSON}")"
 
 if [ "${ROUTE_MODE}" = durable ] \
     && { [ "${IID}" != "${ROUTED_IID}" ] \
@@ -1028,8 +1058,12 @@ fi
 # With no pending entry this is a harmless duplicate/stale delivery.  Let the
 # followup return its existing idempotent stale or durable-handoff-recovery
 # envelope; it performs no terminal mutation without current pending state.
+FOLLOWUP_REPLY="${WORKER_JSON}"
+if [ "${MISSING_WORKER_COMPLETION}" = true ]; then
+  FOLLOWUP_REPLY='authenticated terminal child completed without a strict compact worker result'
+fi
 CALLBACK_RUN_ID="${RUN_ID}" \
 CALLBACK_CHILD_SESSION_KEY="${CHILD_SESSION_KEY}" \
 CALLBACK_LABEL="${CHILD_LABEL}" \
 IID="${IID}" EXECUTION_ID="${EXECUTION_ID}" \
-  bash "${FOLLOWUP_SCRIPT}" <<<"${WORKER_JSON}"
+  bash "${FOLLOWUP_SCRIPT}" <<<"${FOLLOWUP_REPLY}"

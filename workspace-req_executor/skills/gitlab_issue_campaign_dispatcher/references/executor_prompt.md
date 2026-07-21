@@ -132,8 +132,10 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
    fields required by the parent.
 
 4. If the tool returns without a compact JSON last line, output no invented
-   result and do not call another tool. The heartbeat will inspect the durable
-   acpx marker/result files, classify the interruption, and reclaim the slot.
+   result and do not call another tool. The authenticated native completion
+   path immediately classifies a pre-result interruption as
+   `blocked-dispatcher` and reclaims the slot. If the completion itself is
+   lost, the heartbeat remains the durable recovery backstop.
 </instructions>
 
 <constraints>

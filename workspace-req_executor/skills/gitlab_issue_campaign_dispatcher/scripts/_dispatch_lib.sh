@@ -98,6 +98,10 @@ atomic_write_json() {
     cat >"${tmp}"
     chmod 600 "${tmp}"
     mv -f "${tmp}" "${target}"
+    # Re-apply the private mode to the published path. The temporary file is
+    # already mode 600, but this makes the destination contract explicit for
+    # deployment filesystems or copy layers that do not preserve rename modes.
+    chmod 600 "${target}"
   )
 }
 
@@ -112,6 +116,9 @@ wrapper_log() {
 # text.  The worker contract requires a one-line object, so parsing candidate
 # lines avoids treating arbitrary prose, nested examples, or tool payloads as
 # a completion.  Two valid lines are ambiguous even when byte-identical.
+# Returns 4 when no strict worker object exists and 5 when more than one exists,
+# allowing the authenticated native-completion path to recover only the former
+# without weakening the fail-closed ambiguous-result rule.
 completion_extract_unique_worker_reply() {
   local final_text="$1" candidates count
 
@@ -164,12 +171,29 @@ completion_extract_unique_worker_reply() {
 
   count="$(jq -r 'length' <<<"${candidates}")"
   if [ "${count}" -eq 0 ]; then
+    # Zero strict objects is recoverable only for prose/no-result terminals.
+    # A malformed, pretty-printed, or wrong-identity JSON object must remain a
+    # hard rejection; otherwise it could be mistaken for an absent result and
+    # borrow the durable route's IID/execution identity.
+    if printf '%s' "${final_text}" | jq -Rse '
+        def trim: gsub("^\\s+|\\s+$"; "");
+        . as $raw
+        | ($raw | trim) as $whole
+        | ([$raw | split("\n")[] | sub("\r$"; "") | trim]) as $lines
+        | (((try ($whole | fromjson) catch null) | type) == "object")
+          or ($lines | any(.[];
+            (((try fromjson catch null) | type) == "object")
+            or startswith("{") or endswith("}")))
+      ' >/dev/null 2>&1; then
+      echo "completion: final assistant text has invalid or non-canonical JSON-shaped worker output" >&2
+      return 3
+    fi
     echo "completion: final assistant text has no strict compact worker JSON" >&2
-    return 3
+    return 4
   fi
   if [ "${count}" -ne 1 ]; then
     echo "completion: final assistant text has ambiguous compact worker JSON" >&2
-    return 3
+    return 5
   fi
   jq -c '.[0]' <<<"${candidates}"
 }
