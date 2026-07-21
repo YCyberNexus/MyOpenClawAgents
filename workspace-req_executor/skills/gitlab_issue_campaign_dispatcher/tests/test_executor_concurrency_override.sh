@@ -90,14 +90,14 @@ printf '%s' "${request}" | \
   CAPTURE="${CAPTURE}" \
   bash "${TOPUP_SCRIPT}" >/dev/null
 
-grep -qx 'hourly_issue_quota=5' "${CAPTURE}" \
-  || fail "deployment override 5 did not reach hourly_issue_quota"
-grep -qx 'max_concurrent_subagents=5' "${CAPTURE}" \
-  || fail "deployment override 5 did not reach project topup capacity"
+grep -qx 'hourly_issue_quota=1' "${CAPTURE}" \
+  || fail "one repository grant did not constrain hourly_issue_quota"
+grep -qx 'max_concurrent_subagents=1' "${CAPTURE}" \
+  || fail "one repository grant did not constrain project topup capacity"
 grep -qx "repo_path=${TEST_ROOT}/repos/group" "${CAPTURE}" \
   || fail "process repo parent override did not reach project topup"
 
-echo "ok executor concurrency override is unified across scheduler and topup"
+echo "ok executor repository limit stays separate from per-project topup capacity"
 
 # Intake, tick, and post-spawn recording must all honor the same process-level
 # scheduler root/concurrency overrides even when campaign_defaults.env pins a

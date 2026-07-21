@@ -28,8 +28,10 @@ else
   jq -cn --argjson slots "${FAKE_SLOTS:-7}" '{
     status:"success",exit_code:0,
     worker_result_json:{
-      status:"success",slot_count:$slots,previous_slot_count:3,
-      active_count:2,available_slots:($slots - 2),draining:false
+      status:"success",parallel_project_limit:$slots,
+      previous_parallel_project_limit:3,
+      active_project_count:2,available_project_slots:($slots - 2),
+      draining:false
     }
   }'
 fi
@@ -45,10 +47,10 @@ success_output="$(
 )"
 jq -e '
   .status == "success"
-  and .slot_count == 7
-  and .previous_slot_count == 3
-  and .active_count == 2
-  and .available_slots == 5
+  and .parallel_project_limit == 7
+  and .previous_parallel_project_limit == 3
+  and .active_project_count == 2
+  and .available_project_slots == 5
   and .draining == false
 ' <<<"${success_output}" >/dev/null
 jq -e '

@@ -25,7 +25,7 @@ fi
 SLOT_COUNT_TEXT="${BASH_REMATCH[1]}"
 if [ "${#SLOT_COUNT_TEXT}" -gt 10 ] \
   || [ "${SLOT_COUNT_TEXT}" -gt 2147483647 ]; then
-  emit_failure "slot number must be between 1 and 2147483647"
+  emit_failure "parallel project limit must be between 1 and 2147483647"
 fi
 
 : "${DEFAULT_EXECUTOR_AGENT:?set_executor_slots.sh: DEFAULT_EXECUTOR_AGENT required}"
@@ -56,25 +56,27 @@ if ! RESULT_JSON="$(printf '%s' "${TURN_OUTPUT}" | jq -ce \
       and .exit_code == 0
       and (.worker_result_json | type == "object")
       and (.worker_result_json | keys | sort) == [
-        "active_count","available_slots","draining","previous_slot_count",
-        "slot_count","status"
+        "active_project_count","available_project_slots","draining",
+        "parallel_project_limit","previous_parallel_project_limit","status"
       ]
       and .worker_result_json.status == "success"
-      and (.worker_result_json.slot_count
+      and (.worker_result_json.parallel_project_limit
         | type == "number" and . == floor and . > 0)
-      and (.worker_result_json.previous_slot_count
+      and (.worker_result_json.previous_parallel_project_limit
         | type == "number" and . == floor and . > 0)
-      and (.worker_result_json.active_count
+      and (.worker_result_json.active_project_count
         | type == "number" and . == floor and . >= 0)
-      and (.worker_result_json.available_slots
+      and (.worker_result_json.available_project_slots
         | type == "number" and . == floor and . >= 0)
       and (.worker_result_json.draining | type == "boolean")
-      and .worker_result_json.slot_count == $requested
-      and .worker_result_json.available_slots == (
-        [(.worker_result_json.slot_count - .worker_result_json.active_count), 0]
+      and .worker_result_json.parallel_project_limit == $requested
+      and .worker_result_json.available_project_slots == (
+        [(.worker_result_json.parallel_project_limit
+          - .worker_result_json.active_project_count), 0]
         | max)
       and .worker_result_json.draining == (
-        .worker_result_json.active_count > .worker_result_json.slot_count)
+        .worker_result_json.active_project_count
+          > .worker_result_json.parallel_project_limit)
     then .worker_result_json
     else error("invalid executor slot response") end
 ' 2>/dev/null)"; then

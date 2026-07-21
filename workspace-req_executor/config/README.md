@@ -38,7 +38,7 @@ Like `gitlab.env`, this file is `source`d (and may be loaded under `set -a`), so
 
 ### Why these values are pinned
 
-The runner has to know where to clone repositories before it can read issue content or repository-local guidance. The driven-batch scheduler also needs one agent-level state root outside all clones, one physical concurrency ceiling shared by every project, and one initial acpx timeout for future attempts. Everything else is either supplied by the issue/wiki, supplied by req_dispatcher as an optional `branch`, inferred by the wrapper (`branch` from `origin/HEAD` when omitted), or handled by Claude Code/OpenClaw defaults.
+The runner has to know where to clone repositories before it can read issue content or repository-local guidance. The driven-batch scheduler also needs one agent-level state root outside all clones, one parallel-repository ceiling shared by every batch, and one initial acpx timeout for future attempts. Issues in one repository run serially; distinct repositories may run in parallel. Everything else is either supplied by the issue/wiki, supplied by req_dispatcher as an optional `branch`, inferred by the wrapper (`branch` from `origin/HEAD` when omitted), or handled by Claude Code/OpenClaw defaults.
 
 ### Fields
 
@@ -46,7 +46,7 @@ The runner has to know where to clone repositories before it can read issue cont
 | --- | --- | --- |
 | `REPO_PARENT_PATH` | `/data` | Absolute parent under which the project is cloned; the final clone target is `${REPO_PARENT_PATH}/${PROJECT}`. Use ignored `campaign_defaults.local.env` to override this for local testing. |
 | `EXECUTOR_SCHEDULER_ROOT` | `/data/req_executor/_scheduler` | Absolute agent-level root for scheduler state, lock, batch records, and callback inbox/outbox. |
-| `EXECUTOR_MAX_CONCURRENCY` | `3` | Positive integer initialization default shared across all driven batches; `/slot` persists the later runtime ceiling in scheduler state. |
+| `EXECUTOR_MAX_CONCURRENCY` | `10` | Positive integer initialization default for parallel GitLab repositories, shared across all driven batches; `/slot` persists the later runtime ceiling in scheduler state. |
 | `EXECUTOR_ACPX_TIMEOUT_SECONDS` | `3600` | Initialization default for the per-attempt acpx wall-clock cap. `/timeout-executor` persists later values from 60 through 18000 seconds for future attempts. |
 | `EXECUTOR_RUNNING_LEASE_SECONDS` | `21600` | Backstop before tick checks a running claim for a lost callback; the project-side ACPX deadline is still authoritative. |
 | `DRIVEN_LEGACY_LOCK_COMPAT_SECONDS` | `86400` | Persisted rollout window in which new wrappers acquire both old and new callback/launch lock paths. Set to `0` only after all pre-upgrade executor processes have stopped; expired windows migrate old locks out of hot directories without replacing canonical lock inodes. |
@@ -138,14 +138,14 @@ There is no UI-account pool configuration in this workspace. The issue body is p
 
 ## 受驱动批次部署与恢复
 
-- tracked 蓝区默认保持 `EXECUTOR_MAX_CONCURRENCY=3` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。不得为了工作站测试修改 tracked `campaign_defaults.env` 中的 `/data` 默认值、GitLab host/protocol 或 token 注入契约。
+- tracked 蓝区默认保持 `EXECUTOR_MAX_CONCURRENCY=10` 和 `EXECUTOR_SCHEDULER_ROOT=/data/req_executor/_scheduler`。不得为了工作站测试修改 tracked `campaign_defaults.env` 中的 `/data` 默认值、GitLab host/protocol 或 token 注入契约。
 - 工作站覆盖只能放在进程环境或 ignored `campaign_defaults.local.env`。scheduler root 等部署字段由显式进程环境优先于 local env，local env 优先于 tracked defaults；并发与 acpx timeout 字段仅用于尚无运行时值时的初始化，后续使用 `/slot` 与 `/timeout-executor`。不要提交本机绝对路径、临时 session、测试 endpoint 或额外凭据。
 - `dispatcher_callback_target`、`executor_agent` 与 `callback_nonce` 是 `RUN_DRIVEN_ISSUE_BATCH` 与新发 `RUN_SINGLE_ISSUE` 的必填 I1 字段。前两者必须匹配部署 pin，nonce 必须为 64 个小写 hex，只进入私有 durable state 和认证回调信封。driven-batch I1 还固定保存处理基准 `branch`、布尔值 `auto_merge` 与 `merge_target_branch`；`auto_merge=true` 时合并目标不能为空，dispatcher 已按“明确目标 → 处理基准 → `master`”完成回退。executor 不从自由文本或本地配置重新推断合并策略。I1 定义项目、selector、处理及合并策略与回调路由字段；executor 按进程环境优先、`config/gitlab.env` 回退的顺序加载 `GITLAB_TOKEN`，并将它直接用于内部 scheduled trigger 与子任务 prompt。
 - I1 schema 滚动升级时先暂停新的执行请求，排空或停止旧 executor，部署并验证新版 executor，最后才升级 dispatcher。旧 executor 的严格字段白名单不接受 `auto_merge` 与 `merge_target_branch`；新版 dispatcher 对普通请求也会固定发送 `auto_merge=false`，所以新版 I1 和自动合并请求都不得发往旧 executor。回滚时先停止新入口与双方 tick，先回滚 dispatcher 或保留新版 executor，确认不再发送新字段后才可回滚 executor；未完成自动合并 intent 原样保留等待恢复。
 - 私有仓库的 clone、fetch、ls-remote、push 使用普通 `git`，`origin` 采用 `${GITLAB_API_PROTOCOL}://oauth2:${GITLAB_TOKEN}@${GITLAB_HOST}/${GROUP}/${PROJECT}.git` 形式的直接认证 URL。Git 子进程与 callback `openclaw` 子进程继承 executor 当前环境，包括按上述优先级选中的 `GITLAB_TOKEN`。
 - 只有升级前已存在于 mode `0700` scheduler 根、同时缺少 executor/nonce 的旧 request/outbox 才会被 executor 显式投影为 `legacy_pre_upgrade` 并沿 raw 八字段 I3 兼容投递。新 intake 缺少认证字段或携带 `callback_auth_mode=legacy_pre_upgrade` 都必须失败，不能由请求输入降级。
 - lock layout 升级由 `${EXECUTOR_SCHEDULER_ROOT}/lock_layout_v2.json` 固定起点。默认 86400 秒兼容窗口内，新进程按旧路径→新路径的固定顺序同时加锁，避免尚在运行的旧 drainer/coordinator 与新进程分裂互斥域；窗口结束后同时锁住两侧再把旧 inode 移到独立锁目录，绝不覆盖 canonical 新锁。确认所有旧进程已停止时可通过进程环境或 local env 将窗口设为 `0` 提前收口。
-- 初始默认 3 个物理槽位由所有 driven batch 共享，可用 `/slot <正整数>` 在线调整并持久化。acpx timeout 初始默认 3600 秒，可用 `/timeout-executor <时长>` 在线调整并持久化，且只影响后续 attempt；req_dispatcher 会从该 scheduler state 派生后续 executor turn、exec 工具、旧队列回收和 stuck 驱逐预算，但不会修改 OpenClaw 全局 timeout。缩容不取消已有任务，只暂停新 reservation 直到 active 数回落。scheduler 持久保存 snapshot 游标与 round-robin 游标；即使单批包含 100+ Issue，也只按严格轮转逐步发放 grant，不把 IID 列表或全部 runtime action 展开到聊天上下文。
+- 初始默认允许 10 个 GitLab 仓库并行，由所有 driven batch 共享，可用 `/slot <正整数>` 在线调整并持久化。同一仓库始终只运行一个 Issue，前一个终态释放后才发放下一个；不同仓库可并行。acpx timeout 初始默认 3600 秒，可用 `/timeout-executor <时长>` 在线调整并持久化，且只影响后续 attempt；req_dispatcher 会从该 scheduler state 派生后续 executor turn、exec 工具、旧队列回收和 stuck 驱逐预算，但不会修改 OpenClaw 全局 timeout。缩容不取消已有任务，只暂停新仓库 reservation 直到活跃仓库数回落。scheduler 持久保存 snapshot 游标与 round-robin 游标；即使单批包含 100+ Issue，也只按严格轮转逐步发放 grant，不把 IID 列表或全部 runtime action 展开到聊天上下文。
 - 部署周期触发固定为 `RUN_EXECUTOR_BATCH_TICK`，建议每分钟在 executor main session 唤醒一次。tick 对项目预检已经 `pr`、`finish` 或 closed 的 running claim 立即执行同代 fence 与 GitLab 二次核验并生成 `skipped` handoff；`pr` 表示 MR 等待人工处理，`finish` 表示显式请求的自动合并已按精确 MR 身份、目标分支和 SHA 验证成功。对仍无完成证据且超过 lease/ACPX deadline 的丢回调任务继续走 timeout 兜底。tick 还会用 scheduler active job 与未完成 launch coordinator 保护集清理无任何运行标识的旧 driven placeholder，然后恢复 durable handoff/outbox 和未完成协调阶段，再按严格 round-robin 补满空槽；outbox 每 tick 默认最多投递 3 条，失败按持久时间退避，因此大量失败回调不会阻止 reservation；完成数据退出热扫描后仍保留冷归档，它不依赖此前聊天 turn 的内存。
 - 升级时先让 req_dispatcher 排空旧 FIFO。旧 active/queue 非空期间，新 batch 保持 `waiting_for_legacy_drain`，不得与旧 single active 重叠启动；旧队列清空后再由周期 tick 推进新 scheduler。
 - 回滚时先停止新的 batch 入口和周期 `RUN_EXECUTOR_BATCH_TICK`。可以在停用前排空，也可以原样保留 `${EXECUTOR_SCHEDULER_ROOT}` 下的 scheduler state、batch snapshot、handoff 与 callback outbox，等待恢复后继续；不得删除这些 durable runtime 记录。

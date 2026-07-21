@@ -23,7 +23,7 @@ dispatcher 是 prompt 路由器和 batch 控制面：
   全局 timeout 不随命令变更。
 
 它不建 Issue、不改 GitLab、不跑 Issue、不查询 GitLab Issue、不展开 IID snapshot、不管理
-worktree/campaign/物理并发。wiki 是唯一只读 GitLab 入口。
+worktree/campaign/仓库级并发。wiki 是唯一只读 GitLab 入口。
 
 iid_list 支持同一仓库中排序去重后的离散 IID；single/iid_list/range/open_unfinished/open_label
 都只处理 intake 时为 OPEN 的 Issue；snapshot 查询、过滤

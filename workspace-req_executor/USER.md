@@ -4,8 +4,9 @@
 - GitLab host/protocol/token fallback and campaign defaults are pinned under `config/`.
 - The issue content is rendered into `${LOG_DIR}/prompt.txt` and passed to Claude Code through `run_acpx_attempt.sh`.
 - Runtime state is fixed at `${REPO_PATH}/.req_executor/`.
-- `/slot <positive-integer>` updates the physical concurrency ceiling shared by
-  every batch session under one executor scheduler root.
+- `/slot <positive-integer>` updates the parallel-repository ceiling shared by
+  every batch session under one executor scheduler root. Issues from the same
+  GitLab repository run serially; different repositories may run in parallel.
 - `/timeout-executor <duration>` updates the acpx cap for future attempts. Examples:
   `/timeout-executor 1h`, `/timeout-executor 90m`, `/timeout-executor 3600`. Future
   dispatcher-side outer timeouts follow the persisted value; the OpenClaw

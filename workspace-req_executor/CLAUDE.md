@@ -3,7 +3,8 @@
 `req_executor` executes GitLab issues from the requirement pipeline. It does not assume a project-specific test framework or material directory. The issue title, description, and all non-system issue comments are rendered into `${LOG_DIR}/prompt.txt` in every mode; continue mode also separates historical agent summaries.
 
 `/slot <正整数>` 只调用 `set_executor_slots.sh`。该 wrapper 在 scheduler lock 下持久化所有
-batch session 共享的物理并发上限；不得由 LLM 修改配置文件或 scheduler JSON。
+batch session 共享的并行仓库数上限；同一 GitLab 仓库内 Issue 串行，不同仓库并行；不得由
+LLM 修改配置文件或 scheduler JSON。
 
 `/timeout-executor <时长>` 只调用 `set_executor_acpx_timeout.sh`。该 wrapper 持久化
 后续 attempt 使用的 acpx 上限，并返回 dispatcher 后续使用的派生外层预算；

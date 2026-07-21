@@ -1609,7 +1609,7 @@ append_operation "$(jq -cn --argjson reserve "${RESERVE_JSON}" '{
   available_slots:$reserve.available_slots
 }')"
 
-# Running physical jobs already occupy a global slot. Re-present them to their
+# Running physical jobs already occupy their repository slot. Re-present them to their
 # project campaign so a prior blocked/retry terminal can prepare its next
 # attempt without consuming a new reservation or creating another physical job.
 if ! active_lock_timeout="$(remaining_topup_seconds 5)"; then
@@ -2230,7 +2230,7 @@ import_candidate_skips() {
 
 import_candidate_skips "${CANDIDATES}"
 
-# A successful synthetic terminal frees a physical slot immediately. Re-run
+# A successful synthetic terminal frees a repository slot immediately. Re-run
 # the strict scheduler reservation and project preflight in the same tick until
 # a refill round contains no further skip. The outer deadline, round cap, and
 # item cap keep this agent-wide lock independent of the total batch size;

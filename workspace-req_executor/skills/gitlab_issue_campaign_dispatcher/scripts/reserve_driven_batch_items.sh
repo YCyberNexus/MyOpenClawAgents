@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# Reserve executor-wide driven batch slots with a persistent strict
-# round-robin cursor. The scheduler lock covers JSON state transitions only;
-# this script never calls GitLab, clone helpers, project wrappers, or OpenClaw.
+# Reserve executor-wide repository slots with a persistent strict round-robin
+# cursor. At most one active Issue may own a repository at a time; distinct
+# repositories may run in parallel up to the configured ceiling. The scheduler
+# lock covers JSON state transitions only; this script never calls GitLab,
+# clone helpers, project wrappers, or OpenClaw.
 set -euo pipefail
 
 RESERVE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -728,7 +730,62 @@ for expired_job_id in "${EXPIRED_PREPARING_JOB_IDS[@]}"; do
   SCHEDULER_CHANGED=true
 done
 
-ACTIVE_COUNT="$(jq -r '.active_jobs | length' <<<"${SCHEDULER_STATE}")"
+# Upgrade compatibility: older scheduler versions could reserve several Issues
+# from one repository before any of them launched. Keep at most the oldest
+# reserved job when the repository has no preparing/running owner; otherwise
+# release every reserved job for that repository. Running work is never
+# cancelled, and the normal repository barrier prevents replacements until it
+# drains. Reset every attached membership so dedup can rebuild it safely.
+mapfile -t REDUNDANT_RESERVED_JOB_IDS < <(jq -r '
+  [.active_jobs | to_entries[]]
+  | sort_by(.value.project, .value.reservation_seq, .key)
+  | group_by(.value.project)[]
+  | ([.[] | select(.value.status != "reserved")] | length) as $started_count
+  | [.[] | select(.value.status == "reserved")] as $reserved
+  | if $started_count > 0 then $reserved[] else $reserved[1:][] end
+  | .key
+' <<<"${SCHEDULER_STATE}")
+for redundant_job_id in "${REDUNDANT_RESERVED_JOB_IDS[@]}"; do
+  redundant_job="$(jq -c --arg job_id "${redundant_job_id}" \
+    '.active_jobs[$job_id]' <<<"${SCHEDULER_STATE}")"
+  while IFS=$'\t' read -r redundant_batch_id redundant_snapshot_index; do
+    [ -n "${redundant_batch_id}" ] || continue
+    load_batch "${redundant_batch_id}"
+    redundant_batch_state="${BATCH_STATES[${redundant_batch_id}]}"
+    if ! jq -e \
+      --arg index "${redundant_snapshot_index}" \
+      --arg job_id "${redundant_job_id}" '
+      .memberships[$index].job_id == $job_id
+      and (.memberships[$index].status == "reserved"
+        or .memberships[$index].status == "attached")
+    ' <<<"${redundant_batch_state}" >/dev/null; then
+      reserve_die \
+        "redundant reserved membership is inconsistent: ${redundant_batch_id}/${redundant_snapshot_index}" \
+        3
+    fi
+    redundant_batch_state="$(jq -c \
+      --arg index "${redundant_snapshot_index}" '
+      .memberships[$index] = (
+        .memberships[$index]
+        | {snapshot_index,iid,status:"pending"}
+          + (if (.defer_count // 0) > 0
+            then {defer_count:.defer_count} else {} end)
+      )
+      | .status = (if any(.memberships[];
+          .status == "attached" or .status == "reserved"
+          or .status == "preparing" or .status == "running")
+        then "running" else "queued" end)
+    ' <<<"${redundant_batch_state}")"
+    BATCH_STATES["${redundant_batch_id}"]="${redundant_batch_state}"
+    CHANGED_BATCHES["${redundant_batch_id}"]=1
+  done < <(jq -r '.memberships[]
+    | [.batch_id, (.snapshot_index | tostring)] | @tsv' <<<"${redundant_job}")
+  SCHEDULER_STATE="$(jq -c --arg job_id "${redundant_job_id}" \
+    'del(.active_jobs[$job_id])' <<<"${SCHEDULER_STATE}")"
+  SCHEDULER_CHANGED=true
+done
+
+ACTIVE_COUNT="$(jq -r '[.active_jobs[].project] | unique | length' <<<"${SCHEDULER_STATE}")"
 SCHEDULER_MAX_CONCURRENCY="$(jq -er \
   --argjson configured_max "${EXECUTOR_MAX_CONCURRENCY}" '
   (.max_concurrency // $configured_max)
@@ -887,7 +944,7 @@ while [ "${batch_order_length}" -gt 0 ]; do
           BATCH_STATES["${batch_id}"]="${batch_state}"
           CHANGED_BATCHES["${batch_id}"]=1
         fi
-        continue
+        break
       elif [ "${same_intent}" = true ]; then
         batch_state="$(jq -c \
           --arg index "${pending_index}" \
@@ -941,13 +998,50 @@ while [ "${batch_order_length}" -gt 0 ]; do
           BATCH_STATES["${batch_id}"]="${batch_state}"
           CHANGED_BATCHES["${batch_id}"]=1
         fi
-        continue
+        break
       fi
     fi
 
-    # A new physical job consumes a global slot. If no slot is free, leave a
-    # lazy snapshot item untouched so next_snapshot_index remains a true claim
-    # cursor rather than merely a scan cursor.
+    # A repository already owned by another active Issue is a serial barrier.
+    # Keep this membership pending until that Issue reaches a terminal/release
+    # transition. Choosing the oldest owner makes the blocker deterministic
+    # even while legacy pre-upgrade state drains multiple jobs for one project.
+      project_jobs="$(jq -c \
+        --arg project "${project}" '
+        [.active_jobs | to_entries[]
+          | select(.value.project == $project)]
+        | sort_by(.value.reservation_seq, .key)
+      ' <<<"${SCHEDULER_STATE}")"
+      project_job_count="$(jq -r 'length' <<<"${project_jobs}")"
+      if [ "${project_job_count}" -gt 0 ]; then
+        active_job_id="$(jq -r '.[0].key' <<<"${project_jobs}")"
+        old_blocker="$(jq -r --arg index "${pending_index}" \
+          '.memberships[$index].blocked_by_job_id // empty' <<<"${batch_state}")"
+        if [ "${candidate_is_new}" = true ] || [ "${old_blocker}" != "${active_job_id}" ]; then
+          batch_state="$(jq -c \
+            --arg index "${pending_index}" \
+            --argjson snapshot_index "${pending_index}" \
+            --argjson iid "${iid}" \
+            --arg job_id "${active_job_id}" \
+            --argjson defer_count "${candidate_defer_count}" \
+            --argjson candidate_is_new "${candidate_is_new}" '
+            .memberships[$index] = {
+              snapshot_index:$snapshot_index,
+              iid:$iid,
+              status:"pending",
+              blocked_by_job_id:$job_id
+            } + (if $defer_count > 0 then {defer_count:$defer_count} else {} end)
+            | if $candidate_is_new then .next_snapshot_index += 1 else . end
+          ' <<<"${batch_state}")"
+          BATCH_STATES["${batch_id}"]="${batch_state}"
+          CHANGED_BATCHES["${batch_id}"]=1
+        fi
+        break
+      fi
+
+    # A new physical job consumes one repository slot. If no repository slot
+    # is free, leave a lazy snapshot item untouched so next_snapshot_index
+    # remains a true claim cursor rather than merely a scan cursor.
       if [ "${AVAILABLE_SLOTS}" -le 0 ]; then
         break
       fi

@@ -29,13 +29,14 @@ Exact form:
 ```
 
 Call `scripts/set_executor_slots.sh` with the complete message on stdin and
-return its sole compact JSON object. The wrapper persists `max_concurrency` in
-the executor-wide `scheduler_state.json` under `scheduler.lock`; every batch
-session sharing the same scheduler root uses that value. A decrease below the
-current active count is accepted without cancelling work: `draining=true`, no
-new physical jobs are reserved, and the active set drains naturally to the new
-ceiling. The tracked `EXECUTOR_MAX_CONCURRENCY=3` remains the initialization
-default when no runtime value has been set.
+return its sole compact JSON object. The wrapper persists `max_concurrency` as
+the parallel-repository ceiling in the executor-wide `scheduler_state.json`
+under `scheduler.lock`; every batch session sharing the same scheduler root
+uses that value. Issues in one repository stay serial. A decrease below the
+current active repository count is accepted without cancelling work:
+`draining=true`, no new repository jobs are reserved, and the active set drains
+naturally to the new ceiling. The tracked `EXECUTOR_MAX_CONCURRENCY=10` remains
+the initialization default when no runtime value has been set.
 
 ## Runtime ACPX Timeout Control
 

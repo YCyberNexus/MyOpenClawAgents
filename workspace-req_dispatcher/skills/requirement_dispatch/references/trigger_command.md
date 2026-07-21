@@ -17,7 +17,7 @@ git_issuer 准备与调用 wrapper；所有执行动作进入下面的 batch wra
 路由第一优先级是首行精确 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`；兼容旧首行
 `RUN_DRIVEN_BATCH_RESULT`。两者都必须直接进入下面的固定 I3 handler，不得落入自然语言动作判断。
 
-### 运行时 slot 配置
+### 运行时并行仓库数配置
 
 用户命令固定为：
 
@@ -33,9 +33,10 @@ MESSAGE='<完整原文>' bash scripts/set_executor_slots.sh
 
 wrapper 严格校验完整消息，把规范化命令发送到
 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，并只接受 executor 的严格六字段成功对象：
-`status,slot_count,previous_slot_count,active_count,available_slots,draining`。该命令调整的是
-目标 executor 的共享物理槽位上限，不是当前 dispatcher 或某个 batch session 的私有并发。
-`draining=true` 表示缩容值低于当前 active 数；已有任务继续运行，新 reservation 暂停。
+`status,parallel_project_limit,previous_parallel_project_limit,active_project_count,available_project_slots,draining`。该命令调整的是
+目标 executor 的共享并行仓库数上限，不是当前 dispatcher 或某个 batch session 的私有并发。
+同一 GitLab 仓库的 Issue 串行，不同仓库可并行；未设置运行时值时默认上限为 10。
+`draining=true` 表示缩容值低于当前活跃仓库数；已有任务继续运行，新仓库 reservation 暂停。
 
 ### 运行时 acpx timeout 配置
 

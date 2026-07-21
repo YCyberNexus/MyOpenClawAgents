@@ -13,11 +13,12 @@ CONFIG_DIR="${TEST_ROOT}/config"
 SCHEDULER_ROOT="${TEST_ROOT}/_scheduler"
 mkdir -p "${CONFIG_DIR}"
 
-# Deliberately omit EXECUTOR_MAX_CONCURRENCY: scheduler_env.sh's deployment
-# default must provide the requested three executor-wide slots.
+# Use two repository slots so the fixture can exercise round-robin fairness
+# between two repositories while preserving repository-local serialization.
 printf '%s\n' \
   'REPO_PARENT_PATH=/data' \
   "EXECUTOR_SCHEDULER_ROOT=${SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=2' \
   >"${CONFIG_DIR}/campaign_defaults.env"
 
 CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
@@ -25,6 +26,7 @@ CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/nu
 create_batch_fixture() {
   local batch_id="$1"
   local iids_json="$2"
+  local project="${3:-group/repo}"
   local batch_dir="${SCHEDULER_ROOT}/batches/${batch_id}"
   local matched_count=""
 
@@ -32,19 +34,21 @@ create_batch_fixture() {
   matched_count="$(jq -r 'length' <<<"${iids_json}")"
   jq -cnS \
     --arg batch_id "${batch_id}" \
+    --arg project "${project}" \
     '{
       version:1,
       batch_id:$batch_id,
       correlation_id:("correlation-" + $batch_id),
-      project:"group/repo",
+      project:$project,
       selector:{type:"range",iid_min:1,iid_max:100},
       force_rerun_pr:false,
       dispatcher_callback_target:"agent:req_dispatcher:main",
       branch:"main"
     }' >"${batch_dir}/request.json"
   jq -cnS \
+    --arg project "${project}" \
     --argjson iids "${iids_json}" \
-    '{version:1,project:"group/repo",iids:$iids}' \
+    '{version:1,project:$project,iids:$iids}' \
     >"${batch_dir}/snapshot.json"
   jq -cnS \
     --arg batch_id "${batch_id}" \
@@ -67,9 +71,9 @@ create_batch_fixture() {
     }' >"${batch_dir}/state.json"
 }
 
-create_batch_fixture A '[1,2,3]'
-create_batch_fixture B '[10,11]'
-create_batch_fixture HISTORICAL '[]'
+create_batch_fixture A '[1,2,3]' group/repo-a
+create_batch_fixture B '[10,11]' group/repo-b
+create_batch_fixture HISTORICAL '[]' group/historical
 jq '.status = "completed"' \
   "${SCHEDULER_ROOT}/batches/HISTORICAL/state.json" \
   >"${SCHEDULER_ROOT}/batches/HISTORICAL/state.completed.json"
@@ -86,17 +90,16 @@ jq -e '.batch_order == ["A","B"]' \
   || { echo "completed batch remained in the hot fairness index" >&2; exit 1; }
 jq -e '
   .status == "ready"
-  and .active_count == 3
+  and .active_count == 2
   and .available_slots == 0
   and [.grants[] | {batch_id,iid}] == [
     {batch_id:"A",iid:1},
-    {batch_id:"B",iid:10},
-    {batch_id:"A",iid:2}
+    {batch_id:"B",iid:10}
   ]
   and ([.grants[].job_id] | length) == ([.grants[].job_id] | unique | length)
   and all(.grants[];
     (.snapshot_index | type == "number")
-    and .project == "group/repo"
+    and (.project == "group/repo-a" or .project == "group/repo-b")
     and .branch == "main"
     and (.entry_mode | type == "string")
     and .force_rerun_pr == false)
@@ -115,14 +118,14 @@ jq -e \
   --argjson first_grants "$(jq -c '.grants' <<<"${first_reserve}")" '
   .status == "ready"
   and .grants == $first_grants
-  and .active_count == 3
+  and .active_count == 2
   and .available_slots == 0
   and all(.grants[]; has("reservation_seq") | not)
 ' <<<"${replayed_reserve}" >/dev/null
 
 jq -e --argjson expected_order "${first_grant_order}" '
-  .round_robin_cursor == "A"
-  and (.active_jobs | length) == 3
+  .round_robin_cursor == "B"
+  and (.active_jobs | length) == 2
   and ([.active_jobs[].reservation_seq] | length) ==
     ([.active_jobs[].reservation_seq] | unique | length)
   and ([.active_jobs[]
@@ -133,11 +136,12 @@ jq -e --argjson expected_order "${first_grant_order}" '
 jq -e '
   .next_snapshot_index == 2
   and .memberships["0"].status == "reserved"
-  and .memberships["1"].status == "reserved"
+  and .memberships["1"].status == "pending"
 ' "${SCHEDULER_ROOT}/batches/A/state.json" >/dev/null
 jq -e '
-  .next_snapshot_index == 1
+  .next_snapshot_index == 2
   and .memberships["0"].status == "reserved"
+  and .memberships["1"].status == "pending"
 ' "${SCHEDULER_ROOT}/batches/B/state.json" >/dev/null
 
 a1_job_id="$(jq -r '.grants[] | select(.batch_id == "A" and .iid == 1) | .job_id' <<<"${first_reserve}")"
@@ -215,7 +219,7 @@ full_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
 jq -e '
   .status == "at_capacity"
   and .grants == []
-  and .active_count == 3
+  and .active_count == 2
   and .available_slots == 0
 ' <<<"${full_reserve}" >/dev/null
 jq -e --arg job_id "${a1_job_id}" \
@@ -232,11 +236,11 @@ CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${a1_job_id}" STATUS=terminal \
 second_reserve="$(CONFIG_DIR="${CONFIG_DIR}" bash "${RESERVE}")"
 jq -e '
   .status == "ready"
-  and .active_count == 3
+  and .active_count == 2
   and .available_slots == 0
-  and [.grants[] | {batch_id,iid}] == [{batch_id:"B",iid:11}]
+  and [.grants[] | {batch_id,iid}] == [{batch_id:"A",iid:2}]
 ' <<<"${second_reserve}" >/dev/null
-jq -e '.round_robin_cursor == "B"' \
+jq -e '.round_robin_cursor == "A"' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 
 # Simulate a process dying after batch state has been published but before the
@@ -353,8 +357,9 @@ printf '%s\n' \
   'EXECUTOR_MAX_CONCURRENCY=2' \
   >"${CONFIG_DIR}/campaign_defaults.env"
 CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
-create_batch_fixture L '[21,22]'
-jq '.batch_order = ["L"]' \
+create_batch_fixture L '[21]' group/lease-a
+create_batch_fixture M '[22]' group/lease-b
+jq '.batch_order = ["L","M"]' \
   "${LEASE_ROOT}/scheduler_state.json" \
   >"${LEASE_ROOT}/scheduler_state.next.json"
 /bin/mv "${LEASE_ROOT}/scheduler_state.next.json" \
@@ -368,7 +373,7 @@ lease_first_reserve="$(
 jq -e '
   [.grants[] | {batch_id,iid}] == [
     {batch_id:"L",iid:21},
-    {batch_id:"L",iid:22}
+    {batch_id:"M",iid:22}
   ]
 ' <<<"${lease_first_reserve}" >/dev/null
 lease_sequences_before="$(jq -c '
@@ -460,9 +465,10 @@ fi
 jq -e '
   [.active_jobs[].status] == ["reserved","reserved"]
 ' "${LEASE_ROOT}/scheduler_state.json" >/dev/null
-jq -e '
-  [.memberships[].status] == ["reserved","reserved"]
-' "${LEASE_ROOT}/batches/L/state.json" >/dev/null
+jq -e '.memberships["0"].status == "reserved"' \
+  "${LEASE_ROOT}/batches/L/state.json" >/dev/null
+jq -e '.memberships["0"].status == "reserved"' \
+  "${LEASE_ROOT}/batches/M/state.json" >/dev/null
 jq -e --arg job_id "${lease_job_id}" '
   .active_jobs[$job_id].claim_generation == 1
   and .active_jobs[$job_id].claim_token == null
@@ -660,14 +666,12 @@ if [ "${legacy_normal_status}" -ne 0 ]; then
   exit 1
 fi
 if ! jq -e '
-  [.grants[] | {batch_id,iid}] == [
-    {batch_id:"P",iid:32},
-    {batch_id:"R",iid:31}
-  ]
-  and .active_count == 3
-  and .available_slots == 0
+  .status == "idle"
+  and .grants == []
+  and .active_count == 1
+  and .available_slots == 2
 ' <<<"${legacy_normal_output}" >/dev/null; then
-  echo "expected migrated legacy reserved grants in deterministic order, got ${legacy_normal_output}" >&2
+  echo "expected migrated legacy repository to drain before replay, got ${legacy_normal_output}" >&2
   exit 1
 fi
 jq -e '
@@ -677,28 +681,15 @@ jq -e '
   and .active_jobs["N:snapshot-0"].legacy_running == true
   and .active_jobs["N:snapshot-0"].claim_generation == 0
   and .active_jobs["N:snapshot-0"].claim_token == null
-  and .active_jobs["P:snapshot-0"].reservation_seq == 2
-  and .active_jobs["P:snapshot-0"].status == "reserved"
-  and .active_jobs["P:snapshot-0"].claim_generation == 0
-  and .active_jobs["P:snapshot-0"].claim_token == null
-  and .active_jobs["R:snapshot-0"].reservation_seq == 3
-  and .active_jobs["R:snapshot-0"].status == "reserved"
-  and .active_jobs["R:snapshot-0"].claim_generation == 0
-  and .active_jobs["R:snapshot-0"].claim_token == null
+  and (.active_jobs | has("P:snapshot-0") | not)
+  and (.active_jobs | has("R:snapshot-0") | not)
 ' "${MIGRATION_ROOT}/scheduler_state.json" >/dev/null
-jq -e '.memberships["0"].status == "reserved"' \
+jq -e '.memberships["0"].status == "pending"' \
   "${MIGRATION_ROOT}/batches/P/state.json" >/dev/null
+jq -e '.memberships["0"].status == "pending"' \
+  "${MIGRATION_ROOT}/batches/R/state.json" >/dev/null
 jq -e '.memberships["0"].status == "running"' \
   "${MIGRATION_ROOT}/batches/N/state.json" >/dev/null
-
-legacy_p_claim="$(
-  CONFIG_DIR="${CONFIG_DIR}" JOB_ID='P:snapshot-0' STATUS=preparing \
-    NOW_EPOCH=201 bash "${RECORD}"
-)"
-jq -e '
-  .should_spawn == true
-  and (.claim_token | type == "string" and length > 0)
-' <<<"${legacy_p_claim}" >/dev/null
 
 legacy_running_scheduler_before="$(jq -cS . "${MIGRATION_ROOT}/scheduler_state.json")"
 legacy_running_batch_before="$(jq -cS . "${MIGRATION_ROOT}/batches/N/state.json")"
@@ -730,6 +721,13 @@ jq -e '.active_jobs | has("N:snapshot-0") | not' \
   "${MIGRATION_ROOT}/scheduler_state.json" >/dev/null
 jq -e '.memberships["0"].status == "terminal"' \
   "${MIGRATION_ROOT}/batches/N/state.json" >/dev/null
+legacy_after_running="$(
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=204 bash "${RESERVE}"
+)"
+jq -e '
+  [.grants[] | {batch_id,iid}] == [{batch_id:"R",iid:31}]
+  and .active_count == 1
+' <<<"${legacy_after_running}" >/dev/null
 
 # Once importer installs a finalization fence, preparing-lease recovery must
 # not mint a new claim or erase the claim identity carried by the handoff.

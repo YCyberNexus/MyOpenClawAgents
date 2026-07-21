@@ -27,8 +27,9 @@ EOF
 increase_output="$(printf '/slot 5\n' | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_SLOTS}")"
 jq -e '
   . == {
-    status:"success",slot_count:5,previous_slot_count:3,
-    active_count:0,available_slots:5,draining:false
+    status:"success",parallel_project_limit:5,
+    previous_parallel_project_limit:3,
+    active_project_count:0,available_project_slots:5,draining:false
   }
 ' <<<"${increase_output}" >/dev/null
 jq -e '.max_concurrency == 5' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
@@ -52,13 +53,17 @@ jq -e '
   and .max_concurrency == 5
 ' <<<"${reserve_output}" >/dev/null
 
-# Shrinking below active work is non-destructive: persist the new ceiling,
-# report draining, and expose no free slots.
+# Four legacy active jobs occupy only two repositories. Shrinking to one
+# repository is non-destructive: persist the new ceiling, report draining, and
+# expose no free repository slots while both repositories remain active.
 jq -c '
   .active_jobs = reduce range(1;5) as $n ({};
     .["job-\($n)"] = {
-      job_id:"job-\($n)",physical_key:("group/repo#" + ($n | tostring)),
-      project:"group/repo",iid:$n,branch:null,entry_mode:"auto",
+      job_id:"job-\($n)",
+      physical_key:((if $n < 3 then "group/repo-a" else "group/repo-b" end)
+        + "#" + ($n | tostring)),
+      project:(if $n < 3 then "group/repo-a" else "group/repo-b" end),
+      iid:$n,branch:null,entry_mode:"auto",
       force_rerun_pr:false,status:"running",reservation_seq:$n,
       reserved_at:1,updated_at:1,claim_generation:1,
       claim_token:("token-" + ($n | tostring)),
@@ -69,15 +74,15 @@ jq -c '
   >"${SCHEDULER_ROOT}/scheduler_state.with-active.json"
 mv "${SCHEDULER_ROOT}/scheduler_state.with-active.json" \
   "${SCHEDULER_ROOT}/scheduler_state.json"
-shrink_output="$(printf '/slot 2\n' | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_SLOTS}")"
+shrink_output="$(printf '/slot 1\n' | CONFIG_DIR="${CONFIG_DIR}" bash "${SET_SLOTS}")"
 jq -e '
-  .slot_count == 2
-  and .previous_slot_count == 5
-  and .active_count == 4
-  and .available_slots == 0
+  .parallel_project_limit == 1
+  and .previous_parallel_project_limit == 5
+  and .active_project_count == 2
+  and .available_project_slots == 0
   and .draining == true
 ' <<<"${shrink_output}" >/dev/null
-jq -e '.max_concurrency == 2 and (.active_jobs | length) == 4' \
+jq -e '.max_concurrency == 1 and (.active_jobs | length) == 4' \
   "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 draining_reserve_output="$(
   CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_MAX_CONCURRENCY=99 \
@@ -86,9 +91,9 @@ draining_reserve_output="$(
 jq -e '
   .status == "at_capacity"
   and .grants == []
-  and .active_count == 4
+  and .active_count == 2
   and .available_slots == 0
-  and .max_concurrency == 2
+  and .max_concurrency == 1
 ' <<<"${draining_reserve_output}" >/dev/null
 
 before_invalid="$(jq -cS . "${SCHEDULER_ROOT}/scheduler_state.json")"

@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-20.4] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-21.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 并行仓库数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -46,7 +46,7 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
 turn 中自行执行多个分支。
 
-## 路径 E：运行时 slot 配置
+## 路径 E：运行时并行仓库数配置
 
 收到 `/slot <正整数>` 时，只调用：
 
@@ -58,9 +58,10 @@ MESSAGE="<完整原文>" bash scripts/set_executor_slots.sh
 
 wrapper 会严格校验命令，只把规范化后的 `/slot N` 发送到
 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，并只接受 executor 固定 wrapper 返回的严格 JSON。
-`status=success` 时按 `slot_count,previous_slot_count,active_count,available_slots,draining`
-回复用户；`draining=true` 表示在线缩容后已有任务数暂时高于新上限，任务不会被取消，但不会
-继续发放新物理槽位。`status=failed` 时读取 `reason` 后停止，不得改写 executor 配置或调度状态。
+`status=success` 时按 `parallel_project_limit,previous_parallel_project_limit,active_project_count,available_project_slots,draining`
+回复用户；`draining=true` 表示在线缩容后活跃仓库数暂时高于新上限，任务不会被取消，但不会
+继续发放新仓库槽位。同仓库 Issue 始终串行。`status=failed` 时读取 `reason` 后停止，不得改写
+executor 配置或调度状态。
 
 ## 路径 F：运行时 acpx timeout 配置
 

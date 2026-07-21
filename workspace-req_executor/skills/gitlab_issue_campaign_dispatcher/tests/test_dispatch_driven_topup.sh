@@ -1299,10 +1299,10 @@ jq --arg now "${NOW}" '.pending_subagents["9"] = {
 mv "${UNSETTLED_STATE_TMP}" "${STATE_FILE}"
 DEPENDENCY_HEAD_PENDING="$(run_wrapper "${RACE_REQUEST}")"
 printf '%s' "${DEPENDENCY_HEAD_PENDING}" | jq -e '
-  .status == "no_eligible_iids"
+  .status == "waiting_for_callbacks"
   and .dispatch_entries == []
-  and .dependency_waiting[0].reason == "dependency_not_completed"
-' >/dev/null || fail "campaign-pending A released C during Phase-6 crash window"
+  and .pending_iids == [9]
+' >/dev/null || fail "repository-serial topup did not wait for campaign-pending A"
 [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
   || fail "campaign-pending A allowed C to allocate or prepare"
 
