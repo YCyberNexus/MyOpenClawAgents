@@ -6,6 +6,11 @@ The exact first line is a hard router. `RUN_DRIVEN_ISSUE_BATCH` always means
 Path C and starts with `run_driven_issue_batch.sh`; `RUN_EXECUTOR_BATCH_TICK`
 alone means Path D and starts with `run_executor_batch_tick.sh`. Never replace
 the Path C intake wrapper with the tick wrapper.
+Path C may return its public acceptance only after every emitted runtime action
+has been resolved and recorded. Its embedded tick is global, so any live
+`action_emitted` record with no spawn ack is a hard acceptance failure even if
+the action belongs to an older batch; it is not permission to describe success
+or to manually reconstruct the skipped spawn from scheduler files.
 `/slot <positive-integer>` means Path F and calls only
 `set_executor_slots.sh`; the model never edits scheduler state directly.
 `/timeout-executor <duration>` means Path G and calls only
@@ -20,6 +25,9 @@ patches, or debugs a wrapper, and exits after the first ingester rejection.
 A heartbeat tick runs only the exact bare Path D wrapper command. It never
 reads config or `*.env` files and never copies credentials or deployment values
 into a tool call; the wrapper resolves all configuration privately.
+Natural-language questions are not heartbeat or spawn triggers. They never
+authorize scheduler mutation or manual runtime recovery; an ambiguous emitted
+spawn is reconciled only when Path D returns the fixed runtime-evidence action.
 
 The executor-wide repository-slot ceiling is runtime state shared by every
 batch session under one `EXECUTOR_SCHEDULER_ROOT`. At most one Issue per GitLab

@@ -398,6 +398,54 @@ jq -e '
   and (.snapshot_digest | type == "string" and test("^[0-9a-f]{64}$"))
   and .scheduler_status == "queued"
 ' <<<"${single_acceptance}" >/dev/null
+
+# The intake tick is global and persists action_emitted before exposing its
+# spawn grant. Even when that grant belongs to an older batch, a model that
+# skips sessions_spawn/the fixed recorder must not be able to return the new
+# batch's five-field success receipt.
+LAUNCH_ACTIONS_ROOT="${SCHEDULER_ROOT}/launch_actions"
+LAUNCH_ACTION_ARCHIVE_ROOT="${SCHEDULER_ROOT}/launch_action_archive"
+UNACKNOWLEDGED_ACTION="${LAUNCH_ACTIONS_ROOT}/single-unacknowledged.json"
+mkdir -p "${LAUNCH_ACTIONS_ROOT}" "${LAUNCH_ACTION_ARCHIVE_ROOT}"
+printf '%s\n' \
+  '{"version":1,"job_id":"older:snapshot-0","batch_id":"older-batch","stage":"action_emitted","outcome":null,"ack":null}' \
+  >"${UNACKNOWLEDGED_ACTION}"
+if emit_acceptance single >"${TEST_ROOT}/unacknowledged-acceptance.out" \
+    2>"${TEST_ROOT}/unacknowledged-acceptance.err"; then
+  echo "unacknowledged spawn action produced a public success receipt" >&2
+  exit 1
+fi
+grep -Fq 'executor spawn acknowledgement is still pending while acknowledging single' \
+  "${TEST_ROOT}/unacknowledged-acceptance.err" || {
+  echo "unacknowledged spawn rejection was not explicit" >&2
+  exit 1
+}
+printf '%s\n' \
+  '{"version":1,"job_id":"older:snapshot-0","batch_id":"older-batch","stage":"ack_received","outcome":"spawned","ack":{"run_id":"run-1","child_session_key":"agent:req_executor:subagent:1"}}' \
+  >"${UNACKNOWLEDGED_ACTION}"
+single_acknowledged_acceptance="$(emit_acceptance single)"
+jq -e '
+  .status == "success"
+  and .batch_id == "single"
+  and .scheduler_status == "queued"
+' <<<"${single_acknowledged_acceptance}" >/dev/null \
+  || { echo "durably acknowledged spawn was rejected" >&2; exit 1; }
+
+# A completed coordinator may move from the live directory to the cold archive
+# after the emitter snapshots the live filenames. Model that stale pathname
+# with a dangling directory entry and require the matching completed archive to
+# be accepted rather than reported as corrupt.
+ARCHIVED_BASENAME=concurrently-archived.json
+printf '%s\n' \
+  '{"version":1,"job_id":"older:snapshot-1","batch_id":"older-batch","stage":"completed","outcome":"spawned","ack":{"run_id":"run-2","child_session_key":"agent:req_executor:subagent:2"}}' \
+  >"${LAUNCH_ACTION_ARCHIVE_ROOT}/${ARCHIVED_BASENAME}"
+ln -s "${LAUNCH_ACTIONS_ROOT}/already-archived.json" \
+  "${LAUNCH_ACTIONS_ROOT}/${ARCHIVED_BASENAME}"
+single_archived_acceptance="$(emit_acceptance single)"
+jq -e '.status == "success" and .batch_id == "single"' \
+  <<<"${single_archived_acceptance}" >/dev/null \
+  || { echo "concurrently archived completed action was rejected" >&2; exit 1; }
+
 iid_list_acceptance="$(emit_acceptance iid-list)"
 jq -e '
   .status == "success"

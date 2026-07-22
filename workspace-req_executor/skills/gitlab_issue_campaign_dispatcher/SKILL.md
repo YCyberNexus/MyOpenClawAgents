@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-21.7] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler that serializes Issues per GitLab repository while running distinct repositories in parallel, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-22.2] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler that serializes Issues per GitLab repository while running distinct repositories in parallel, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -397,6 +397,11 @@ Pass the complete I1 trigger verbatim to the fixed intake wrapper:
    acceptance.
 4. cd "${SKILL_DIR}" && BATCH_ID="<verbatim envelope.batch_id>" \
      bash scripts/emit_driven_batch_acceptance.sh → acceptance
+   # This fixed emitter is the hard runtime-action fence. It exits nonzero if
+   # any hot action is still action_emitted with no durable spawn acknowledgement;
+   # the embedded global tick may have returned a grant for an older batch.
+   # On nonzero, do not emit a receipt, do not run an ad-hoc tick, and do not
+   # reconstruct a manual spawn from private scheduler files.
 5. Return exactly acceptance's sole compact JSON line as the final assistant
    reply, then EXIT. Do not print envelope.chat_summary, the rich envelope, a
    code fence, or surrounding prose after/beside it.
@@ -532,6 +537,13 @@ later tick may allocate the next claim generation. If the child is found, the
 wrapper restores that exact generation and the later tick must not spawn it
 again. `should_spawn=false` and claim-0 skips are handled entirely inside the
 tick wrapper and therefore never authorize a runtime call.
+
+Natural-language operator questions are never a substitute for Path D. Do not
+read `payload_path` from a durable launch action and manually call
+`sessions_spawn`, even if the operator asks to "spawn now". Only a grant in the
+current wrapper envelope authorizes spawn; only a current
+`reconcile_emitted_spawn` action authorizes runtime enumeration and ambiguity
+resolution.
 
 This task-identity boundary is intentionally fail-closed across upgrades. A
 pre-upgrade durable launch action or project receipt that lacks

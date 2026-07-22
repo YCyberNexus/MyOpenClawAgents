@@ -92,6 +92,20 @@ accepts only the complete exact result shape for the durable action's
 `spawned` or `launch_failed` outcome. A partial or forged zero-exit response
 leaves the action at `ack_received` for safe recovery.
 
+## `emit_driven_batch_acceptance.sh`
+
+Rebuilds the exact five-field I1 receipt from durable scheduler state. Before
+emitting success it scans all hot launch actions and rejects any action still
+at `action_emitted`; the embedded global tick may return a grant owned by an
+older batch. This is the deterministic fence between
+the intake wrapper and the OpenClaw-only runtime call: skipping
+`sessions_spawn` or its mandatory recorder can no longer look like successful
+batch acceptance. `ack_received` and later stages are safe because the runtime
+identity is already durable and heartbeat recovery owns the remaining recorder
+stages. A live path that concurrently moves to the cold archive is accepted
+only when the same basename is present there with `stage=completed`; other
+read/layout errors remain fail-closed.
+
 ## `record_driven_batch_launch.sh`
 
 `ACTION=launch_failed` requires a positive claim generation and matching private

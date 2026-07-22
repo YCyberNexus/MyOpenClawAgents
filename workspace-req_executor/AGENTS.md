@@ -50,14 +50,25 @@ Core contract:
   terminal-reference JSON, never the raw internal completion context.
 - Paths C and E are synchronous public-acceptance turns. They never call
   `sessions_yield` and never inherit Path D's post-cleanup or post-recorder
-  termination behavior. After every resolved runtime action, including a
-  durable spawned or launch-failed record, they emit and return the exact
-  five-field acceptance.
+  termination behavior. If their rich envelope contains a `spawn_grants[]`
+  item, the required order is Read payload -> `sessions_spawn` ->
+  `record_executor_batch_spawn.sh`; never jump from the intake wrapper to the
+  acceptance emitter. After every resolved runtime action, including a durable
+  spawned or launch-failed record, they emit and return the exact five-field
+  acceptance. Because the embedded tick is global, the fixed emitter rejects
+  while any hot `action_emitted` spawn acknowledgement is still pending, even
+  when that action belongs to an older batch. A nonzero emitter result must
+  stop the turn and must never be rewritten as a successful receipt.
 - `record_executor_batch_spawn.sh` accepts its spawned or launch-failed object
   only as strict JSON stdin. Never pass its result fields as environment
   variables; that environment contract belongs only to Path A's
   `dispatch_record_spawn.sh`. After a successful `sessions_spawn`, this
   recorder is the mandatory next tool call before any `sessions_yield`.
+- Unmatched human prose is not a scheduler trigger. It may receive a read-only
+  explanation, but it never authorizes reading a private spawn payload,
+  manually calling `sessions_spawn`, editing launch state, or running a tick.
+  An `action_emitted` ambiguity is resolved only from an exact Path D
+  `reconcile_emitted_spawn` action and its prescribed runtime enumeration.
 - The outer subagent receives `references/executor_prompt.md`.
 - The outer subagent makes one long call to `scripts/run_executor_attempt.sh`.
   That wrapper owns the complete acpx-to-finalization sequence and atomically

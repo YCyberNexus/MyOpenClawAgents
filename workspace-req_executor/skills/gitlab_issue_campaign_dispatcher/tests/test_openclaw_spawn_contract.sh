@@ -87,6 +87,14 @@ grep -Fq 'MUST NOT call' <<<"${PATH_E_SECTION}" \
   || fail "Path E must absolutely forbid sessions_yield"
 grep -Fq 'recorder is the mandatory next tool call' "${WORKSPACE_DIR}/AGENTS.md" \
   || fail "executor bootstrap rules must persist spawn ack before yielding"
+grep -Fq 'never jump from the intake wrapper to the' "${WORKSPACE_DIR}/AGENTS.md" \
+  && grep -Fq 'acceptance emitter' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "executor bootstrap rules must not skip a Path C spawn grant"
+grep -Fq 'fixed emitter is the hard runtime-action fence' "${SKILL_DIR}/SKILL.md" \
+  || fail "Path C must document the deterministic acceptance fence"
+grep -Fq 'Unmatched human prose is not a scheduler trigger' \
+  "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "operator prose must not authorize manual spawn recovery"
 
 RECORDER_STDERR="$(mktemp "${TMPDIR:-/tmp}/req-executor-recorder-empty-stdin.XXXXXX")"
 set +e

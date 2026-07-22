@@ -198,6 +198,96 @@ if [ "${SCHEDULER_REGISTRATION_COUNT}" -eq 0 ] \
   acceptance_die "non-terminal batch is absent from the runnable index: ${BATCH_ID}" 3
 fi
 
+# `run_executor_batch_tick.sh` durably writes action_emitted before returning a
+# spawn grant to the runtime. The runtime must then call sessions_spawn and
+# immediately feed its acknowledgement (or exhausted launch failure) to the
+# fixed recorder. Do not let a model skip that runtime boundary and still
+# publish a successful I1 receipt: that would leave the batch in preparing,
+# close the global launch gate, and make every later tick report spawn_ack
+# pending until lease recovery.
+#
+# The embedded tick is executor-global, so its one returned grant may belong to
+# an older batch. Reject any hot action_emitted item, not only one whose owner
+# matches BATCH_ID; otherwise this turn could skip an older grant, acknowledge
+# the new batch, and leave the same global launch gate stuck.
+#
+# Launch-action writes and live-to-archive moves are atomic renames, but the
+# coordinator uses its own lock domain rather than the scheduler lock held
+# here. If a globbed live path disappears before jq opens it, accept only the
+# same basename in the cold archive with a completed stage. Any other read or
+# layout failure remains fail-closed.
+LAUNCH_ACTIONS_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_actions"
+LAUNCH_ACTION_ARCHIVE_ROOT="${EXECUTOR_SCHEDULER_ROOT}/launch_action_archive"
+if [ -d "${LAUNCH_ACTIONS_ROOT}" ]; then
+  shopt -s nullglob
+  LAUNCH_ACTION_FILES=("${LAUNCH_ACTIONS_ROOT}"/*.json)
+  shopt -u nullglob
+  for launch_action_file in "${LAUNCH_ACTION_FILES[@]}"; do
+    set +e
+    jq -e '
+      if type == "object"
+        and .version == 1
+        and (.job_id | type == "string" and length > 0)
+        and (.stage == "topup_prepared" or .stage == "preparing_claimed"
+          or .stage == "bound" or .stage == "action_emitted"
+          or .stage == "ack_received" or .stage == "project_recorded"
+          or .stage == "scheduler_recorded" or .stage == "completed")
+      then .stage == "action_emitted"
+      else error("invalid durable launch action") end
+    ' "${launch_action_file}" >/dev/null 2>&1
+    launch_action_match_rc=$?
+    set -e
+    case "${launch_action_match_rc}" in
+      0)
+        acceptance_die \
+          "executor spawn acknowledgement is still pending while acknowledging ${BATCH_ID}" 4
+        ;;
+      1) ;;
+      *)
+        archived_launch_action="${LAUNCH_ACTION_ARCHIVE_ROOT}/$(basename "${launch_action_file}")"
+        if [ ! -e "${launch_action_file}" ] \
+            && jq -e '
+              type == "object"
+              and .version == 1
+              and (.job_id | type == "string" and length > 0)
+              and .stage == "completed"
+            ' "${archived_launch_action}" >/dev/null 2>&1; then
+          continue
+        fi
+
+        # The archive may have been reopened between the first failed read and
+        # the archive check. Retry the canonical live path once before treating
+        # the layout as corrupt.
+        set +e
+        jq -e '
+          if type == "object"
+            and .version == 1
+            and (.job_id | type == "string" and length > 0)
+            and (.stage == "topup_prepared" or .stage == "preparing_claimed"
+              or .stage == "bound" or .stage == "action_emitted"
+              or .stage == "ack_received" or .stage == "project_recorded"
+              or .stage == "scheduler_recorded" or .stage == "completed")
+          then .stage == "action_emitted"
+          else error("invalid durable launch action") end
+        ' "${launch_action_file}" >/dev/null 2>&1
+        launch_action_retry_rc=$?
+        set -e
+        case "${launch_action_retry_rc}" in
+          0)
+            acceptance_die \
+              "executor spawn acknowledgement is still pending while acknowledging ${BATCH_ID}" 4
+            ;;
+          1) ;;
+          *)
+            acceptance_die \
+              "durable launch action is invalid while acknowledging ${BATCH_ID}" 3
+            ;;
+        esac
+        ;;
+    esac
+  done
+fi
+
 flock -u "${SCHEDULER_LOCK_FD}"
 exec {SCHEDULER_LOCK_FD}>&-
 
