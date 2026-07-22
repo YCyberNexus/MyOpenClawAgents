@@ -264,6 +264,28 @@ if ! jq -e '.status == "success" and .selector == {type:"range",iid_min:100,iid_
   exit 1
 fi
 
+hyphen_range_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #12-#18' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"range",iid_min:12,iid_max:18} and .iid == null' <<<"${hyphen_range_json}" >/dev/null; then
+  echo "expected an ASCII-hyphen IID range to produce a range selector and null legacy iid" >&2
+  printf '%s\n' "${hyphen_range_json}" >&2
+  exit 1
+fi
+
+hyphenated_branch_json="$(
+  MESSAGE='处理 ai-infra/veqp_server_v3 的 issue #12，branch=release/2026-07' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+
+if ! jq -e '.status == "success" and .selector == {type:"single",iid:12} and .target_branch == "release/2026-07"' <<<"${hyphenated_branch_json}" >/dev/null; then
+  echo "expected a hyphenated branch name not to be parsed as an IID range" >&2
+  printf '%s\n' "${hyphenated_branch_json}" >&2
+  exit 1
+fi
+
 for unsupported_range_message in \
   '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 failed' \
   '处理 ai-infra/veqp_server_v3 的 issue #10 到 #20，且状态为 timeout' \

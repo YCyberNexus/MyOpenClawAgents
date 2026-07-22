@@ -415,9 +415,12 @@ extract_selector_range_evidence() {
   local text="$1"
 
   printf '%s\n' "${text}" | awk '
+    BEGIN {
+      range_pattern = "#?[0-9]+[[:space:]]*(到|至)[[:space:]]*#?[0-9]+|#[0-9]+[[:space:]]*-[[:space:]]*#?[0-9]+|[0-9]+[[:space:]]*-[[:space:]]*#[0-9]+"
+    }
     {
       remaining = $0
-      while (match(remaining, /#?[0-9]+[[:space:]]*(到|至)[[:space:]]*#?[0-9]+/)) {
+      while (match(remaining, range_pattern)) {
         value = substr(remaining, RSTART, RLENGTH)
         if (match(value, /[0-9]+/)) {
           iid_min = substr(value, RSTART, RLENGTH)
@@ -427,7 +430,7 @@ extract_selector_range_evidence() {
             print iid_min "\t" iid_max
           }
         }
-        sub(/#?[0-9]+[[:space:]]*(到|至)[[:space:]]*#?[0-9]+/, " ", remaining)
+        sub(range_pattern, " ", remaining)
       }
     }'
 }
@@ -436,9 +439,12 @@ strip_selector_ranges() {
   local text="$1"
 
   printf '%s\n' "${text}" | awk '
+    BEGIN {
+      range_pattern = "#?[0-9]+[[:space:]]*(到|至)[[:space:]]*#?[0-9]+|#[0-9]+[[:space:]]*-[[:space:]]*#?[0-9]+|[0-9]+[[:space:]]*-[[:space:]]*#[0-9]+"
+    }
     {
       line = $0
-      gsub(/#?[0-9]+[[:space:]]*(到|至)[[:space:]]*#?[0-9]+/, " ", line)
+      gsub(range_pattern, " ", line)
       print line
     }'
 }
