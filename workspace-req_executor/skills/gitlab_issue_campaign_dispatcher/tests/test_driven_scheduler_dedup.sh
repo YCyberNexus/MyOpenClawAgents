@@ -1071,4 +1071,52 @@ for deferred_batch in C C_ATTACH; do
   ' "${SCHEDULER_ROOT}/batches/${deferred_batch}/state.json" >/dev/null
 done
 
+# Spawn-ack recovery may shorten the preparing lease only for the exact
+# action_emitted job selected by the heartbeat. Another repository claim keeps
+# the ordinary preparing lease and must not be reclaimed with it.
+ACK_CONFIG_DIR="${TEST_ROOT}/ack-config"
+ACK_SCHEDULER_ROOT="${TEST_ROOT}/ack-scheduler"
+mkdir -p "${ACK_CONFIG_DIR}"
+printf '%s\n' \
+  'REPO_PARENT_PATH=/data' \
+  "EXECUTOR_SCHEDULER_ROOT=${ACK_SCHEDULER_ROOT}" \
+  'EXECUTOR_MAX_CONCURRENCY=3' \
+  >"${ACK_CONFIG_DIR}/campaign_defaults.env"
+CONFIG_DIR="${ACK_CONFIG_DIR}" SCHEDULER_ROOT="${ACK_SCHEDULER_ROOT}"
+CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null
+create_single_fixture ACK_A group/ack-a 41 main false
+create_single_fixture ACK_B group/ack-b 42 main false
+jq '.batch_order = ["ACK_A","ACK_B"]' \
+  "${SCHEDULER_ROOT}/scheduler_state.json" \
+  >"${SCHEDULER_ROOT}/scheduler_state.next.json"
+mv "${SCHEDULER_ROOT}/scheduler_state.next.json" \
+  "${SCHEDULER_ROOT}/scheduler_state.json"
+ack_initial="$(CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=100 \
+  bash "${RESERVE}")"
+ack_a_job="$(jq -r '.grants[] | select(.batch_id == "ACK_A") | .job_id' \
+  <<<"${ack_initial}")"
+ack_b_job="$(jq -r '.grants[] | select(.batch_id == "ACK_B") | .job_id' \
+  <<<"${ack_initial}")"
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${ack_a_job}" STATUS=preparing \
+  NOW_EPOCH=101 bash "${RECORD}" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" JOB_ID="${ack_b_job}" STATUS=preparing \
+  NOW_EPOCH=101 bash "${RECORD}" >/dev/null
+CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=103 \
+  DRIVEN_PREPARING_LEASE_SECONDS=1800 \
+  DRIVEN_ACK_RECOVERY_JOB_ID="${ack_a_job}" \
+  DRIVEN_ACK_RECOVERY_LEASE_SECONDS=1 \
+  bash "${RESERVE}" >/dev/null
+jq -e \
+  --arg ack_a_job "${ack_a_job}" \
+  --arg ack_b_job "${ack_b_job}" '
+  .active_jobs[$ack_a_job].status == "reserved"
+  and .active_jobs[$ack_a_job].claim_token == null
+  and .active_jobs[$ack_b_job].status == "preparing"
+  and (.active_jobs[$ack_b_job].claim_token | type == "string" and length > 0)
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
+jq -e '.memberships["0"].status == "reserved"' \
+  "${SCHEDULER_ROOT}/batches/ACK_A/state.json" >/dev/null
+jq -e '.memberships["0"].status == "preparing"' \
+  "${SCHEDULER_ROOT}/batches/ACK_B/state.json" >/dev/null
+
 echo 'ok driven scheduler dedup'

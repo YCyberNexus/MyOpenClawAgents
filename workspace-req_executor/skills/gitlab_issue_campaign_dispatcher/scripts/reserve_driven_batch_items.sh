@@ -9,6 +9,8 @@ set -euo pipefail
 RESERVE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RESERVED_AT="${NOW_EPOCH:-$(date +%s)}"
 PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
+ACK_RECOVERY_JOB_ID="${DRIVEN_ACK_RECOVERY_JOB_ID:-}"
+ACK_RECOVERY_LEASE_SECONDS="${DRIVEN_ACK_RECOVERY_LEASE_SECONDS:-}"
 
 reserve_die() {
   echo "reserve_driven_batch_items.sh: $1" >&2
@@ -419,6 +421,21 @@ esac
 if [[ "${PREPARING_LEASE_SECONDS}" =~ ^0+$ ]]; then
   reserve_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer"
 fi
+if [ -n "${ACK_RECOVERY_JOB_ID}" ] || [ -n "${ACK_RECOVERY_LEASE_SECONDS}" ]; then
+  [ -n "${ACK_RECOVERY_JOB_ID}" ] && [ -n "${ACK_RECOVERY_LEASE_SECONDS}" ] \
+    || reserve_die "ACK recovery job and lease must be supplied together"
+  case "${ACK_RECOVERY_JOB_ID}" in
+    *$'\n'*|*$'\r'*|*$'\t'*) reserve_die "ACK recovery job contains control characters" ;;
+  esac
+  if ! [[ "${ACK_RECOVERY_JOB_ID}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}:snapshot-(0|[1-9][0-9]*)(::defer-[1-9][0-9]*)?$ ]]; then
+    reserve_die "ACK recovery job is not a scheduler job id"
+  fi
+  case "${ACK_RECOVERY_LEASE_SECONDS}" in
+    ''|*[!0-9]*) reserve_die "ACK recovery lease must be a positive integer" ;;
+  esac
+  [ "${ACK_RECOVERY_LEASE_SECONDS}" -gt 0 ] \
+    || reserve_die "ACK recovery lease must be a positive integer"
+fi
 
 # scheduler_env.sh validates deployment settings, initializes the scheduler
 # layout if needed, and exports all runtime paths. Its own short initialization
@@ -684,12 +701,19 @@ load_batch() {
 
 mapfile -t EXPIRED_PREPARING_JOB_IDS < <(jq -r \
   --argjson now "${RESERVED_AT}" \
-  --arg lease_seconds "${PREPARING_LEASE_SECONDS}" '
+  --arg lease_seconds "${PREPARING_LEASE_SECONDS}" \
+  --arg ack_recovery_job_id "${ACK_RECOVERY_JOB_ID}" \
+  --arg ack_recovery_lease_seconds "${ACK_RECOVERY_LEASE_SECONDS}" '
   ($lease_seconds | tonumber) as $lease
   | [.active_jobs | to_entries[]
       | select(.value.status == "preparing"
         and (.value.finalization // null) == null
-        and (($now - .value.updated_at) >= $lease))]
+        and (($now - .value.updated_at) >=
+          (if .key == $ack_recovery_job_id
+              and $ack_recovery_lease_seconds != ""
+            then ($ack_recovery_lease_seconds | tonumber)
+            else $lease
+            end)))]
   | sort_by(.value.reservation_seq)
   | .[].key
 ' <<<"${SCHEDULER_STATE}")

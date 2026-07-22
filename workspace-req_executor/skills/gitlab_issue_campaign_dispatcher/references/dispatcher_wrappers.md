@@ -106,6 +106,14 @@ stages. A live path that concurrently moves to the cold archive is accepted
 only when the same basename is present there with `stage=completed`; other
 read/layout errors remain fail-closed.
 
+The executor heartbeat pairs that fence with bounded recovery. A hot
+`action_emitted` record waits on its dedicated spawn-ack lease (180 seconds by
+default). At expiry, the tick permits `reserve_driven_batch_items.sh` to recover
+only the exact matching preparing job, stops before project top-up, and emits
+the ordinary runtime-evidence reconciliation action. This prevents an
+interrupted older batch from holding every later intake behind a permanent ACK
+gate without weakening the no-duplicate-spawn fence.
+
 ## `record_driven_batch_launch.sh`
 
 `ACTION=launch_failed` requires a positive claim generation and matching private

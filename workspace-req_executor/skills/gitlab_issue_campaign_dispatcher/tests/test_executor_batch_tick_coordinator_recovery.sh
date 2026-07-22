@@ -50,6 +50,18 @@ EOF
 cat >"${FAKE_BIN}/reserve.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "${DRIVEN_ACK_RECOVERY_JOB_ID:-}" = "A:snapshot-0" ] \
+    && [ "${DRIVEN_ACK_RECOVERY_LEASE_SECONDS:-}" = 180 ] \
+    && jq -e --argjson now "${NOW_EPOCH:-$(date +%s)}" '
+      .active_jobs["A:snapshot-0"].status == "preparing"
+      and ($now - .active_jobs["A:snapshot-0"].updated_at) >= 1
+    ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null; then
+  state="$(jq -c '
+    .active_jobs["A:snapshot-0"].status = "reserved"
+    | .active_jobs["A:snapshot-0"].claim_token = null
+  ' "${SCHEDULER_ROOT}/scheduler_state.json")"
+  printf '%s\n' "${state}" >"${SCHEDULER_ROOT}/scheduler_state.json"
+fi
 jq -cn '{
   status:"ready",active_count:1,available_slots:2,
   grants:[{
@@ -93,6 +105,7 @@ if [ "${status}" = reserved ]; then
   next_generation=$((current_generation + 1))
   state="$(jq -c --arg job_id "${JOB_ID}" '
     .active_jobs[$job_id].status = "preparing"
+    | .active_jobs[$job_id].updated_at = (now | floor)
   ' <<<"${state}")"
   state="$(jq -c --arg job_id "${JOB_ID}" \
     --argjson generation "${next_generation}" \
@@ -250,17 +263,18 @@ assert_replay_once() {
     || fail "${expected_prior_stage}: coordinator emitted the same actionable grant twice"
 
   # The most dangerous window is action_emitted durable + sessions_spawn may
-  # have succeeded + no post-ack wrapper call yet. Before lease expiry the
-  # same claim stays suppressed. If no callback/ack ever arrives and reserve
-  # later fences the preparing lease back to reserved, the same physical job
-  # may emit exactly one next-generation action without a new reservation.
+  # have succeeded + no post-ack wrapper call yet. Before the dedicated ACK
+  # lease expires, the same claim stays suppressed. Once it expires, the tick
+  # itself must reach reserve, fence preparing back to reserved, and require
+  # runtime enumeration before the physical job may get a new generation.
   action_file="${files[0]}"
   jq -e '.stage == "action_emitted" and .claim_generation == 1' \
     "${action_file}" >/dev/null \
     || fail "${expected_prior_stage}: actionable emission was not durable"
+  action_state="$(jq -c '.updated_at = 1' "${action_file}")"
+  printf '%s\n' "${action_state}" >"${action_file}"
   scheduler_state="$(jq -c '
-    .active_jobs["A:snapshot-0"].status = "reserved"
-    | .active_jobs["A:snapshot-0"].claim_token = null
+    .active_jobs["A:snapshot-0"].updated_at = 1
   ' "${SCHEDULER_ROOT}/scheduler_state.json")"
   printf '%s\n' "${scheduler_state}" >"${SCHEDULER_ROOT}/scheduler_state.json"
   reconcile_required="$(run_case_tick '' 1)" \
@@ -364,15 +378,16 @@ found_generation1_label="$(jq -r '.spawn_grants[0].child_label' \
 [[ "${found_generation1_label}" =~ ^reqx-iid42-gen1-[0-9a-f]{40}$ ]] \
   || fail "runtime_found: initial runtime label is unsafe"
 
+mapfile -t runtime_action_files < <(find "${SCHEDULER_ROOT}/launch_actions" \
+  -maxdepth 1 -type f -name '*.json' -print)
+[ "${#runtime_action_files[@]}" -eq 1 ] \
+  || fail "runtime_found: durable launch action is missing before expiry"
+runtime_action_state="$(jq -c '.updated_at = 1' "${runtime_action_files[0]}")"
+printf '%s\n' "${runtime_action_state}" >"${runtime_action_files[0]}"
 scheduler_state="$(jq -c '
-  .active_jobs["A:snapshot-0"].status = "reserved"
-  | .active_jobs["A:snapshot-0"].claim_token = null
-  | .active_jobs["A:snapshot-0"].updated_at = 2
+  .active_jobs["A:snapshot-0"].updated_at = 1
 ' "${SCHEDULER_ROOT}/scheduler_state.json")"
 printf '%s\n' "${scheduler_state}" >"${SCHEDULER_ROOT}/scheduler_state.json"
-batch_state="$(jq -c '.memberships["0"].status = "reserved"' \
-  "${SCHEDULER_ROOT}/batches/A/state.json")"
-printf '%s\n' "${batch_state}" >"${SCHEDULER_ROOT}/batches/A/state.json"
 
 reconcile_required="$(run_case_tick '' 1)" \
   || fail "runtime_found: fenced tick failed"

@@ -59,6 +59,11 @@ Core contract:
   while any hot `action_emitted` spawn acknowledgement is still pending, even
   when that action belongs to an older batch. A nonzero emitter result must
   stop the turn and must never be rewritten as a successful receipt.
+  The heartbeat does not leave that gate permanent: after the dedicated
+  spawn-ack lease expires, it atomically fences only the exact emitted claim
+  through the canonical reservation wrapper and returns runtime reconciliation
+  before any new spawn. Explicit child-label enumeration still decides whether
+  to restore the old child or open the next claim generation.
 - `record_executor_batch_spawn.sh` accepts its spawned or launch-failed object
   only as strict JSON stdin. Never pass its result fields as environment
   variables; that environment contract belongs only to Path A's

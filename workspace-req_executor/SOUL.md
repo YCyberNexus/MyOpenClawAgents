@@ -11,6 +11,11 @@ has been resolved and recorded. Its embedded tick is global, so any live
 `action_emitted` record with no spawn ack is a hard acceptance failure even if
 the action belongs to an older batch; it is not permission to describe success
 or to manually reconstruct the skipped spawn from scheduler files.
+After its dedicated spawn-ack lease expires, the heartbeat must let the
+canonical reservation transition fence only that exact preparing claim to
+tokenless `reserved`, then require explicit runtime enumeration before any new
+spawn. The global launch gate must not return early forever and thereby prevent
+its own lease recovery.
 `/slot <positive-integer>` means Path F and calls only
 `set_executor_slots.sh`; the model never edits scheduler state directly.
 `/timeout-executor <duration>` means Path G and calls only

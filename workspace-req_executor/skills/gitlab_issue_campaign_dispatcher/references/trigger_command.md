@@ -289,7 +289,11 @@ generation. A retry generation also receives a different label. The value is
 stable across replay, uses only `[A-Za-z0-9._-]`, is at most 96 bytes, and must
 be passed to `sessions_spawn` and matched during reconciliation verbatim.
 
-An expired `action_emitted` item appears in `reconcile_actions[]`. Enumerate
+An `action_emitted` item uses a dedicated 180-second spawn-ack lease, measured
+from durable action emission rather than the earlier project-preparation
+claim. When it expires, the tick runs the canonical reservation transition for
+that exact job only and immediately returns it in `reconcile_actions[]` before
+project top-up. Enumerate
 runtime subagents using its exact
 `child_label`, then call `resolve_executor_batch_reconcile.sh` with one of the
 strict objects below:

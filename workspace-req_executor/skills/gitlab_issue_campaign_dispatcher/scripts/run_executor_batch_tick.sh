@@ -1182,6 +1182,9 @@ resume_durable_launch_actions
 EXECUTOR_TOPUP_ITEM_LIMIT="${EXECUTOR_TOPUP_ITEM_LIMIT:-256}"
 EXECUTOR_REFILL_ROUND_LIMIT="${EXECUTOR_REFILL_ROUND_LIMIT:-32}"
 EXECUTOR_TOPUP_PHASE_SECONDS="${EXECUTOR_TOPUP_PHASE_SECONDS:-90}"
+PREPARING_LEASE_SECONDS="${DRIVEN_PREPARING_LEASE_SECONDS:-1800}"
+SPAWN_ACK_LEASE_SECONDS="${DRIVEN_SPAWN_ACK_LEASE_SECONDS:-180}"
+unset DRIVEN_ACK_RECOVERY_JOB_ID DRIVEN_ACK_RECOVERY_LEASE_SECONDS
 case "${EXECUTOR_TOPUP_ITEM_LIMIT}" in
   ''|*[!0-9]*) tick_die "EXECUTOR_TOPUP_ITEM_LIMIT must be an integer" ;;
 esac
@@ -1190,6 +1193,12 @@ case "${EXECUTOR_REFILL_ROUND_LIMIT}" in
 esac
 case "${EXECUTOR_TOPUP_PHASE_SECONDS}" in
   ''|*[!0-9]*) tick_die "EXECUTOR_TOPUP_PHASE_SECONDS must be an integer" ;;
+esac
+case "${PREPARING_LEASE_SECONDS}" in
+  ''|*[!0-9]*) tick_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer" ;;
+esac
+case "${SPAWN_ACK_LEASE_SECONDS}" in
+  ''|*[!0-9]*) tick_die "DRIVEN_SPAWN_ACK_LEASE_SECONDS must be a positive integer" ;;
 esac
 if [ "${EXECUTOR_TOPUP_ITEM_LIMIT}" -lt 1 ] \
     || [ "${EXECUTOR_TOPUP_ITEM_LIMIT}" -gt 256 ]; then
@@ -1203,6 +1212,10 @@ if [ "${EXECUTOR_TOPUP_PHASE_SECONDS}" -lt 1 ] \
     || [ "${EXECUTOR_TOPUP_PHASE_SECONDS}" -gt 120 ]; then
   tick_die "EXECUTOR_TOPUP_PHASE_SECONDS must be between 1 and 120"
 fi
+[ "${PREPARING_LEASE_SECONDS}" -gt 0 ] \
+  || tick_die "DRIVEN_PREPARING_LEASE_SECONDS must be a positive integer"
+[ "${SPAWN_ACK_LEASE_SECONDS}" -ge 120 ] \
+  || tick_die "DRIVEN_SPAWN_ACK_LEASE_SECONDS must be at least 120 seconds"
 EXECUTOR_TICK_LOCK_FILE="${EXECUTOR_SCHEDULER_ROOT}/executor_batch_tick.lock"
 exec {EXECUTOR_TICK_LOCK_FD}>"${EXECUTOR_TICK_LOCK_FILE}"
 chmod 600 "${EXECUTOR_TICK_LOCK_FILE}" 2>/dev/null \
@@ -1404,6 +1417,32 @@ done < <(jq -r '.[]' <<<"${PROJECTS_JSON}")
 # job already occupies a scheduler slot and therefore may not be returned by
 # reserve_driven_batch_items.sh at all.
 SERIAL_LAUNCH_GATE_CLOSED=false
+SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED=false
+SERIAL_LAUNCH_RECOVERY_JOB_ID=""
+append_spawn_reconcile_action() {
+  local action_json="$1" job_id="$2"
+  RECONCILE_ACTIONS="$(jq -c \
+    --arg job_id "${job_id}" \
+    --argjson claim_generation "$(jq -r '.claim_generation' <<<"${action_json}")" \
+    --arg project "$(jq -r '.project' <<<"${action_json}")" \
+    --argjson iid "$(jq -r '.iid' <<<"${action_json}")" \
+    --argjson execution_id "$(jq -r '.execution_id' <<<"${action_json}")" \
+    --arg child_label "$(jq -r '.child_label' <<<"${action_json}")" \
+    --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${action_json}")" \
+    --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${action_json}")" '
+    . + [{
+      action:"reconcile_emitted_spawn",
+      job_id:$job_id,
+      claim_generation:$claim_generation,
+      project:$project,
+      iid:$iid,
+      execution_id:$execution_id,
+      child_label:$child_label,
+      expected_task_sha256:$expected_task_sha256,
+      expected_task_bytes:$expected_task_bytes
+    }]
+  ' <<<"${RECONCILE_ACTIONS}")"
+}
 declare -a SERIAL_GATE_ACTION_FILES=()
 shopt -s nullglob
 SERIAL_GATE_ACTION_FILES=("${DLC_ROOT}"/*.json)
@@ -1484,36 +1523,42 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
           and .claim_generation == $prior_generation
           and .claim_token == null
         ' <<<"${serial_scheduler_job}" >/dev/null; then
-        RECONCILE_ACTIONS="$(jq -c \
-          --arg job_id "${serial_job_id}" \
-          --argjson claim_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" \
-          --arg project "$(jq -r '.project' <<<"${serial_action}")" \
-          --argjson iid "$(jq -r '.iid' <<<"${serial_action}")" \
-          --argjson execution_id "$(jq -r '.execution_id' <<<"${serial_action}")" \
-          --arg child_label "$(jq -r '.child_label' <<<"${serial_action}")" \
-          --arg expected_task_sha256 "$(jq -r '.expected_task_sha256' <<<"${serial_action}")" \
-          --argjson expected_task_bytes "$(jq -r '.expected_task_bytes' <<<"${serial_action}")" '
-          . + [{
-            action:"reconcile_emitted_spawn",
-            job_id:$job_id,
-            claim_generation:$claim_generation,
-            project:$project,
-            iid:$iid,
-            execution_id:$execution_id,
-            child_label:$child_label,
-            expected_task_sha256:$expected_task_sha256,
-            expected_task_bytes:$expected_task_bytes
-          }]
-        ' <<<"${RECONCILE_ACTIONS}")"
+        append_spawn_reconcile_action "${serial_action}" "${serial_job_id}"
         append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
           operation:"spawn_reconcile",job_id:$job_id,status:"required"
+        }')"
+        SERIAL_LAUNCH_GATE_CLOSED=true
+      elif jq -e \
+          --argjson prior_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" \
+          --arg prior_token "$(jq -r '.claim_token' <<<"${serial_action}")" \
+          --argjson now "${TICK_NOW_EPOCH}" \
+          --argjson emitted_at "$(jq -r '.updated_at' <<<"${serial_action}")" \
+          --arg lease_seconds "${SPAWN_ACK_LEASE_SECONDS}" '
+          ($lease_seconds | tonumber) as $lease
+          | type == "object"
+          and .status == "preparing"
+          and (.finalization // null) == null
+          and .claim_generation == $prior_generation
+          and .claim_token == $prior_token
+          and $now >= $emitted_at
+          and (($now - $emitted_at) >= $lease)
+        ' <<<"${serial_scheduler_job}" >/dev/null; then
+        # reserve_driven_batch_items.sh owns the atomic scheduler+batch lease
+        # transition. Let exactly that phase run once, then stop before project
+        # top-up and require explicit runtime enumeration for the emitted
+        # child label. Previously this global gate returned before reserve on
+        # every heartbeat, so the preparing lease could never actually expire.
+        SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED=true
+        SERIAL_LAUNCH_RECOVERY_JOB_ID="${serial_job_id}"
+        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+          operation:"spawn_ack",job_id:$job_id,status:"lease_expired"
         }')"
       else
         append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
           operation:"spawn_ack",job_id:$job_id,status:"pending"
         }')"
+        SERIAL_LAUNCH_GATE_CLOSED=true
       fi
-      SERIAL_LAUNCH_GATE_CLOSED=true
       ;;
     ack_received|project_recorded|scheduler_recorded)
       append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
@@ -1524,7 +1569,10 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
       ;;
   esac
   dlc_close
-    [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ] && break
+    if [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ] \
+        || [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
+      break
+    fi
   done
 fi
 
@@ -1560,9 +1608,15 @@ fi
 # failure is terminal for this tick because no safe grant set exists.
 RESERVE_OUTPUT=""
 RESERVE_RC=124
+ACK_RECOVERY_LEASE_OVERRIDE=""
+if [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
+  ACK_RECOVERY_LEASE_OVERRIDE="${SPAWN_ACK_LEASE_SECONDS}"
+fi
 if RESERVE_TIMEOUT="$(remaining_topup_seconds 15)"; then
   set +e
   RESERVE_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" \
+    DRIVEN_ACK_RECOVERY_JOB_ID="${SERIAL_LAUNCH_RECOVERY_JOB_ID}" \
+    DRIVEN_ACK_RECOVERY_LEASE_SECONDS="${ACK_RECOVERY_LEASE_OVERRIDE}" \
     timeout --kill-after=1s "${RESERVE_TIMEOUT}s" \
       bash "${RESERVE_CMD}" 2>/dev/null)"
   RESERVE_RC=$?
@@ -1608,6 +1662,87 @@ append_operation "$(jq -cn --argjson reserve "${RESERVE_JSON}" '{
   grant_count:($reserve.grants | length),active_count:$reserve.active_count,
   available_slots:$reserve.available_slots
 }')"
+
+# An expired action_emitted claim reached reserve only so the canonical lease
+# recovery could fence preparing -> reserved in both scheduler and batch state.
+# Re-read the coordinator while holding its lock, then the scheduler lock, and
+# expose only the existing runtime-evidence action. Never continue into project
+# top-up or emit the recovered reservation as a new spawn grant.
+if [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
+  dlc_open "${SERIAL_LAUNCH_RECOVERY_JOB_ID}"
+  recovered_serial_action="$(dlc_read)" || {
+    dlc_close
+    tick_die "durable launch action is invalid after lease recovery"
+  }
+  exec {RECOVERED_SERIAL_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+  flock -x "${RECOVERED_SERIAL_STATE_LOCK_FD}"
+  recovered_serial_job="$(jq -c \
+    --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" \
+    '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
+  flock -u "${RECOVERED_SERIAL_STATE_LOCK_FD}"
+  exec {RECOVERED_SERIAL_STATE_LOCK_FD}>&-
+
+  if jq -e \
+      --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" \
+      --argjson generation "$(jq -r '.claim_generation' <<<"${recovered_serial_action}")" '
+      .job_id == $job_id
+      and .stage == "action_emitted"
+      and .claim_generation == $generation
+      and (.claim_token | type == "string" and length > 0)
+      and .outcome == null and .ack == null
+    ' <<<"${recovered_serial_action}" >/dev/null \
+      && jq -e \
+        --argjson generation "$(jq -r '.claim_generation' <<<"${recovered_serial_action}")" '
+        type == "object"
+        and .status == "reserved"
+        and .claim_generation == $generation
+        and .claim_token == null
+      ' <<<"${recovered_serial_job}" >/dev/null; then
+    append_spawn_reconcile_action \
+      "${recovered_serial_action}" "${SERIAL_LAUNCH_RECOVERY_JOB_ID}"
+    append_operation "$(jq -cn \
+      --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" '{
+      operation:"spawn_reconcile",job_id:$job_id,
+      status:"required_after_lease_recovery"
+    }')"
+    dlc_close
+    flock -u "${EXECUTOR_TICK_LOCK_FD}"
+    exec {EXECUTOR_TICK_LOCK_FD}>&-
+    jq -cn \
+      --argjson operations "${OPERATIONS}" \
+      --argjson reconcile_actions "${RECONCILE_ACTIONS}" '{
+      status:"reconcile_required",
+      spawn_grants:[],
+      reconcile_actions:$reconcile_actions,
+      cleanup_actions:[],
+      operation_results:$operations,
+      max_launch_retries:3,
+      backoff_seconds:2,
+      chat_summary:"executor batch tick requires runtime reconciliation after spawn acknowledgement lease expiry"
+    }'
+    exit 0
+  fi
+
+  dlc_close
+  flock -u "${EXECUTOR_TICK_LOCK_FD}"
+  exec {EXECUTOR_TICK_LOCK_FD}>&-
+  append_operation "$(jq -cn \
+    --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" '{
+    operation:"spawn_reconcile",job_id:$job_id,
+    status:"lease_recovery_raced"
+  }')"
+  jq -cn --argjson operations "${OPERATIONS}" '{
+    status:"tick_failed",
+    spawn_grants:[],
+    reconcile_actions:[],
+    cleanup_actions:[],
+    operation_results:$operations,
+    max_launch_retries:3,
+    backoff_seconds:2,
+    chat_summary:"executor spawn acknowledgement state changed during lease recovery; retry the heartbeat"
+  }'
+  exit 0
+fi
 
 # Running physical jobs already occupy their repository slot. Re-present them to their
 # project campaign so a prior blocked/retry terminal can prepare its next
