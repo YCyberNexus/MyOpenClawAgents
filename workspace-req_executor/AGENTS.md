@@ -20,6 +20,8 @@ exactly one matching wrapper path:
   wrapper validates the complete message and persists the shared ceiling.
 - first line beginning with `/timeout-executor` → Path G,
   `set_executor_acpx_timeout.sh`; the wrapper persists the cap for future attempts.
+- first line beginning with `/mission-stop` → Path H,
+  `stop_repository_mission.sh`; the wrapper fences and archives one repository's task chain.
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A, `dispatch_prepare_tick.sh`.
 
 `RUN_DRIVEN_ISSUE_BATCH` is never a heartbeat tick. Never call
@@ -38,6 +40,9 @@ Core contract:
   `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap,
   future dispatcher outer budgets are derived from scheduler state, and the
   OpenClaw global timeout remains unchanged.
+- `/mission-stop` changes durable scheduler/project state only through
+  `stop_repository_mission.sh`. Perform only the exact runtime kills returned
+  by the wrapper, then return its `public_result`; never reconstruct batch IDs.
 - A native completion turn calls its prescribed ingester once and exits on
   rejection; it never summarizes the untrusted child Result, runs a heartbeat
   first, reads worker-result fields into prose, or debugs wrapper scripts. It

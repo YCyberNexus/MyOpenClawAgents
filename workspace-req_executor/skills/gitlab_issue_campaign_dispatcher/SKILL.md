@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-22.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler that serializes Issues per GitLab repository while running distinct repositories in parallel, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-23.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler that serializes Issues per GitLab repository while running distinct repositories in parallel, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -26,6 +26,9 @@ allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, sub
 - A message whose first line starts with `/timeout-executor` → Path G → only
   wrapper is `scripts/set_executor_acpx_timeout.sh`; the wrapper validates the
   complete message and changes only future attempts.
+- A message whose first line starts with `/mission-stop` → Path H → only
+  wrapper is `scripts/stop_repository_mission.sh`; the wrapper validates the
+  complete message and durably fences one repository before runtime cleanup.
 - Exact `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A → first wrapper is
   `scripts/dispatch_prepare_tick.sh`.
 
@@ -686,6 +689,27 @@ pinned when they were spawned. Its strict result also reports the derived
 executor turn, exec tool, legacy queue reclaim, and stuck eviction budgets used
 by req_dispatcher on later calls. It never changes OpenClaw global
 `runTimeoutSeconds`. The tracked initialization default is one hour.
+
+### Path H — `/mission-stop <repository>` repository interruption
+
+```
+1. cd "${SKILL_DIR}" && bash scripts/stop_repository_mission.sh <<'STOP_EOF' → envelope
+   <verbatim complete /mission-stop message>
+   STOP_EOF
+2. For every exact `cleanup_actions[]` item, call `subagents kill` with only
+   its `target`. Do not infer or reconstruct a session identifier.
+3. If `runtime_labels[]` is non-empty, call `subagents list` once, select only
+   children whose label exactly equals one listed label, and best-effort kill
+   those exact child targets. Do not use prefix or substring matching.
+4. Return `envelope.public_result` as the sole compact JSON object without
+   prose or Markdown, even when a best-effort runtime kill reports not found.
+```
+
+The wrapper accepts the configured GitLab repository URL (including an Issue
+URL) or a safe multi-segment `group/project` path. Under scheduler and campaign
+locks it removes the repository's active jobs and runnable batches, marks batch
+state failed, archives hot launch actions, clears project pending state, and
+returns only exact runtime cleanup identities. It never deletes audit evidence.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
 the next tick imports it, releases the repository slot, fans out every attached

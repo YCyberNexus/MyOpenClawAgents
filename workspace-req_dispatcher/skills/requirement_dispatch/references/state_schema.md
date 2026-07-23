@@ -300,3 +300,11 @@ old active intent。新 batch 不为每个 IID 创建 dispatcher pending。
 
 ledger 是 append-only 审计，不作为 batch 调度 source。batch source 是 outbox receipt、mirror、
 event ledger、notification queue 与旧 active bridge。
+
+## `mission_stop_archive/`
+
+`/mission-stop` 只有在对应 executor 已返回严格 success 后，才在 dispatcher 全局锁内写入
+`mission_stop_archive/<stop_id>.json`。该私有文件保留被移除的 I1、旧 FIFO/pending、待通知
+以及 executor summary；同 stop 同时把非终态 mirror 标为 `failed` 并追加 `event=mission_stop`
+ledger 行。archive 含 callback nonce 等私有恢复证据，目录权限为 `0700`、文件按 dispatcher
+私有 umask 创建，不得作为 public reply。

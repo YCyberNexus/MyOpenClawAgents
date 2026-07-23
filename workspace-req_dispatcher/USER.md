@@ -34,6 +34,16 @@ stuck 驱逐会按新值自动派生；旧 FIFO active/pending 保留创建时�
 命令使用 `/timeout-executor` 是为了避开 OpenClaw 内置命令的前缀路由；旧名称
 `/acpx-timeout` 和 `/executor-timeout` 均不再接受。
 
+需要放弃某仓库当前全部任务链并重新执行时，可使用：
+
+```text
+/mission-stop group/project
+/mission-stop https://gitlab.example/group/project
+```
+
+也可粘贴该仓库的 Issue URL。命令不要求知道 batch ID；它会中断并归档该仓库在 executor
+与 dispatcher 两侧的待执行/运行中链路，随后可重新提交同一 Issue 或 batch。
+
 执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
 
 - 单 Issue：`处理 group/project 的 #42`；

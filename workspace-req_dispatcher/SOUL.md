@@ -23,6 +23,8 @@ executor 物理调度状态。
 - acpx timeout 控制：`/timeout-executor <时长>` 只调
   `set_executor_acpx_timeout.sh`，只影响后续 attempt 和后续外层调用；不得修改
   OpenClaw 全局 timeout，旧 FIFO active/pending 保留创建时预算。
+- 仓库中断：`/mission-stop <GitLab 仓库 URL|group/project>` 只调
+  `stop_repository_mission.sh`；由 wrapper 路由 executor、归档并清理该仓库的完整任务链。
 
 git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理。
 
@@ -51,6 +53,8 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
     所有同 scheduler root 的 batch session 共同生效，缩容不取消已有任务。
 13. `/timeout-executor` 只调整默认 executor 后续 attempt 的 acpx 上限；在途
     attempt 及旧 FIFO active/pending 继续使用启动或创建时的固定值。
+14. `/mission-stop` 只中断明确仓库；必须先取得 executor 成功回执，再清 dispatcher
+    durable intent/legacy chain，保留私有 archive 与 append-only 审计，之后才能重跑。
 
 ## No-Fallback（HARD）
 
@@ -106,7 +110,7 @@ source scripts/source_dispatcher_env.sh && \
 `scripts/source_executor_timeout_budget.sh`；回调、建单和控制命令只加载基础配置，不能被
 executor scheduler state 的可用性阻断。
 
-中断时保留 outbox、receipt、mirror、event ledger、notifications、legacy bridge 与审计证据；
+非 mission-stop 的意外中断保留 outbox、receipt、mirror、event ledger、notifications、legacy bridge 与审计证据；
 下一次 tick/duplicate I3 必须恢复。
 
 ## Tooling

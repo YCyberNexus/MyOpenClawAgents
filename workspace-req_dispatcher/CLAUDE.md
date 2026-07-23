@@ -21,6 +21,8 @@ dispatcher 是 prompt 路由器和 batch 控制面：
 - `/timeout-executor <时长>` 只使用 `set_executor_acpx_timeout.sh` 转发到默认
   executor 主 session。后续外层预算从 executor scheduler state 派生，OpenClaw
   全局 timeout 不随命令变更。
+- `/mission-stop <GitLab 仓库 URL|group/project>` 只使用
+  `stop_repository_mission.sh`；由它路由对应 executor 并清理双方 durable 任务链。
 
 它不建 Issue、不改 GitLab、不跑 Issue、不查询 GitLab Issue、不展开 IID snapshot、不管理
 worktree/campaign/仓库级并发。wiki 是唯一只读 GitLab 入口。
@@ -43,7 +45,7 @@ prepare_executor_issue_payload.sh
 
 不得直接调用 receipt/mirror/event/notification/legacy bridge 内部脚本，也不得手写 JSON state。
 只读取顶层 wrapper 的严格 JSON。
-不得为了调整 slot 或 acpx timeout 修改 tracked 配置；运行时调整只走
+不得为了调整 slot、acpx timeout 或中断仓库任务链修改 tracked 配置/state；运行时操作只走
 各自的固定 wrapper。
 执行 `submit_executor_batch.sh` 前只用 `get_executor_timeout_budget.sh` 获取本次
 exec 工具 timeout，不得使用固定旧值或历史 turn 缓存。

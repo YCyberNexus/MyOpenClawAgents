@@ -61,6 +61,24 @@ queue_launch_reclaim_seconds,stuck_after_minutes,active_count,applies_to`
 独立部署值，命令不读取或写入它。旧 FIFO active 与 pending 保存创建时预算，
 调低 timeout 不会让已经在途的旧任务提前回收或驱逐。
 
+### 中断仓库任务链
+
+用户命令固定为：
+
+```text
+/mission-stop <GitLab 仓库 URL|group/project>
+```
+
+首行以 `/mission-stop` 开始时调用：
+
+```bash
+MESSAGE='<完整原文>' bash scripts/stop_repository_mission.sh
+```
+
+wrapper 规范化 project 并按现有路由选择 executor。executor 严格成功后，它归档并清除该
+project 的 durable I1、非终态 mirror、待发通知、旧 FIFO 与全部 pending；失败时不提前
+清 dispatcher 状态。用户不需要提供 batch ID，最终只读取 wrapper 的严格结果。
+
 ### 自然语言执行
 
 `create_and_execute` 在 git_issuer 成功后必须保留用户的完整原请求，并把新返回的

@@ -1,6 +1,6 @@
 # Trigger Commands
 
-`req_executor` accepts six current trigger forms and one compatibility
+`req_executor` accepts seven current trigger forms and one compatibility
 command:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN`
@@ -9,6 +9,7 @@ command:
 - `RUN_EXECUTOR_BATCH_TICK`
 - `/slot <positive-integer>`
 - `/timeout-executor <60..18000 seconds|Nm|Nh>`
+- `/mission-stop <GitLab repository URL|group/project>`
 - `RUN_SINGLE_ISSUE`
 
 The executor is task-agnostic. It reads the GitLab issue, renders the issue
@@ -56,6 +57,21 @@ The result reports future dispatcher-side budgets derived as agent turn
 `acpx+3600`, exec tool `acpx+3900`, legacy queue reclaim `acpx+4200`, and stuck
 eviction `ceil((acpx+4200)/60)+20`. The command never changes OpenClaw global
 `runTimeoutSeconds`.
+
+## Repository Mission Stop
+
+Exact form:
+
+```text
+/mission-stop <GitLab repository URL|group/project>
+```
+
+Call `scripts/stop_repository_mission.sh` with the complete message. Execute
+only the exact runtime cleanup targets in its private envelope, using one
+bounded child listing for exact `runtime_labels` matches, then return only
+`public_result`. The wrapper archives and removes the repository's active
+scheduler jobs, non-terminal batch chain, hot launch actions, undelivered I3
+callbacks, and project pending state so a later submission starts cleanly.
 
 ## Scheduled Tick
 

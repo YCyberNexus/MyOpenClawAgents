@@ -20,6 +20,12 @@ ${REPO_PATH}/.req_executor/
 
 This directory name is fixed. It is not configurable through trigger fields or tracked config.
 
+Repository-wide scheduler interruption evidence is stored outside individual
+clones at `${EXECUTOR_SCHEDULER_ROOT}/mission_stop_archive/<stop_id>/`. It
+contains stopped launch actions, undelivered callback entries, the pre-stop
+campaign snapshot when present, and the compact public result. The hot files
+are moved into this private archive rather than deleted.
+
 Layout:
 
 ```text

@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-22.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、运行时 /slot 并行仓库数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-23.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -41,7 +41,8 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
 7. 首行以 `/slot` 开始：路径 E；由固定 wrapper 校验完整消息。
 8. 首行以 `/timeout-executor` 开始：路径 F；由固定 wrapper 校验完整消息。
-9. 其余自然语言需求：路径 A。
+9. 首行以 `/mission-stop` 开始：路径 G；由固定 wrapper 校验完整消息。
+10. 其余自然语言需求：路径 A。
 
 禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
 turn 中自行执行多个分支。
@@ -80,6 +81,22 @@ wrapper 接受 60 秒到 5 小时；裸数字或 `Ns` 表示秒，`Nm` 表示分
 OpenClaw 全局 `runTimeoutSeconds` 是独立固定部署值，命令不得修改。新值仅影响
 后续 attempt 和后续创建的外层调用，不取消或改写在途任务已固定的 timeout；旧 FIFO
 active 与 pending 会持久化创建时的回收和驱逐预算，调低新值也不得追溯缩短它们。
+
+## 路径 G：中断仓库任务链
+
+收到 `/mission-stop <GitLab 仓库 URL|group/project>` 时，只调用：
+
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+source scripts/source_dispatcher_env.sh && \
+MESSAGE="<完整原文>" bash scripts/stop_repository_mission.sh
+```
+
+wrapper 规范化完整 project、使用 `route_project.sh` 选择 executor，并发送规范化后的
+`/mission-stop group/project`。只有 executor 返回严格 success 后，wrapper 才在 dispatcher
+全局锁内归档并移除该 project 的 durable I1、把非终态 compact mirror 标为 failed、清除旧
+FIFO active/queue 与该仓库的全部 pending。最终只按 wrapper 的严格 JSON 回复；不得要求用户提供
+batch ID，不得自行读取或改写 scheduler/outbox，也不得在 executor 失败时先清本地状态。
 
 ## 路径 A：需求接入
 

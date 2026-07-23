@@ -11,4 +11,7 @@
   `/timeout-executor 1h`, `/timeout-executor 90m`, `/timeout-executor 3600`. Future
   dispatcher-side outer timeouts follow the persisted value; the OpenClaw
   global timeout remains an independent deployment setting.
+- `/mission-stop <GitLab repository URL|group/project>` interrupts all durable
+  work for that repository, archives private recovery evidence, and frees the
+  scheduler/project state so the repository can be submitted again.
 - No project data directory, runtime basename, or UI account-pool fields are part of the current req_executor contract.

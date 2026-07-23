@@ -26,6 +26,9 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `/timeout-executor <时长>`：只调 `set_executor_acpx_timeout.sh`，持久化后续
   attempt 的 acpx 超时，并让 dispatcher 后续从 scheduler state 派生外层预算；
   OpenClaw 全局 timeout 不变，在途任务使用已持久化的创建时预算，不受调低操作影响。
+- `/mission-stop <GitLab 仓库 URL|group/project>`：只调
+  `stop_repository_mission.sh`，按 project 路由 executor，先终止 executor 任务链，再归档并清除
+  dispatcher 侧 I1、mirror、旧 FIFO/pending，使同仓库可安全重跑。
 - I3：首行 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY` 直接进入路径 D，只调
   `handle_executor_batch_event.sh`；新 batch/single 必须使用带 nonce 与 executor 身份的严格
   `callback_envelope`。旧 `RUN_DRIVEN_BATCH_RESULT` 首行继续兼容同一 handler。
@@ -34,7 +37,7 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 
 LLM 不得直接调用 `route_project.sh`、`build_executor_batch_payload.sh`、receipt/mirror/event/
 notification 内部脚本，也不得手写 state。
-slot 与 acpx timeout 调整只能调用各自的顶层 wrapper，不得编辑 executor
+slot、acpx timeout 与 mission stop 只能调用各自的顶层 wrapper，不得编辑 executor
 配置或 scheduler JSON。
 
 调用 `submit_executor_batch.sh` 前必须先调 `get_executor_timeout_budget.sh`，OpenClaw exec

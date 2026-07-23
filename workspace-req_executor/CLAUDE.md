@@ -10,6 +10,10 @@ LLM 修改配置文件或 scheduler JSON。
 后续 attempt 使用的 acpx 上限，并返回 dispatcher 后续使用的派生外层预算；
 在途 attempt 保留启动时固定的超时，OpenClaw 全局 timeout 不变。
 
+`/mission-stop <GitLab 仓库 URL|group/project>` 只调用
+`stop_repository_mission.sh`。先由 wrapper 原子清理 scheduler、batch、launch action 与
+项目 pending 状态，再按其私有 envelope 精确 kill 运行时 child，最终只返回 `public_result`。
+
 ## Wrapper Flow
 
 1. `dispatch_prepare_tick.sh` validates the trigger, reconciles GitLab labels, selects IIDs, prepares worktrees, builds prompts, and emits spawn entries.
