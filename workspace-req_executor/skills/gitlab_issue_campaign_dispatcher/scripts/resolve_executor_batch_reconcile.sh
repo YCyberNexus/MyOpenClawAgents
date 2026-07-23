@@ -14,7 +14,7 @@ die() {
   exit 2
 }
 
-validate_command() {
+validate_bash_script() {
   local name="$1" path="$2"
   case "${path}" in
     /*) ;;
@@ -23,12 +23,12 @@ validate_command() {
   case "${path}" in
     *$'\n'*|*$'\r'*|*$'\t'*) die "${name} contains control characters" ;;
   esac
-  [ -f "${path}" ] && [ -x "${path}" ] \
-    || die "${name} must be an executable regular file"
+  [ -f "${path}" ] && [ -r "${path}" ] \
+    || die "${name} must be a readable regular file"
 }
 
-validate_command SCHEDULER_ENV_CMD "${SCHEDULER_ENV_CMD}"
-validate_command RECORD_SPAWN_CMD "${RECORD_SPAWN_CMD}"
+validate_bash_script SCHEDULER_ENV_CMD "${SCHEDULER_ENV_CMD}"
+validate_bash_script RECORD_SPAWN_CMD "${RECORD_SPAWN_CMD}"
 
 if ! INPUT_JSON="$(jq -ce '
   def clean_string:

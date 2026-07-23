@@ -438,6 +438,11 @@ jq -cn \
   }"
 '
 
+# Deployment artifact copies can preserve readable shell content while losing
+# executable mode bits. Every helper below is sourced or passed explicitly to
+# Bash, so the heartbeat and post-spawn recorder must accept this safe shape.
+chmod a-x "${FAKE_BIN}"/*.sh
+
 printf '%s' 'secret-free spawn bootstrap for issue 42' >"${TEST_ROOT}/payload-42.txt"
 printf '%s' 'secret-free spawn bootstrap for issue 44' >"${TEST_ROOT}/payload-44.txt"
 

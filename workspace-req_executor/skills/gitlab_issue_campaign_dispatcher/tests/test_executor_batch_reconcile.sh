@@ -58,6 +58,9 @@ printf '%s\n' found >>"${CALL_LOG}"
 jq -cn '{status:"spawned_recorded",job_id:"A:snapshot-0",claim_generation:1}'
 EOF
 chmod +x "${FAKE_BIN}"/*.sh
+# These helpers are passed to Bash/source rather than executed by the kernel.
+# A deployed workspace that loses mode bits must remain recoverable.
+chmod a-x "${FAKE_BIN}/scheduler_env.sh" "${FAKE_BIN}/record_spawn.sh"
 
 action_path() {
   local digest

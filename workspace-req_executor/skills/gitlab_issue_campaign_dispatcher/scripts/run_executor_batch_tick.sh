@@ -29,19 +29,6 @@ tick_die() {
   exit 2
 }
 
-validate_command() {
-  local name="$1" path="$2"
-  case "${path}" in
-    /*) ;;
-    *) tick_die "${name} must be absolute" ;;
-  esac
-  case "${path}" in
-    *$'\n'*|*$'\r'*|*$'\t'*) tick_die "${name} contains control characters" ;;
-  esac
-  [ -f "${path}" ] && [ -x "${path}" ] \
-    || tick_die "${name} must be an executable regular file"
-}
-
 validate_bash_script() {
   local name="$1" path="$2"
   case "${path}" in
@@ -69,7 +56,7 @@ for command_spec in \
   "BIND_CLAIM_CMD:${BIND_CLAIM_CMD}" \
   "RESUME_SPAWN_CMD:${RESUME_SPAWN_CMD}"
 do
-  validate_command "${command_spec%%:*}" "${command_spec#*:}"
+  validate_bash_script "${command_spec%%:*}" "${command_spec#*:}"
 done
 validate_bash_script EXPIRE_RUNNING_CMD "${EXPIRE_RUNNING_CMD}"
 validate_bash_script RECOVER_SHARED_MR_CMD "${RECOVER_SHARED_MR_CMD}"

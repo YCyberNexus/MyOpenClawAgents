@@ -17,19 +17,22 @@ die() {
   exit 2
 }
 
-validate_command() {
+validate_bash_script() {
   local name="$1" path="$2"
   case "${path}" in
     /*) ;;
     *) die "${name} must be absolute" ;;
   esac
-  [ -f "${path}" ] && [ -x "${path}" ] \
-    || die "${name} must be an executable regular file"
+  case "${path}" in
+    *$'\n'*|*$'\r'*|*$'\t'*) die "${name} contains control characters" ;;
+  esac
+  [ -f "${path}" ] && [ -r "${path}" ] \
+    || die "${name} must be a readable regular file"
 }
-validate_command SCHEDULER_ENV_CMD "${SCHEDULER_ENV_CMD}"
-validate_command RESOLVE_REPO_CMD "${RESOLVE_REPO_CMD}"
-validate_command PROJECT_RECORD_CMD "${PROJECT_RECORD_CMD}"
-validate_command RECORD_LAUNCH_CMD "${RECORD_LAUNCH_CMD}"
+validate_bash_script SCHEDULER_ENV_CMD "${SCHEDULER_ENV_CMD}"
+validate_bash_script RESOLVE_REPO_CMD "${RESOLVE_REPO_CMD}"
+validate_bash_script PROJECT_RECORD_CMD "${PROJECT_RECORD_CMD}"
+validate_bash_script RECORD_LAUNCH_CMD "${RECORD_LAUNCH_CMD}"
 
 if ! INPUT_JSON="$(jq -ce '
   def clean_string:
