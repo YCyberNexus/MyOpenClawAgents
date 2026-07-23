@@ -1,12 +1,12 @@
 # 104 AI Coding 与 114 智伴通信对接协议
 
-> 文档版本：2026-07-16.1
+> 文档版本：2026-07-23.1
 >
 > 适用版本：104 OpenClaw `2026.4.9`，114 OpenClaw `2026.6.1`
 >
 > 部署区域：两端均位于公司蓝区
 >
-> 当前状态：104→114 协议 4 适配器已实现；114→104 继续复用现有需求提交通道
+> 当前状态：104→114 协议 4 适配器已实现；114→104 使用无外发的 `/v1/chat/completions` 提交脚本
 
 ## 1. 对接结论
 
@@ -14,8 +14,8 @@
 
 | 方向 | 发送端 | 接收端 | 当前方法 | 协议边界 |
 |---|---|---|---|---|
-| 需求提交 | 114 智伴 | 104 `req_dispatcher` | 复用当前已经可用的 AI Coding 需求提交通道，发送自由文本和 origin | 104 侧业务入口固定为 `agent:req_dispatcher:main`；本仓库不定义该外部通道的网络封装 |
-| 受理回复 | 104 `req_dispatcher` | 114 智伴 | 沿现有需求提交调用返回 | 属于正向调用的应答，不等于任务终态通知 |
+| 需求提交 | 114 智伴 | 104 `req_dispatcher` | `send_req_dispatcher_from_114.sh` 调用 104 `/v1/chat/completions`，发送自由文本和 origin | `model=openclaw/req_dispatcher`，`x-openclaw-session-key=agent:req_dispatcher:main`，禁止使用 `sessions_send` |
+| 受理回复 | 104 `req_dispatcher` | 114 智伴 | 仅沿当前 HTTP 响应返回 | 属于正向调用的应答，不等于任务终态通知 |
 | 终态回推 | 104 `req_dispatcher` | 114 个人 Agent | 104 独立适配器直连 114 Gateway | WebSocket，Gateway 协议 4，设备签名 v3，`operator.write` |
 | 企微投递 | 114 个人 Agent | 原企微会话 | 114 根据回推信封中的 origin 完成最后一跳 | 由 114 智伴实现，不由 104 直接调用企微 |
 
@@ -25,14 +25,16 @@
 - 104→114 只在独立适配器中使用协议 4，不加载或替换 104 的 OpenClaw 包。
 - 114 的个人 Agent 名就是人员姓名，例如 `zhujiaye`；回推必须同时使用 `agentId=zhujiaye` 和 `sessionKey=agent:zhujiaye:main`。
 - 当前闭环定义“受理回复 + 终态通知”。尚未定义执行百分比、步骤变化等中途进度事件。
-- 如果 114 将来改为直接连接 104 Gateway，不能直接使用 `2026.6.1` 原生协议 4 客户端；必须另做协议 3 适配。当前已经工作的需求提交通道不需要因此改造。
+- 114→104 当前使用 104 Gateway 的 HTTP `/v1/chat/completions` 直接执行目标 Agent，
+  该入口以 `deliver=false` 运行，不触发 A2A announce 或历史渠道外发。如果将来改为 WebSocket
+  Gateway 客户端，不能直接使用 `2026.6.1` 原生协议 4 客户端，必须另做协议 3 适配。
 
 ## 2. 总体架构示意图
 
 ```mermaid
 flowchart LR
     U["企微用户"] -->|"自然语言需求"| Z["114 智伴<br/>个人 Agent：zhujiaye"]
-    Z -->|"现有需求提交通道<br/>自由文本 + origin"| D["104 req_dispatcher<br/>agent:req_dispatcher:main"]
+    Z -->|"POST /v1/chat/completions<br/>deliver=false<br/>自由文本 + origin"| D["104 req_dispatcher<br/>agent:req_dispatcher:main"]
     D -->|"建单/执行"| P["104 AI Coding 流水线<br/>git_issuer + req_executor"]
     P -->|"I3 终态回调"| D
     D -->|"WebSocket 协议 4<br/>agent RPC + req_result_push"| G["114 OpenClaw Gateway 2026.6.1"]
@@ -96,12 +98,62 @@ flowchart LR
 
 `reply_agent` 是回程路由的关键字段。104 优先使用它；只有它为空时才使用 104 部署配置中的 `DEFAULT_REPLY_AGENT`。origin 不是 JSON 对象时，104 不会使用默认 Agent 兜底回推。
 
-### 3.4 正向 transport 的版本说明
+### 3.4 正向 transport 与回复路由
 
-当前仓库只约束 104 收到的目标 Session、自由文本和 origin，不包含 114 当前“AI Coding 平台需求提交”通道的网络实现。双方联调时，114 开发者需要确认现有通道属于以下哪一种：
+114 使用本仓库的 `send_req_dispatcher_from_114.sh` 调用 104 Gateway
+`POST /v1/chat/completions`。该端点默认关闭，104 必须先在服务端配置中启用并重启
+Gateway：
 
-- 已有中继或平台接口：保持不变，只补齐 origin。
-- 直接连接 104 Gateway：必须确认客户端实际发协议 3；`2026.6.1` 的原生协议 4 客户端不能直接连接 `2026.4.9` Gateway。
+```json5
+{
+  gateway: {
+    http: {
+      endpoints: {
+        chatCompletions: { enabled: true },
+      },
+    },
+  },
+}
+```
+
+正向请求固定使用以下路由头和请求体：
+
+```http
+Authorization: Bearer <104 Gateway token>
+Content-Type: application/json
+x-openclaw-agent-id: req_dispatcher
+x-openclaw-session-key: agent:req_dispatcher:main
+```
+
+```json
+{
+  "model": "openclaw/req_dispatcher",
+  "messages": [
+    {
+      "role": "user",
+      "content": "[origin] {...}\n<用户需求>"
+    }
+  ],
+  "stream": false
+}
+```
+
+- `model` 和 `x-openclaw-agent-id` 都固定选择 `req_dispatcher`。
+- `x-openclaw-session-key` 完整指定 `agent:req_dispatcher:main`，不落入默认 `main`。
+- `stream=false` 时受理回复位于 `.choices[0].message.content`；提交脚本原样输出完整
+  Chat Completions JSON，由正在处理原企微会话的 114 个人 Agent 回复用户。
+- 104 `2026.4.9` 的该 HTTP 入口构造 Agent 请求时固定设置 `deliver=false`，因此回复只写入
+  当前 HTTP 响应，不会调用渠道 `send`。
+
+不得把此桥接改回 `/tools/invoke` + `sessions_send`。在 104 `2026.4.9` 中，
+`sessions_send` 即使调用者 Session 与目标 Session 相同，仍会安排 A2A announce；把两层
+Session 都设为 `req_dispatcher` 只能避免部分跨 Agent ping-pong，不能保证不沿持久化的
+企微 last route 外发。这正是回复出现为 `main:wecom:<user>` 的根因。
+
+如果现场仍使用其他已有中继或平台接口，必须保持同样语义：目标是
+`agent:req_dispatcher:main`，执行时禁止外发，且同步应答仅沿当前正向调用返回。若改为
+WebSocket Gateway 客户端，客户端必须实际发送协议 3；
+`2026.6.1` 的原生协议 4 客户端不能直接连接 `2026.4.9` Gateway。
 
 ## 4. 104→114：终态结果回推契约
 
@@ -335,7 +387,7 @@ sequenceDiagram
     participant G as 114 OpenClaw Gateway
 
     U->>A: 自然语言需求
-    A->>D: 现有提交通道<br/>自由文本 + origin<br/>目标 agent:req_dispatcher:main
+    A->>D: POST /v1/chat/completions<br/>req_dispatcher + deliver=false<br/>自由文本 + origin
     D-->>A: 受理回复
     A-->>U: 已提交，正在执行
     D->>P: 建单并提交执行
@@ -436,6 +488,8 @@ OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1
 | 未授予 `operator.write` | 不应扩大申请 scope | 检查设备授权 scope |
 | 找不到个人 Agent | 检查 `origin.reply_agent` | Agent 名必须与姓名完全一致，例如 `zhujiaye` |
 | Session 路由错误 | 应为 `agent:<姓名>:main` | 确认个人 Agent 的主 Session 存在 |
+| `/v1/chat/completions` 返回 404 | 确认已启用 `gateway.http.endpoints.chatCompletions.enabled` 并重启 Gateway | 确认请求发往 104 Gateway 的正确端口 |
+| 受理回复进入 `main:wecom:<peer>` | 检查是否仍在调用 `/tools/invoke` + `sessions_send` | 使用修复后的直接 Agent 提交脚本；不要把 104 的渠道消息当 HTTP 应答 |
 | 只有 `accepted` 无终态 | 104 最终会超时并记失败 | 检查个人 Agent 是否卡住、企微调用是否一直未返回 |
 | Gateway 已成功但企微没消息 | 检查业务信封中的 origin | 检查个人 Agent 是否真正执行了企微最后一跳 |
 | 短时间重复消息 | 检查同一事件是否使用稳定 idempotencyKey | 检查 Gateway 幂等缓存和个人 Agent 重复处理 |
@@ -461,7 +515,11 @@ OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1
 按顺序执行：
 
 - [ ] 114 提交一条带完整 origin 的测试需求，目标为 `agent:req_dispatcher:main`。
+- [ ] 104 已启用 `/v1/chat/completions`，且该端点只暴露在受控蓝区入口。
+- [ ] 抓取 114 正向请求，确认 model、agent header 和 session header 都指向 `req_dispatcher`。
+- [ ] 请求体和调用链中均不存在 `/tools/invoke` 或 `sessions_send`。
 - [ ] 104 能解析出 `reply_agent=zhujiaye`，并返回受理信息。
+- [ ] 受理回复只出现在当前 HTTP 响应中，104 不新增任何 `main:wecom:<peer>` 或其他渠道外发。
 - [ ] 首次 104→114 连接产生配对请求，114 只批准 `operator.write`。
 - [ ] 重试后 114 Gateway 返回 `hello-ok` 且 `protocol=4`。
 - [ ] 114 收到的 `agentId`、`sessionKey` 都指向 `zhujiaye`。
@@ -480,7 +538,7 @@ OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1
 
 - 任务执行中的百分比或阶段进度推送。
 - 超过 Gateway 幂等缓存窗口后的永久精确一次投递。
-- 114→104 现有需求提交通道的网络协议替换。
+- 114→104 提交脚本之外的其他中继或平台通道替换。
 - 多个个人 Agent 共用一个回程 Session。
 - 104 直接调用企微接口。
 
@@ -493,3 +551,5 @@ OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1
 - 终态业务信封：`workspace-req_dispatcher/skills/requirement_dispatch/scripts/notify_user.sh`
 - origin 捕获：`workspace-req_dispatcher/skills/requirement_dispatch/scripts/capture_origin.sh`
 - 帧级集成测试：`workspace-req_dispatcher/skills/requirement_dispatch/tests/test_openclaw_agent_gateway_v4.mjs`
+- 114 正向提交脚本：`docs/blue-zone-infrastructure/send_req_dispatcher_from_114.sh`
+- 114 正向提交回归测试：`docs/blue-zone-infrastructure/tests/test_send_req_dispatcher_from_114.sh`

@@ -6,13 +6,13 @@
 # agent:<CURRENT_AGENT_NAME>:main；调用方不得把受理回复当成任务终态。
 #
 # 114 部署环境必须注入：
-#   REQ_DISPATCHER_GATEWAY_TOKEN  104 /tools/invoke Bearer token
+#   REQ_DISPATCHER_GATEWAY_TOKEN  104 Gateway Bearer token
 #   CURRENT_AGENT_NAME            当前个人 Agent 名，例如 zhujiaye
 #   WECHAT_USER_ID                企微发起人 ID
 #   WECHAT_CONVERSATION_ID        企微会话或群聊 ID
 #
 # 可选：
-#   REQ_DISPATCHER_GATEWAY_URL    默认 http://10.64.5.104:18789/tools/invoke
+#   REQ_DISPATCHER_GATEWAY_URL    默认 http://10.64.5.104:18789/v1/chat/completions
 #   REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS  默认 10
 #   REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS  默认 120
 #   TASK_DESCRIPTION              需求原文；为空时从标准输入读取
@@ -50,6 +50,32 @@ require_positive_integer() {
   esac
 }
 
+require_chat_completions_url() {
+  local value="$1"
+  local authority
+
+  case "${value}" in
+    http://*|https://*) ;;
+    *) die "REQ_DISPATCHER_GATEWAY_URL must use http:// or https://" ;;
+  esac
+
+  authority="${value#*://}"
+  authority="${authority%%/*}"
+  [ -n "${authority}" ] \
+    || die "REQ_DISPATCHER_GATEWAY_URL must include a host"
+
+  case "${authority}" in
+    *@*) die "REQ_DISPATCHER_GATEWAY_URL must not contain credentials" ;;
+  esac
+
+  case "${value}" in
+    */v1/chat/completions) ;;
+    *)
+      die "REQ_DISPATCHER_GATEWAY_URL must end with /v1/chat/completions"
+      ;;
+  esac
+}
+
 require_command curl
 require_command jq
 
@@ -58,9 +84,11 @@ require_command jq
 : "${WECHAT_USER_ID:?send_req_dispatcher_from_114: WECHAT_USER_ID required}"
 : "${WECHAT_CONVERSATION_ID:?send_req_dispatcher_from_114: WECHAT_CONVERSATION_ID required}"
 
-REQ_DISPATCHER_GATEWAY_URL="${REQ_DISPATCHER_GATEWAY_URL:-http://10.64.5.104:18789/tools/invoke}"
+REQ_DISPATCHER_GATEWAY_URL="${REQ_DISPATCHER_GATEWAY_URL:-http://10.64.5.104:18789/v1/chat/completions}"
 REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS="${REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS:-10}"
 REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS="${REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS:-120}"
+REQ_DISPATCHER_AGENT_ID="req_dispatcher"
+REQ_DISPATCHER_SESSION_KEY="agent:req_dispatcher:main"
 
 case "${CURRENT_AGENT_NAME}" in
   ''|*[!A-Za-z0-9_-]*)
@@ -68,16 +96,12 @@ case "${CURRENT_AGENT_NAME}" in
     ;;
 esac
 
-case "${REQ_DISPATCHER_GATEWAY_URL}" in
-  http://*|https://*) ;;
-  *) die "REQ_DISPATCHER_GATEWAY_URL must use http:// or https://" ;;
-esac
-
 require_no_line_break REQ_DISPATCHER_GATEWAY_TOKEN "${REQ_DISPATCHER_GATEWAY_TOKEN}"
 require_no_line_break CURRENT_AGENT_NAME "${CURRENT_AGENT_NAME}"
 require_no_line_break WECHAT_USER_ID "${WECHAT_USER_ID}"
 require_no_line_break WECHAT_CONVERSATION_ID "${WECHAT_CONVERSATION_ID}"
 require_no_line_break REQ_DISPATCHER_GATEWAY_URL "${REQ_DISPATCHER_GATEWAY_URL}"
+require_chat_completions_url "${REQ_DISPATCHER_GATEWAY_URL}"
 require_positive_integer REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS \
   "${REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS}"
 require_positive_integer REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS \
@@ -113,16 +137,26 @@ origin_json="$({
 message="$(printf '[origin] %s\n%s' "${origin_json}" "${task_description}")"
 
 request_json="$({
-  jq -nc --arg message "${message}" '
+  jq -nc \
+    --arg model "openclaw/${REQ_DISPATCHER_AGENT_ID}" \
+    --arg message "${message}" '
     {
-      tool: "sessions_send",
-      args: {
-        sessionKey: "agent:req_dispatcher:main",
-        message: $message
-      }
+      model: $model,
+      messages: [
+        {
+          role: "user",
+          content: $message
+        }
+      ],
+      stream: false
     }
   '
 })"
+
+# 使用 Chat Completions 直接执行 req_dispatcher，不调用 sessions_send。
+# 104 OpenClaw 2026.4.9 会以 deliver=false 运行此入口：Agent 回复只写入本次
+# HTTP 响应，不会启动 A2A announce，也不会沿 main 的企微 last route 外发。
+# model、agent header 和 session header 都固定，避免落入默认 main。
 
 # 通过 curl 配置文件描述符传入 Authorization header，避免 token 出现在
 # curl 命令参数中。这里不创建磁盘临时文件。
@@ -148,6 +182,8 @@ response="$({
         --max-time "${REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS}" \
         --config <(render_curl_auth_config) \
         --header 'Content-Type: application/json' \
+        --header "x-openclaw-agent-id: ${REQ_DISPATCHER_AGENT_ID}" \
+        --header "x-openclaw-session-key: ${REQ_DISPATCHER_SESSION_KEY}" \
         --data-binary @- \
         "${REQ_DISPATCHER_GATEWAY_URL}"
 })"
@@ -155,14 +191,14 @@ curl_rc=$?
 set -e
 
 if [ "${curl_rc}" -ne 0 ]; then
-  die "104 /tools/invoke request failed with curl exit code ${curl_rc}" 69
+  die "104 /v1/chat/completions request failed with curl exit code ${curl_rc}" 69
 fi
 
 [ -n "${response}" ] \
-  || die "104 /tools/invoke returned an empty response" 69
+  || die "104 /v1/chat/completions returned an empty response" 69
 
 if ! printf '%s' "${response}" | jq empty >/dev/null 2>&1; then
-  die "104 /tools/invoke returned non-JSON content" 69
+  die "104 /v1/chat/completions returned non-JSON content" 69
 fi
 
 # stdout 只输出104原始JSON应答，供114个人 Agent 判断是否成功受理。
