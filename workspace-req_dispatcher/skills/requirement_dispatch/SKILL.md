@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-28.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-29.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -40,9 +40,10 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 5. 收到旧 `RUN_EXECUTOR_RESULT_CALLBACK` I2：路径 B，兼容升级前 FIFO。
 6. 收到 `RUN_EXECUTOR_BATCH_TICK` 或旧 `RUN_EXECUTOR_QUEUE_DRAIN`：路径 C。
 7. 首行以 `/slot` 开始：路径 E；由固定 wrapper 校验完整消息。
-8. 首行以 `/timeout-executor` 开始：路径 F；由固定 wrapper 校验完整消息。
-9. 首行以 `/mission-stop` 开始：路径 G；由固定 wrapper 校验完整消息。
-10. 其余自然语言需求：路径 A。
+8. 首行以 `/repo-slot` 开始：路径 F；由固定 wrapper 校验完整消息。
+9. 首行以 `/timeout-executor` 开始：路径 G；由固定 wrapper 校验完整消息。
+10. 首行以 `/mission-stop` 开始：路径 H；由固定 wrapper 校验完整消息。
+11. 其余自然语言需求：路径 A。
 
 禁止把任一 `RUN_DRIVEN_BATCH_RESULT*` callback marker 当自然语言或 I2，也禁止在一个回调
 turn 中自行执行多个分支。
@@ -61,10 +62,27 @@ wrapper 会严格校验命令，只把规范化后的 `/slot N` 发送到
 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，并只接受 executor 固定 wrapper 返回的严格 JSON。
 `status=success` 时按 `parallel_project_limit,previous_parallel_project_limit,active_project_count,available_project_slots,draining`
 回复用户；`draining=true` 表示在线缩容后活跃仓库数暂时高于新上限，任务不会被取消，但不会
-继续发放新仓库槽位。同仓库 Issue 始终串行。`status=failed` 时读取 `reason` 后停止，不得改写
+继续发放新仓库槽位。`status=failed` 时读取 `reason` 后停止，不得改写
 executor 配置或调度状态。
 
-## 路径 F：运行时 acpx timeout 配置
+## 路径 F：运行时每仓库 Issue 并发配置
+
+收到 `/repo-slot <正整数>` 时，只调用：
+
+```bash
+cd "<SKILL_DIR 绝对路径>" && \
+source scripts/source_dispatcher_env.sh && \
+MESSAGE="<完整原文>" bash scripts/set_executor_repo_slots.sh
+```
+
+wrapper 只把规范化后的 `/repo-slot N` 发送到默认 executor 主 session，并只接受严格
+`status,per_repository_issue_limit,previous_per_repository_issue_limit,
+active_repository_count,active_issue_count,over_limit_repository_count,draining`
+成功对象。默认值为 1。`draining=true` 表示至少一个仓库的 active Issue job（可能包含尚未
+启动的 reservation）暂时超过新上限；已启动任务不取消，未启动的多余 reservation 由
+executor 下一 tick 安全退回 pending。
+
+## 路径 G：运行时 acpx timeout 配置
 
 收到 `/timeout-executor <时长>` 时，只调用：
 
@@ -82,7 +100,7 @@ OpenClaw 全局 `runTimeoutSeconds` 是独立固定部署值，命令不得修�
 后续 attempt 和后续创建的外层调用，不取消或改写在途任务已固定的 timeout；旧 FIFO
 active 与 pending 会持久化创建时的回收和驱逐预算，调低新值也不得追溯缩短它们。
 
-## 路径 G：中断仓库任务链
+## 路径 H：中断仓库任务链
 
 收到 `/mission-stop <GitLab 仓库 URL|group/project>` 时，只调用：
 

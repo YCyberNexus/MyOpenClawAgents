@@ -22,7 +22,9 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 - `create_and_execute`：git_issuer 严格成功后，把返回 Issue URL 交同一个 batch wrapper。
 - `clarify_or_reject`：不调用下游。
 - `/slot <正整数>`：只调 `set_executor_slots.sh`，由它把命令发送到默认 executor 主 session，
-  调整并行仓库数上限；同仓库 Issue 仍串行，dispatcher 不直接修改调度状态。
+  调整并行仓库数上限，dispatcher 不直接修改调度状态。
+- `/repo-slot <正整数>`：只调 `set_executor_repo_slots.sh`，调整每个仓库的 Issue 并发上限；
+  默认值为 1，dispatcher 不直接修改调度状态。
 - `/timeout-executor <时长>`：只调 `set_executor_acpx_timeout.sh`，持久化后续
   attempt 的 acpx 超时，并让 dispatcher 后续从 scheduler state 派生外层预算；
   OpenClaw 全局 timeout 不变，在途任务使用已持久化的创建时预算，不受调低操作影响。
@@ -37,7 +39,7 @@ dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允
 
 LLM 不得直接调用 `route_project.sh`、`build_executor_batch_payload.sh`、receipt/mirror/event/
 notification 内部脚本，也不得手写 state。
-slot、acpx timeout 与 mission stop 只能调用各自的顶层 wrapper，不得编辑 executor
+slot、repo-slot、acpx timeout 与 mission stop 只能调用各自的顶层 wrapper，不得编辑 executor
 配置或 scheduler JSON。
 
 调用 `submit_executor_batch.sh` 前必须先调 `get_executor_timeout_budget.sh`，OpenClaw exec

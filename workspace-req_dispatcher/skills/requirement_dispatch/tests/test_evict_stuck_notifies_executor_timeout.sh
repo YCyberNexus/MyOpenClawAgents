@@ -149,8 +149,8 @@ if ! jq -e '.active == null and (.queue | length) == 1 and .queue[0].iid == 46' 
 fi
 
 for expected_run_id in run-executor-origin run-git-issuer-origin run-executor-no-origin; do
-  if ! jq -e --arg rid "${expected_run_id}" \
-    'select(.run_id==$rid and .outcome=="stuck_evicted" and .was_pending==true)' \
+  if ! jq -se --arg rid "${expected_run_id}" \
+    'any(.[]; .run_id==$rid and .outcome=="stuck_evicted" and .was_pending==true)' \
     "${DISPATCHER_DIR}/ledger.jsonl" >/dev/null; then
     echo "expected stuck_evicted ledger row for ${expected_run_id}" >&2
     sed -n '1,20p' "${DISPATCHER_DIR}/ledger.jsonl" >&2
@@ -158,7 +158,7 @@ for expected_run_id in run-executor-origin run-git-issuer-origin run-executor-no
   fi
 done
 
-if ! jq -e 'select(.run_id=="run-executor-origin" and .stage=="executor" and .project=="group/project" and .issue_iid==42)' \
+if ! jq -se 'any(.[]; .run_id=="run-executor-origin" and .stage=="executor" and .project=="group/project" and .issue_iid==42)' \
   "${DISPATCHER_DIR}/ledger.jsonl" >/dev/null; then
   echo "expected executor stuck_evicted ledger row to preserve project and iid" >&2
   sed -n '1,20p' "${DISPATCHER_DIR}/ledger.jsonl" >&2
@@ -243,7 +243,7 @@ if ! jq -e '.pending == {}' "${FAIL_DISPATCHER_DIR}/pending.json" >/dev/null; th
   exit 1
 fi
 
-if ! jq -e 'select(.run_id=="run-executor-notify-fails" and .outcome=="stuck_evicted" and .stage=="executor")' \
+if ! jq -se 'any(.[]; .run_id=="run-executor-notify-fails" and .outcome=="stuck_evicted" and .stage=="executor")' \
   "${FAIL_DISPATCHER_DIR}/ledger.jsonl" >/dev/null; then
   echo "expected notify failure case to still write stuck_evicted ledger row" >&2
   sed -n '1,20p' "${FAIL_DISPATCHER_DIR}/ledger.jsonl" >&2
@@ -301,14 +301,14 @@ if ! jq -e '.pending == {}' "${OPENCLAW_FAIL_DISPATCHER_DIR}/pending.json" >/dev
   exit 1
 fi
 
-if ! jq -e 'select(.run_id=="run-executor-openclaw-fails" and .outcome=="stuck_evicted" and .stage=="executor")' \
+if ! jq -se 'any(.[]; .run_id=="run-executor-openclaw-fails" and .outcome=="stuck_evicted" and .stage=="executor")' \
   "${OPENCLAW_FAIL_DISPATCHER_DIR}/ledger.jsonl" >/dev/null; then
   echo "expected openclaw failure case to still write stuck_evicted ledger row" >&2
   sed -n '1,20p' "${OPENCLAW_FAIL_DISPATCHER_DIR}/ledger.jsonl" >&2
   exit 1
 fi
 
-if ! jq -e 'select(.kind=="user_notify_failed" and .status=="timeout" and .iid==45 and .reason=="gateway agent run non-zero")' \
+if ! jq -se 'any(.[]; .kind=="user_notify_failed" and .status=="timeout" and .iid==45 and .reason=="gateway agent run non-zero")' \
   "${OPENCLAW_FAIL_DISPATCHER_DIR}/ledger.jsonl" >/dev/null; then
   echo "expected openclaw failure case to write user_notify_failed ledger row" >&2
   sed -n '1,20p' "${OPENCLAW_FAIL_DISPATCHER_DIR}/ledger.jsonl" >&2

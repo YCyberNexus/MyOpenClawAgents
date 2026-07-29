@@ -18,9 +18,12 @@ exactly one matching wrapper path:
 - `RUN_SINGLE_ISSUE` → Path E, `run_single_issue_batch.sh`.
 - first line beginning with `/slot` → Path F, `set_executor_slots.sh`; the
   wrapper validates the complete message and persists the shared ceiling.
-- first line beginning with `/timeout-executor` → Path G,
+- first line beginning with `/repo-slot` → Path G,
+  `set_executor_repo_slots.sh`; the wrapper validates the complete message and
+  persists the shared per-repository Issue ceiling.
+- first line beginning with `/timeout-executor` → Path H,
   `set_executor_acpx_timeout.sh`; the wrapper persists the cap for future attempts.
-- first line beginning with `/mission-stop` → Path H,
+- first line beginning with `/mission-stop` → Path I,
   `stop_repository_mission.sh`; the wrapper fences and archives one repository's task chain.
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A, `dispatch_prepare_tick.sh`.
 
@@ -34,8 +37,9 @@ Core contract:
 - `RUN_EXECUTOR_BATCH_TICK` runs the exact bare Path D wrapper command. Never read config or `*.env` files and never inject credentials, paths, hosts, or
   scheduler settings into that command; the wrapper resolves them privately.
 - `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
-  it limits parallel repositories, while Issues in one repository stay
-  serial. Never edit deployment config or scheduler JSON in the orchestrator.
+  it limits parallel repositories. `/repo-slot` changes per-repository Issue
+  capacity only through `set_executor_repo_slots.sh`; its default is `1`.
+  Never edit deployment config or scheduler JSON in the orchestrator.
 - `/timeout-executor` changes the future-attempt acpx cap only through
   `set_executor_acpx_timeout.sh`; active attempts retain their pinned cap,
   future dispatcher outer budgets are derived from scheduler state, and the

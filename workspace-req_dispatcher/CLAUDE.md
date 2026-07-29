@@ -18,6 +18,8 @@ dispatcher 是 prompt 路由器和 batch 控制面：
 - I3 只使用 `handle_executor_batch_event.sh`；
 - 旧 I2/FIFO 只为部署升级排空保留。
 - `/slot <正整数>` 只使用 `set_executor_slots.sh` 转发到默认 executor 主 session。
+- `/repo-slot <正整数>` 只使用 `set_executor_repo_slots.sh` 转发到默认 executor 主 session；
+  调整每仓库 Issue 并发，默认值为 1。
 - `/timeout-executor <时长>` 只使用 `set_executor_acpx_timeout.sh` 转发到默认
   executor 主 session。后续外层预算从 executor scheduler state 派生，OpenClaw
   全局 timeout 不随命令变更。
@@ -45,7 +47,7 @@ prepare_executor_issue_payload.sh
 
 不得直接调用 receipt/mirror/event/notification/legacy bridge 内部脚本，也不得手写 JSON state。
 只读取顶层 wrapper 的严格 JSON。
-不得为了调整 slot、acpx timeout 或中断仓库任务链修改 tracked 配置/state；运行时操作只走
+不得为了调整 slot、repo-slot、acpx timeout 或中断仓库任务链修改 tracked 配置/state；运行时操作只走
 各自的固定 wrapper。
 执行 `submit_executor_batch.sh` 前只用 `get_executor_timeout_budget.sh` 获取本次
 exec 工具 timeout，不得使用固定旧值或历史 turn 缓存。

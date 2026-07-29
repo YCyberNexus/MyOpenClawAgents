@@ -141,7 +141,7 @@ I1 / I3 / `callback_nonce` / receipt / mirror / legacy bridge —— 这套机�
 | **持久化定时器**（冷却 N 分钟后重试） | ❌ 无原语，需外部调度器 | ✅ `workflow.sleep()` |
 | **重试策略 + 上限**（`blocked_retry_limit`） | ❌ 手写 | ✅ `RetryPolicy(maximum_attempts=…)` |
 | **单例围栏**（同一 Issue 不得并发执行） | ❌ 手写锁 | ✅ workflow id 唯一性 |
-| **外部信号**（`/slot`、`/timeout-executor`、人工审批） | ⚠️ `interrupt()` 仅限进程内恢复 | ✅ Signal，跨进程可寻址 |
+| **外部信号**（`/slot`、`/repo-slot`、`/timeout-executor`、人工审批） | ⚠️ `interrupt()` 仅限进程内恢复 | ✅ Signal，跨进程可寻址 |
 | **取消传播**（`cancel_run` 要杀到 acpx 子进程） | ❌ 手写 | ✅ 原生，经 heartbeat 传递 |
 | **状态查询不触发 IO** | ❌ 读 checkpoint | ✅ Query |
 | 长任务（小时级）承载 | ⚠️ 进程内 | ✅ 设计目标 |
@@ -203,7 +203,8 @@ except RetryableAttemptError as e:
 
 | 现有命令 | 现状实现 | Temporal |
 |---|---|---|
-| `/slot <n>` | `set_executor_slots.sh` 写 `slot_count` 进 scheduler state，下一轮 tick 生效 | Signal 到父 workflow，改信号量；缩容不取消在途（语义不变） |
+| `/slot <n>` | `set_executor_slots.sh` 写 `max_concurrency` 进 scheduler state，下一轮 tick 生效 | Signal 到父 workflow，改并行仓库信号量；缩容不取消在途（语义不变） |
+| `/repo-slot <n>` | `set_executor_repo_slots.sh` 写 `max_issues_per_repository` 进 scheduler state，下一轮 tick 生效 | Signal 到父 workflow，改每仓库 Issue 信号量；缩容不取消在途（语义不变） |
 | `/timeout-executor <时长>` | `set_executor_acpx_timeout.sh`，仅影响后续 attempt | Signal 改后续 activity 的 `start_to_close_timeout`（在途 activity 保留启动时值，语义天然一致） |
 | 查批次状态 | 读 JSON 状态文件 | Query，不触发任何 IO |
 | 取消批次 | **现状无此能力** | `handle.cancel()`，经 heartbeat 传播到 acpx 子进程 |
@@ -388,6 +389,7 @@ MCP Server（FastMCP）—— Temporal Client 的薄封装，任何调用 < 1s
 | `stuck_after_minutes` / `queue_launch_reclaim_seconds` 派生预算 | 高 | **`start_to_close_timeout` + `heartbeat_timeout`** |
 | `reap_driven_orphan_placeholders.sh` 孤儿回收 | 中 | 不存在此失败模式（worker 崩溃即心跳超时） |
 | `/slot <n>` 改 scheduler state | 中 | **Signal** → 父 workflow 信号量 |
+| `/repo-slot <n>` 改每仓库 Issue 上限 | 中 | **Signal** → 父 workflow 的仓库级信号量 |
 | `/timeout-executor` 只影响后续 attempt | 中 | **Signal**；已 schedule 的 activity timeout 不可变（语义免费得到） |
 | 读 JSON 状态文件查批次进度 | 低 | **Query**（不触发 IO） |
 | I1 durable intent outbox + 稳定 `batch_id` 复用 | 高 | **`start_workflow` 幂等**（`WorkflowExecutionAlreadyStarted`） |
@@ -524,7 +526,9 @@ workflow 的内部状态枚举与 GitLab 标签**一一对应**，不新造语�
 ### 7.3 并发控制是双层的
 
 - **物理层**：worker 的 `max_concurrent_activity_task_executions` —— 保护机器资源
-- **逻辑层**：`RequirementRunWorkflow` 内的信号量，对应 `EXECUTOR_MAX_CONCURRENCY` 与 `/slot`
+- **逻辑层**：`RequirementRunWorkflow` 内分别限制并行仓库数与每仓库 Issue 数，对应
+  `EXECUTOR_MAX_CONCURRENCY` / `/slot` 和
+  `EXECUTOR_MAX_ISSUES_PER_REPOSITORY` / `/repo-slot`
 
 两层都需要。只靠 worker 配置无法实现"运行时调整且缩容不取消在途"的语义；
 只靠 workflow 信号量则在多 worker 场景下无法保护单机资源。
@@ -643,7 +647,7 @@ Spike E 单列的理由：它是 §3.6 的实机验证，也是现状唯一缺�
 | **删除冷却/重试/tick 回路（§2.4）** | ❌ 手写 | ✅ 原生 | ❌ 需外部调度器 |
 | **per-Issue 互斥围栏** | ❌ 手写 | ✅ workflow id | ❌ 手写 |
 | **取消传播到 acpx** | ❌ 手写 | ✅ 原生 | ❌ 手写 |
-| 运行时信号（`/slot`、审批） | ❌ 手写 | ✅ Signal | ⚠️ 进程内 |
+| 运行时信号（`/slot`、`/repo-slot`、审批） | ❌ 手写 | ✅ Signal | ⚠️ 进程内 |
 | 图编排 / LLM 节点生态 | ❌ | ⚠️ 普通控制流 | ✅ |
 | 新增运维面 | 1 个进程 | **Server + DB + Worker + UI** | Server + DB |
 | 新增编码纪律 | 低 | **确定性 + 版本化（中高）** | 低 |

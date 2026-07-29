@@ -11,6 +11,8 @@ SCHEDULER_ROOT_ENV_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 SCHEDULER_ROOT_ENV_VALUE="${EXECUTOR_SCHEDULER_ROOT:-}"
 MAX_CONCURRENCY_ENV_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 MAX_CONCURRENCY_ENV_VALUE="${EXECUTOR_MAX_CONCURRENCY:-}"
+ISSUES_PER_REPOSITORY_ENV_SET="${EXECUTOR_MAX_ISSUES_PER_REPOSITORY+x}"
+ISSUES_PER_REPOSITORY_ENV_VALUE="${EXECUTOR_MAX_ISSUES_PER_REPOSITORY:-}"
 ACPX_TIMEOUT_ENV_SET="${EXECUTOR_ACPX_TIMEOUT_SECONDS+x}"
 ACPX_TIMEOUT_ENV_VALUE="${EXECUTOR_ACPX_TIMEOUT_SECONDS:-}"
 RUNNING_LEASE_ENV_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
@@ -126,6 +128,9 @@ fi
 if [ "${MAX_CONCURRENCY_ENV_SET}" = x ]; then
   EXECUTOR_MAX_CONCURRENCY="${MAX_CONCURRENCY_ENV_VALUE}"
 fi
+if [ "${ISSUES_PER_REPOSITORY_ENV_SET}" = x ]; then
+  EXECUTOR_MAX_ISSUES_PER_REPOSITORY="${ISSUES_PER_REPOSITORY_ENV_VALUE}"
+fi
 if [ "${ACPX_TIMEOUT_ENV_SET}" = x ]; then
   EXECUTOR_ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_ENV_VALUE}"
 fi
@@ -165,10 +170,11 @@ if [ "${ACPX_TIMEOUT_EFF}" -lt 60 ] || [ "${ACPX_TIMEOUT_EFF}" -gt 18000 ]; then
   die "EXECUTOR_ACPX_TIMEOUT_SECONDS must be between 60 and 18000"
 fi
 GRANT_COUNT="$(printf '%s' "${REQUEST_JSON}" | jq -r '.grants | length')"
-# The executor-wide value limits distinct repositories; it must never become
-# per-repository Issue concurrency. Normal scheduler state grants exactly one
-# job for this project. A larger legacy grant set only represents jobs that
-# predate the repository-serial upgrade and still need recovery/reconciliation.
+# Runtime ceilings are enforced by the agent scheduler before this wrapper.
+# Project campaign capacity comes only from the exact authorized grant set, so
+# `/slot` cannot leak into repository-local concurrency and `/repo-slot` cannot
+# authorize work that the scheduler did not grant. A shrink may still supply a
+# larger started set temporarily so those claims can drain/reconcile safely.
 PROJECT_GRANT_CAPACITY="${GRANT_COUNT}"
 
 if ! RESOLVED_REPO_PATH="$(
@@ -238,6 +244,7 @@ export GITLAB_TOKEN="${GITLAB_TOKEN_EFF}"
 export GITLAB_HOST GITLAB_API_PROTOCOL
 export REPO_PARENT_PATH="${REPO_PARENT_EFF}"
 export EXECUTOR_SCHEDULER_ROOT EXECUTOR_MAX_CONCURRENCY
+export EXECUTOR_MAX_ISSUES_PER_REPOSITORY
 export EXECUTOR_ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_EFF}"
 export EXECUTOR_RUNNING_LEASE_SECONDS EXECUTOR_AGENT
 export DISPATCHER_CALLBACK_TARGET DRIVEN_LEGACY_LOCK_COMPAT_SECONDS

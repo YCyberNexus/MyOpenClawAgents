@@ -170,10 +170,12 @@ IssueWorkflow(project, iid):
 
 单例 `SlotPoolWorkflow` 持有槽位，`IssueWorkflow` 主动申请租约。
 
-- `/slot <n>` → signal 到 SlotPool，立即生效；**缩容不取消在途**（等自然释放），语义与现状一致
+- `/slot <n>` → signal 到 SlotPool，调整并行仓库数；`/repo-slot <n>` → 调整每仓库
+  Issue 数。两者都立即生效，且**缩容不取消在途**（等自然释放），语义与现状一致
 - **round-robin 公平**：等待队列按 project 分桶轮转。常驻实体能看到全量等待者，
   比现状的有界视图 + 防饥饿游标简单得多
-- **双层限流**：SlotPool 管逻辑并发（可运行时调），worker 并发上限管物理资源（防机器过载）
+- **逻辑双层 + 物理限流**：SlotPool 分别管并行仓库数和每仓库 Issue 数（均可运行时调），
+  worker 并发上限管物理资源（防机器过载）
 - 单例 workflow 的事件历史增长用 `continue_as_new` 定期截断
 
 ### 决策 5 · 人工回流改事件驱动，但对账不能删

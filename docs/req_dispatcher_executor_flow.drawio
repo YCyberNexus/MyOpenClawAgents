@@ -9,7 +9,7 @@
           <mxGeometry x="480" y="4" width="900" height="30" as="geometry" />
         </mxCell>
 
-        <mxCell id="legend" value="&lt;b&gt;图例（主流程编号）&lt;/b&gt;&lt;br&gt;① 企微用户发需求&lt;br&gt;② 智伴转发需求原文（附 origin）或控制命令（/slot · /timeout-executor）&lt;br&gt;③ dispatcher 经 run_agent_turn.sh spawn git_issuer 建单&lt;br&gt;④ git_issuer 只用 glab 建/改 Issue（CREATE/CHANGE/CANCEL/SUPERSEDE，写 req_origin 标记 note）&lt;br&gt;⑤ git_issuer 回调 dispatcher → record_pending / drain_pending 审计&lt;br&gt;⑥ dispatcher 下发 I1 = RUN_DRIVEN_ISSUE_BATCH（durable intent + nonce 先落盘，同步等待）&lt;br&gt;⑦ executor 同步返回五字段 acceptance（status · batch_id · matched_count · snapshot_digest · scheduler_status）&lt;br&gt;⑧ executor 逐 Issue 回投 I3（RUN_DRIVEN_BATCH_RESULT_ACK_ONLY + batch_acceptance + nonce）&lt;br&gt;⑨ dispatcher 返回严格单行 ack（accepted / duplicate）&lt;br&gt;⑩ notify_user.sh 经 104→114 反向网关推送（唯一放行方向）&lt;br&gt;⑪ 智伴把结果推回企微用户" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;align=left;spacingLeft=10;spacingRight=8;spacingTop=8;verticalAlign=top;" vertex="1" parent="1">
+        <mxCell id="legend" value="&lt;b&gt;图例（主流程编号）&lt;/b&gt;&lt;br&gt;① 企微用户发需求&lt;br&gt;② 智伴转发需求原文（附 origin）或控制命令（/slot · /repo-slot · /timeout-executor）&lt;br&gt;③ dispatcher 经 run_agent_turn.sh spawn git_issuer 建单&lt;br&gt;④ git_issuer 只用 glab 建/改 Issue（CREATE/CHANGE/CANCEL/SUPERSEDE，写 req_origin 标记 note）&lt;br&gt;⑤ git_issuer 回调 dispatcher → record_pending / drain_pending 审计&lt;br&gt;⑥ dispatcher 下发 I1 = RUN_DRIVEN_ISSUE_BATCH（durable intent + nonce 先落盘，同步等待）&lt;br&gt;⑦ executor 同步返回五字段 acceptance（status · batch_id · matched_count · snapshot_digest · scheduler_status）&lt;br&gt;⑧ executor 逐 Issue 回投 I3（RUN_DRIVEN_BATCH_RESULT_ACK_ONLY + batch_acceptance + nonce）&lt;br&gt;⑨ dispatcher 返回严格单行 ack（accepted / duplicate）&lt;br&gt;⑩ notify_user.sh 经 104→114 反向网关推送（唯一放行方向）&lt;br&gt;⑪ 智伴把结果推回企微用户" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;align=left;spacingLeft=10;spacingRight=8;spacingTop=8;verticalAlign=top;" vertex="1" parent="1">
           <mxGeometry x="40" y="40" width="400" height="400" as="geometry" />
         </mxCell>
 
@@ -51,7 +51,7 @@
           <mxGeometry x="260" y="675" width="160" height="90" as="geometry" />
         </mxCell>
 
-        <mxCell id="dRouter" value="&lt;b&gt;首行路由（路径判定）&lt;/b&gt;&lt;br&gt;A 自然语言需求 · B 旧 I2 回调&lt;br&gt;C RUN_EXECUTOR_BATCH_TICK&lt;br&gt;D I3 回调 · E /slot · F /timeout-executor" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="dRouter" value="&lt;b&gt;首行路由（路径判定）&lt;/b&gt;&lt;br&gt;A 自然语言需求 · B 旧 I2 回调&lt;br&gt;C RUN_EXECUTOR_BATCH_TICK&lt;br&gt;D I3 回调 · E /slot · F /repo-slot&lt;br&gt;G /timeout-executor · H /mission-stop" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffe599;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="520" y="120" width="340" height="100" as="geometry" />
         </mxCell>
         <mxCell id="dCreateChain" value="&lt;b&gt;建单链（Path A）&lt;/b&gt;&lt;br&gt;capture_origin.sh&lt;br&gt;→ prepare_downstream_payloads.sh / prepare_wiki_downstream_payloads.sh&lt;br&gt;→ run_agent_turn.sh（wiki 是唯一只读 GitLab 入口）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff2cc;strokeColor=#d6b656;fontSize=11;" vertex="1" parent="1">
@@ -79,7 +79,7 @@
         <mxCell id="eIntake" value="&lt;b&gt;Path C/E：run_driven_issue_batch.sh&lt;/b&gt;（intake）&lt;br&gt;GraphQL 分页发现 → 连续两次全扫一致 → 冻结 OPEN snapshot&lt;br&gt;→ 幂等 batch + 内嵌 tick&lt;br&gt;→ emit_driven_batch_acceptance.sh 严格五字段 acceptance" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1120" y="430" width="420" height="110" as="geometry" />
         </mxCell>
-        <mxCell id="eSched" value="&lt;b&gt;共享严格 round-robin 调度器&lt;/b&gt;&lt;br&gt;claim fencing · 槽位上限（/slot）&lt;br&gt;acpx 上限（/timeout-executor）→ scheduler_state.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="eSched" value="&lt;b&gt;共享严格 round-robin 调度器&lt;/b&gt;&lt;br&gt;claim fencing · 并行仓库上限（/slot）&lt;br&gt;每仓库 Issue 上限（/repo-slot）&lt;br&gt;acpx 上限（/timeout-executor）→ scheduler_state.json" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1120" y="600" width="420" height="90" as="geometry" />
         </mxCell>
         <mxCell id="eSpawn" value="&lt;b&gt;spawn_grants（每 tick ≤1）→ sessions_spawn 串行&lt;/b&gt;&lt;br&gt;同一 secret-free bootstrap&lt;br&gt;3 次尝试 × 2s backoff → record_spawn" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1d5e7;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">

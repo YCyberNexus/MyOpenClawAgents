@@ -1,6 +1,6 @@
 # Trigger Commands
 
-`req_executor` accepts seven current trigger forms and one compatibility
+`req_executor` accepts eight current trigger forms and one compatibility
 command:
 
 - `RUN_SCHEDULED_ISSUE_CAMPAIGN`
@@ -8,6 +8,7 @@ command:
 - `RUN_DRIVEN_ISSUE_BATCH`
 - `RUN_EXECUTOR_BATCH_TICK`
 - `/slot <positive-integer>`
+- `/repo-slot <positive-integer>`
 - `/timeout-executor <60..18000 seconds|Nm|Nh>`
 - `/mission-stop <GitLab repository URL|group/project>`
 - `RUN_SINGLE_ISSUE`
@@ -33,11 +34,30 @@ Call `scripts/set_executor_slots.sh` with the complete message on stdin and
 return its sole compact JSON object. The wrapper persists `max_concurrency` as
 the parallel-repository ceiling in the executor-wide `scheduler_state.json`
 under `scheduler.lock`; every batch session sharing the same scheduler root
-uses that value. Issues in one repository stay serial. A decrease below the
-current active repository count is accepted without cancelling work:
+uses that value. A decrease below the current active repository count is
+accepted without cancelling work:
 `draining=true`, no new repository jobs are reserved, and the active set drains
 naturally to the new ceiling. The tracked `EXECUTOR_MAX_CONCURRENCY=10` remains
 the initialization default when no runtime value has been set.
+
+## Runtime Per-Repository Issue Control
+
+Exact form:
+
+```text
+/repo-slot <positive-integer>
+```
+
+Call `scripts/set_executor_repo_slots.sh` with the complete message on stdin and
+return its sole compact JSON object. The wrapper persists
+`max_issues_per_repository` in executor-wide scheduler state under
+`scheduler.lock`; every repository and batch session sharing the scheduler root
+uses it. The tracked `EXECUTOR_MAX_ISSUES_PER_REPOSITORY=1` keeps repository
+execution serial by default. A decrease does not cancel preparing or running
+jobs. The command reports draining when any repository's active physical job
+count, including reservations, exceeds the new ceiling. The next reservation
+pass returns excess tokenless reservations to pending and waits for excess
+started work to finish before granting replacements.
 
 ## Runtime ACPX Timeout Control
 
@@ -266,18 +286,20 @@ an older tombstone, including when the same job and numeric generation are
 reused with a new token. All conflicting outcome, runtime session, generation,
 token, or action evidence fails closed.
 
-The initial executor-wide concurrency is 3 unless deployment config overrides
-`EXECUTOR_MAX_CONCURRENCY`. `/slot` then persists the runtime ceiling in shared
-scheduler state. `EXECUTOR_ACPX_TIMEOUT_SECONDS` similarly initializes the
+The initial executor-wide repository concurrency is 10 unless deployment config
+overrides `EXECUTOR_MAX_CONCURRENCY`; the initial per-repository Issue limit is
+1 unless `EXECUTOR_MAX_ISSUES_PER_REPOSITORY` overrides it. `/slot` and
+`/repo-slot` then persist the corresponding runtime ceilings in shared scheduler
+state. `EXECUTOR_ACPX_TIMEOUT_SECONDS` similarly initializes the
 one-hour attempt cap, while `/timeout-executor` persists later values for future
-attempts. Multiple projects/batches share those slots. Grant
+attempts. Multiple projects/batches share those limits. Grant
 order is persisted scheduler order and must be consumed one item at a time;
 project grouping must not reorder it. Explicit process values for
 `EXECUTOR_SCHEDULER_ROOT` process values take precedence over config and are
 preserved consistently across intake, tick, top-up, and spawn recording, so one
 operation cannot split a batch across scheduler roots. A process/config
-`EXECUTOR_MAX_CONCURRENCY` initializes scheduler capacity only while no runtime
-`max_concurrency` has been persisted.
+`EXECUTOR_MAX_CONCURRENCY` and `EXECUTOR_MAX_ISSUES_PER_REPOSITORY` initialize
+scheduler capacity only while no corresponding runtime value has been persisted.
 Completed batches leave the hot `batch_order`; completed launch actions and
 delivered callbacks move to cold per-ID archives. Direct replay still resolves
 those records without making every periodic tick scan the full history.

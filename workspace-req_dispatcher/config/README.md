@@ -3,9 +3,9 @@
 本目录是 **部署期 pin（deployment-time pins）**：在每台部署 `req_dispatcher` 的 runner 上编辑一次。它们**不**由 trigger 输入生成，agent 运行时也**不**改写它们。
 
 标准入口 `skills/requirement_dispatch/scripts/source_dispatcher_env.sh` 会先加载 tracked `dispatcher.env`，再加载 ignored `dispatcher.local.env`（若存在）。当前部署要求 `WIKI_GITLAB_*` 明文保存在 tracked `dispatcher.env`；本机路径、临时 session 或调试网关仍放在 ignored `dispatcher.local.env`。
-基础配置加载不访问 executor state。只有执行和恢复路径额外 source `source_executor_timeout_budget.sh`，只读 `EXECUTOR_SCHEDULER_STATE_FILE` 并覆盖未来调用的派生外层预算；state 不存在、不可读或无效时失败关闭。I3 callback、建单及 `/slot`、`/timeout-executor` 控制路径不依赖这次读取，也不会访问或修改 OpenClaw 全局配置。
+基础配置加载不访问 executor state。只有执行和恢复路径额外 source `source_executor_timeout_budget.sh`，只读 `EXECUTOR_SCHEDULER_STATE_FILE` 并覆盖未来调用的派生外层预算；state 不存在、不可读或无效时失败关闭。I3 callback、建单及 `/slot`、`/repo-slot`、`/timeout-executor` 控制路径不依赖这次读取，也不会访问或修改 OpenClaw 全局配置。
 
-新部署必须先启动一次 req_executor scheduler/tick，或通过 `/slot`、`/timeout-executor` 初始化 scheduler state，再开放自然语言执行入口。这样执行路径不会在 state 路径错误时静默使用较短的 tracked 默认值。
+新部署必须先启动一次 req_executor scheduler/tick，或通过 `/slot`、`/repo-slot`、`/timeout-executor` 初始化 scheduler state，再开放自然语言执行入口。这样执行路径不会在 state 路径错误时静默使用较短的 tracked 默认值。
 
 ## `dispatcher.env`
 
@@ -20,7 +20,8 @@
 | `OPS_NOTIFY_CHANNEL` | 否 | 失败通知 channel = **企业微信群机器人 webhook URL**（http/https）。留空则不通知。消费方 `scripts/ops_notify.sh`（best-effort，发送失败不阻断失败路径；要换通知形态改该脚本）。 |
 | `DEFAULT_ENTRY_LABEL` | 否 | 仅当将来需要 `req_dispatcher` 向 git_issuer 显式指定执行器入口标签时用。默认空＝由 git_issuer 自决。 |
 | `DEFAULT_EXECUTOR_AGENT` | 是 | 默认执行器 agent。只有用户明确要求处理 issue 时才使用；所有形态合法的 GitLab project（`group/project`）未命中覆盖路由时都路由到这里，默认 `req_executor`。 |
-| `/slot` 目标 | 自动 | `/slot <正整数>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，调整该 executor 共享 scheduler 的并行仓库数上限；同仓库 Issue 串行，不按 project 路由表拆分命令。 |
+| `/slot` 目标 | 自动 | `/slot <正整数>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，调整该 executor 共享 scheduler 的并行仓库数上限，不按 project 路由表拆分命令。 |
+| `/repo-slot` 目标 | 自动 | `/repo-slot <正整数>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，调整每个仓库共享的 Issue 并发上限，默认值为 1。 |
 | `/timeout-executor` 目标 | 自动 | `/timeout-executor <时长>` 固定发送到 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，持久化 60 到 18000 秒的后续 attempt acpx 上限；支持裸秒数、`Ns`、`Nm`、`Nh`。 |
 | `DOWNSTREAM_AGENT_TIMEOUT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 调用下游 agent 时传给 `openclaw agent --timeout` 的配置下限，默认 `600`。若单次调用误传更短的 `AGENT_TIMEOUT_SECONDS`，脚本会提升到本值。 |
 | `EXECUTOR_AGENT_TIMEOUT_SECONDS` | 自动 | `scripts/run_agent_turn.sh` 调用 executor 目标时的专用超时下限，按 `acpx+3600` 派生；默认 `7200`。git_issuer 仍使用 `DOWNSTREAM_AGENT_TIMEOUT_SECONDS`。 |
@@ -123,7 +124,7 @@ openclaw config validate
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；104→114 回推固定使用协议 4 适配器，不改变 104 的 `2026.4.9` 或 114 的 `2026.6.1` 服务版本。首次发起一次通知后，在 114 执行 `openclaw devices list`，核对请求的设备、`operator` 角色和仅 `operator.write` scope，再执行 `openclaw devices approve <requestId>`；随后以同一 104 `OPENCLAW_STATE_DIR` 重试。114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数；`REPLY_NOTIFY_WATCHDOG_GRACE_SECONDS` 默认 `35` 且不得小于 `31`，用于握手与收尾，不计入114 agent 的业务执行时间。持久通知 drain 会把同一 `event_id` 哈希为固定 idempotencyKey，使 114 Gateway 在其幂等缓存有效窗口内合并短期恢复重试；超过缓存窗口的长时间停机恢复仍可能重新启动个人 agent。
 7. `DISPATCHER_CALLBACK_TARGET` 必须精确 pin 到 req_dispatcher 长期安全 session；蓝区固定为 `agent:req_dispatcher:main`，session 部分匹配 `^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`。不得留空或使用裸 agent/其他 agent，否则 batch intake 与旧 FIFO drain 会拒绝，req_executor 也会在 intake 与 delivery 双重拒绝。
 8. req_dispatcher 部署侧必须每分钟周期性唤醒 `RUN_EXECUTOR_BATCH_TICK`。该统一路径先恢复旧 single bridge 并排空升级前 FIFO，再发送 durable batch I1、修复 receipt/mirror，最后重试逐 Issue 通知；只建单请求不会进入 executor batch。
-9. req_executor 部署侧也必须每分钟在其 main session 唤醒 `RUN_EXECUTOR_BATCH_TICK`，让默认 10 个并行仓库的严格 round-robin 调度、handoff 导入和 callback outbox 在没有新聊天消息时持续恢复与补位。同仓库 Issue 始终串行。
+9. req_executor 部署侧也必须每分钟在其 main session 唤醒 `RUN_EXECUTOR_BATCH_TICK`，让默认 10 个并行仓库、默认每仓库 1 个 Issue 的严格 round-robin 调度、handoff 导入和 callback outbox 在没有新聊天消息时持续恢复与补位；每仓库上限可用 `/repo-slot` 在线调整。
 
 ## 与 acpx 工作区的差异
 

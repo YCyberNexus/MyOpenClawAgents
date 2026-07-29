@@ -78,8 +78,9 @@ executor 侧当前已落地、且容易被误当成"还没有"的能力：
   同一分支，已有的普通分支可迁移过去，迁移可重放。
 - **exact-SHA MR 校验** 与 **per-Issue callback outbox**：终态结果按 Issue 逐条投递，不做批量汇总投递。
 - **运行时控制**：`/slot <正整数>` 调所有 batch session 共享的并行仓库数上限，
+  `/repo-slot <正整数>` 调每个仓库的 Issue 并发上限（默认 1），
   `/timeout-executor <时长>` 调后续 attempt 的 acpx 上限（默认 `EXECUTOR_ACPX_TIMEOUT_SECONDS=3600`）。
-  两者都只走各自固定 wrapper，**不改配置文件、不手写 scheduler JSON**。
+  三者都只走各自固定 wrapper，**不改配置文件、不手写 scheduler JSON**。
 
 **执行身份（execution identity）**：attempt 级的文件系统隔离已被取消。worktree、output 目录和本地
 Git 分支现在**按 Issue 固定**；每次运行只拿一个随机不透明的 `execution_id` + 独立 log 目录 + 不可变
@@ -159,7 +160,7 @@ for t in workspace-req_dispatcher/skills/requirement_dispatch/tests/test_*.sh; d
 done
 ```
 
-测试规模（改脚本时按这个量级预期回归成本）：`req_executor` 64 个、`req_dispatcher` 41 个、
+测试规模（改脚本时按这个量级预期回归成本）：`req_executor` 67 个、`req_dispatcher` 43 个、
 `git_issuer` 4 个。
 
 改 `req_dispatcher` 脚本至少要过 `test_driven_batch_simulated_flow.sh` 和
@@ -175,7 +176,7 @@ done
 | 执行身份 / 日志归档 | `test_execution_identity_migration.sh`、`test_archive_execution_logs.sh`、`test_stage_and_guard_ignores_logs.sh` |
 | 依赖 / 共享分支 | `test_shared_dependency_branch.sh`、`test_migrate_shared_dependency_head.sh`、`test_recover_shared_mr_finalization.sh` |
 | MR / 合并 / 标签 | `test_phase6_auto_merge.sh`、`test_merge_mr.sh`、`test_set_issue_label_finish_guard.sh` |
-| 运行时控制命令 | `test_set_executor_slots.sh`、`test_set_executor_acpx_timeout.sh`、`test_executor_concurrency_override.sh` |
+| 运行时控制命令 | `test_set_executor_slots.sh`、`test_set_executor_repo_slots.sh`、`test_repository_configurable_scheduler.sh`、`test_set_executor_acpx_timeout.sh`、`test_executor_concurrency_override.sh` |
 | GitLab token / 网络守卫 | `test_gitlab_token_source_order.sh`、`test_git_network_guard_all_callers.sh`、`test_glab_auth_local_fail_closed.sh` |
 
 ## Code review 循环

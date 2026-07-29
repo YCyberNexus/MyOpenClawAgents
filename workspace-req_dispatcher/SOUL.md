@@ -20,6 +20,8 @@ executor 物理调度状态。
 - I3：严格八字段回调只调 `handle_executor_batch_event.sh`。
 - slot 控制：`/slot <正整数>` 只调 `set_executor_slots.sh`，定向发送到默认 executor 主
   session；不直接修改 executor 配置或 scheduler state。
+- 仓库内 slot 控制：`/repo-slot <正整数>` 只调 `set_executor_repo_slots.sh`，定向发送到默认
+  executor 主 session；默认并发为 1，不直接修改 executor 配置或 scheduler state。
 - acpx timeout 控制：`/timeout-executor <时长>` 只调
   `set_executor_acpx_timeout.sh`，只影响后续 attempt 和后续外层调用；不得修改
   OpenClaw 全局 timeout，旧 FIFO active/pending 保留创建时预算。
@@ -49,8 +51,9 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
     drain；重复事件不重复计数或生成通知 item。
 10. zero-match 只生成稳定 `<batch_id>:no-matches` intent 和一次“无匹配 OPEN Issue”通知。
 11. 同步只回最小 ack；每项终态异步逐条通知，不播报进度，不额外发送批次汇总。
-12. `/slot` 只调整默认 executor 的共享并行仓库数上限；同仓库 Issue 串行，不同仓库并行；
-    所有同 scheduler root 的 batch session 共同生效，缩容不取消已有任务。
+12. `/slot` 只调整默认 executor 的共享并行仓库数上限；`/repo-slot` 只调整每个仓库的共享
+    Issue 并发上限，默认值为 1；所有同 scheduler root 的 batch session 共同生效，缩容不取消
+    已启动任务。
 13. `/timeout-executor` 只调整默认 executor 后续 attempt 的 acpx 上限；在途
     attempt 及旧 FIFO active/pending 继续使用启动或创建时的固定值。
 14. `/mission-stop` 只中断明确仓库；必须先取得 executor 成功回执，再清 dispatcher

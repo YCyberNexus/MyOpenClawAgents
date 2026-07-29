@@ -21,6 +21,7 @@ EOF
 out="$(CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env.sh")"
 jq -e '
   .max_concurrency == 3
+  and .max_issues_per_repository == 1
   and .acpx_timeout_seconds == 3600
   and (.scheduler_root | endswith("/_scheduler"))
 ' <<<"${out}" >/dev/null
@@ -116,6 +117,11 @@ jq -e '.job_id == "history-104:snapshot-0" and .recorded_at == 104' \
 
 if CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_MAX_CONCURRENCY=0 bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null 2>&1; then
   echo 'expected invalid concurrency to fail' >&2
+  exit 1
+fi
+if CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_MAX_ISSUES_PER_REPOSITORY=0 \
+    bash "${SKILL_DIR}/scripts/scheduler_env.sh" >/dev/null 2>&1; then
+  echo 'expected invalid per-repository concurrency to fail' >&2
   exit 1
 fi
 for invalid_timeout in 59 18001 invalid; do
@@ -247,9 +253,11 @@ jq -e \
   '.scheduler_root == $root and .scheduler_state_file == ($root + "/scheduler_state.json")' \
   <<<"${normalized_out}" >/dev/null
 
-jq -e '.max_concurrency == 7 and .acpx_timeout_seconds == 7200' <<<"$(
+jq -e '.max_concurrency == 7 and .max_issues_per_repository == 4
+  and .acpx_timeout_seconds == 7200' <<<"$(
   CONFIG_DIR="${CONFIG_DIR}" \
   EXECUTOR_MAX_CONCURRENCY=7 \
+  EXECUTOR_MAX_ISSUES_PER_REPOSITORY=4 \
   EXECUTOR_ACPX_TIMEOUT_SECONDS=7200 \
   bash "${SKILL_DIR}/scripts/scheduler_env.sh"
 )" >/dev/null
@@ -258,6 +266,7 @@ LOCAL_SCHEDULER_ROOT="${TEST_ROOT}/local/_scheduler"
 cat >"${CONFIG_DIR}/campaign_defaults.local.env" <<EOF
 EXECUTOR_SCHEDULER_ROOT=${LOCAL_SCHEDULER_ROOT}
 EXECUTOR_MAX_CONCURRENCY=5
+EXECUTOR_MAX_ISSUES_PER_REPOSITORY=2
 EXECUTOR_ACPX_TIMEOUT_SECONDS=5400
 EOF
 
@@ -265,12 +274,15 @@ local_out="$(CONFIG_DIR="${CONFIG_DIR}" bash "${SKILL_DIR}/scripts/scheduler_env
 jq -e \
   --arg root "${LOCAL_SCHEDULER_ROOT}" \
   '.scheduler_root == $root and .max_concurrency == 5
+    and .max_issues_per_repository == 2
     and .acpx_timeout_seconds == 5400' \
   <<<"${local_out}" >/dev/null
 
-jq -e '.max_concurrency == 7 and .acpx_timeout_seconds == 7200' <<<"$(
+jq -e '.max_concurrency == 7 and .max_issues_per_repository == 6
+  and .acpx_timeout_seconds == 7200' <<<"$(
   CONFIG_DIR="${CONFIG_DIR}" \
   EXECUTOR_MAX_CONCURRENCY=7 \
+  EXECUTOR_MAX_ISSUES_PER_REPOSITORY=6 \
   EXECUTOR_ACPX_TIMEOUT_SECONDS=7200 \
   bash "${SKILL_DIR}/scripts/scheduler_env.sh"
 )" >/dev/null

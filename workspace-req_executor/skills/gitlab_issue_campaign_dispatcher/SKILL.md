@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-29.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler that serializes Issues per GitLab repository while running distinct repositories in parallel, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-29.2] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler with independent parallel-repository and per-repository Issue ceilings (the latter defaults to serial), crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -23,10 +23,12 @@ allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, sub
   `scripts/run_single_issue_batch.sh`.
 - A message whose first line starts with `/slot` → Path F → only wrapper is
   `scripts/set_executor_slots.sh`; the wrapper validates the complete message.
-- A message whose first line starts with `/timeout-executor` → Path G → only
+- A message whose first line starts with `/repo-slot` → Path G → only wrapper is
+  `scripts/set_executor_repo_slots.sh`; the wrapper validates the complete message.
+- A message whose first line starts with `/timeout-executor` → Path H → only
   wrapper is `scripts/set_executor_acpx_timeout.sh`; the wrapper validates the
   complete message and changes only future attempts.
-- A message whose first line starts with `/mission-stop` → Path H → only
+- A message whose first line starts with `/mission-stop` → Path I → only
   wrapper is `scripts/stop_repository_mission.sh`; the wrapper validates the
   complete message and durably fences one repository before runtime cleanup.
 - Exact `RUN_SCHEDULED_ISSUE_CAMPAIGN` → Path A → first wrapper is
@@ -420,10 +422,12 @@ non-advancing/unsafe cursors and bounded-scan overflow, requires two consecutive
 normalized full scans to agree before freezing, OPEN filtering, immutable snapshot creation,
 batch idempotency, strict round-robin reservation, live preflight, claim
 allocation and binding, claim-0 skips, project handoff import, and outbox drain.
-The scheduler ceiling counts distinct repositories. A project topup derives
-`max_concurrent_subagents` and `hourly_issue_quota` from its already-authorized
-grant count, never from the executor-wide `/slot` value; normal state therefore
-uses `1` and cannot turn repository capacity into same-repository concurrency.
+The `/slot` scheduler ceiling counts distinct repositories; the independent
+`/repo-slot` ceiling caps active physical Issue jobs per repository and defaults
+to `1`. A project topup derives `max_concurrent_subagents` and
+`hourly_issue_quota` from its already-authorized grant count, never directly
+from either runtime ceiling, so only scheduler-authorized per-repository capacity
+can become same-repository subagent concurrency.
 The agent-wide topup transaction processes at most 256 candidate jobs and 32
 skip-refill rounds under a 90-second phase deadline; each project topup process
 also has a 75-second wall-clock cap. Every child process and nested scheduler or
@@ -431,8 +435,9 @@ launch-coordinator lock uses the smaller of its own cap and the remaining phase
 budget. Reaching an outer budget releases the lock and leaves unprocessed
 reserved jobs for the next tick.
 Dependency-only deferrals are transactionally returned to `retry_wait` after
-ordinary skip/refill processing. They do not retain a repository slot, and normal
-pending/lazy snapshot work is reserved before retrying those deferred entries.
+ordinary skip/refill processing. They do not retain active Issue capacity (or a
+repository slot when no other Issue remains), and normal pending/lazy snapshot
+work is reserved before retrying those deferred entries.
 The external I1 shape is the selector and callback-routing schema documented in
 `references/trigger_command.md`. The wrapper resolves `GITLAB_TOKEN` using the
 standard source precedence and injects it privately into fixed outer scripts.
@@ -666,12 +671,31 @@ The wrapper accepts exactly `/slot` followed by one positive decimal integer.
 It updates the executor-wide `max_concurrency`, whose value is the maximum
 number of parallel GitLab repositories, in shared scheduler state under the
 scheduler lock. Every batch session using the same `EXECUTOR_SCHEDULER_ROOT`
-observes the new value. One repository runs at most one Issue at a time.
-Lowering the ceiling does not cancel running jobs; reservation stays at
-capacity until the active repository count naturally falls below the new
-value. The LLM never edits `scheduler_state.json` or deployment config itself.
+observes the new value. This command does not change the separate
+per-repository Issue limit. Lowering the ceiling does not cancel running jobs;
+reservation stays at capacity until the active repository count naturally
+falls below the new value. The LLM never edits `scheduler_state.json` or
+deployment config itself.
 
-### Path G — `/timeout-executor <duration>` runtime control
+### Path G — `/repo-slot <slot-number>` runtime control
+
+```
+1. cd "${SKILL_DIR}" && bash scripts/set_executor_repo_slots.sh <<'REPO_SLOT_EOF' → result
+   <verbatim complete /repo-slot message>
+   REPO_SLOT_EOF
+2. Return the wrapper's sole compact JSON object without prose or Markdown.
+```
+
+The wrapper accepts exactly `/repo-slot` followed by one positive decimal
+integer. It updates the executor-wide `max_issues_per_repository` under the
+scheduler lock and mirrors it into a recoverable pending transaction. Every
+repository and batch session sharing the scheduler root observes the new value;
+the tracked initialization default is `1`. Raising it permits independent IIDs
+from one repository to run concurrently in their per-Issue worktrees. Lowering
+it does not cancel preparing or running jobs: the next reservation pass returns
+excess tokenless reservations to pending and started work drains naturally.
+
+### Path H — `/timeout-executor <duration>` runtime control
 
 ```
 1. cd "${SKILL_DIR}" && bash scripts/set_executor_acpx_timeout.sh <<'TIMEOUT_EOF' → result
@@ -690,7 +714,7 @@ executor turn, exec tool, legacy queue reclaim, and stuck eviction budgets used
 by req_dispatcher on later calls. It never changes OpenClaw global
 `runTimeoutSeconds`. The tracked initialization default is one hour.
 
-### Path H — `/mission-stop <repository>` repository interruption
+### Path I — `/mission-stop <repository>` repository interruption
 
 ```
 1. cd "${SKILL_DIR}" && bash scripts/stop_repository_mission.sh <<'STOP_EOF' → envelope
@@ -712,7 +736,8 @@ state failed, archives hot launch actions, clears project pending state, and
 returns only exact runtime cleanup identities. It never deletes audit evidence.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
-the next tick imports it, releases the repository slot, fans out every attached
+the next tick imports it, releases that Issue's repository-local capacity (and
+the repository slot when it was the last active Issue), fans out every attached
 batch membership, and retries each I3 outbox item until the dispatcher returns
 the matching accepted acknowledgement. Callback delivery is never a best-effort
 direct send from the LLM. Each drain has a bounded send budget and persists

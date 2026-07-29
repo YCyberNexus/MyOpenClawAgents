@@ -35,8 +35,29 @@ wrapper 严格校验完整消息，把规范化命令发送到
 `agent:${DEFAULT_EXECUTOR_AGENT}:main`，并只接受 executor 的严格六字段成功对象：
 `status,parallel_project_limit,previous_parallel_project_limit,active_project_count,available_project_slots,draining`。该命令调整的是
 目标 executor 的共享并行仓库数上限，不是当前 dispatcher 或某个 batch session 的私有并发。
-同一 GitLab 仓库的 Issue 串行，不同仓库可并行；未设置运行时值时默认上限为 10。
+不同仓库可并行；未设置运行时值时默认仓库数上限为 10。仓库内 Issue 并发由下面独立的
+`/repo-slot` 控制，默认值为 1。
 `draining=true` 表示缩容值低于当前活跃仓库数；已有任务继续运行，新仓库 reservation 暂停。
+
+### 运行时每仓库 Issue 并发配置
+
+用户命令固定为：
+
+```text
+/repo-slot <正整数>
+```
+
+首行以 `/repo-slot` 开始时调用：
+
+```bash
+MESSAGE='<完整原文>' bash scripts/set_executor_repo_slots.sh
+```
+
+wrapper 严格校验完整消息，把规范化命令发送到默认 executor 主 session，并只接受严格七字段
+成功对象：`status,per_repository_issue_limit,previous_per_repository_issue_limit,
+active_repository_count,active_issue_count,over_limit_repository_count,draining`。
+该命令调整所有仓库共享的“每仓库 Issue 并发上限”，默认值为 1；不改变 `/slot` 的并行仓库数。
+在线调低不取消已启动任务，executor 下一 tick 只回收未启动的多余 reservation。
 
 ### 运行时 acpx timeout 配置
 

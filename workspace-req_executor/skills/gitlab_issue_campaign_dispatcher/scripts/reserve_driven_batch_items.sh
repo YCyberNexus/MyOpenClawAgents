@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Reserve executor-wide repository slots with a persistent strict round-robin
-# cursor. At most one active Issue may own a repository at a time; distinct
-# repositories may run in parallel up to the configured ceiling. The scheduler
-# lock covers JSON state transitions only; this script never calls GitLab,
-# clone helpers, project wrappers, or OpenClaw.
+# cursor. Distinct repositories may run in parallel up to one configured
+# ceiling, and each active repository may own Issues up to a second configured
+# ceiling. The scheduler lock covers JSON state transitions only; this script
+# never calls GitLab, clone helpers, project wrappers, or OpenClaw.
 set -euo pipefail
 
 RESERVE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -754,19 +754,38 @@ for expired_job_id in "${EXPIRED_PREPARING_JOB_IDS[@]}"; do
   SCHEDULER_CHANGED=true
 done
 
-# Upgrade compatibility: older scheduler versions could reserve several Issues
-# from one repository before any of them launched. Keep at most the oldest
-# reserved job when the repository has no preparing/running owner; otherwise
-# release every reserved job for that repository. Running work is never
-# cancelled, and the normal repository barrier prevents replacements until it
-# drains. Reset every attached membership so dedup can rebuild it safely.
-mapfile -t REDUNDANT_RESERVED_JOB_IDS < <(jq -r '
+# Resolve both runtime limits before reconciling reservations. The repository
+# limit counts distinct active projects; the per-repository limit counts active
+# physical Issue jobs within each project.
+SCHEDULER_MAX_CONCURRENCY="$(jq -er \
+  --argjson configured_max "${EXECUTOR_MAX_CONCURRENCY}" '
+  (.max_concurrency // $configured_max)
+  | if type == "number" and . == floor and . > 0
+    then . else error("invalid max_concurrency") end
+' <<<"${SCHEDULER_STATE}")" \
+  || reserve_die "scheduler max_concurrency is invalid" 3
+SCHEDULER_MAX_ISSUES_PER_REPOSITORY="$(jq -er \
+  --argjson configured_max "${EXECUTOR_MAX_ISSUES_PER_REPOSITORY}" '
+  (.max_issues_per_repository // $configured_max)
+  | if type == "number" and . == floor and . > 0
+    then . else error("invalid max_issues_per_repository") end
+' <<<"${SCHEDULER_STATE}")" \
+  || reserve_die "scheduler max_issues_per_repository is invalid" 3
+
+# Runtime shrink and rolling-upgrade reconciliation never cancels preparing or
+# running work. For each repository, retain only the oldest reserved jobs that
+# still fit beside started jobs and return every excess reservation to pending.
+# The default limit of one preserves repository-serial behavior.
+mapfile -t REDUNDANT_RESERVED_JOB_IDS < <(jq -r \
+  --argjson per_repository_limit "${SCHEDULER_MAX_ISSUES_PER_REPOSITORY}" '
   [.active_jobs | to_entries[]]
   | sort_by(.value.project, .value.reservation_seq, .key)
   | group_by(.value.project)[]
   | ([.[] | select(.value.status != "reserved")] | length) as $started_count
   | [.[] | select(.value.status == "reserved")] as $reserved
-  | if $started_count > 0 then $reserved[] else $reserved[1:][] end
+  | (($per_repository_limit - $started_count)
+      | if . > 0 then . else 0 end) as $keep_count
+  | $reserved[$keep_count:][]
   | .key
 ' <<<"${SCHEDULER_STATE}")
 for redundant_job_id in "${REDUNDANT_RESERVED_JOB_IDS[@]}"; do
@@ -810,13 +829,6 @@ for redundant_job_id in "${REDUNDANT_RESERVED_JOB_IDS[@]}"; do
 done
 
 ACTIVE_COUNT="$(jq -r '[.active_jobs[].project] | unique | length' <<<"${SCHEDULER_STATE}")"
-SCHEDULER_MAX_CONCURRENCY="$(jq -er \
-  --argjson configured_max "${EXECUTOR_MAX_CONCURRENCY}" '
-  (.max_concurrency // $configured_max)
-  | if type == "number" and . == floor and . > 0
-    then . else error("invalid max_concurrency") end
-' <<<"${SCHEDULER_STATE}")" \
-  || reserve_die "scheduler max_concurrency is invalid" 3
 if [ "${ACTIVE_COUNT}" -ge "${SCHEDULER_MAX_CONCURRENCY}" ]; then
   AVAILABLE_SLOTS=0
 else
@@ -1026,10 +1038,9 @@ while [ "${batch_order_length}" -gt 0 ]; do
       fi
     fi
 
-    # A repository already owned by another active Issue is a serial barrier.
-    # Keep this membership pending until that Issue reaches a terminal/release
-    # transition. Choosing the oldest owner makes the blocker deterministic
-    # even while legacy pre-upgrade state drains multiple jobs for one project.
+    # Enforce the per-repository Issue ceiling. Choosing the oldest owner makes
+    # the blocker deterministic while a repository is full or draining after a
+    # runtime shrink. The default ceiling of one is the serial behavior.
       project_jobs="$(jq -c \
         --arg project "${project}" '
         [.active_jobs | to_entries[]
@@ -1037,7 +1048,7 @@ while [ "${batch_order_length}" -gt 0 ]; do
         | sort_by(.value.reservation_seq, .key)
       ' <<<"${SCHEDULER_STATE}")"
       project_job_count="$(jq -r 'length' <<<"${project_jobs}")"
-      if [ "${project_job_count}" -gt 0 ]; then
+      if [ "${project_job_count}" -ge "${SCHEDULER_MAX_ISSUES_PER_REPOSITORY}" ]; then
         active_job_id="$(jq -r '.[0].key' <<<"${project_jobs}")"
         old_blocker="$(jq -r --arg index "${pending_index}" \
           '.memberships[$index].blocked_by_job_id // empty' <<<"${batch_state}")"
@@ -1063,10 +1074,12 @@ while [ "${batch_order_length}" -gt 0 ]; do
         break
       fi
 
-    # A new physical job consumes one repository slot. If no repository slot
-    # is free, leave a lazy snapshot item untouched so next_snapshot_index
-    # remains a true claim cursor rather than merely a scan cursor.
-      if [ "${AVAILABLE_SLOTS}" -le 0 ]; then
+    # The first active Issue for a project consumes a repository slot. Further
+    # Issues consume only that project's per-repository capacity. If a new
+    # project cannot enter, leave a lazy snapshot item untouched so
+    # next_snapshot_index remains a true claim cursor rather than a scan cursor.
+      if [ "${project_job_count}" -eq 0 ] \
+          && [ "${AVAILABLE_SLOTS}" -le 0 ]; then
         break
       fi
 
@@ -1160,8 +1173,10 @@ while [ "${batch_order_length}" -gt 0 ]; do
     CHANGED_BATCHES["${batch_id}"]=1
     SCHEDULER_CHANGED=true
     PASS_PROGRESS=true
-    ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
-      AVAILABLE_SLOTS=$((AVAILABLE_SLOTS - 1))
+      if [ "${project_job_count}" -eq 0 ]; then
+        ACTIVE_COUNT=$((ACTIVE_COUNT + 1))
+        AVAILABLE_SLOTS=$((AVAILABLE_SLOTS - 1))
+      fi
       break
     done
   done
@@ -1223,10 +1238,12 @@ jq -cn \
   --argjson active_count "${ACTIVE_COUNT}" \
   --argjson available_slots "${AVAILABLE_SLOTS}" \
   --argjson max_concurrency "${SCHEDULER_MAX_CONCURRENCY}" \
+  --argjson max_issues_per_repository "${SCHEDULER_MAX_ISSUES_PER_REPOSITORY}" \
   '{
     status:$status,
     grants:$grants,
     active_count:$active_count,
     available_slots:$available_slots,
-    max_concurrency:$max_concurrency
+    max_concurrency:$max_concurrency,
+    max_issues_per_repository:$max_issues_per_repository
   }'

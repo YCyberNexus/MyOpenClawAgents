@@ -67,6 +67,7 @@ write_fake scheduler_env.sh '
 printf "%s\n" scheduler_env >>"${ORDER_LOG}"
 export EXECUTOR_SCHEDULER_ROOT="${SCHEDULER_ROOT}"
 export EXECUTOR_MAX_CONCURRENCY=3
+export EXECUTOR_MAX_ISSUES_PER_REPOSITORY=1
 export SCHEDULER_STATE_FILE="${SCHEDULER_ROOT}/scheduler_state.json"
 export SCHEDULER_LOCK_FILE="${SCHEDULER_ROOT}/scheduler.lock"
 export BATCHES_ROOT="${SCHEDULER_ROOT}/batches"

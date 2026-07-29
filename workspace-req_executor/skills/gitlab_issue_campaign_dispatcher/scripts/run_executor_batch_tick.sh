@@ -71,6 +71,8 @@ SCHEDULER_ROOT_PROCESS_SET="${EXECUTOR_SCHEDULER_ROOT+x}"
 SCHEDULER_ROOT_PROCESS_OVERRIDE="${EXECUTOR_SCHEDULER_ROOT:-}"
 MAX_CONCURRENCY_PROCESS_SET="${EXECUTOR_MAX_CONCURRENCY+x}"
 MAX_CONCURRENCY_PROCESS_OVERRIDE="${EXECUTOR_MAX_CONCURRENCY:-}"
+ISSUES_PER_REPOSITORY_PROCESS_SET="${EXECUTOR_MAX_ISSUES_PER_REPOSITORY+x}"
+ISSUES_PER_REPOSITORY_PROCESS_OVERRIDE="${EXECUTOR_MAX_ISSUES_PER_REPOSITORY:-}"
 ACPX_TIMEOUT_PROCESS_SET="${EXECUTOR_ACPX_TIMEOUT_SECONDS+x}"
 ACPX_TIMEOUT_PROCESS_OVERRIDE="${EXECUTOR_ACPX_TIMEOUT_SECONDS:-}"
 RUNNING_LEASE_PROCESS_SET="${EXECUTOR_RUNNING_LEASE_SECONDS+x}"
@@ -110,6 +112,9 @@ if [ "${SCHEDULER_ROOT_PROCESS_SET}" = x ]; then
 fi
 if [ "${MAX_CONCURRENCY_PROCESS_SET}" = x ]; then
   EXECUTOR_MAX_CONCURRENCY="${MAX_CONCURRENCY_PROCESS_OVERRIDE}"
+fi
+if [ "${ISSUES_PER_REPOSITORY_PROCESS_SET}" = x ]; then
+  EXECUTOR_MAX_ISSUES_PER_REPOSITORY="${ISSUES_PER_REPOSITORY_PROCESS_OVERRIDE}"
 fi
 if [ "${ACPX_TIMEOUT_PROCESS_SET}" = x ]; then
   EXECUTOR_ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_PROCESS_OVERRIDE}"
@@ -1123,6 +1128,7 @@ resume_durable_launch_actions() {
       REPO_PARENT_PATH="${REPO_PARENT_BASE}" \
       EXECUTOR_SCHEDULER_ROOT="${EXECUTOR_SCHEDULER_ROOT}" \
       EXECUTOR_MAX_CONCURRENCY="${EXECUTOR_MAX_CONCURRENCY}" \
+      EXECUTOR_MAX_ISSUES_PER_REPOSITORY="${EXECUTOR_MAX_ISSUES_PER_REPOSITORY}" \
       bash "${RESUME_SPAWN_CMD}" 2>/dev/null)"
     resume_rc=$?
     set -e
@@ -1620,6 +1626,9 @@ if [ "${RESERVE_RC}" -ne 0 ] || ! RESERVE_JSON="$(printf '%s' "${RESERVE_OUTPUT}
       and (.available_slots | type == "number" and . == floor and . >= 0)
       and ((has("max_concurrency") | not)
         or (.max_concurrency | type == "number" and . == floor and . > 0))
+      and ((has("max_issues_per_repository") | not)
+        or (.max_issues_per_repository | type == "number"
+          and . == floor and . > 0))
     then . else error("invalid reserve envelope") end
   ' 2>/dev/null)"; then
   RESERVE_FAILURE_STATUS=failed
@@ -1643,6 +1652,11 @@ fi
 if [ "$(jq -r 'has("max_concurrency")' <<<"${RESERVE_JSON}")" = true ]; then
   EXECUTOR_MAX_CONCURRENCY="$(jq -r '.max_concurrency' <<<"${RESERVE_JSON}")"
   export EXECUTOR_MAX_CONCURRENCY
+fi
+if [ "$(jq -r 'has("max_issues_per_repository")' <<<"${RESERVE_JSON}")" = true ]; then
+  EXECUTOR_MAX_ISSUES_PER_REPOSITORY="$(jq -r \
+    '.max_issues_per_repository' <<<"${RESERVE_JSON}")"
+  export EXECUTOR_MAX_ISSUES_PER_REPOSITORY
 fi
 append_operation "$(jq -cn --argjson reserve "${RESERVE_JSON}" '{
   operation:"reservation",status:$reserve.status,
@@ -1731,8 +1745,8 @@ if [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
   exit 0
 fi
 
-# Running physical jobs already occupy their repository slot. Re-present them to their
-# project campaign so a prior blocked/retry terminal can prepare its next
+# Running physical jobs already occupy repository-local Issue capacity.
+# Re-present them to their project campaign so a prior blocked/retry terminal can prepare its next
 # attempt without consuming a new reservation or creating another physical job.
 if ! active_lock_timeout="$(remaining_topup_seconds 5)"; then
   active_lock_timeout=1
@@ -1834,6 +1848,7 @@ topup_candidate_set() {
       REPO_PARENT_PATH="${REPO_PARENT_BASE}" \
       EXECUTOR_SCHEDULER_ROOT="${EXECUTOR_SCHEDULER_ROOT}" \
       EXECUTOR_MAX_CONCURRENCY="${EXECUTOR_MAX_CONCURRENCY}" \
+      EXECUTOR_MAX_ISSUES_PER_REPOSITORY="${EXECUTOR_MAX_ISSUES_PER_REPOSITORY}" \
       EXECUTOR_ACPX_TIMEOUT_SECONDS="${EXECUTOR_ACPX_TIMEOUT_SECONDS:-3600}" \
       EXECUTOR_RUNNING_LEASE_SECONDS="${EXECUTOR_RUNNING_LEASE_SECONDS}" \
       timeout --kill-after=1s "${topup_timeout}s" \
@@ -2199,7 +2214,8 @@ import_candidate_skips() {
 
 import_candidate_skips "${CANDIDATES}"
 
-# A successful synthetic terminal frees a repository slot immediately. Re-run
+# A successful synthetic terminal frees repository-local Issue capacity (and
+# possibly the last repository slot) immediately. Re-run
 # the strict scheduler reservation and project preflight in the same tick until
 # a refill round contains no further skip. The outer deadline, round cap, and
 # item cap keep this agent-wide lock independent of the total batch size;
@@ -2243,6 +2259,9 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
         and (.available_slots | type == "number" and . == floor and . >= 0)
         and ((has("max_concurrency") | not)
           or (.max_concurrency | type == "number" and . == floor and . > 0))
+        and ((has("max_issues_per_repository") | not)
+          or (.max_issues_per_repository | type == "number"
+            and . == floor and . > 0))
       then . else error("invalid refill envelope") end
     ' 2>/dev/null)"; then
     REFILL_FAILURE_STATUS=refill_failed
@@ -2260,6 +2279,11 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
   if [ "$(jq -r 'has("max_concurrency")' <<<"${REFILL_JSON}")" = true ]; then
     EXECUTOR_MAX_CONCURRENCY="$(jq -r '.max_concurrency' <<<"${REFILL_JSON}")"
     export EXECUTOR_MAX_CONCURRENCY
+  fi
+  if [ "$(jq -r 'has("max_issues_per_repository")' <<<"${REFILL_JSON}")" = true ]; then
+    EXECUTOR_MAX_ISSUES_PER_REPOSITORY="$(jq -r \
+      '.max_issues_per_repository' <<<"${REFILL_JSON}")"
+    export EXECUTOR_MAX_ISSUES_PER_REPOSITORY
   fi
   append_operation "$(jq -cn --argjson reserve "${REFILL_JSON}" '{
     operation:"reservation",status:$reserve.status,

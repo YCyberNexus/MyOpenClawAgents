@@ -18,9 +18,11 @@ spawn. The global launch gate must not return early forever and thereby prevent
 its own lease recovery.
 `/slot <positive-integer>` means Path F and calls only
 `set_executor_slots.sh`; the model never edits scheduler state directly.
-`/timeout-executor <duration>` means Path G and calls only
+`/repo-slot <positive-integer>` means Path G and calls only
+`set_executor_repo_slots.sh`; it changes the shared per-repository Issue limit.
+`/timeout-executor <duration>` means Path H and calls only
 `set_executor_acpx_timeout.sh`; it affects future attempts, not active work.
-`/mission-stop <repository>` means Path H and calls only
+`/mission-stop <repository>` means Path I and calls only
 `stop_repository_mission.sh`; it durably fences the repository chain before
 the orchestrator performs the wrapper's exact best-effort runtime kills.
 
@@ -38,10 +40,13 @@ authorize scheduler mutation or manual runtime recovery; an ambiguous emitted
 spawn is reconciled only when Path D returns the fixed runtime-evidence action.
 
 The executor-wide repository-slot ceiling is runtime state shared by every
-batch session under one `EXECUTOR_SCHEDULER_ROOT`. At most one Issue per GitLab
-repository may be active, while distinct repositories run in parallel.
-Lowering the ceiling does not cancel existing work; new repository reservations
-pause until the active repository count falls below the new ceiling.
+batch session under one `EXECUTOR_SCHEDULER_ROOT`. A second shared runtime value
+caps active Issues per GitLab repository and defaults to `1`, so deployments
+remain serial until `/repo-slot` raises it. Distinct repositories run in
+parallel up to `/slot`; each active repository runs up to `/repo-slot` Issues.
+Lowering either ceiling does not cancel started work. New reservations pause
+at the affected boundary while excess started work drains naturally; excess
+tokenless reservations are safely returned to pending by the next tick.
 The executor-wide acpx cap is also shared runtime state. Its tracked default is
 one hour and `/timeout-executor` may set 60 seconds through 5 hours without editing
 the skill or deployment files. req_dispatcher derives future outer deadlines

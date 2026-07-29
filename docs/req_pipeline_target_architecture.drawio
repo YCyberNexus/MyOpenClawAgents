@@ -64,7 +64,7 @@
           <mxGeometry x="900" y="300" width="460" height="430" as="geometry" />
         </mxCell>
 
-        <mxCell id="nSlot" value="&lt;b&gt;SlotPoolWorkflow&lt;/b&gt;（单例）&lt;br&gt;全局槽位租约&lt;br&gt;等待队列按 project 分桶轮转&lt;br&gt;/slot &amp;lt;n&amp;gt; → signal 立即生效&lt;br&gt;&lt;i&gt;缩容不取消在途&lt;/i&gt;&lt;br&gt;历史用 continue_as_new 截断" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8dff0;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="nSlot" value="&lt;b&gt;SlotPoolWorkflow&lt;/b&gt;（单例）&lt;br&gt;并行仓库 + 每仓库 Issue 租约&lt;br&gt;等待队列按 project 分桶轮转&lt;br&gt;/slot &amp;lt;n&amp;gt; · /repo-slot &amp;lt;n&amp;gt; → signal 立即生效&lt;br&gt;&lt;i&gt;缩容不取消在途&lt;/i&gt;&lt;br&gt;历史用 continue_as_new 截断" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8dff0;strokeColor=#9673a6;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1400" y="300" width="280" height="190" as="geometry" />
         </mxCell>
 
