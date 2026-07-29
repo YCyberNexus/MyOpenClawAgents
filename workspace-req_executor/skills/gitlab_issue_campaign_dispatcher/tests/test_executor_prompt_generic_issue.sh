@@ -129,6 +129,13 @@ do
   fi
 done
 
+grep -Fq 'Do NOT request nested worktree or branch isolation' "${BUILD_PROMPT}" \
+  || fail "inner Claude Code prompt must forbid nested worktree isolation"
+grep -Fq 'isolation: "worktree"' "${BUILD_PROMPT}" \
+  || fail "inner Claude Code prompt must name the forbidden Task isolation argument"
+grep -Fq 'omit the isolation field' "${BUILD_PROMPT}" \
+  || fail "inner Claude Code prompt must tell Task callers how to use the current worktree"
+
 for script_term in \
   "data_""basename" \
   "DATA_""BASENAME" \
