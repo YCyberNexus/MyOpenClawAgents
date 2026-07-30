@@ -7,7 +7,7 @@ sequenceDiagram
     participant G as 114 OpenClaw Gateway 2026.6.1
 
     U->>A: 自然语言需求
-    A->>D: POST /v1/chat/completions<br/>req_dispatcher + deliver=false<br/>自由文本 + origin
+    A->>D: POST /v1/chat/completions<br/>req_dispatcher intake-origin_sha256 + deliver=false<br/>自由文本 + origin
     D-->>A: 受理回复
     A-->>U: 已提交，正在执行
     D->>P: 建单并提交执行

@@ -6,7 +6,10 @@ WebUI/智伴 prompt 的动作路由器和受驱动 batch 控制面。
 ## Agent Identity
 
 - Agent：`req_dispatcher`
-- 固定 session：`agent:req_dispatcher:main`
+- 智伴需求入口 session：`agent:req_dispatcher:intake-<origin_sha256>`；114 对规范化
+  `reply_agent + conversation + user` 三元组取 SHA-256，同一三元组稳定复用、不同三元组隔离
+- 系统控制 session：`agent:req_dispatcher:main`；只作为 executor callback、恢复 tick 与兼容控制入口，
+  不再承接所有智伴用户的共享 transcript
 - 建单下游：`git_issuer`
 - 执行下游：按 `route_project.sh` 选择的 req_executor，默认
   `DEFAULT_EXECUTOR_AGENT=req_executor`

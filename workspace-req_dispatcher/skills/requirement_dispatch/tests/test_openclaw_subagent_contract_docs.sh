@@ -49,8 +49,16 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-07-29.1' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-07-30.1' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
+grep -Fq 'agent:req_dispatcher:intake-<origin_sha256>' "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must document origin-scoped intake sessions"
+grep -Fq '`reply_agent + conversation + user` 三元组取 SHA-256' \
+  "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must define the intake session identity tuple"
+grep -Fq '`agent:req_dispatcher:main`；只作为 executor callback、恢复 tick' \
+  "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must reserve main for the control plane"
 [ "$(cat "${WORKSPACE_DIR}/HEARTBEAT.md")" = 'RUN_EXECUTOR_BATCH_TICK' ] \
   || fail "dispatcher deployment artifact must keep batch recovery heartbeat active"
 grep -Fq '完整原请求逐字保留' "${SKILL_DIR}/SKILL.md" \

@@ -50,6 +50,24 @@ require_positive_integer() {
   esac
 }
 
+sha256_hex() {
+  local value="$1"
+  local digest
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(printf '%s' "${value}" | sha256sum)"
+  elif command -v shasum >/dev/null 2>&1; then
+    digest="$(printf '%s' "${value}" | shasum -a 256)"
+  else
+    die "sha256sum or shasum is required" 69
+  fi
+
+  digest="${digest%%[[:space:]]*}"
+  [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] \
+    || die "SHA-256 command returned an invalid digest" 69
+  printf '%s' "${digest}"
+}
+
 require_chat_completions_url() {
   local value="$1"
   local authority
@@ -88,7 +106,6 @@ REQ_DISPATCHER_GATEWAY_URL="${REQ_DISPATCHER_GATEWAY_URL:-http://10.64.5.104:187
 REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS="${REQ_DISPATCHER_CONNECT_TIMEOUT_SECONDS:-10}"
 REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS="${REQ_DISPATCHER_REQUEST_TIMEOUT_SECONDS:-120}"
 REQ_DISPATCHER_AGENT_ID="req_dispatcher"
-REQ_DISPATCHER_SESSION_KEY="agent:req_dispatcher:main"
 
 case "${CURRENT_AGENT_NAME}" in
   ''|*[!A-Za-z0-9_-]*)
@@ -134,6 +151,25 @@ origin_json="$({
     '
 })"
 
+# 同一 114 个人 Agent、企微会话和用户稳定复用一个 intake session；任一
+# origin 维度不同都会得到独立 session，避免多用户请求共享 req_dispatcher
+# main transcript。使用规范 JSON 后再散列，避免分隔符碰撞，也不在 session key
+# 中暴露企微标识。main session 继续留给 callback/tick 等控制面消息。
+session_identity_json="$({
+  jq -nc \
+    --arg reply_agent "${CURRENT_AGENT_NAME}" \
+    --arg conversation "${WECHAT_CONVERSATION_ID}" \
+    --arg user "${WECHAT_USER_ID}" '
+      {
+        reply_agent: $reply_agent,
+        conversation: $conversation,
+        user: $user
+      }
+    '
+})"
+session_identity_sha256="$(sha256_hex "${session_identity_json}")"
+REQ_DISPATCHER_SESSION_KEY="agent:req_dispatcher:intake-${session_identity_sha256}"
+
 message="$(printf '[origin] %s\n%s' "${origin_json}" "${task_description}")"
 
 request_json="$({
@@ -156,7 +192,8 @@ request_json="$({
 # 使用 Chat Completions 直接执行 req_dispatcher，不调用 sessions_send。
 # 104 OpenClaw 2026.4.9 会以 deliver=false 运行此入口：Agent 回复只写入本次
 # HTTP 响应，不会启动 A2A announce，也不会沿 main 的企微 last route 外发。
-# model、agent header 和 session header 都固定，避免落入默认 main。
+# model 与 agent header 固定；session header 按 origin 三元组稳定隔离，避免落入
+# 默认 main，也避免不同企微会话共享 transcript。
 
 # 通过 curl 配置文件描述符传入 Authorization header，避免 token 出现在
 # curl 命令参数中。这里不创建磁盘临时文件。

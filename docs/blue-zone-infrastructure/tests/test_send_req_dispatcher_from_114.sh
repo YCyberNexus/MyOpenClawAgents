@@ -48,11 +48,64 @@ if ! jq -e '
   exit 1
 fi
 
+expected_session_key='agent:req_dispatcher:intake-63058a52792925673fd2b1e3d856b884002ecb4b21f7ea61d22c3120f459b369'
 if ! grep -Fxq -- 'x-openclaw-agent-id: req_dispatcher' "${CURL_ARGS_LOG}" \
-  || ! grep -Fxq -- 'x-openclaw-session-key: agent:req_dispatcher:main' "${CURL_ARGS_LOG}" \
+  || ! grep -Fxq -- "x-openclaw-session-key: ${expected_session_key}" "${CURL_ARGS_LOG}" \
   || ! grep -Fxq -- 'http://10.64.5.104:18789/v1/chat/completions' "${CURL_ARGS_LOG}"; then
-  echo "expected fixed req_dispatcher routing headers and Chat Completions endpoint" >&2
+  echo "expected origin-scoped req_dispatcher routing headers and Chat Completions endpoint" >&2
   sed -n '1,40p' "${CURL_ARGS_LOG}" >&2
+  exit 1
+fi
+
+capture_session_key() {
+  local agent="$1"
+  local user="$2"
+  local conversation="$3"
+  local task="$4"
+
+  PATH="${FAKE_BIN}:${PATH}" \
+  CURL_REQUEST_LOG="${CURL_REQUEST_LOG}" \
+  CURL_ARGS_LOG="${CURL_ARGS_LOG}" \
+  REQ_DISPATCHER_GATEWAY_TOKEN="gateway-token-not-for-argv" \
+  REQ_DISPATCHER_GATEWAY_URL="http://10.64.5.104:18789/v1/chat/completions" \
+  CURRENT_AGENT_NAME="${agent}" \
+  WECHAT_USER_ID="${user}" \
+  WECHAT_CONVERSATION_ID="${conversation}" \
+  TASK_DESCRIPTION="${task}" \
+  "${BASH}" "${SUBMIT_SCRIPT}" >/dev/null
+
+  sed -n 's/^x-openclaw-session-key: //p' "${CURL_ARGS_LOG}"
+}
+
+same_origin_session="$(capture_session_key \
+  zhujiaye wm-user-123 conv-456 '同一会话的另一条需求')"
+different_agent_session="$(capture_session_key \
+  otheragent wm-user-123 conv-456 '不同 Agent 的需求')"
+different_user_session="$(capture_session_key \
+  zhujiaye wm-user-999 conv-456 '不同用户的需求')"
+different_conversation_session="$(capture_session_key \
+  zhujiaye wm-user-123 conv-789 '不同会话的需求')"
+
+if [ "${same_origin_session}" != "${expected_session_key}" ]; then
+  echo "the same origin tuple must reuse one intake session" >&2
+  exit 1
+fi
+for isolated_session in \
+  "${different_agent_session}" \
+  "${different_user_session}" \
+  "${different_conversation_session}"
+do
+  if [ "${isolated_session}" = "${expected_session_key}" ] \
+    || ! [[ "${isolated_session}" =~ ^agent:req_dispatcher:intake-[0-9a-f]{64}$ ]]; then
+    echo "each changed origin dimension must select another valid intake session" >&2
+    exit 1
+  fi
+done
+
+if [[ "${expected_session_key}" == *wm-user-123* \
+  || "${expected_session_key}" == *conv-456* \
+  || "${expected_session_key}" == *zhujiaye* ]]; then
+  echo "the intake session key must not expose raw origin identifiers" >&2
   exit 1
 fi
 
@@ -97,4 +150,4 @@ if [ "${legacy_endpoint_rc}" -ne 64 ] \
   exit 1
 fi
 
-echo "ok send_req_dispatcher uses a non-delivering direct agent request"
+echo "ok send_req_dispatcher uses an origin-scoped non-delivering direct agent request"

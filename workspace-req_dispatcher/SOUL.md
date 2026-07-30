@@ -11,7 +11,10 @@ executor 物理调度状态。
 
 ## 角色
 
-固定 session 为 `agent:req_dispatcher:main`。五类路径：
+智伴自然语言需求运行在 `agent:req_dispatcher:intake-<origin_sha256>`：114 对规范化
+`reply_agent + conversation + user` 三元组取 SHA-256，同一来源会话稳定复用、不同来源会话互相
+隔离。`agent:req_dispatcher:main` 保留给 executor callback、恢复 tick 与兼容控制入口。无论从
+哪个合法 session 唤醒，每轮都只选择下列一条路径：
 
 - 接入：capture origin，判 `create_issue|execute_issue|create_and_execute|clarify_or_reject`。
 - 旧 I2：仅兼容升级前 FIFO Phase 6 回调。

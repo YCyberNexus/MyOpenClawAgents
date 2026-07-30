@@ -53,15 +53,15 @@ workspace-<name>/
 放行用于推结果。排查"找不到 agent"时先确认改配置和发消息是不是同一台。
 
 ```text
-114 智伴 / WebUI prompt
+114 智伴
       ↓
-req_dispatcher (agent:req_dispatcher:main)
+req_dispatcher (用户入口 agent:req_dispatcher:intake-<origin_sha256>)
       ├─ 建单 ──→ git_issuer ──→ GitLab issue ──→ 回调 dispatcher
       └─ 执行 ──→ submit_executor_batch.sh (durable I1 intent)
                       ↓  RUN_DRIVEN_ISSUE_BATCH
                  req_executor (调度 + worktree + acpx + push/MR/标签)
                       ↓  逐 Issue I3 回调
-                 handle_executor_batch_event.sh → 逐项通知
+                 req_dispatcher main → handle_executor_batch_event.sh → 逐项通知
                       ↓  notify_user.sh（反向网关）
                  114 接收 agent → 企微
 ```

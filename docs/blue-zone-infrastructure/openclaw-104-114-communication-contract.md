@@ -1,6 +1,6 @@
 # 104 AI Coding 与 114 智伴通信对接协议
 
-> 文档版本：2026-07-23.1
+> 文档版本：2026-07-30.1
 >
 > 适用版本：104 OpenClaw `2026.4.9`，114 OpenClaw `2026.6.1`
 >
@@ -14,7 +14,7 @@
 
 | 方向 | 发送端 | 接收端 | 当前方法 | 协议边界 |
 |---|---|---|---|---|
-| 需求提交 | 114 智伴 | 104 `req_dispatcher` | `send_req_dispatcher_from_114.sh` 调用 104 `/v1/chat/completions`，发送自由文本和 origin | `model=openclaw/req_dispatcher`，`x-openclaw-session-key=agent:req_dispatcher:main`，禁止使用 `sessions_send` |
+| 需求提交 | 114 智伴 | 104 `req_dispatcher` | `send_req_dispatcher_from_114.sh` 调用 104 `/v1/chat/completions`，发送自由文本和 origin | `model=openclaw/req_dispatcher`，`x-openclaw-session-key=agent:req_dispatcher:intake-<origin_sha256>`，禁止使用 `sessions_send` |
 | 受理回复 | 104 `req_dispatcher` | 114 智伴 | 仅沿当前 HTTP 响应返回 | 属于正向调用的应答，不等于任务终态通知 |
 | 终态回推 | 104 `req_dispatcher` | 114 个人 Agent | 104 独立适配器直连 114 Gateway | WebSocket，Gateway 协议 4，设备签名 v3，`operator.write` |
 | 企微投递 | 114 个人 Agent | 原企微会话 | 114 根据回推信封中的 origin 完成最后一跳 | 由 114 智伴实现，不由 104 直接调用企微 |
@@ -28,13 +28,16 @@
 - 114→104 当前使用 104 Gateway 的 HTTP `/v1/chat/completions` 直接执行目标 Agent，
   该入口以 `deliver=false` 运行，不触发 A2A announce 或历史渠道外发。如果将来改为 WebSocket
   Gateway 客户端，不能直接使用 `2026.6.1` 原生协议 4 客户端，必须另做协议 3 适配。
+- 114→104 的用户需求不再共用 `agent:req_dispatcher:main`。114 按规范化
+  `reply_agent + conversation + user` 三元组生成稳定 SHA-256 intake session；`main` 继续作为
+  executor callback、恢复 tick 与兼容控制 session。
 
 ## 2. 总体架构示意图
 
 ```mermaid
 flowchart LR
     U["企微用户"] -->|"自然语言需求"| Z["114 智伴<br/>个人 Agent：zhujiaye"]
-    Z -->|"POST /v1/chat/completions<br/>deliver=false<br/>自由文本 + origin"| D["104 req_dispatcher<br/>agent:req_dispatcher:main"]
+    Z -->|"POST /v1/chat/completions<br/>deliver=false<br/>自由文本 + origin"| D["104 req_dispatcher<br/>agent:req_dispatcher:intake-&lt;origin_sha256&gt;"]
     D -->|"建单/执行"| P["104 AI Coding 流水线<br/>git_issuer + req_executor"]
     P -->|"I3 终态回调"| D
     D -->|"WebSocket 协议 4<br/>agent RPC + req_result_push"| G["114 OpenClaw Gateway 2026.6.1"]
@@ -51,7 +54,9 @@ flowchart LR
 | 项目 | 固定值 |
 |---|---|
 | 104 Agent | `req_dispatcher` |
-| 104 Session | `agent:req_dispatcher:main` |
+| 104 用户入口 Session | `agent:req_dispatcher:intake-<origin_sha256>` |
+| 入口 Session 身份 | `SHA-256({"reply_agent":...,"conversation":...,"user":...})`，JSON 使用此字段顺序的紧凑 UTF-8 编码 |
+| 104 系统控制 Session | `agent:req_dispatcher:main`，保留给 callback/tick/兼容控制入口 |
 | 消息主体 | 自由文本需求 |
 | origin 首选来源 | OpenClaw 运行时结构化来源元数据 |
 | origin 兼容来源 | 正文首个 `[origin]` 行 |
@@ -122,7 +127,7 @@ Gateway：
 Authorization: Bearer <104 Gateway token>
 Content-Type: application/json
 x-openclaw-agent-id: req_dispatcher
-x-openclaw-session-key: agent:req_dispatcher:main
+x-openclaw-session-key: agent:req_dispatcher:intake-<64位小写SHA-256>
 ```
 
 ```json
@@ -139,7 +144,10 @@ x-openclaw-session-key: agent:req_dispatcher:main
 ```
 
 - `model` 和 `x-openclaw-agent-id` 都固定选择 `req_dispatcher`。
-- `x-openclaw-session-key` 完整指定 `agent:req_dispatcher:main`，不落入默认 `main`。
+- `x-openclaw-session-key` 完整指定
+  `agent:req_dispatcher:intake-<origin_sha256>`，不落入默认 `main`。其中散列输入必须是按
+  `reply_agent,conversation,user` 字段顺序生成的紧凑 JSON；相同三元组必须稳定复用一个
+  session，任一字段不同必须进入另一个 session，session key 不得暴露原始企微标识。
 - `stream=false` 时受理回复位于 `.choices[0].message.content`；提交脚本原样输出完整
   Chat Completions JSON，由正在处理原企微会话的 114 个人 Agent 回复用户。
 - 104 `2026.4.9` 的该 HTTP 入口构造 Agent 请求时固定设置 `deliver=false`，因此回复只写入
@@ -151,7 +159,8 @@ Session 都设为 `req_dispatcher` 只能避免部分跨 Agent ping-pong，不�
 企微 last route 外发。这正是回复出现为 `main:wecom:<user>` 的根因。
 
 如果现场仍使用其他已有中继或平台接口，必须保持同样语义：目标是
-`agent:req_dispatcher:main`，执行时禁止外发，且同步应答仅沿当前正向调用返回。若改为
+`agent:req_dispatcher:intake-<origin_sha256>`，执行时禁止外发，且同步应答仅沿当前正向调用
+返回。不得把智伴用户需求重新汇聚到 `agent:req_dispatcher:main`。若改为
 WebSocket Gateway 客户端，客户端必须实际发送协议 3；
 `2026.6.1` 的原生协议 4 客户端不能直接连接 `2026.4.9` Gateway。
 
@@ -387,7 +396,7 @@ sequenceDiagram
     participant G as 114 OpenClaw Gateway
 
     U->>A: 自然语言需求
-    A->>D: POST /v1/chat/completions<br/>req_dispatcher + deliver=false<br/>自由文本 + origin
+    A->>D: POST /v1/chat/completions<br/>req_dispatcher intake-origin_sha256 + deliver=false<br/>自由文本 + origin
     D-->>A: 受理回复
     A-->>U: 已提交，正在执行
     D->>P: 建单并提交执行
@@ -514,9 +523,13 @@ OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1
 
 按顺序执行：
 
-- [ ] 114 提交一条带完整 origin 的测试需求，目标为 `agent:req_dispatcher:main`。
+- [ ] 114 提交一条带完整 origin 的测试需求，目标为
+  `agent:req_dispatcher:intake-<origin_sha256>`，且 key 不含原始企微标识。
+- [ ] 相同 `reply_agent + conversation + user` 使用不同需求正文重复提交时，session key 保持相同。
+- [ ] 分别改变 `reply_agent`、`conversation`、`user`，每次 session key 都随之改变。
 - [ ] 104 已启用 `/v1/chat/completions`，且该端点只暴露在受控蓝区入口。
-- [ ] 抓取 114 正向请求，确认 model、agent header 和 session header 都指向 `req_dispatcher`。
+- [ ] 抓取 114 正向请求，确认 model、agent header 指向 `req_dispatcher`，session header 指向
+  对应的 origin-scoped intake session，而不是 `agent:req_dispatcher:main`。
 - [ ] 请求体和调用链中均不存在 `/tools/invoke` 或 `sessions_send`。
 - [ ] 104 能解析出 `reply_agent=zhujiaye`，并返回受理信息。
 - [ ] 受理回复只出现在当前 HTTP 响应中，104 不新增任何 `main:wecom:<peer>` 或其他渠道外发。

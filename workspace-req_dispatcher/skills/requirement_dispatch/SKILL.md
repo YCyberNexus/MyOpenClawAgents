@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-29.1] 在 104 侧把 WebUI/智伴需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-07-30.1] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -31,7 +31,10 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 
 ## 路径判定
 
-固定 session 为 `agent:req_dispatcher:main`。每次唤醒只选一条：
+智伴自然语言入口 session 为 `agent:req_dispatcher:intake-<origin_sha256>`；其中 114 对规范化
+`reply_agent + conversation + user` 三元组取 SHA-256，同一三元组稳定复用、不同三元组隔离。
+`agent:req_dispatcher:main` 只保留给 executor callback、恢复 tick 与兼容控制入口。路径判定不
+依赖聊天记忆；任何合法 session 每次唤醒都只选一条：
 
 1. 首行是精确 `RUN_DRIVEN_BATCH_RESULT_ACK_ONLY`：路径 D；不得进入自然语言动作判定。
 2. 首行是兼容的精确 `RUN_DRIVEN_BATCH_RESULT`：路径 D。
