@@ -60,8 +60,20 @@ case "$*" in
       0123456789abcdef0123456789abcdef01234567 \
       "${EXPECTED_COMMIT_PARENT_SHA:?}"
     ;;
+  *' rev-parse --verify refs/remotes/origin/'*)
+    if [ -n "${ARCHIVE_ADVANCED_FILE:-}" ] \
+        && [ -s "${ARCHIVE_ADVANCED_FILE}" ]; then
+      cat "${ARCHIVE_ADVANCED_FILE}"
+    else
+      printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+    fi
+    ;;
   *' rev-parse --verify '*)
-    printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+    if [ -n "${LOG_TEST_SHA:-}" ] && [[ "$*" == *"${LOG_TEST_SHA}"* ]]; then
+      printf '%s\n' "${LOG_TEST_SHA}"
+    else
+      printf '%s\n' 0123456789abcdef0123456789abcdef01234567
+    fi
     ;;
   *' merge-base --is-ancestor '*)
     exit 0
@@ -83,7 +95,7 @@ cat >"${FAKE_SCRIPTS}/stage_and_guard.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' stage >>"${ORDER_LOG}"
-printf '%s\n' STAGED_OK
+printf '%s\n' "${STAGE_TEST_MARKER:-STAGED_OK}"
 EOF
 cat >"${FAKE_SCRIPTS}/commit_and_push.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -206,12 +218,15 @@ EOF
 cat >"${FAKE_SCRIPTS}/archive_execution_logs.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-[ -f "${LOG_DIR}/worker_result.json" ] \
-  || { echo "worker_result.json missing before log archive" >&2; exit 92; }
-printf 'archive:%s\n' "${EXECUTION_ID}" >>"${ORDER_LOG}"
-printf 'LOG_ARCHIVE_REF=refs/heads/req-executor-logs/issue-%s/execution-%s\n' \
-  "${ISSUE_IID}" "${EXECUTION_ID}"
-printf 'LOG_ARCHIVE_COMMIT=%040d\n' 1
+parent_commit_sha="${COMMIT_SHA:-0123456789abcdef0123456789abcdef01234567}"
+log_commit_sha="${LOG_TEST_SHA:-${parent_commit_sha}}"
+if [ "${log_commit_sha}" != "${parent_commit_sha}" ]; then
+  : "${ARCHIVE_ADVANCED_FILE:?}"
+  printf '%s\n' "${log_commit_sha}" >"${ARCHIVE_ADVANCED_FILE}"
+fi
+printf 'LOG_WORK_BRANCH=%s\n' "${WORK_BRANCH}"
+printf 'LOG_PARENT_COMMIT=%s\n' "${parent_commit_sha}"
+printf 'LOG_COMMIT_SHA=%s\n' "${log_commit_sha}"
 EOF
 chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_SCRIPTS}"/*.sh
 
@@ -312,8 +327,7 @@ label:remove:doing
 label:add:done
 mr:main:false:0123456789abcdef0123456789abcdef01234567
 label:add:pr
-summarize:false
-archive:3'
+summarize:false'
 [ "$(cat "${ORDER_LOG}")" = "${expected_order}" ] \
   || fail "attempt steps did not stay in one deterministic sequence: $(cat "${ORDER_LOG}")"
 
@@ -356,6 +370,61 @@ else
 fi
 [ "${result_mode}" = 600 ] || fail "worker_result.json mode is ${result_mode}, expected 600"
 
+# A real terminal append advances an open MR source branch. The final compact
+# result, durable state, and private MR marker must all move to that exact tip.
+: >"${ORDER_LOG}"
+LOG_TEST_SHA=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+ARCHIVE_ADVANCED_FILE="${TEST_ROOT}/archive-advanced.sha"
+write_execution_state 17 false main
+advanced_output="$(
+  PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" \
+  LOG_TEST_SHA="${LOG_TEST_SHA}" \
+  ARCHIVE_ADVANCED_FILE="${ARCHIVE_ADVANCED_FILE}" \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=17 \
+  REPO_PATH="${REPO_PATH}" ISSUE_TITLE='日志子提交' ISSUE_MODE=fresh \
+  BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
+    bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+)" || fail "same-branch terminal log promotion failed"
+advanced_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-17/worker_result.json"
+printf '%s\n' "${advanced_output}" | tail -n 1 | jq -e \
+  --arg sha "${LOG_TEST_SHA}" '.status == "done" and .commit_sha == $sha' \
+  >/dev/null || fail "printed result did not advance to the terminal log commit"
+jq -e --arg sha "${LOG_TEST_SHA}" '.commit_sha == $sha' \
+  "${advanced_result_file}" >/dev/null \
+  || fail "durable result did not advance to the terminal log commit"
+jq -e --arg sha "${LOG_TEST_SHA}" \
+  '.work_branch_sha == $sha and .dependency_pinned_execution_id == 17' \
+  "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
+  || fail "Issue state did not advance to the terminal log commit"
+jq -e --arg sha "${LOG_TEST_SHA}" '.sha == $sha' \
+  "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-17/mr_result.json" \
+  >/dev/null || fail "MR marker did not advance to the terminal log commit"
+
+# NO_CHANGES still means no business MR, but its complete terminal evidence
+# must create/advance issue/42 instead of disappearing with an empty index.
+: >"${ORDER_LOG}"
+NO_CHANGE_LOG_SHA=cdefabcdefabcdefabcdefabcdefabcdefabcdef
+NO_CHANGE_ARCHIVE_FILE="${TEST_ROOT}/no-change-archive-advanced.sha"
+write_execution_state 18 false main
+no_change_output="$(
+  PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" \
+  STAGE_TEST_MARKER=NO_CHANGES LOG_TEST_SHA="${NO_CHANGE_LOG_SHA}" \
+  ARCHIVE_ADVANCED_FILE="${NO_CHANGE_ARCHIVE_FILE}" \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=18 \
+  REPO_PATH="${REPO_PATH}" ISSUE_TITLE='无代码改动' ISSUE_MODE=fresh \
+  BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
+    bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+)" || fail "NO_CHANGES terminal evidence was not persisted"
+printf '%s\n' "${no_change_output}" | tail -n 1 | jq -e \
+  --arg sha "${NO_CHANGE_LOG_SHA}" '
+  .status == "blocked" and .commit_sha == $sha
+  and (.block_reason | contains("no staged changes"))
+' >/dev/null || fail "NO_CHANGES result did not report its log-only Issue commit"
+jq -e --arg sha "${NO_CHANGE_LOG_SHA}" \
+  '.work_branch_sha == $sha and .dependency_pinned_execution_id == 18' \
+  "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
+  || fail "NO_CHANGES log-only Issue branch identity was not persisted"
+
 # Auto-merge uses MERGE_TARGET_BRANCH for verification/MR creation and writes
 # finish only when the exact durable marker says the MR is verified merged.
 : >"${ORDER_LOG}"
@@ -377,8 +446,7 @@ label:remove:doing
 label:add:done
 mr:release:true:0123456789abcdef0123456789abcdef01234567
 label:add:finish
-summarize:false
-archive:4'
+summarize:false'
 [ "$(cat "${ORDER_LOG}")" = "${expected_merged_order}" ] \
   || fail "verified merged order/target is wrong: $(cat "${ORDER_LOG}")"
 
@@ -653,12 +721,16 @@ jq -n --arg sha "${SHARED_A_SHA}" '{
 chmod 600 "${REPO_PATH}/.req_executor/issues/issue-9/state.json"
 MR_RETRY_SENTINEL="${TEST_ROOT}/shared-mr-fail-once"
 MR_RECOVERY_LOG="${TEST_ROOT}/shared-mr-recovery.log"
+SHARED_LOG_SHA=bcdefabcdefabcdefabcdefabcdefabcdefabcde
+SHARED_ARCHIVE_ADVANCED_FILE="${TEST_ROOT}/shared-archive-advanced.sha"
 : >"${MR_RETRY_SENTINEL}"
 : >"${MR_RECOVERY_LOG}"
 valid_shared_tail_output="$(
   PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" MR_TEST_ACTION=reused \
   MR_TEST_FAIL_ONCE_FILE="${MR_RETRY_SENTINEL}" \
   MR_TEST_RECOVERY_LOG="${MR_RECOVERY_LOG}" \
+  LOG_TEST_SHA="${SHARED_LOG_SHA}" \
+  ARCHIVE_ADVANCED_FILE="${SHARED_ARCHIVE_ADVANCED_FILE}" \
   PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=11 \
   REPO_PATH="${REPO_PATH}" ISSUE_TITLE='共享尾节点' ISSUE_MODE=fresh \
   BRANCH='issue/9+42' MERGE_TARGET_BRANCH=main WORK_BRANCH='issue/9+42' \
@@ -675,18 +747,20 @@ valid_shared_tail_output="$(
 printf '%s\n' "${valid_shared_tail_output}" | tail -n 1 | jq -e '
   .status == "done" and .work_branch == "issue/9+42"
   and .local_branch == "issue/42" and .mr_action == "reused"
-' >/dev/null || fail "shared tail did not persist the reused MR result"
-jq -e --arg sha "${SHARED_A_SHA}" '
+  and .commit_sha == "bcdefabcdefabcdefabcdefabcdefabcdefabcde"
+' >/dev/null || fail "shared tail did not persist the reused MR/log result"
+jq -e --arg sha "${SHARED_A_SHA}" --arg log_sha "${SHARED_LOG_SHA}" '
   .work_branch == "issue/9+42" and .branch_members == [9,42]
   and .shared_branch_role == "tail"
   and .dependency_iid == 9 and .dependency_branch == "issue/9+42"
   and .dependency_base_sha == $sha
+  and .work_branch_sha == $log_sha
   and .dependency_history_verified == true
   and .mr_finalization == {
     status:"pending",source_execution_id:11,
     work_branch:"issue/9+42",branch_members:[9,42],
     shared_branch_role:"tail",
-    commit_sha:"0123456789abcdef0123456789abcdef01234567",
+    commit_sha:$log_sha,
     intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     target_branch:"main"
   }

@@ -169,12 +169,12 @@ verification remains mandatory.
 
 The outer per-IID subagent invokes `run_executor_attempt.sh` once. It keeps
 `run_acpx_attempt.sh`, stage, commit/push, verification, labels, MR, summary,
-and terminal log archival inside one bounded Bash process. It atomically
-persists mode-600 `${LOG_DIR}/worker_result.json`, publishes the complete
-terminal directory on append-only branch
-`req-executor-logs/issue-<iid>/execution-<execution_id>`, then prints the same
-compact JSON. The archive branch is separate so it cannot move the business/MR
-SHA or violate shared-branch commit topology.
+terminal result persistence, and terminal log append inside one bounded Bash
+process. The complete staging-time `${LOG_DIR}` enters the Issue branch with
+the business changes. The wrapper then atomically persists mode-600
+`${LOG_DIR}/worker_result.json`, appends the complete terminal directory as a
+log-only child on the same `WORK_BRANCH`, and prints the compact JSON. The
+executor never publishes a separate remote log branch.
 `run_acpx_attempt.sh` separately persists mode-600
 `${LOG_DIR}/acpx_terminal.json` immediately after the inner process exits.
 

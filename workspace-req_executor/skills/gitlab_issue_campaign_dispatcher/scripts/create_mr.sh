@@ -749,10 +749,10 @@ if [ "${REUSE_EXISTING}" != true ]; then
       echo "Auto-generated MR for issue #${ISSUE_IID} (mode=${ISSUE_MODE})."
     fi
     echo
-    echo "The complete staging-time execution log directory is included in this MR."
-    echo "After worker_result.json is durable, the terminal directory is also"
-    echo "published on append-only branch"
-    echo "\`req-executor-logs/issue-${ISSUE_IID}/execution-${EXECUTION_ID}\`."
+    echo "The complete staging-time execution log directory is committed and"
+    echo "pushed together with the business changes on this Issue branch."
+    echo "Terminal evidence is appended later as a log-only child on the same branch"
+    echo "when doing so preserves the exact MR recovery fence."
     echo
     echo "Per-attempt summaries remain in the executor's local issue state and are not posted as issue comments."
     echo

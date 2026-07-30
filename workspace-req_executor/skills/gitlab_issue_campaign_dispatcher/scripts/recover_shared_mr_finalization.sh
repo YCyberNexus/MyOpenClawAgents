@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Recover only the MR-finalization half of an already pushed shared-branch
-# attempt. This path never runs acpx and never stages, commits, or pushes.
+# attempt. This path never runs acpx or republishes business changes. After the
+# MR identity is recovered, it appends the refreshed terminal evidence as a
+# log-only child on the same shared WORK_BRANCH.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -201,13 +203,96 @@ if ! [[ "${MR_IID}" =~ ^[1-9][0-9]*$ ]] \
   exit 6
 fi
 
-# create_mr.sh may have refreshed mr_result.json after the worker's first log
-# snapshot. Append the new terminal tree to the execution's dedicated archive
-# branch before reporting successful recovery.
-if ! bash "${SCRIPT_DIR}/archive_execution_logs.sh" >/dev/null; then
-  echo "recover_shared_mr_finalization: updated execution-log archive failed" >&2
+ARCHIVE_OUTPUT="$(COMMIT_SHA="${COMMIT_SHA}" \
+  bash "${SCRIPT_DIR}/archive_execution_logs.sh")" || {
+  echo "recover_shared_mr_finalization: terminal logs could not be persisted to the shared Issue branch" >&2
+  exit 6
+}
+LOG_PARENT_COMMIT="$(awk -F= '$1 == "LOG_PARENT_COMMIT" {print $2}' \
+  <<<"${ARCHIVE_OUTPUT}")"
+LOG_COMMIT_SHA="$(awk -F= '$1 == "LOG_COMMIT_SHA" {print $2}' \
+  <<<"${ARCHIVE_OUTPUT}")"
+if ! [[ "${LOG_COMMIT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+    || [ "${LOG_PARENT_COMMIT,,}" != "${COMMIT_SHA,,}" ]; then
+  echo "recover_shared_mr_finalization: terminal log commit identity is invalid" >&2
   exit 6
 fi
+
+# The private checkpoint and marker must advance atomically from the business
+# commit to the exact same-branch log child so heartbeat Phase 6 verifies the
+# MR's new source tip instead of the superseded parent.
+CURRENT_ISSUE_STATE="$(read_private_json "${ISSUE_STATE_FILE}")" || {
+  echo "recover_shared_mr_finalization: shared checkpoint became unsafe during log persistence" >&2
+  exit 6
+}
+STATE_TMP="${ISSUE_STATE_FILE}.tmp.$$"
+if ! (umask 077; printf '%s' "${CURRENT_ISSUE_STATE}" | jq \
+    --argjson iid "${ISSUE_IID}" \
+    --argjson execution_id "${EXECUTION_ID}" \
+    --arg work_branch "${WORK_BRANCH}" \
+    --argjson branch_members "$(jq -c '.branch_members' <<<"${RECOVERY_IDENTITY}")" \
+    --arg shared_branch_role "$(jq -r '.shared_branch_role' <<<"${RECOVERY_IDENTITY}")" \
+    --arg target_branch "$(jq -r '.target_branch' <<<"${RECOVERY_IDENTITY}")" \
+    --arg old_commit_sha "${COMMIT_SHA}" \
+    --arg new_commit_sha "${LOG_COMMIT_SHA}" \
+    --arg intent_id "$(jq -r '.intent_id' <<<"${RECOVERY_IDENTITY}")" '
+    if .iid == $iid
+      and .work_branch == $work_branch
+      and .branch_members == $branch_members
+      and .shared_branch_role == $shared_branch_role
+      and .dependency_pinned_execution_id == $execution_id
+      and ((.work_branch_sha | ascii_downcase)
+        == ($old_commit_sha | ascii_downcase))
+      and .mr_finalization == {
+        status:"pending",
+        source_execution_id:$execution_id,
+        work_branch:$work_branch,
+        branch_members:$branch_members,
+        shared_branch_role:$shared_branch_role,
+        commit_sha:$old_commit_sha,
+        intent_id:$intent_id,
+        target_branch:$target_branch
+      }
+    then
+      .work_branch_sha = $new_commit_sha
+      | .mr_finalization.commit_sha = $new_commit_sha
+    else error("shared checkpoint changed during log persistence") end
+  ' >"${STATE_TMP}"); then
+  echo "recover_shared_mr_finalization: shared checkpoint could not advance to the log commit" >&2
+  exit 6
+fi
+chmod 600 "${STATE_TMP}"
+mv "${STATE_TMP}" "${ISSUE_STATE_FILE}"
+
+MR_RESULT_FILE="${LOG_DIR}/mr_result.json"
+CURRENT_MR_RESULT="$(read_private_json "${MR_RESULT_FILE}")" || {
+  echo "recover_shared_mr_finalization: MR marker became unsafe during log persistence" >&2
+  exit 6
+}
+MR_RESULT_TMP="${MR_RESULT_FILE}.tmp.$$"
+if ! (umask 077; printf '%s' "${CURRENT_MR_RESULT}" | jq \
+    --argjson issue_iid "${ISSUE_IID}" \
+    --argjson execution_id "${EXECUTION_ID}" \
+    --arg source_branch "${WORK_BRANCH}" \
+    --arg target_branch "$(jq -r '.target_branch' <<<"${RECOVERY_IDENTITY}")" \
+    --arg old_commit_sha "${COMMIT_SHA}" \
+    --arg new_commit_sha "${LOG_COMMIT_SHA}" \
+    --arg intent_id "$(jq -r '.intent_id' <<<"${RECOVERY_IDENTITY}")" '
+    if .issue_iid == $issue_iid
+      and .execution_id == $execution_id
+      and .source_branch == $source_branch
+      and .target_branch == $target_branch
+      and ((.sha | ascii_downcase) == ($old_commit_sha | ascii_downcase))
+      and .shared_mr_intent_id == $intent_id
+    then .sha = $new_commit_sha
+    else error("MR marker changed during log persistence") end
+  ' >"${MR_RESULT_TMP}"); then
+  echo "recover_shared_mr_finalization: MR marker could not advance to the log commit" >&2
+  exit 6
+fi
+chmod 600 "${MR_RESULT_TMP}"
+mv "${MR_RESULT_TMP}" "${MR_RESULT_FILE}"
+COMMIT_SHA="${LOG_COMMIT_SHA}"
 
 jq -nc \
   --argjson iid "${ISSUE_IID}" \

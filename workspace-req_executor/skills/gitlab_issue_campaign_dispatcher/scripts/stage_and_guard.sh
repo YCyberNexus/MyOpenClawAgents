@@ -6,9 +6,11 @@
 # All ordinary non-log files Claude wrote (or any non-log file already tracked
 # on the base branch) go through. The script force-adds the current issue's
 # ${OUTPUT_DIR} and the complete staging-time ${LOG_DIR} so both survive the
-# `/.req_executor/` line in `.git/info/exclude`. The later terminal directory
-# is published separately by archive_execution_logs.sh. Unrelated repository
-# paths under a `logs/` directory remain local and are removed from the index.
+# `/.req_executor/` line in `.git/info/exclude` and enter the same WORK_BRANCH
+# business commit. Files created after that commit are appended by
+# archive_execution_logs.sh as a log-only child on the same branch. Unrelated
+# repository paths under a `logs/` directory remain local and are removed from
+# the index.
 # The script still distinguishes STAGED_OK from NO_CHANGES so the caller
 # can short-circuit empty diffs.
 #

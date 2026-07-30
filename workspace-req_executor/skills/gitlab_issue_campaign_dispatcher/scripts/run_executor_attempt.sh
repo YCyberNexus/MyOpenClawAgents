@@ -8,13 +8,14 @@
 # This wrapper keeps the whole deterministic path in one process:
 #
 #   acpx -> stage -> commit/push -> verify -> labels -> MR -> summary
-#        -> persist worker result -> archive terminal LOG_DIR
+#        -> persist worker result -> append terminal logs to WORK_BRANCH
 #
 # The final compact worker result is written atomically to
-# ${LOG_DIR}/worker_result.json, then the terminal directory is published on a
-# separate append-only Git branch before the result is printed. The executor
-# heartbeat can therefore recover the exact result even if OpenClaw never asks
-# the outer model to echo the line and finish its run.
+# ${LOG_DIR}/worker_result.json before it is printed. The executor heartbeat can
+# therefore recover the exact result even if OpenClaw never asks the outer model
+# to echo the line and finish its run. Git receives the staging-time LOG_DIR in
+# the business commit and the complete terminal LOG_DIR in a log-only child
+# commit on that same Issue branch. No second class of remote branch is used.
 
 set -euo pipefail
 
@@ -179,9 +180,10 @@ last_error_line() {
 # the exact pushed commit. Preparation and local checkout are proposals: they
 # never replace the tuple bound to the last remotely recoverable branch.
 persist_pushed_branch_identity() {
+  local branch_tip_sha="${1:-${COMMIT_SHA}}"
   local canonical_commit remote_commit prior_state state_tmp now
   canonical_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" rev-parse --verify \
-    "${COMMIT_SHA}^{commit}" 2>/dev/null)" || return 1
+    "${branch_tip_sha}^{commit}" 2>/dev/null)" || return 1
   remote_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" rev-parse --verify \
     "refs/remotes/origin/${WORK_BRANCH}^{commit}" 2>/dev/null)" || return 1
   if [ "${canonical_commit,,}" != "${remote_commit,,}" ]; then
@@ -364,6 +366,94 @@ persist_shared_mr_pending_checkpoint() {
   mv "${state_tmp}" "${ISSUE_STATE_FILE}"
 }
 
+# A terminal log commit advances a shared source branch after the business
+# commit and MR marker were created. Move the already-owned pending checkpoint
+# to that exact child without minting a new intent.
+advance_shared_mr_checkpoint() {
+  local old_commit_sha="$1" new_commit_sha="$2"
+  [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ] || return 0
+
+  local prior_state state_tmp
+  [ -f "${ISSUE_STATE_FILE}" ] && [ ! -L "${ISSUE_STATE_FILE}" ] \
+    && [ "$(execution_state_file_mode "${ISSUE_STATE_FILE}" 2>/dev/null || true)" = 600 ] \
+    && [ "$(execution_state_file_owner "${ISSUE_STATE_FILE}" 2>/dev/null || true)" = "$(id -u)" ] \
+    || return 1
+  prior_state="$(jq -ce 'if type == "object" then . else error("invalid state") end' \
+    "${ISSUE_STATE_FILE}" 2>/dev/null)" || return 1
+  if ! printf '%s' "${prior_state}" | jq -e \
+      --argjson execution_id "${EXECUTION_ID}" \
+      --arg work_branch "${WORK_BRANCH}" \
+      --argjson branch_members "${BRANCH_MEMBERS_JSON}" \
+      --arg shared_branch_role "${SHARED_BRANCH_ROLE}" \
+      --arg old_commit_sha "${old_commit_sha}" \
+      --arg new_commit_sha "${new_commit_sha}" \
+      --arg intent_id "${SHARED_MR_INTENT_ID}" \
+      --arg target_branch "${MERGE_TARGET_BRANCH}" '
+      .work_branch == $work_branch
+      and .branch_members == $branch_members
+      and .shared_branch_role == $shared_branch_role
+      and ((.work_branch_sha | ascii_downcase)
+        == ($new_commit_sha | ascii_downcase))
+      and .mr_finalization == {
+        status:"pending",
+        source_execution_id:$execution_id,
+        work_branch:$work_branch,
+        branch_members:$branch_members,
+        shared_branch_role:$shared_branch_role,
+        commit_sha:$old_commit_sha,
+        intent_id:$intent_id,
+        target_branch:$target_branch
+      }
+    ' >/dev/null 2>&1; then
+    return 1
+  fi
+  state_tmp="${ISSUE_STATE_FILE}.tmp.$$"
+  if ! (umask 077; printf '%s' "${prior_state}" | jq \
+      --arg new_commit_sha "${new_commit_sha}" '
+      .mr_finalization.commit_sha = $new_commit_sha
+    ' >"${state_tmp}"); then
+    return 1
+  fi
+  chmod 600 "${state_tmp}" || return 1
+  mv "${state_tmp}" "${ISSUE_STATE_FILE}"
+}
+
+# Keep the private MR marker aligned with a same-branch terminal log commit.
+# Missing markers are valid on pre-MR failure paths; an existing mismatched
+# marker is not.
+advance_mr_result_marker() {
+  local old_commit_sha="$1" new_commit_sha="$2"
+  local marker_file="${LOG_DIR}/mr_result.json" marker_tmp marker_bytes
+  [ -e "${marker_file}" ] || return 0
+  [ -f "${marker_file}" ] && [ ! -L "${marker_file}" ] \
+    && [ "$(execution_state_file_mode "${marker_file}" 2>/dev/null || true)" = 600 ] \
+    && [ "$(execution_state_file_owner "${marker_file}" 2>/dev/null || true)" = "$(id -u)" ] \
+    || return 1
+  marker_bytes="$(wc -c <"${marker_file}" 2>/dev/null | tr -d '[:space:]')"
+  [[ "${marker_bytes}" =~ ^[1-9][0-9]*$ ]] \
+    && [ "${marker_bytes}" -le 65536 ] || return 1
+  if ! jq -e \
+      --argjson issue_iid "${ISSUE_IID}" \
+      --argjson execution_id "${EXECUTION_ID}" \
+      --arg source_branch "${WORK_BRANCH}" \
+      --arg old_commit_sha "${old_commit_sha}" '
+      type == "object"
+      and .issue_iid == $issue_iid
+      and .execution_id == $execution_id
+      and .source_branch == $source_branch
+      and ((.sha | ascii_downcase) == ($old_commit_sha | ascii_downcase))
+    ' "${marker_file}" >/dev/null 2>&1; then
+    return 1
+  fi
+  marker_tmp="${marker_file}.tmp.$$"
+  if ! (umask 077; jq --arg new_commit_sha "${new_commit_sha}" \
+      '.sha = $new_commit_sha' "${marker_file}" >"${marker_tmp}"); then
+    return 1
+  fi
+  chmod 600 "${marker_tmp}" || return 1
+  mv "${marker_tmp}" "${marker_file}"
+}
+
 # Capture every fixed step in the issue-local log. Each post-acpx operation
 # has its own hard cap so a wedged Git/glab call cannot indefinitely retain the
 # native subagent slot. The heartbeat has a larger whole-finalization watchdog
@@ -434,11 +524,8 @@ run_summary() {
   fi
 }
 
-persist_and_print_result() {
-  local result_file="${LOG_DIR}/worker_result.json"
-  local result_tmp="${result_file}.tmp.$$"
-  local result archive_output
-  result="$(jq -cn \
+build_worker_result() {
+  jq -cn \
     --argjson iid "${ISSUE_IID}" \
     --argjson execution_id "${EXECUTION_ID}" \
     --arg status "${FINAL_STATUS}" \
@@ -468,7 +555,13 @@ persist_and_print_result() {
       summary_posted:$summary_posted,
       block_reason:$block_reason,
       log_dir:$log_dir
-    }')"
+    }'
+}
+
+write_worker_result() {
+  local result="$1"
+  local result_file="${LOG_DIR}/worker_result.json"
+  local result_tmp="${result_file}.tmp.$$"
   if ! (
     umask 077
     printf '%s\n' "${result}" >"${result_tmp}"
@@ -478,15 +571,78 @@ persist_and_print_result() {
     echo "run_executor_attempt.sh: failed to persist ${result_file}" >&2
     exit 3
   fi
+}
 
-  # worker_result.json is the last per-execution file written by this wrapper.
-  # Archive the now-complete LOG_DIR on a separate append-only Git branch so the
-  # archive cannot move WORK_BRANCH or invalidate its business/MR commit SHA.
-  if ! archive_output="$(bash "${SCRIPT_DIR}/archive_execution_logs.sh")"; then
-    echo "run_executor_attempt.sh: complete execution-log Git archive failed" >&2
-    exit 4
+persist_and_print_result() {
+  local result archive_output log_parent_commit log_commit_sha prior_commit_sha
+  local archive_logs=true promote_log_commit=true
+  result="$(build_worker_result)"
+  write_worker_result "${result}"
+
+  # A shared branch may advance only after its exact pending MR checkpoint was
+  # installed. Before that point, a log-only commit would change the frozen
+  # topology without a recoverable owner.
+  if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ] \
+      && { [ -z "${COMMIT_SHA}" ] || [ -z "${SHARED_MR_INTENT_ID}" ]; }; then
+    archive_logs=false
   fi
-  printf '%s\n' "${archive_output}" >&2
+
+  # An unresolved automatic merge is still fenced to the pre-archive source
+  # SHA. Moving that open/unknown MR would destroy the only safe recovery
+  # identity. Verified merged MRs are immutable and can safely retain their
+  # business SHA while the source branch advances to its terminal log child.
+  if [ "${AUTO_MERGE}" = true ] && [ "${MR_ACTION}" != none ]; then
+    if [ -f "${LOG_DIR}/mr_result.json" ] && jq -e '
+        .verified == true and .outcome == "merged"
+        and .observed_state == "merged"
+      ' "${LOG_DIR}/mr_result.json" >/dev/null 2>&1; then
+      promote_log_commit=false
+    else
+      archive_logs=false
+      echo "run_executor_attempt.sh: terminal log append deferred because automatic MR identity is unresolved" >&2
+    fi
+  fi
+
+  if [ "${archive_logs}" = true ]; then
+    prior_commit_sha="${COMMIT_SHA}"
+    if ! archive_output="$(COMMIT_SHA="${COMMIT_SHA}" \
+        bash "${SCRIPT_DIR}/archive_execution_logs.sh")"; then
+      echo "run_executor_attempt.sh: terminal logs could not be persisted to ${WORK_BRANCH}" >&2
+      exit 4
+    fi
+    log_parent_commit="$(awk -F= '$1 == "LOG_PARENT_COMMIT" {print $2}' \
+      <<<"${archive_output}")"
+    log_commit_sha="$(awk -F= '$1 == "LOG_COMMIT_SHA" {print $2}' \
+      <<<"${archive_output}")"
+    if ! [[ "${log_parent_commit}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+        || ! [[ "${log_commit_sha}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+        || { [ -n "${prior_commit_sha}" ] \
+          && [ "${log_parent_commit,,}" != "${prior_commit_sha,,}" ]; }; then
+      echo "run_executor_attempt.sh: terminal log persistence returned an invalid branch identity" >&2
+      exit 4
+    fi
+    if ! persist_pushed_branch_identity "${log_commit_sha}"; then
+      echo "run_executor_attempt.sh: terminal log branch identity could not be persisted" >&2
+      exit 4
+    fi
+    if [ "${promote_log_commit}" = true ] \
+        && [ "${log_commit_sha,,}" != "${prior_commit_sha,,}" ]; then
+      if ! advance_shared_mr_checkpoint "${prior_commit_sha}" "${log_commit_sha}"; then
+        echo "run_executor_attempt.sh: shared MR checkpoint did not advance to the terminal log commit" >&2
+        exit 4
+      fi
+      if [ -n "${prior_commit_sha}" ] \
+          && ! advance_mr_result_marker "${prior_commit_sha}" "${log_commit_sha}"; then
+        echo "run_executor_attempt.sh: MR marker did not advance to the terminal log commit" >&2
+        exit 4
+      fi
+      COMMIT_SHA="${log_commit_sha}"
+      result="$(build_worker_result)"
+      write_worker_result "${result}"
+    fi
+    printf '%s\n' "${archive_output}" >&2
+  fi
+
   printf '%s\n' "${result}"
 }
 

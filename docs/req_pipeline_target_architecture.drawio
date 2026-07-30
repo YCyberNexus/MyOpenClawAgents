@@ -9,7 +9,7 @@
           <mxGeometry x="520" y="6" width="1100" height="30" as="geometry" />
         </mxCell>
 
-        <mxCell id="legend" value="&lt;b&gt;图例（主流程编号）&lt;/b&gt;&lt;br&gt;① 企微用户发需求&lt;br&gt;② 智伴转发需求原文（附 origin）&lt;br&gt;③ req_intake 做 NLU → 结构化意图（唯一 LLM 环节）&lt;br&gt;④ MCP tool call 启动 RunWorkflow（idempotency_key 即 workflow id，幂等）&lt;br&gt;⑤ 逐 IID signal_with_start，把本 run 登记为订阅者&lt;br&gt;⑥ 申请 / 发放槽位租约（跨 project 轮转公平）&lt;br&gt;⑦ 共享依赖分支的写入序列化（branch id 即互斥）&lt;br&gt;⑧ workflow 调 activity&lt;br&gt;⑨ activity 内 subprocess 调现有 wrapper（一行不重写）&lt;br&gt;⑩ wrapper 落到 acpx / worktree / 日志归档 / GitLab&lt;br&gt;⑪ 人工改标签 → GitLab webhook（label events）&lt;br&gt;⑫ 接收器 signal 进 IssueWorkflow；已终态则 signal_with_start 复活&lt;br&gt;⑬ Issue 到终态 → 逐订阅者出通知&lt;br&gt;⑭ 经 104 → 114 反向网关推送（唯一放行方向）&lt;br&gt;⑮ 智伴把结果推回企微用户&lt;br&gt;&lt;br&gt;虚线 = 兜底 / 低频路径，不驱动调度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;align=left;spacingLeft=10;spacingRight=8;spacingTop=8;verticalAlign=top;" vertex="1" parent="1">
+        <mxCell id="legend" value="&lt;b&gt;图例（主流程编号）&lt;/b&gt;&lt;br&gt;① 企微用户发需求&lt;br&gt;② 智伴转发需求原文（附 origin）&lt;br&gt;③ req_intake 做 NLU → 结构化意图（唯一 LLM 环节）&lt;br&gt;④ MCP tool call 启动 RunWorkflow（idempotency_key 即 workflow id，幂等）&lt;br&gt;⑤ 逐 IID signal_with_start，把本 run 登记为订阅者&lt;br&gt;⑥ 申请 / 发放槽位租约（跨 project 轮转公平）&lt;br&gt;⑦ 共享依赖分支的写入序列化（branch id 即互斥）&lt;br&gt;⑧ workflow 调 activity&lt;br&gt;⑨ activity 内 subprocess 调现有 wrapper（一行不重写）&lt;br&gt;⑩ wrapper 落到 acpx / worktree / Issue 分支日志 / GitLab&lt;br&gt;⑪ 人工改标签 → GitLab webhook（label events）&lt;br&gt;⑫ 接收器 signal 进 IssueWorkflow；已终态则 signal_with_start 复活&lt;br&gt;⑬ Issue 到终态 → 逐订阅者出通知&lt;br&gt;⑭ 经 104 → 114 反向网关推送（唯一放行方向）&lt;br&gt;⑮ 智伴把结果推回企微用户&lt;br&gt;&lt;br&gt;虚线 = 兜底 / 低频路径，不驱动调度" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#999999;fontSize=11;align=left;spacingLeft=10;spacingRight=8;spacingTop=8;verticalAlign=top;" vertex="1" parent="1">
           <mxGeometry x="40" y="40" width="400" height="470" as="geometry" />
         </mxCell>
 
@@ -96,7 +96,7 @@
         <mxCell id="bandEffLbl" value="④ 效果层 — 现有 shell wrapper（一行不重写）" style="text;html=1;fontSize=13;fontStyle=1;align=left;fontColor=#2f5b2f;" vertex="1" parent="1">
           <mxGeometry x="505" y="1106" width="500" height="20" as="geometry" />
         </mxCell>
-        <mxCell id="nShell" value="&lt;b&gt;保留的领域本质（B 类）&lt;/b&gt;：run_executor_attempt / run_acpx_attempt（PATH 白名单 · --safe-mode · 内层 glab 全禁 · 进程组 teardown · token 剥离）｜ create_driven_batch（GraphQL 游标分页 + &lt;b&gt;两次归一化全扫一致才冻结&lt;/b&gt;）｜ merge_mr（exact-GET → SHA-fenced-PUT → exact-GET）｜ commit_and_push / post_push_verify（SHA 栅栏）｜ migrate_shared_dependency_head（可重放检查点）｜ prepare_attempt · stage_and_guard · create_mr · set_issue_label · &lt;b&gt;reconcile&lt;/b&gt; · archive_execution_logs" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
+        <mxCell id="nShell" value="&lt;b&gt;保留的领域本质（B 类）&lt;/b&gt;：run_executor_attempt / run_acpx_attempt（PATH 白名单 · --safe-mode · 内层 glab 全禁 · 进程组 teardown · token 剥离）｜ create_driven_batch（GraphQL 游标分页 + &lt;b&gt;两次归一化全扫一致才冻结&lt;/b&gt;）｜ merge_mr（exact-GET → SHA-fenced-PUT → exact-GET）｜ commit_and_push / post_push_verify（SHA 栅栏）｜ migrate_shared_dependency_head（可重放检查点）｜ prepare_attempt · stage_and_guard · create_mr · set_issue_label · &lt;b&gt;reconcile&lt;/b&gt; · archive_execution_logs（同分支 log-only 子提交）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;align=left;spacingLeft=10;spacingRight=10;verticalAlign=middle;" vertex="1" parent="1">
           <mxGeometry x="520" y="1135" width="980" height="105" as="geometry" />
         </mxCell>
         <mxCell id="nGitlab" value="&lt;b&gt;蓝区 GitLab&lt;/b&gt;&lt;br&gt;&lt;i&gt;外部真相源&lt;/i&gt;&lt;br&gt;只走 glab&lt;br&gt;（禁 curl / SDK）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
@@ -108,7 +108,7 @@
         <mxCell id="nWorktree" value="&lt;b&gt;Git worktree&lt;/b&gt;&lt;br&gt;按 Issue 固定隔离&lt;br&gt;（非 attempt 级）" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="880" y="1285" width="280" height="85" as="geometry" />
         </mxCell>
-        <mxCell id="nLogsArch" value="&lt;b&gt;日志归档&lt;/b&gt;&lt;br&gt;append-only 分支&lt;br&gt;req-executor-logs/issue-&amp;lt;iid&amp;gt;/…" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
+        <mxCell id="nLogsArch" value="&lt;b&gt;Issue 分支日志&lt;/b&gt;&lt;br&gt;业务提交 + 终态 log-only 子提交&lt;br&gt;同一 WORK_BRANCH" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#ffffff;strokeColor=#82b366;fontSize=11;" vertex="1" parent="1">
           <mxGeometry x="1210" y="1285" width="290" height="85" as="geometry" />
         </mxCell>
 

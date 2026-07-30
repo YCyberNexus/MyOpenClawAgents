@@ -8,6 +8,7 @@
 
 # Generic project logs are ignored by the req_executor clone as well.
 # stage_and_guard.sh still force-adds its singular staging-time LOG_DIR under
-# .req_executor/, and archive_execution_logs.sh publishes the terminal LOG_DIR
-# on its append-only req-executor-logs branch. Unrelated logs/ paths stay out.
+# .req_executor/ into the same Issue-branch commit as the business changes;
+# terminal files are appended as a log-only child on that same branch.
+# Unrelated logs/ paths stay local.
 logs/

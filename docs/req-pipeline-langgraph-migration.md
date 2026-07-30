@@ -381,7 +381,7 @@ MCP Server（FastMCP）—— Temporal Client 的薄封装，任何调用 < 1s
 | 现有实现 | 手写代价 | Temporal 原语 |
 |---|---|---|
 | `flock` + claim fencing + `active_jobs` 防重入 | 高 | **workflow id 唯一性**（同 namespace 同 id 只允许一个 Running execution） |
-| `execution_id` 作为 stale-callback 围栏 | 中 | **`workflow.info().run_id`**（语义几乎 1:1，日志归档分支名可直接沿用） |
+| `execution_id` 作为 stale-callback 围栏 | 中 | **`workflow.info().run_id`**（语义几乎 1:1，执行日志路径分区可直接沿用） |
 | `_driven_launch_coordinator.sh` 三阶段重放 | 高 | **事件溯源重放**（原生，无需编码） |
 | `blocked_cooldown_ticks` + tick 轮询驱动冷却 | 高 | **`workflow.sleep()`** 持久化定时器 |
 | `blocked_retry_limit` → 升级 `failed-*` | 中 | **`RetryPolicy.maximum_attempts`** + `non_retryable_error_types` |
@@ -422,7 +422,7 @@ MCP Server（FastMCP）—— Temporal Client 的薄封装，任何调用 < 1s
 - `git_network_guard.sh`、`clone_or_pull.sh`、`branch_utils.sh`、`prepare_attempt.sh`
 - `stage_and_guard.sh`、`commit_and_push.sh`、`post_push_verify.sh`
 - `create_mr.sh`、`set_issue_label.sh`、`reconcile.sh`、`summarize_attempt.sh`
-- `archive_execution_logs.sh`
+- `archive_execution_logs.sh`（仅向同一 Issue 分支追加 log-only 子提交）
 
 **接口约定**：这些 wrapper 已经是"一个 JSON envelope 出 stdout"，天然适配 activity 调用。
 activity = 组装 env → `subprocess.run` → `json.loads(stdout)` → 转 dataclass。

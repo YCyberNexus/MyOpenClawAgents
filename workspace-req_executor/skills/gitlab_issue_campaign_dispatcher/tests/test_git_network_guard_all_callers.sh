@@ -16,7 +16,6 @@ required_contracts=(
   'commit_and_push.sh:ls-remote --exit-code --heads origin'
   'commit_and_push.sh:git_network_guard_run "${WORKTREE_DIR}" push'
   'archive_execution_logs.sh:git_network_guard_run "${WORKTREE_DIR}" push'
-  'archive_execution_logs.sh:git_network_guard_run "${WORKTREE_DIR}" fetch'
   'archive_execution_logs.sh:git_network_guard_run "${WORKTREE_DIR}"'
   'post_push_verify.sh:git_network_guard_run "${WORKTREE_DIR}" fetch'
 )

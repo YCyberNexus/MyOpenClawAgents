@@ -85,8 +85,9 @@ executor 侧当前已落地、且容易被误当成"还没有"的能力：
 **执行身份（execution identity）**：attempt 级的文件系统隔离已被取消。worktree、output 目录和本地
 Git 分支现在**按 Issue 固定**；每次运行只拿一个随机不透明的 `execution_id` + 独立 log 目录 + 不可变
 execution-state 文件。`execution_id` 是 stale-callback 的围栏，**不是"第几次重跑"的计数**，不要拿它
-推断次数或拼路径。终态产物由 `archive_execution_logs.sh` 发布到 append-only 分支
-`req-executor-logs/issue-<iid>/execution-<execution_id>`，不移动业务分支。
+推断次数或拼路径。执行日志在暂存时与业务改动一起提交到对应 `WORK_BRANCH`（普通任务为
+`issue/<iid>`）；push 后生成的 `worker_result.json`、MR 恢复标记等终态文件再以 log-only 子提交追加到
+同一 `WORK_BRANCH`，不再创建独立日志分支。
 
 **Issue 评论的方向已经反过来了**（`27c73f5`）：attempt 总结不再发回 issue 讨论区，只落成本地文件
 （`summary_posted=false` 是保留的兼容字段）；反过来，Issue 正文与全部非系统评论会被渲染进
@@ -173,7 +174,7 @@ done
 |---|---|
 | 调度 / claim / 并发 | `test_executor_batch_tick.sh`、`test_executor_tick_lock_concurrency.sh`、`test_driven_scheduler_fairness.sh` |
 | attempt 执行链 | `test_run_executor_attempt.sh`、`test_native_subagent_completion.sh` |
-| 执行身份 / 日志归档 | `test_execution_identity_migration.sh`、`test_archive_execution_logs.sh`、`test_stage_and_guard_ignores_logs.sh` |
+| 执行身份 / 日志随分支提交 | `test_execution_identity_migration.sh`、`test_archive_execution_logs.sh`、`test_stage_and_guard_ignores_logs.sh` |
 | 依赖 / 共享分支 | `test_shared_dependency_branch.sh`、`test_migrate_shared_dependency_head.sh`、`test_recover_shared_mr_finalization.sh` |
 | MR / 合并 / 标签 | `test_phase6_auto_merge.sh`、`test_merge_mr.sh`、`test_set_issue_label_finish_guard.sh` |
 | 运行时控制命令 | `test_set_executor_slots.sh`、`test_set_executor_repo_slots.sh`、`test_repository_configurable_scheduler.sh`、`test_set_executor_acpx_timeout.sh`、`test_executor_concurrency_override.sh` |

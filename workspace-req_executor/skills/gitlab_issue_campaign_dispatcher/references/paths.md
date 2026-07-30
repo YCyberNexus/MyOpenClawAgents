@@ -69,7 +69,7 @@ ${REPO_PATH}/
 | `ISSUE_LOG_REL` | `${ISSUE_WORKTREE_REL}/log/execution-${EXECUTION_ID}` |
 | `LOG_DIR` | `${WORKTREE_DIR}/${ISSUE_LOG_REL}` |
 
-`clone_or_pull.sh` appends `/.req_executor/` and `logs/` to `${REPO_PATH}/.git/info/exclude`. When a business change exists, `stage_and_guard.sh` force-adds `${OUTPUT_DIR}` and the complete staging-time `${LOG_DIR}` into the MR; log-only runs still return `NO_CHANGES`. After terminal `worker_result.json` persistence, `archive_execution_logs.sh` publishes the complete directory on append-only branch `req-executor-logs/issue-<iid>/execution-<execution_id>`; later recovery evidence advances it with a child snapshot commit. The separate archive branch avoids moving `${WORK_BRANCH}` or changing the business/MR commit SHA. Unrelated `logs/` paths remain local.
+`clone_or_pull.sh` appends `/.req_executor/` and `logs/` to `${REPO_PATH}/.git/info/exclude`. When a business change exists, `stage_and_guard.sh` force-adds `${OUTPUT_DIR}` and the complete staging-time `${LOG_DIR}` into the same Issue-branch commit; log-only runs still return `NO_CHANGES` for business-change classification. After terminal `worker_result.json` persistence, `archive_execution_logs.sh` appends the complete directory as a log-only child on the same `${WORK_BRANCH}`; later recovery evidence may append another child. It never creates another remote branch. Unrelated `logs/` paths remain local.
 
 Claude Code is invoked only through `scripts/run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs the fixed acpx command against `${LOG_DIR}/prompt.txt`.
 

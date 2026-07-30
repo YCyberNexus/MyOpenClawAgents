@@ -24,7 +24,10 @@ cp "${SKILL_DIR}/scripts/create_mr.sh" \
 cat >"${FIXTURE_SCRIPTS}/archive_execution_logs.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf 'archive:%s\n' "${EXECUTION_ID:?}" >>"${ARCHIVE_LOG:?}"
+printf 'same-branch:%s\n' "${EXECUTION_ID:?}" >>"${ARCHIVE_LOG:?}"
+printf 'LOG_WORK_BRANCH=%s\n' "${WORK_BRANCH:?}"
+printf 'LOG_PARENT_COMMIT=%s\n' "${COMMIT_SHA:?}"
+printf 'LOG_COMMIT_SHA=%s\n' "${COMMIT_SHA}"
 EOF
 
 cat >"${FIXTURE_SCRIPTS}/env_paths.sh" <<'EOF'
@@ -312,8 +315,8 @@ jq -e '
   and .sha == "1111111111111111111111111111111111111111"
 ' "${CASE_LOG_DIR}/mr_result.json" >/dev/null \
   || fail "the MR flow did not persist a verified private marker"
-[ "$(cat "${CASE_ARCHIVE_LOG}")" = 'archive:1' ] \
-  || fail "valid recovery did not append the refreshed terminal log snapshot"
+[ "$(cat "${CASE_ARCHIVE_LOG}")" = 'same-branch:1' ] \
+  || fail "valid recovery did not append refreshed logs to the shared Issue branch"
 
 # Exactly 100 history rows means the first page is full, not that history is
 # malformed. Recovery must request page 2, then persist terminal conflict

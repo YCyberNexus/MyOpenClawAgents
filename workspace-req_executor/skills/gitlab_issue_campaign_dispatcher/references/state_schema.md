@@ -154,6 +154,20 @@ and an exact resume SHA. A two-member state can never normalize to a
 dependency-free tail. Missing, legacy, partial, moved, or mismatched metadata
 fails closed and is never reconstructed from current Issue text.
 
+After the compact terminal result is durable, `archive_execution_logs.sh`
+builds a tree from the current `HEAD` plus only the current `ISSUE_LOG_REL` and
+pushes it as a direct log-only child on the same `WORK_BRANCH`. A private Git
+index prevents staged or unstaged partial business work from entering that
+child. Ordinary log-only executions may create `issue/<iid>` from the current
+base even when `stage_and_guard.sh` returned `NO_CHANGES`. For non-auto and
+shared open-MR flows, the wrapper advances `work_branch_sha`, the private MR
+marker/checkpoint, and the compact callback `commit_sha` to the new source tip.
+A verified merged automatic MR keeps its immutable merged SHA in the callback
+while only `work_branch_sha` advances. An unresolved automatic MR and a shared
+failure that has not installed its exact MR checkpoint keep post-push evidence
+local because moving those source refs would destroy their recovery fence. No
+`req-executor-logs/*` ref is created.
+
 Before C starts, `migrate_shared_dependency_head.sh` moves an ordinary completed
 A from `issue/A` to `issue/A+C` without changing A's commit. A's state first
 adds `branch_migration` with `version:1`, `status:"pending"`, ordered

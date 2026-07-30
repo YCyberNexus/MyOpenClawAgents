@@ -97,7 +97,7 @@ Core contract:
 - `build_prompt.sh` writes `${LOG_DIR}/prompt.txt` from the issue title, description, and all non-system issue comments in every mode; continue mode also separates historical agent summaries.
 - Runtime state lives under `${REPO_PATH}/.req_executor/`.
 - There are no runtime basename, project data directory, or UI account-pool trigger/config fields.
-- `clone_or_pull.sh` locally ignores `/.req_executor/` and `logs/`; when business changes exist, `stage_and_guard.sh` force-adds the current issue's output plus the complete staging-time `${LOG_DIR}` into the MR. After `worker_result.json` is durable, `archive_execution_logs.sh` publishes terminal snapshots on append-only branch `req-executor-logs/issue-<iid>/execution-<execution_id>` without moving the business branch; later recovery evidence appends another snapshot. Unrelated `logs/` paths remain outside the commit index.
+- `clone_or_pull.sh` locally ignores `/.req_executor/` and `logs/`; when business changes exist, `stage_and_guard.sh` force-adds the current issue's output plus the complete staging-time `${LOG_DIR}` into the same Issue-branch commit. After `worker_result.json` is durable, `archive_execution_logs.sh` appends the complete terminal directory as a log-only child on that same `WORK_BRANCH`; later recovery evidence may append another child. It never creates a separate remote log branch. Unrelated `logs/` paths remain outside the commit index.
 
 The standard wrapper environment is:
 

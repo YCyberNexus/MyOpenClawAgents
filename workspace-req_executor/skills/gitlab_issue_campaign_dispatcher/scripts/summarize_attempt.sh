@@ -64,7 +64,7 @@ fi
     echo "- **Block reason**: ${BLOCK_REASON}"
   fi
   echo "- **Changed files**: ${CHANGED_COUNT}"
-  echo "- **Evidence**: \`${LOG_DIR}\` (staging-time files enter the MR; the terminal directory is archived on \`req-executor-logs/issue-${ISSUE_IID}/execution-${EXECUTION_ID}\`)"
+  echo "- **Evidence**: \`${LOG_DIR}\` (staging-time files enter the business commit; terminal files append to the same Issue branch)"
 
   if [ -n "${CHANGED_PREVIEW}" ] && [ "${CHANGED_COUNT}" -gt 0 ]; then
     echo
