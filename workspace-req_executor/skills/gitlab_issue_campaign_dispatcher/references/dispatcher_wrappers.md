@@ -15,6 +15,8 @@ Owns scheduled preparation:
   changing or delaying an ordinary A
 - when C declares A, migrates completed `issue/<A>` at the exact A SHA onto
   `issue/<A>+<C>` through a replayable branch/MR transaction
+- when C declares two through eight heads, validates and aggregates all exact
+  ordinary commits before binding the same anchor-shaped shared branch
 - defers C until A's stable `pr`/`finish`, migrated shared branch, durable
   commit SHA, replacement MR identity, and campaign `pending` drain all agree
 - allocates execution identities
@@ -25,17 +27,19 @@ Owns scheduled preparation:
 
 It does not read runtime basename, data directory, or account-pool trigger fields.
 Dependency planning and waiting happen before allocation and placeholder
-persistence, so they do not consume retry budget or create an execution identity. Version 1 supports
-only a two-node one-to-one A -> C pair. Fan-out, a longer chain, cycles,
-duplicate persisted membership, a changed edge, or a changed target fail
-closed. An incomplete frozen scope does not block an ordinary A; a later C may
-bind an already-completed A from the same batch or an earlier campaign.
+persistence, so they do not consume retry budget or create an execution identity.
+Supported shapes are one `A -> C` pair or a bounded independent fan-in
+`[A1,...,An] -> C`. Fan-out, a longer chain, cycles, aggregate merge conflicts,
+duplicate persisted participation, a changed edge/list, or a changed target
+fail closed. An incomplete frozen scope does not block an ordinary source; a
+later C may bind completed sources from the same batch or an earlier campaign.
 
 The project envelope exposes `dependency_waiting[]` with `iid`,
 `dependency_iid`, `branch`, and a stable reason. Before an IID is known, scope
 or API uncertainty uses null dependency fields. Once known, C waits on
-`dependency_not_completed`, `dependency_branch_migration_pending`, or
-`dependency_commit_unverified` for the shared `issue/A+C` branch. Bounded API
+`dependency_not_completed`, `dependency_branch_migration_pending`,
+`dependency_fan_in_migration_pending`, or `dependency_commit_unverified` for
+the shared `issue/A+C` branch. Bounded API
 or parser uncertainty remains non-terminal. Driven mode returns deterministic
 failures as exact `skipped_entries[]`, allowing the scheduler to terminalize
 the physical job after project state is durable. Driven

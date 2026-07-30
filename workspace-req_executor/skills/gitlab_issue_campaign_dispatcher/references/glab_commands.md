@@ -95,7 +95,10 @@ Used by `scripts/create_mr.sh` to list open MRs for the work branch. Ordinary
 branches use the result for rotation. During late binding,
 `migrate_shared_dependency_head.sh` requires exactly one open ordinary
 `issue/A` MR, then requires empty all-state `issue/A+C` history before creating
-the replacement. Recovery may reuse only the one intent-owned exact open
+the replacement. `migrate_multi_dependency_heads.sh` applies the same exact
+source-MR check to every additional ordinary head, adds every closing line to
+the replacement, and only then closes those old MRs. Recovery may reuse only
+the one intent-owned exact open
 replacement and never replaces closed or moved shared history. C requires
 exactly one entry whose URL/IID matches A's migrated durable state, then reuses
 it without mutation. The final exact MR

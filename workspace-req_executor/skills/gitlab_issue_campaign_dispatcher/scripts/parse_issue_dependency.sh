@@ -63,7 +63,9 @@ normalize_declaration_line() {
   trim_whitespace "${value}"
 }
 
+MAX_DEPENDENCY_ISSUES=8
 declare -A dependency_iids=()
+dependency_iid_order=()
 invalid_target=false
 dependency_issue_pattern='^依赖[[:space:]]*Issue([[:space:]]+|[[:space:]]*:[[:space:]]*|$)(.*)$'
 dependency_on_issue_pattern='^依赖于[[:space:]]*Issue([[:space:]]+|[[:space:]]*:[[:space:]]*|$)(.*)$'
@@ -76,8 +78,8 @@ depends_on_key_pattern='^depends_on([[:space:]]*:[[:space:]]*|$)(.*)$'
 # The dependency declaration is a line-start prefix, not a whole-line record.
 # Keep a token boundary after the IID so `#123abc` remains invalid, while
 # allowing other Issue metadata to follow after whitespace on the same line.
-required_hash_target_pattern='^#([1-9][0-9]*)([[:space:]].*)?$'
-optional_hash_target_pattern='^#?([1-9][0-9]*)([[:space:]].*)?$'
+required_hash_target_pattern='^(#[1-9][0-9]*([[:space:]]*[,，][[:space:]]*#[1-9][0-9]*)*)([[:space:]].*)?$'
+optional_hash_target_pattern='^(#?[1-9][0-9]*([[:space:]]*[,，][[:space:]]*#?[1-9][0-9]*)*)([[:space:]].*)?$'
 
 shopt -s nocasematch
 fence_marker=""
@@ -382,22 +384,30 @@ for ((markdown_line_index = 0;
   if [[ "${declaration_rest}" =~ ^Issue[[:space:]]+(.*)$ ]]; then
     declaration_rest="$(trim_whitespace "${BASH_REMATCH[1]}")"
   fi
-  dependency_iid=""
+  dependency_target_list=""
   if [[ "${hash_optional}" == true && "${declaration_rest}" =~ ${optional_hash_target_pattern} ]]; then
-    dependency_iid="${BASH_REMATCH[1]}"
+    dependency_target_list="${BASH_REMATCH[1]}"
   elif [[ "${hash_optional}" != true && "${declaration_rest}" =~ ${required_hash_target_pattern} ]]; then
-    dependency_iid="${BASH_REMATCH[1]}"
+    dependency_target_list="${BASH_REMATCH[1]}"
   else
     invalid_target=true
     continue
   fi
 
-  if ! valid_gitlab_iid "${dependency_iid}"; then
-    invalid_target=true
-    continue
-  fi
-
-  dependency_iids["${dependency_iid}"]=1
+  dependency_target_list="${dependency_target_list//，/,}"
+  IFS=',' read -r -a parsed_dependency_targets <<<"${dependency_target_list}"
+  for dependency_target in "${parsed_dependency_targets[@]}"; do
+    dependency_target="$(trim_whitespace "${dependency_target}")"
+    dependency_iid="${dependency_target#\#}"
+    if ! valid_gitlab_iid "${dependency_iid}"; then
+      invalid_target=true
+      continue
+    fi
+    if [[ -z "${dependency_iids[${dependency_iid}]+present}" ]]; then
+      dependency_iids["${dependency_iid}"]=1
+      dependency_iid_order+=("${dependency_iid}")
+    fi
+  done
 done
 shopt -u nocasematch
 
@@ -406,19 +416,34 @@ if [[ "${invalid_target}" == true ]]; then
   exit 0
 fi
 
-if (( ${#dependency_iids[@]} > 1 )); then
-  printf '{"status":"invalid","reason":"multiple_dependencies"}\n'
+if (( ${#dependency_iid_order[@]} > MAX_DEPENDENCY_ISSUES )); then
+  printf '{"status":"invalid","reason":"too_many_dependencies"}\n'
   exit 0
 fi
 
-if (( ${#dependency_iids[@]} == 0 )); then
+if (( ${#dependency_iid_order[@]} == 0 )); then
   printf '{"status":"none"}\n'
   exit 0
 fi
 
-dependency_iid="${!dependency_iids[*]}"
-if [[ "${dependency_iid}" == "${ISSUE_IID}" ]]; then
-  printf '{"status":"invalid","reason":"self_dependency"}\n'
+for dependency_iid in "${dependency_iid_order[@]}"; do
+  if [[ "${dependency_iid}" == "${ISSUE_IID}" ]]; then
+    printf '{"status":"invalid","reason":"self_dependency"}\n'
+    exit 0
+  fi
+done
+
+dependency_iid="${dependency_iid_order[0]}"
+if (( ${#dependency_iid_order[@]} > 1 )); then
+  dependency_iids_json="$(printf '%s\n' "${dependency_iid_order[@]}" \
+    | jq -Rsc 'split("\n") | map(select(length > 0) | tonumber)')"
+  jq -nc \
+    --argjson dependency_iid "${dependency_iid}" \
+    --argjson dependency_iids "${dependency_iids_json}" \
+    --arg base_branch "issue/${dependency_iid}" '{
+      status:"resolved_multiple",dependency_iid:$dependency_iid,
+      dependency_iids:$dependency_iids,base_branch:$base_branch
+    }'
   exit 0
 fi
 

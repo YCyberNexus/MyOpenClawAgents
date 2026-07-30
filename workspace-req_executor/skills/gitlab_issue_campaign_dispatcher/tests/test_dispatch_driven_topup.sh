@@ -298,6 +298,61 @@ jq -nc --argjson head "${MIGRATION_HEAD_IID}" \
     intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
   }'
 EOF
+cat >"${FIXTURE_SCRIPTS}/migrate_multi_dependency_heads.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+anchor_iid="$(jq -r '.[0]' <<<"${MIGRATION_DEPENDENCY_IIDS_JSON}")"
+aggregate_sha="${FAKE_MULTI_AGGREGATE_SHA:?}"
+state_file="${ISSUES_ROOT}/issue-${anchor_iid}/state.json"
+new_branch="issue/${anchor_iid}+${MIGRATION_TAIL_IID}"
+printf 'multi:%s->%s\n' "$(jq -c . <<<"${MIGRATION_DEPENDENCY_IIDS_JSON}")" \
+  "${MIGRATION_TAIL_IID}" >>"${TEST_MIGRATION_LOG}"
+state_tmp="$(mktemp "${state_file}.multi.XXXXXX")"
+jq --argjson head "${anchor_iid}" \
+  --argjson tail "${MIGRATION_TAIL_IID}" \
+  --argjson dependencies "${MIGRATION_DEPENDENCY_IIDS_JSON}" \
+  --arg branch "${new_branch}" --arg sha "${aggregate_sha}" \
+  --arg target "${MIGRATION_TARGET_BRANCH}" '
+  .work_branch=$branch
+  | .branch_members=[$head,$tail]
+  | .shared_branch_role="head"
+  | .commit_sha=$sha
+  | .work_branch_sha=$sha
+  | .dependency_history_verified=true
+  | .dependency_pinned_execution_id=.latest_execution_id
+  | .merge_request_url="https://gitlab.test/group/project/-/merge_requests/17"
+  | .mr_finalization={
+      status:"verified_open",source_execution_id:.latest_execution_id,
+      work_branch:$branch,branch_members:[$head,$tail],
+      shared_branch_role:"head",commit_sha:$sha,
+      intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      target_branch:$target,iid:17,
+      web_url:"https://gitlab.test/group/project/-/merge_requests/17",
+      mr_action:"created",verified_at:"2026-07-20T00:00:00Z"
+    }
+  | .dependency_aggregation={
+      version:1,status:"completed",anchor_iid:$head,tail_iid:$tail,
+      dependency_iids:$dependencies,work_branch:$branch,
+      target_branch:$target,aggregate_sha:$sha,
+      sources:[],started_at:"2026-07-20T00:00:00Z",
+      completed_at:"2026-07-20T00:00:01Z"
+    }
+' "${state_file}" >"${state_tmp}"
+chmod 600 "${state_tmp}"
+mv "${state_tmp}" "${state_file}"
+git -C "${REPO_PATH}" update-ref \
+  "refs/remotes/origin/${new_branch}" "${aggregate_sha}"
+jq -nc --argjson head "${anchor_iid}" \
+  --argjson tail "${MIGRATION_TAIL_IID}" \
+  --argjson dependencies "${MIGRATION_DEPENDENCY_IIDS_JSON}" \
+  --arg branch "${new_branch}" --arg sha "${aggregate_sha}" '{
+    status:"ready",reason:"multi_dependency_heads_aggregated",
+    head_iid:$head,tail_iid:$tail,dependency_iids:$dependencies,
+    work_branch:$branch,commit_sha:$sha,mr_iid:17,
+    mr_url:"https://gitlab.test/group/project/-/merge_requests/17",
+    intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  }'
+EOF
 cat >"${BIN_DIR}/glab" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -780,7 +835,8 @@ RACE_REQUEST="$(printf '%s' "${VALID_REQUEST}" | jq -c \
 # Persisted shared-group identity is an authorization boundary. The branch key
 # must encode the same ordered members, one IID may belong to only one group,
 # and a frozen merge target must be a non-empty string.
-for invalid_group_case in mismatched_key duplicate_member invalid_target; do
+for invalid_group_case in mismatched_key duplicate_member duplicate_auxiliary \
+  invalid_fan_in missing_fan_in_mode unexpected_pair_mode invalid_target; do
   write_terminal_race_state
   INVALID_GROUP_TMP="$(mktemp "${STATE_FILE}.invalid-group.XXXXXX")"
   case "${invalid_group_case}" in
@@ -796,6 +852,36 @@ for invalid_group_case in mismatched_key duplicate_member invalid_target; do
           members:[9,2],scope_id:"batch-A",merge_target_branch:"main"},
         "issue/9+3":{work_branch:"issue/9+3",head_iid:9,tail_iid:3,
           members:[9,3],scope_id:"batch-A",merge_target_branch:"main"}
+      }' "${STATE_FILE}" >"${INVALID_GROUP_TMP}"
+      ;;
+    duplicate_auxiliary)
+      jq '.shared_branch_groups = {
+        "issue/9+2":{work_branch:"issue/9+2",head_iid:9,tail_iid:2,
+          members:[9,2],dependency_iids:[9,10],dependency_mode:"fan_in",
+          scope_id:"batch-A",merge_target_branch:"main"},
+        "issue/10+3":{work_branch:"issue/10+3",head_iid:10,tail_iid:3,
+          members:[10,3],scope_id:"batch-A",merge_target_branch:"main"}
+      }' "${STATE_FILE}" >"${INVALID_GROUP_TMP}"
+      ;;
+    invalid_fan_in)
+      jq '.shared_branch_groups = {
+        "issue/9+2":{work_branch:"issue/9+2",head_iid:9,tail_iid:2,
+          members:[9,2],dependency_iids:[9,2],dependency_mode:"fan_in",
+          scope_id:"batch-A",merge_target_branch:"main"}
+      }' "${STATE_FILE}" >"${INVALID_GROUP_TMP}"
+      ;;
+    missing_fan_in_mode)
+      jq '.shared_branch_groups = {
+        "issue/9+2":{work_branch:"issue/9+2",head_iid:9,tail_iid:2,
+          members:[9,2],dependency_iids:[9,10],
+          scope_id:"batch-A",merge_target_branch:"main"}
+      }' "${STATE_FILE}" >"${INVALID_GROUP_TMP}"
+      ;;
+    unexpected_pair_mode)
+      jq '.shared_branch_groups = {
+        "issue/9+2":{work_branch:"issue/9+2",head_iid:9,tail_iid:2,
+          members:[9,2],dependency_mode:"fan_in",
+          scope_id:"batch-A",merge_target_branch:"main"}
       }' "${STATE_FILE}" >"${INVALID_GROUP_TMP}"
       ;;
     invalid_target)
@@ -1423,6 +1509,102 @@ grep -Fq 'MERGE_TARGET_BRANCH=main' "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
   || fail "dependency unexpectedly changed the independently resolved MR target"
 grep -Fq 'WORK_BRANCH=issue/9+2' "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
   || fail "dependent Issue did not retain the shared canonical work branch"
+
+# Two completed ordinary heads are aggregated before C is allocated. The
+# pair-shaped execution contract keeps the first dependency as its anchor, but
+# the campaign group freezes the complete ordered source list and pins C to the
+# aggregate commit that contains both heads.
+write_terminal_race_state
+MULTI_SOURCE_9_SHA="$(git -C "${PROJECT_REPO}" rev-parse HEAD)"
+MULTI_SOURCE_10_SHA="$(printf 'multi source 10\n' \
+  | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} -p HEAD)"
+MULTI_AGGREGATE_SHA="$(printf 'aggregate 9 and 10\n' \
+  | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} \
+    -p "${MULTI_SOURCE_9_SHA}" -p "${MULTI_SOURCE_10_SHA}")"
+mkdir -p "${PROJECT_REPO}/.req_executor/issues/issue-9"
+jq -n --arg sha "${MULTI_SOURCE_9_SHA}" '{
+  iid:9,status:"done",latest_execution_id:1,
+  dependency_pinned_execution_id:1,
+  work_branch:"issue/9",branch_members:[9],shared_branch_role:null,
+  dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
+  commit_sha:$sha,work_branch_sha:$sha,dependency_history_verified:true,
+  merge_request_url:"https://gitlab.test/group/project/-/merge_requests/16"
+}' >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+chmod 600 "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+export FAKE_MULTI_AGGREGATE_SHA="${MULTI_AGGREGATE_SHA}"
+export FAKE_SHARED_MR_SHA="${MULTI_AGGREGATE_SHA}"
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"依赖issue #9,#10 page-name: BOM"
+}'
+export FAKE_ISSUE_LABELS_JSON='{"9":["pr"],"10":["pr"]}'
+: >"${MIGRATION_LOG}"
+MULTI_DEPENDENCY_READY="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_MULTI_AGGREGATE_SHA FAKE_ISSUE_DESCRIPTIONS_JSON \
+  FAKE_ISSUE_LABELS_JSON
+printf '%s' "${MULTI_DEPENDENCY_READY}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [2]
+  and .dependency_waiting == []
+' >/dev/null || fail "multi-dependency fan-in did not release its dependent"
+jq -e --arg sha "${MULTI_AGGREGATE_SHA}" '
+  .shared_branch_groups["issue/9+2"].dependency_iids == [9,10]
+  and .shared_branch_groups["issue/9+2"].dependency_mode == "fan_in"
+  and .shared_branch_groups["issue/9+2"].members == [9,2]
+  and .pending_subagents["2"].dependency_iid == 9
+  and .pending_subagents["2"].dependency_base_sha == $sha
+  and .pending_subagents["2"].work_branch == "issue/9+2"
+' "${STATE_FILE}" >/dev/null \
+  || fail "multi-dependency fan-in identity was not frozen durably"
+grep -Fxq 'multi:[9,10]->2' "${MIGRATION_LOG}" \
+  || fail "dispatcher did not invoke the multi-head migration transaction"
+MULTI_DEPENDENCY_PAYLOAD="$(printf '%s' "${MULTI_DEPENDENCY_READY}" \
+  | jq -r '.dispatch_entries[0].payload_path')"
+MULTI_DEPENDENCY_MANIFEST="$(sed -n 's/^manifest_path=//p' \
+  "${MULTI_DEPENDENCY_PAYLOAD}")"
+MULTI_DEPENDENCY_EXECUTOR_PAYLOAD="$(jq -r '.executor_payload_path' \
+  "${MULTI_DEPENDENCY_MANIFEST}")"
+grep -Fq "DEPENDENCY_BASE_SHA=${MULTI_AGGREGATE_SHA}" \
+  "${MULTI_DEPENDENCY_EXECUTOR_PAYLOAD}" \
+  || fail "multi-dependency attempt did not pin the aggregate commit"
+grep -Fq "EXPECTED_COMMIT_PARENT_SHA=${MULTI_AGGREGATE_SHA}" \
+  "${MULTI_DEPENDENCY_EXECUTOR_PAYLOAD}" \
+  || fail "multi-dependency attempt did not require the aggregate parent"
+
+MULTI_AUX_STATE_TMP="$(mktemp "${STATE_FILE}.multi-aux.XXXXXX")"
+jq '.issue_min_iid=10 | .issue_max_iid=10 | .issue_iids_whitelist=[10]
+  | .unfinished_iids=[10] | .completed_iids=[9,10]
+  | .pending_subagents={} | .active_issue_iids=[] | .active_issue_sessions=[]' \
+  "${STATE_FILE}" >"${MULTI_AUX_STATE_TMP}"
+mv "${MULTI_AUX_STATE_TMP}" "${STATE_FILE}"
+MULTI_AUX_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0] |= (
+    .job_id="job-10" | .iid=10 | .snapshot_index=3 | .branch="main"
+    | .entry_mode="auto" | .force_rerun_pr=false
+  )')"
+export FAKE_ISSUE_LABELS_JSON='{"10":["pr","continue"]}'
+: >"${ALLOC_LOG}"
+: >"${PREP_LOG}"
+: >"${LABEL_LOG}"
+MULTI_AUX_CONTINUE="$(run_wrapper "${MULTI_AUX_REQUEST}")"
+unset FAKE_ISSUE_LABELS_JSON
+printf '%s' "${MULTI_AUX_CONTINUE}" | jq -e '
+  .status == "no_eligible_iids"
+  and .dispatch_entries == []
+  and .dependency_waiting == [{
+    iid:10,dependency_iid:null,branch:null,
+    reason:"shared_branch_source_continue_unsupported"
+  }]
+' >/dev/null \
+  || fail "auxiliary fan-in source was allowed to diverge after aggregation"
+[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
+  || fail "auxiliary fan-in continue consumed an attempt"
+
+# Restore the single-head fixture used by the remaining continue tests.
+cp "${VALID_DEPENDENCY_STATE}" \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+git -C "${PROJECT_REPO}" update-ref \
+  refs/remotes/origin/issue/9+2 "${DEPENDENCY_SHA}"
+export FAKE_SHARED_MR_SHA="${DEPENDENCY_SHA}"
 
 # Once C has pushed the shared branch, continue resumes that exact C tip even
 # if A is no longer in a stable completed state.

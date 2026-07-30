@@ -52,10 +52,16 @@ prefix cannot permanently starve later candidates.
 `shared_branch_groups` is an object keyed by the exact frozen branch
 `issue/<head>+<tail>`. Each value contains the same `work_branch`, positive and
 distinct `head_iid` / `tail_iid`, ordered `members:[head,tail]`, a non-empty
-`scope_id`, and an optional non-empty `merge_target_branch`. The key must encode
-the two stored members exactly, and one IID may occur in at most one group.
-Malformed keys, duplicate membership, invalid targets, declaration changes,
-or a second group binding fail closed before attempt allocation.
+`scope_id`, and an optional non-empty `merge_target_branch`. A fan-in group also
+contains `dependency_mode:"fan_in"` and ordered unique
+`dependency_iids:[head,...]` with two through eight entries; the tail may not
+appear in that list. `members` intentionally remains `[head,tail]` because the
+first dependency is the compatibility anchor for the existing execution/MR
+contract. Uniqueness is enforced across every group's effective participants
+`(dependency_iids // [head]) + [tail]`, so auxiliary fan-in sources cannot be
+reused through their absence from `members`. The key must encode the anchor and
+tail exactly. Malformed keys, duplicate participation, invalid targets,
+declaration changes, or a second group binding fail closed before allocation.
 
 Graph discovery from a frozen planning scope is advisory for topology already
 visible. An incomplete scope never delays or changes an ordinary A. When C is
@@ -186,6 +192,28 @@ replacement MR. A terminal identity conflict changes the checkpoint to
 uncertainty leaves it pending and returns a retryable migration deferral. The
 old ordinary MR remains closed in GitLab history, but steady state has exactly
 one open shared MR.
+
+For a fan-in, the anchor Issue additionally stores
+`dependency_aggregation`. Version 1 freezes `anchor_iid`, `tail_iid`, ordered
+`dependency_iids`, `work_branch`, `target_branch`, `aggregate_sha`,
+`started_at`, and ordered `sources`. Every source entry contains its `iid`,
+ordinary `branch`, immutable `commit_sha`, `source_execution_id`, and old MR
+IID/URL. `status:"pending"` is written only after all source states, refs, MRs,
+and a conflict-free aggregate commit have been verified, but before the anchor
+migration changes remote state. Completion adds the combined MR IID/URL and
+`completed_at`, advances the anchor's canonical `commit_sha`,
+`work_branch_sha`, and `mr_finalization.commit_sha` to `aggregate_sha`, and sets
+`status:"completed"`. A deterministic identity/merge failure uses
+`status:"failed"` with `failure_reason`/`failed_at`; transient uncertainty
+leaves it pending.
+
+Each non-anchor source retains its original `commit_sha` and gains a
+`joined_dependency_group` record with the same anchor, tail, dependency list,
+work branch, aggregate SHA, and `joined_at`. Its ordinary MR URL is retained as
+`superseded_merge_request_url`; `merge_request_url` points to the combined MR,
+and `mr_finalization.status:"superseded"` prevents the retired ordinary
+identity from authorizing another migration. These auxiliary states are audit
+evidence, not execution members of the pair-shaped shared branch.
 
 After C's shared push is verified, `state.json.mr_finalization` first has exactly
 `status:"pending"`, `source_execution_id`, `work_branch`, ordered

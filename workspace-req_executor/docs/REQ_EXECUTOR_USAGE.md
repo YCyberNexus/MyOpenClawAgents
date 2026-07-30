@@ -60,75 +60,54 @@ merge_target_branch=<auto_merge=true 时必填的 MR 目标分支>
 
 ### Issue 依赖分支
 
-若 issueC 需要在 issueA 的实现之上继续开发，请让 issueC 描述中的某一行以如下声明开头：
-
-```text
-依赖 Issue #<issueA 的 IID>
-```
-
-例如 issueA 的 IID 是 `41`：
+若 issueC 需要在一个或多个已完成 Issue 的实现之上继续开发，请让其描述中的某一行以声明开头：
 
 ```text
 依赖 Issue #41
+依赖 Issue #41,#42
 ```
 
 兼容写法包括 `依赖于 #41`、`依赖于 Issue #41`、`前置 Issue: #41`、
 `Depends on #41`、`Blocked by #41`、`dependency: #41` 与
-`depends_on: 41`。声明必须从原始 Markdown 的行首开始，可带 Markdown 列表、标题或粗体前缀；
-合法 IID 后允许以空白继续书写 `page-name` 等其他内容，不要求声明占满整行。GitLab 将单换行
-渲染为空格不影响解析，正文中间的普通提及也不会被误判。目前只允许一个同项目直接依赖，多个
-不同依赖、非法 IID 和自依赖会失败关闭。
+`depends_on: 41`。多依赖接受英文逗号、中文逗号及逗号两侧空格，例如 `#41, #42`。声明必须从原始
+Markdown 的行首开始，可带列表、标题或粗体前缀；合法 IID 列表后允许以空白继续书写 `page-name`
+等其他内容，不要求声明占满整行。声明按出现顺序稳定去重，最多 8 个；超过上限、非法 IID 和自依赖
+会失败关闭。
 
-issueA 处理时不会假设未来存在反向依赖：它先按普通 Issue 使用 `issue/<A IID>`，提交一次并创建
-只关闭 A 的普通 MR。只有轮到 issueC、解析到 C 正文中的声明后，executor 才建立 `A -> C` 绑定；
-A 与 C 可以位于同一批次，也可以位于不同批次。冻结范围不完整不会阻塞一个没有依赖声明的 A。
+每个上游处理时都不会假设未来存在反向依赖：它先使用普通 `issue/<IID>` 分支，提交并创建只关闭
+自己的普通 MR。只有轮到 C 后，executor 才建立 `A -> C` 或 `[A1,A2,...,An] -> C` 绑定。当前支持
+一个上游或 2–8 个独立上游汇入一个 C。各上游不能再有前置依赖，也不能同时参加另一个共享组；C
+不能再被其他 Issue 依赖。扇出、三层以上链、环、合并冲突和重叠绑定都会失败关闭。
 
-当前版本只支持两个节点的一对一关系 `A -> C`：A 不能再依赖其他 Issue，A 不能有第二个依赖者，
-C 也不能再被其他 Issue 依赖。扇出、三节点以上链、环、自依赖、多个直接依赖和重叠持久化绑定都会
-失败关闭。调度器仍可用当前冻结范围提前发现明显的非法拓扑，但范围外的已完成 A 会由 C 的直接声明
-和 A 的 durable state 校验，不再仅因“不在当前冻结范围”而拒绝。
-
-对 `A -> C`，唯一远端工作分支冻结为：
+唯一远端工作分支继续采用二元兼容命名；多依赖时以声明中的第一个上游作为 anchor：
 
 ```text
-issue/<A IID>+<C IID>
+issue/<anchor IID>+<C IID>
 ```
 
-例如 A=`41`、C=`43`，A 完成时先存在 `issue/41`；C 被处理时，executor 将 A 的同一个提交迁移到
-`issue/41+43`，此后 A、C 的 canonical work branch 都绑定为该组合分支。A 的固定本地分支是
-`issue/41`，C 的固定本地分支是 `issue/43`，因此两个 worktree 不会尝试检出同一个本地分支。
-不同 attempt 不再创建新的本地分支。一次正常 fresh 流程的最终提交历史严格为
-`target -> commit(A) -> commit(C)`；独立 issueB 继续使用 `issue/<B IID>`，可以和 A 并行。
+例如依赖 `#41,#42` 的 C=`43` 使用 `issue/41+43`。每个 IID 的固定本地分支仍是 `issue/<IID>`，所以
+多个 worktree 不会检出同一个本地分支。单依赖历史为
+`target -> commit(A) -> commit(C)`；多依赖先生成包含全部固定上游 SHA 的 merge commit 链，最终为
+`target -> aggregate(A1,...,An) -> commit(C)`。
 
-A 完成普通流程后，C 会等待 A 具有稳定的 `pr` 或 `finish` 标签，且没有 `continue`、`doing`、
-`retry`、blocked、failed 或 timeout 工作流标签；当前 campaign 中也不能仍有 A 的
-`pending_subagents` claim。若 A 来自当前 campaign，`completed_iids` 可作为完成证据；若 A 来自更早
-campaign，则迁移器改用更强的 durable 校验：A 的 mode-600 私有 `done` 状态、`issue/A` 的完整远端
-SHA、提交身份和唯一开放普通 MR 必须全部一致。
+C 会等待每个上游都具有稳定的 `pr` 或 `finish`，且没有 `continue`、`doing`、`retry`、blocked、
+failed 或 timeout 标签，也不能仍有 campaign `pending_subagents` claim。迁移器还会逐个校验 mode-600
+私有 `done` 状态、普通远端分支完整 SHA、提交身份和唯一开放普通 MR。
 
-GitLab 不提供修改 MR `source_branch` 或原子重命名分支的接口，所以这里的“改名”由可恢复事务实现：
-先写入 `branch_migration.status=pending` 检查点，以空期望 lease 在同一 A SHA 创建
-`issue/A+C`，关闭 A 的旧 MR，创建同时包含 `Closes #A` 与 `Closes #C` 的替代 MR，再以精确 A SHA
-lease 删除 `issue/A`，最后把 A 的 durable state 改写为共享 head。任一网络步骤中断都会保留检查点
-并在后续 tick 幂等重放；不会重新运行 A、重新提交 A 或创建第二个替代 MR。稳定状态只有一个开放
-组合 MR，但 GitLab 历史中会保留一个已关闭的 A 普通 MR IID 和一个开放的替代 MR IID。
+单依赖由 `migrate_shared_dependency_head.sh` 写入 `branch_migration.status=pending`，以空期望 lease
+创建组合分支，关闭旧 MR，创建同时关闭 A/C 的唯一替代 MR，再按精确 SHA 删除普通分支。多依赖由
+`migrate_multi_dependency_heads.sh` 在任何远端变更前固定全部 source identity，用
+`git merge-tree --write-tree` 计算无冲突树，并持久化包含 sources 和 aggregate SHA 的
+`dependency_aggregation.status=pending`。随后它复用 anchor 迁移、以精确 lease 推进组合分支、给唯一
+MR 加上所有 `Closes`，确认可观察后才关闭其他普通 MR、删除其分支并记录
+`joined_dependency_group`。任一步骤中断都可幂等重放；内容冲突返回 `dependency_merge_conflict`，
+不会自动选择 ours/theirs，也不会先破坏 source MR/ref。
 
-迁移完成后，远端 `issue/A+C` 的完整 SHA 必须仍等于 A 的唯一提交，A 的状态绑定相同成员、共享
-分支角色和替代 MR。C 的 fresh attempt 固定该 A SHA，并把它同时作为
-`DEPENDENCY_BASE_SHA` 与 `EXPECTED_WORK_BRANCH_SHA`。提交前要求 C 的新提交恰好只有一个父提交且
-父提交就是 A SHA；推送使用显式
-`--force-with-lease=refs/heads/issue/A+C:<A SHA>`。远端移动、消失或父提交不一致都会失败关闭。
-迁移器首次创建共享 ref 时使用空期望 lease，要求服务端更新瞬间该 ref 仍不存在。提交后 wrapper
-固定新 commit 的完整 SHA，按该不可变 SHA 校验单父链、推送并回读精确远端 ref，不再信任随后
-可能移动的本地 attempt ref 或 `HEAD`。
-
-迁移器创建组合分支唯一开放的替代 MR，描述同时包含 `Closes #A` 与 `Closes #C`。C 推送后不会
-关闭或新建 MR，而是核对 A durable state 中记录的替代 MR URL/IID，并复用它；来源分支、目标分支
-和当前 source SHA 仍由固定脚本向 GitLab 精确验证。迁移器创建的 64 位十六进制 `intent_id` 会写入私有状态和
-MR 描述，C 继承同一标识；MR 作者还必须是当前服务账号，且两条 `Closes` 必须完整存在。共享分支
-当前强制 `auto_merge=false`；任一成员请求
-自动合并都会以 `shared_branch_auto_merge_unsupported` 失败关闭。A、C 的 MR 目标分支一旦冻结也
-不能改变。
+C 的 fresh attempt 将 anchor SHA 或 aggregate SHA 同时固定为 `DEPENDENCY_BASE_SHA`、
+`EXPECTED_WORK_BRANCH_SHA` 和唯一允许的父提交。推送使用相同 SHA 的显式 lease；远端移动、消失或
+父提交不一致都会失败关闭。唯一组合 MR 描述包含每个上游及 C 的 `Closes`，并携带与私有状态一致的
+64 位 `intent_id`。C 推送后只复用该 MR；来源、目标、当前 SHA、作者和全部冻结 closing lines 都由
+固定脚本重新验证。共享分支仍强制 `auto_merge=false`，目标分支冻结后不能改变。
 
 迁移 A 时先使用 `branch_migration.status=pending` 检查点；C 在 push 并核对远端 SHA 后、进入 MR
 阶段前使用 `mr_finalization.status=pending` 检查点。若 MR 创建、回读、标签写入或 callback 在此后
@@ -148,9 +127,9 @@ scheduler 执行槽。查询或解析 timeout 使用非终态 deferred 原因并
 拓扑会先落盘 blocked 状态，再向 driven scheduler 返回精确 skip handoff。共享组、成员顺序、依赖
 声明或目标分支一旦冻结，后续正文变更不能重写历史。`continue` 只恢复与 durable state 完全一致的
 远端或 IID 本地 attempt ref，并再次固定其 SHA；旧格式、缺失、部分写入、分支移动或依赖 tuple
-不匹配都会失败关闭。已发布的共享 head A 不允许走普通 `continue`，避免生成 A2；C 的
-`continue` 会从冻结的 A SHA 重新形成替代提交，并用旧 C SHA 做 lease，因此最终历史仍严格只有
-`commit(A) -> commit(C)`，不会变成 `A -> C1 -> C2`。
+不匹配都会失败关闭。已发布的共享 anchor 不允许走普通 `continue`；C 的 `continue` 会从冻结的
+dependency/aggregate SHA 重新形成替代提交，并用旧 C SHA 做 lease，不会形成
+`dependency -> C1 -> C2`。
 
 业务代码来自已固定的基线 SHA，但直接执行控制路径（任意层级的 `.claude/`、`CLAUDE.md`、
 `CLAUDE.local.md`、`.mcp.json` 与 `.acpxrc.json`）仍只从原始可信处理分支刷新。物化依赖提交时

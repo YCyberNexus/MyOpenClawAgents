@@ -1197,10 +1197,11 @@ fi
 
 # ─── 16b. Issue-dependency preflight ─────────────────────────────
 #
-# An Issue may declare one same-project prerequisite in its description, for
-# example `依赖 Issue #123` or `Depends on #123`. A supported one-to-one pair
-# shares `issue/<dependency IID>+<dependent IID>`; each IID still owns one fixed
-# local issue branch and contributes one commit in dependency order.
+# An Issue may declare one same-project prerequisite or a bounded fan-in, for
+# example `依赖 Issue #123` or `依赖 Issue #123,#124`. The first prerequisite
+# anchors `issue/<dependency IID>+<dependent IID>`; a fan-in first aggregates
+# every fixed source commit, while each executable member still owns one fixed
+# local issue branch.
 #
 # Do this before attempt allocation and placeholder persistence. If the
 # prerequisite branch has not been pushed yet, leave the IID/grant untouched
@@ -1210,6 +1211,8 @@ declare -A ISSUE_JSON_CACHE DEPENDENCY_IID_BY_IID DEPENDENCY_BRANCH_BY_IID
 declare -A DEPENDENCY_BASE_SHA_BY_IID
 declare -A DEPENDENCY_ERROR_BY_IID
 declare -A WORK_BRANCH_BY_IID BRANCH_MEMBERS_JSON_BY_IID SHARED_BRANCH_ROLE_BY_IID
+declare -A MULTI_DEPENDENCY_IIDS_JSON_BY_TAIL
+declare -A FAN_IN_AUXILIARY_GROUP_BY_IID
 declare -A SHARED_GRAPH_SCOPE_BY_IID SHARED_GRAPH_SCOPE_COMPLETE_BY_IID
 declare -A SHARED_GRAPH_WAIT_BY_IID
 declare -A LATE_SHARED_HEAD_BY_TAIL LATE_SHARED_TAIL_BY_HEAD
@@ -1594,10 +1597,28 @@ if ! STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -ce '
           and (.key == ("issue/" + (.value.head_iid | tostring)
             + "+" + (.value.tail_iid | tostring)))
           and (.value.scope_id | type == "string" and length > 0)
+          and (.value as $group
+            | if (($group.dependency_iids // null) == null) then
+                (($group.dependency_mode // null) == null)
+              else
+                ($group.dependency_mode == "fan_in")
+                and ($group.dependency_iids | type == "array")
+                and ($group.dependency_iids | length) >= 2
+                and ($group.dependency_iids | length) <= 8
+                and ($group.dependency_iids[0] == $group.head_iid)
+                and ($group.dependency_iids | index($group.tail_iid) == null)
+                and (all($group.dependency_iids[];
+                  type == "number" and . == floor and . > 0))
+                and (($group.dependency_iids | length)
+                  == ($group.dependency_iids | unique | length))
+              end)
           and (((.value.merge_target_branch // null) == null)
             or (.value.merge_target_branch | type == "string" and length > 0)))
-        and (([.shared_branch_groups[].members[]] | length)
-          == ([.shared_branch_groups[].members[]] | unique | length))
+        and (([.shared_branch_groups[]
+              | ((.dependency_iids // [.head_iid]) + [.tail_iid])[]] | length)
+          == ([.shared_branch_groups[]
+              | ((.dependency_iids // [.head_iid]) + [.tail_iid])[]]
+            | unique | length))
         then . else error("invalid shared branch group entry") end
     end
   ' 2>/dev/null)"; then
@@ -1614,6 +1635,14 @@ while IFS= read -r persisted_shared_group; do
   BRANCH_MEMBERS_JSON_BY_IID["${persisted_shared_tail}"]="${persisted_shared_members}"
   SHARED_BRANCH_ROLE_BY_IID["${persisted_shared_head}"]=head
   SHARED_BRANCH_ROLE_BY_IID["${persisted_shared_tail}"]=tail
+  persisted_dependency_iids="$(jq -c \
+    '.dependency_iids // [.head_iid]' <<<"${persisted_shared_group}")"
+  if [ "$(jq -r 'length' <<<"${persisted_dependency_iids}")" -gt 1 ]; then
+    MULTI_DEPENDENCY_IIDS_JSON_BY_TAIL["${persisted_shared_tail}"]="${persisted_dependency_iids}"
+    while IFS= read -r persisted_auxiliary_iid; do
+      FAN_IN_AUXILIARY_GROUP_BY_IID["${persisted_auxiliary_iid}"]="${persisted_shared_branch}"
+    done < <(jq -r '.[1:][]' <<<"${persisted_dependency_iids}")
+  fi
 done < <(printf '%s' "${STATE_JSON}" | jq -c '.shared_branch_groups[]')
 
 # Reuse the exact reconciliation snapshot for graph discovery. This prevents a
@@ -1697,6 +1726,12 @@ while IFS= read -r planning_scope; do
           | jq -r '.dependency_iid')"
         SHARED_GRAPH_DEP_BY_KEY["${planning_key}"]="${planning_dependency_iid}"
         ;;
+      resolved_multiple)
+        # Multi-head fan-in is late-bound from the dependent's direct
+        # declaration after every source has a durable ordinary result. The
+        # pair-oriented advisory graph cannot represent its extra heads.
+        SHARED_GRAPH_DEP_BY_KEY["${planning_key}"]=""
+        ;;
       *)
         planning_scope_invalid=true
         mark_shared_dependency_error "${planning_iid}" \
@@ -1777,8 +1812,9 @@ while IFS= read -r planning_scope; do
     existing_member_branch="$(printf '%s' "${STATE_JSON}" | jq -r \
       --argjson head "${shared_head_iid}" --argjson tail "${shared_tail_iid}" '
       [.shared_branch_groups | to_entries[]
-       | select((.value.members | index($head) != null)
-         or (.value.members | index($tail) != null))
+       | select(.value as $group
+         | (($group.dependency_iids // [$group.head_iid]) + [$group.tail_iid])
+         | (index($head) != null or index($tail) != null))
        | .key] | unique | if length == 0 then "" else join(",") end')"
     if [ -n "${existing_member_branch}" ] \
         && [ "${existing_member_branch}" != "${shared_work_branch}" ]; then
@@ -1931,6 +1967,17 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
     fi
     continue
   fi
+  if [ -n "${FAN_IN_AUXILIARY_GROUP_BY_IID[${candidate_iid}]:-}" ] \
+      && [ "${candidate_requests_continue}" = true ]; then
+    record_dependency_preflight_wait \
+      "${candidate_iid}" "shared_branch_source_continue_unsupported"
+    wrapper_log prepare_tick \
+      "iid=${candidate_iid} shared_branch_source_continue_unsupported group=${FAN_IN_AUXILIARY_GROUP_BY_IID[${candidate_iid}]}"
+    if [ "${DISPATCH_MODE}" = scheduled ]; then
+      break
+    fi
+    continue
+  fi
 
   # Reconciliation is only a snapshot. If C itself became closed/pr/finish
   # after that snapshot, let the existing prep-time terminal-race path drain
@@ -1946,6 +1993,11 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
       || { [ "${candidate_live_terminal}" = "true" ] \
         && [ "${candidate_requests_continue}" != "true" ] \
         && [ "${candidate_force_rerun_pr}" != "true" ]; }; then
+    append_batch_iid "${candidate_iid}"
+    continue
+  fi
+  if [ -n "${FAN_IN_AUXILIARY_GROUP_BY_IID[${candidate_iid}]:-}" ]; then
+    DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_source_rerun_unsupported"
     append_batch_iid "${candidate_iid}"
     continue
   fi
@@ -1979,12 +2031,19 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
   if [ "${SHARED_BRANCH_ROLE_BY_IID[${candidate_iid}]:-}" = tail ]; then
     shared_expected_head="$(printf '%s' \
       "${BRANCH_MEMBERS_JSON_BY_IID[${candidate_iid}]}" | jq -r '.[0]')"
-    shared_declared_head=""
-    if [ "${dependency_status}" = resolved ]; then
-      shared_declared_head="$(printf '%s' "${dependency_result}" \
-        | jq -r '.dependency_iid')"
-    fi
-    if [ "${shared_declared_head}" != "${shared_expected_head}" ]; then
+    shared_expected_dependencies="${MULTI_DEPENDENCY_IIDS_JSON_BY_TAIL[${candidate_iid}]:-[${shared_expected_head}]}"
+    shared_declared_dependencies='[]'
+    case "${dependency_status}" in
+      resolved)
+        shared_declared_dependencies="$(printf '%s' "${dependency_result}" \
+          | jq -c '[.dependency_iid]')"
+        ;;
+      resolved_multiple)
+        shared_declared_dependencies="$(printf '%s' "${dependency_result}" \
+          | jq -c '.dependency_iids')"
+        ;;
+    esac
+    if [ "${shared_declared_dependencies}" != "${shared_expected_dependencies}" ]; then
       DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_dependency_changed"
       append_batch_iid "${candidate_iid}"
       continue
@@ -2212,6 +2271,254 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
     append_batch_iid "${candidate_iid}"
     continue
   fi
+
+  # A direct fan-in declaration is normalized to the existing scalar shared
+  # branch contract only after all ordinary heads have been atomically
+  # aggregated. The first dependency is the compatibility anchor; the complete
+  # ordered source list remains frozen in shared_branch_groups and in the
+  # anchor's private dependency_aggregation checkpoint.
+  if [ "${dependency_status}" = resolved_multiple ]; then
+    multi_dependency_iids="$(printf '%s' "${dependency_result}" \
+      | jq -ce '
+        if (.dependency_iids | type == "array")
+          and (.dependency_iids | length) >= 2
+          and (.dependency_iids | length) <= 8
+          and all(.dependency_iids[];
+            type == "number" and . == floor and . > 0)
+          and ((.dependency_iids | length)
+            == (.dependency_iids | unique | length))
+          and .dependency_iid == .dependency_iids[0]
+          and .base_branch == ("issue/" + (.dependency_iid | tostring))
+        then .dependency_iids else error("invalid multi dependency result") end
+      ' 2>/dev/null)" || {
+        DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="invalid_dependency_parser_result"
+        append_batch_iid "${candidate_iid}"
+        continue
+      }
+    if printf '%s' "${multi_dependency_iids}" | jq -e \
+        --argjson iid "${candidate_iid}" 'index($iid) != null' >/dev/null; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="self_dependency"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    multi_anchor_iid="$(jq -r '.[0]' <<<"${multi_dependency_iids}")"
+    multi_work_branch="issue/${multi_anchor_iid}+${candidate_iid}"
+    multi_members_json="[${multi_anchor_iid},${candidate_iid}]"
+    if [ "${candidate_auto_merge}" = true ]; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_auto_merge_unsupported"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+
+    proposed_multi_participants="$(jq -cn \
+      --argjson dependencies "${multi_dependency_iids}" \
+      --argjson tail "${candidate_iid}" '$dependencies + [$tail]')"
+    existing_multi_overlaps="$(printf '%s' "${STATE_JSON}" | jq -c \
+      --argjson participants "${proposed_multi_participants}" '
+      [.shared_branch_groups | to_entries[]
+        | .value as $group
+        | (($group.dependency_iids // [$group.head_iid]) + [$group.tail_iid])
+          as $bound
+        | select(any($bound[]; . as $iid
+            | $participants | index($iid) != null))]')"
+    existing_multi_count="$(jq -r 'length' <<<"${existing_multi_overlaps}")"
+    if [ "${existing_multi_count}" -gt 0 ]; then
+      if [ "${existing_multi_count}" -ne 1 ] \
+          || ! jq -e --arg branch "${multi_work_branch}" \
+            --argjson head "${multi_anchor_iid}" \
+            --argjson tail "${candidate_iid}" \
+            --argjson dependencies "${multi_dependency_iids}" \
+            --arg target "${candidate_merge_target}" '
+            .[0].key == $branch
+            and .[0].value.head_iid == $head
+            and .[0].value.tail_iid == $tail
+            and .[0].value.dependency_iids == $dependencies
+            and .[0].value.merge_target_branch == $target
+          ' <<<"${existing_multi_overlaps}" >/dev/null 2>&1; then
+        DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_binding_conflict"
+        append_batch_iid "${candidate_iid}"
+        continue
+      fi
+    else
+      multi_sources_ready=true
+      multi_wait_recorded=false
+      while IFS= read -r multi_source_iid; do
+        if ! load_dependency_issue_snapshot "${multi_source_iid}" direct; then
+          case "${DEPENDENCY_CHAIN_LOAD_OUTCOME}" in
+            timeout|budget|deadline)
+              record_dependency_wait "${candidate_iid}" "${multi_source_iid}" \
+                "${multi_work_branch}" "dependency_fan_in_preflight_deferred"
+              multi_wait_recorded=true
+              ;;
+            *)
+              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_issue_lookup_failed"
+              ;;
+          esac
+          multi_sources_ready=false
+          break
+        fi
+        multi_source_issue_json="${DEPENDENCY_CHAIN_ISSUE_JSON}"
+        multi_source_completed="$(printf '%s' "${multi_source_issue_json}" | jq -r '
+          (.labels // []) as $labels
+          | ((($labels | index("pr")) != null)
+              or (($labels | index("finish")) != null))
+            and ([$labels[] | select(
+              . == "continue" or . == "contiune" or . == "doing"
+              or . == "retry" or . == "todo" or . == "new"
+              or . == "timeout" or . == "blocked" or startswith("blocked-")
+              or . == "failed" or startswith("failed-"))] | length) == 0
+        ')"
+        multi_source_settled="$(printf '%s' "${STATE_JSON}" | jq -r \
+          --argjson iid "${multi_source_iid}" '
+          ((.pending_subagents // {})[($iid | tostring)] // null) == null')"
+        if [ "${multi_source_completed}" != true ] \
+            || [ "${multi_source_settled}" != true ]; then
+          if [ "${multi_source_completed}" != true ]; then
+            detect_live_dependency_cycle "${candidate_iid}" "${multi_source_iid}"
+            case "${DEPENDENCY_CHAIN_STATUS}" in
+              cycle)
+                DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_cycle"
+                ;;
+              too_deep)
+                DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_too_deep"
+                ;;
+              chain_invalid)
+                DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_invalid"
+                ;;
+              lookup_failed)
+                DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_issue_lookup_failed"
+                ;;
+              parser_failed)
+                DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_parser_failed"
+                ;;
+              deferred_timeout|deferred_budget)
+                record_dependency_wait "${candidate_iid}" "${multi_source_iid}" \
+                  "${multi_work_branch}" "dependency_cycle_check_deferred"
+                multi_wait_recorded=true
+                ;;
+            esac
+          fi
+          if [ -z "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ] \
+              && [ "${multi_wait_recorded}" != true ]; then
+            record_dependency_wait "${candidate_iid}" "${multi_source_iid}" \
+              "${multi_work_branch}" "dependency_not_completed"
+            multi_wait_recorded=true
+          fi
+          multi_sources_ready=false
+          break
+        fi
+      done < <(jq -r '.[]' <<<"${multi_dependency_iids}")
+      if [ -n "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ]; then
+        append_batch_iid "${candidate_iid}"
+        continue
+      fi
+      if [ "${multi_sources_ready}" != true ]; then
+        wrapper_log prepare_tick \
+          "iid=${candidate_iid} dependency_fan_in_waiting dependencies=${multi_dependency_iids}"
+        if [ "${DISPATCH_MODE}" = scheduled ]; then
+          break
+        fi
+        continue
+      fi
+
+      multi_migration_output=""
+      multi_migration_rc=0
+      set +e
+      multi_migration_output="$(
+        MIGRATION_DEPENDENCY_IIDS_JSON="${multi_dependency_iids}" \
+        MIGRATION_TAIL_IID="${candidate_iid}" \
+        MIGRATION_TARGET_BRANCH="${candidate_merge_target}" \
+        timeout --kill-after=30s 900s \
+          bash "${SCRIPT_DIR}/migrate_multi_dependency_heads.sh"
+      )"
+      multi_migration_rc=$?
+      set -e
+      if [ "${multi_migration_rc}" -eq 75 ] \
+          || [ "${multi_migration_rc}" -eq 124 ] \
+          || [ "${multi_migration_rc}" -eq 137 ]; then
+        record_dependency_wait "${candidate_iid}" "${multi_anchor_iid}" \
+          "${multi_work_branch}" "dependency_fan_in_migration_pending"
+        wrapper_log prepare_tick \
+          "iid=${candidate_iid} dependency_fan_in_migration_pending anchor_iid=${multi_anchor_iid}"
+        continue
+      fi
+      if [ "${multi_migration_rc}" -ne 0 ] \
+          || ! jq -e --argjson head "${multi_anchor_iid}" \
+            --argjson tail "${candidate_iid}" \
+            --argjson dependencies "${multi_dependency_iids}" \
+            --arg branch "${multi_work_branch}" '
+            .status == "ready" and .head_iid == $head and .tail_iid == $tail
+            and .dependency_iids == $dependencies and .work_branch == $branch
+            and (.commit_sha | type == "string"
+              and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+          ' <<<"${multi_migration_output}" >/dev/null 2>&1; then
+        multi_migration_reason="$(printf '%s' "${multi_migration_output}" \
+          | jq -r '.reason // "dependency_fan_in_migration_failed"' \
+            2>/dev/null || printf '%s' dependency_fan_in_migration_failed)"
+        DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="${multi_migration_reason}"
+        append_batch_iid "${candidate_iid}"
+        wrapper_log prepare_tick \
+          "iid=${candidate_iid} dependency_fan_in_migration_failed anchor_iid=${multi_anchor_iid} rc=${multi_migration_rc} reason=${multi_migration_reason}"
+        continue
+      fi
+
+      multi_scope_suffix="$(jq -r 'map(tostring) | join("+")' \
+        <<<"${multi_dependency_iids}")"
+      multi_scope_id="${SHARED_GRAPH_SCOPE_BY_IID[${candidate_iid}]:-fan-in:${PROJECT_FULL}:${multi_scope_suffix}+${candidate_iid}}"
+      if ! STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -ce \
+          --arg branch "${multi_work_branch}" \
+          --argjson head "${multi_anchor_iid}" \
+          --argjson tail "${candidate_iid}" \
+          --argjson dependencies "${multi_dependency_iids}" \
+          --arg scope_id "${multi_scope_id}" \
+          --arg target "${candidate_merge_target}" '
+          [.shared_branch_groups | to_entries[]
+            | .value as $group
+            | (($group.dependency_iids // [$group.head_iid]) + [$group.tail_iid])
+              as $bound
+            | select(any($bound[]; . as $iid
+                | ($dependencies + [$tail]) | index($iid) != null))] as $overlaps
+          | if ($overlaps | length) == 0 then
+              .shared_branch_groups[$branch] = {
+                work_branch:$branch,head_iid:$head,tail_iid:$tail,
+                members:[$head,$tail],dependency_iids:$dependencies,
+                dependency_mode:"fan_in",scope_id:$scope_id,
+                merge_target_branch:$target
+              }
+            elif ($overlaps | length) == 1
+              and $overlaps[0].key == $branch
+              and $overlaps[0].value.head_iid == $head
+              and $overlaps[0].value.tail_iid == $tail
+              and $overlaps[0].value.dependency_iids == $dependencies
+              and $overlaps[0].value.merge_target_branch == $target
+            then . else error("multi shared branch binding conflict") end
+        ' 2>/dev/null)"; then
+        DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_binding_conflict"
+        append_batch_iid "${candidate_iid}"
+        continue
+      fi
+      persist_state "${STATE_JSON}"
+    fi
+
+    WORK_BRANCH_BY_IID["${multi_anchor_iid}"]="${multi_work_branch}"
+    WORK_BRANCH_BY_IID["${candidate_iid}"]="${multi_work_branch}"
+    BRANCH_MEMBERS_JSON_BY_IID["${multi_anchor_iid}"]="${multi_members_json}"
+    BRANCH_MEMBERS_JSON_BY_IID["${candidate_iid}"]="${multi_members_json}"
+    SHARED_BRANCH_ROLE_BY_IID["${multi_anchor_iid}"]=head
+    SHARED_BRANCH_ROLE_BY_IID["${candidate_iid}"]=tail
+    MULTI_DEPENDENCY_IIDS_JSON_BY_TAIL["${candidate_iid}"]="${multi_dependency_iids}"
+    while IFS= read -r multi_auxiliary_iid; do
+      FAN_IN_AUXILIARY_GROUP_BY_IID["${multi_auxiliary_iid}"]="${multi_work_branch}"
+    done < <(jq -r '.[1:][]' <<<"${multi_dependency_iids}")
+    dependency_status=resolved
+    dependency_result="$(jq -nc --argjson dependency_iid "${multi_anchor_iid}" \
+      --arg base_branch "issue/${multi_anchor_iid}" '{
+        status:"resolved",dependency_iid:$dependency_iid,base_branch:$base_branch
+      }')"
+    wrapper_log prepare_tick \
+      "iid=${candidate_iid} dependency_fan_in_ready dependencies=${multi_dependency_iids} branch=${multi_work_branch}"
+  fi
+
   case "${dependency_status}" in
     none)
       append_batch_iid "${candidate_iid}"
@@ -2248,8 +2555,9 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
           --argjson head "${dependency_iid}" \
           --argjson tail "${candidate_iid}" '
           [.shared_branch_groups | to_entries[]
-            | select((.value.members | index($head) != null)
-              or (.value.members | index($tail) != null))
+            | select(.value as $group
+              | (($group.dependency_iids // [$group.head_iid]) + [$group.tail_iid])
+              | (index($head) != null or index($tail) != null))
             | .key] | unique | join(",")')"
         if [ -n "${existing_dependency_binding}" ]; then
           DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_binding_conflict"
@@ -2368,9 +2676,11 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
         # exact remote SHA and unique live MR before performing any mutation.
         dependency_campaign_settled="$(jq -r \
           --argjson dependency_iid "${dependency_iid}" \
-          --argjson late_binding_pair "${late_binding_pair}" '
+          --argjson late_binding_pair "${late_binding_pair}" \
+          --argjson multi_fan_in "$([ -n "${MULTI_DEPENDENCY_IIDS_JSON_BY_TAIL[${candidate_iid}]:-}" ] \
+            && printf true || printf false)" '
           ((.pending_subagents // {})[($dependency_iid|tostring)] // null) == null
-          and ($late_binding_pair
+          and ($late_binding_pair or $multi_fan_in
             or ((.completed_iids // []) | index($dependency_iid) != null))
         ' <<<"${STATE_JSON}")"
         if [ "${dependency_campaign_settled}" != "true" ]; then
@@ -2425,8 +2735,9 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
               --arg scope_id "${migration_scope_id}" \
               --arg target "${candidate_merge_target}" '
               [.shared_branch_groups | to_entries[]
-                | select((.value.members | index($head) != null)
-                  or (.value.members | index($tail) != null))] as $overlaps
+                | select(.value as $group
+                  | (($group.dependency_iids // [$group.head_iid]) + [$group.tail_iid])
+                  | (index($head) != null or index($tail) != null))] as $overlaps
               | if ($overlaps | length) == 0 then
                   .shared_branch_groups[$branch] = {
                     work_branch:$branch,head_iid:$head,tail_iid:$tail,

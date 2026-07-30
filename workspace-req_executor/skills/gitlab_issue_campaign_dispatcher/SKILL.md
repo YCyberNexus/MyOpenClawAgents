@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-30.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler with independent parallel-repository and per-repository Issue ceilings (the latter defaults to serial), crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-30.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and late-bound same-project shared branches for either one prerequisite or a bounded multi-Issue fan-in declared in the dependent Issue body, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, deterministic multi-head aggregation, shared-branch identity, a shared runtime-configurable strict round-robin scheduler with independent parallel-repository and per-repository Issue ceilings (the latter defaults to serial), crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -61,17 +61,25 @@ See [`references/paths.md`](references/paths.md) for the complete layout.
 
 ## Issue dependency branch baseline
 
-An Issue may declare one same-project prerequisite with a line-start prefix:
+An Issue may declare one or more same-project prerequisites with a line-start
+prefix:
 
 ```text
 依赖 Issue #123
+```
+
+For fan-in, list two to eight distinct IIDs in execution order:
+
+```text
+依赖 Issue #123,#124
 ```
 
 Accepted compatibility forms include `依赖于 #123`, `依赖于 Issue #123`, `前置 Issue: #123`,
 `Depends on #123`, `Blocked by #123`, `dependency: #123`, and
 `depends_on: 123`. Other metadata may follow the valid IID after whitespace on
 the same line; the declaration does not need to occupy the whole line. Inline
-prose before the declaration is deliberately ignored. Multiple distinct
+prose before the declaration is deliberately ignored. ASCII comma, Chinese
+comma, and optional surrounding spaces are accepted. More than eight distinct
 dependencies, an invalid target, and a self-dependency fail closed through the
 normal per-Issue dispatcher-blocked path.
 
@@ -88,16 +96,17 @@ on a later tick. Deterministic topology/parser failures persist the normal
 dispatcher-blocked state and, in driven mode, emit an exact scheduler
 `skipped_entries[]` handoff.
 
-The current version supports exactly one two-node, one-to-one group A -> C.
-A must have no prerequisite, A must have exactly one dependent, and C must not
-have a dependent. Fan-out fails as `shared_branch_fanout_unsupported`; longer
-chains fail as `shared_branch_chain_unsupported`; cycles,
-overlapping group membership, changed declarations, and changed targets also
-fail closed. The frozen remote source branch and normal fresh topology are:
+The current version supports either one two-node group `A -> C`, or one bounded
+fan-in `[A1,A2,...,An] -> C` with two to eight completed independent heads. A
+source must have no prerequisite, each source may belong to only this group,
+and C must not have a dependent. Fan-out and longer chains remain unsupported;
+cycles, merge conflicts, overlapping group membership, changed declarations,
+and changed targets fail closed. The first declared dependency is the anchor,
+so the frozen remote source branch remains pair-shaped for compatibility:
 
 ```text
-branch: issue/<A IID>+<C IID>
-history: target -> commit(A) -> commit(C)
+branch: issue/<A1 IID>+<C IID>
+history: target -> aggregate(A1,...,An) -> commit(C)
 ```
 
 A and C keep fixed IID-local branches `issue/<iid>` and separate worktrees,
@@ -110,8 +119,8 @@ unique open MR identity all match live GitLab state. An A from the current
 campaign may also appear in `completed_iids`; an A from an earlier campaign is
 authorized by the stronger private-state, exact-ref, and live-MR checks.
 
-GitLab cannot update an MR source branch or atomically rename a branch. The
-fixed `migrate_shared_dependency_head.sh` therefore writes a private
+GitLab cannot update an MR source branch or atomically rename a branch. For one
+head, `migrate_shared_dependency_head.sh` writes a private
 `branch_migration.status:"pending"` checkpoint, creates `issue/A+C` at A's
 exact SHA with an empty expected lease, closes A's old MR, creates one
 intent-owned replacement MR containing `Closes #A` and `Closes #C`, deletes
@@ -119,18 +128,28 @@ intent-owned replacement MR containing `Closes #A` and `Closes #C`, deletes
 step is replayable. A transient stop never reruns or recommits A and never
 creates a duplicate replacement MR. Steady state has one open shared MR, while
 GitLab history retains the closed ordinary MR plus the open replacement MR.
+For fan-in, `migrate_multi_dependency_heads.sh` first validates every ordinary
+source's private done state, exact remote SHA, and unique owned MR. Before any
+remote mutation it computes clean deterministic merge commits and persists a
+`dependency_aggregation` checkpoint. It then reuses the ordinary anchor
+migration, advances the shared branch with an exact lease, adds `Closes` for
+every source, and only then closes and retires the remaining source MRs and
+branches. Replay never recomputes or duplicates the owned MR. A content conflict
+returns `dependency_merge_conflict` before the source MRs or refs are changed.
 
-C receives A's full SHA as both `DEPENDENCY_BASE_SHA` and
+C receives the anchor SHA (single head) or aggregate SHA (fan-in) as both
+`DEPENDENCY_BASE_SHA` and
 `EXPECTED_WORK_BRANCH_SHA`. Its new commit must have exactly one parent and that
-parent must equal A's SHA. Updating the shared ref uses the explicit lease
-`--force-with-lease=refs/heads/issue/A+C:<A SHA>`; a missing or moved ref fails
+parent must equal that frozen SHA. Updating the shared ref uses an explicit
+lease; a missing or moved ref fails
 closed. The migration's shared-ref creation uses an empty expected lease, and every push
 publishes and re-reads the immutable SHA captured immediately after the commit,
-never a later mutable local ref. The migration creates the only open shared MR with both `Closes #A` and `Closes #C`. After C
+never a later mutable local ref. The migration creates the only open shared MR
+with `Closes` for every dependency and C. After C
 pushes, it must reuse the exact replacement MR URL/IID persisted by A; it never closes
 or creates another MR. A's private state and the replacement MR description share one random
 64-hex `intent_id`; live verification also requires the current token author
-and both exact closing lines. The shared target is frozen, and any shared member with
+and all frozen closing lines. The shared target is frozen, and any shared member with
 `auto_merge=true` fails as `shared_branch_auto_merge_unsupported`.
 
 The A migration uses its `branch_migration` checkpoint. After C pushes and
@@ -169,11 +188,11 @@ ordinary business scripts still run with the executor UID's authority.
 whose SHA and complete dependency/work-branch identity match durable state.
 A shared tail can never normalize to a dependency-free history, a shared head
 can never acquire a dependency tuple, and a fresh C lease must equal A's pinned
-SHA. Missing, legacy, partial, moved, or rewritten state fails closed rather
+or aggregated SHA. Missing, legacy, partial, moved, or rewritten state fails closed rather
 than being reconstructed from current Issue text. An already-published shared
 head cannot enter the ordinary code-changing continue path. A shared-tail
 continue uses the old C tip only as the explicit push lease, resets the new
-commit's sole parent to A's pinned SHA, and therefore replaces C1 with C2 rather
+commit's sole parent to the pinned dependency SHA, and therefore replaces C1 with C2 rather
 than appending a third commit.
 
 ## Three task layers you MUST NOT confuse (read this first)

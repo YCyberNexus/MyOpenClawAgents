@@ -156,14 +156,39 @@ negative_output="$(run_parser 999 $'不依赖 #402\n- **不依赖 #403**')"
 assert_json 'negative Chinese statements are ignored' '{"status":"none"}' "${negative_output}"
 
 multiple_output="$(run_parser 999 $'依赖 Issue #501\nBlocked by #502')"
-assert_json 'multiple different dependencies are invalid' \
-  '{"status":"invalid","reason":"multiple_dependencies"}' \
+assert_json 'multiple declaration lines preserve dependency order' \
+  '{"status":"resolved_multiple","dependency_iid":501,"dependency_iids":[501,502],"base_branch":"issue/501"}' \
   "${multiple_output}"
+
+comma_separated_output="$(run_parser 999 '依赖issue #13,#14 page-name: BOM')"
+assert_json 'compact comma-separated Chinese dependencies with trailing metadata' \
+  '{"status":"resolved_multiple","dependency_iid":13,"dependency_iids":[13,14],"base_branch":"issue/13"}' \
+  "${comma_separated_output}"
+
+spaced_list_output="$(run_parser 999 'Depends on #21, #22, #23 implementation metadata')"
+assert_json 'spaced English dependency list' \
+  '{"status":"resolved_multiple","dependency_iid":21,"dependency_iids":[21,22,23],"base_branch":"issue/21"}' \
+  "${spaced_list_output}"
+
+chinese_comma_output="$(run_parser 999 '前置 Issue: #31，#32')"
+assert_json 'Chinese comma dependency list' \
+  '{"status":"resolved_multiple","dependency_iid":31,"dependency_iids":[31,32],"base_branch":"issue/31"}' \
+  "${chinese_comma_output}"
+
+deduplicated_list_output="$(run_parser 999 $'依赖 Issue #41,#42,#41\nBlocked by #42')"
+assert_json 'multi-dependency declarations are stably deduplicated' \
+  '{"status":"resolved_multiple","dependency_iid":41,"dependency_iids":[41,42],"base_branch":"issue/41"}' \
+  "${deduplicated_list_output}"
 
 self_output="$(run_parser 601 '依赖于 #601')"
 assert_json 'self dependency is invalid' \
   '{"status":"invalid","reason":"self_dependency"}' \
   "${self_output}"
+
+self_in_list_output="$(run_parser 602 '依赖 Issue #601,#602,#603')"
+assert_json 'self dependency anywhere in a list is invalid' \
+  '{"status":"invalid","reason":"self_dependency"}' \
+  "${self_in_list_output}"
 
 for invalid_description in \
   '依赖 Issue #abc' \
@@ -172,6 +197,9 @@ for invalid_description in \
   '依赖 Issue #2147483648' \
   'Depends on #-2' \
   'Blocked by #123trailing' \
+  '依赖 Issue #123,' \
+  '依赖 Issue #123,124' \
+  '依赖 Issue #123,,#124' \
   'dependency:' \
   'depends_on: zero'; do
   invalid_output="$(run_parser 999 "${invalid_description}")"
@@ -184,6 +212,11 @@ mixed_invalid_output="$(run_parser 999 $'依赖 Issue #701\ndependency: invalid'
 assert_json 'an invalid declaration invalidates otherwise valid declarations' \
   '{"status":"invalid","reason":"invalid_dependency_target"}' \
   "${mixed_invalid_output}"
+
+too_many_output="$(run_parser 999 '依赖 Issue #1,#2,#3,#4,#5,#6,#7,#8,#9')"
+assert_json 'dependency fan-in is bounded' \
+  '{"status":"invalid","reason":"too_many_dependencies"}' \
+  "${too_many_output}"
 
 set +e
 configuration_output="$(printf '依赖 Issue #1' | ISSUE_IID=invalid bash "${PARSER}" 2>/dev/null)"
