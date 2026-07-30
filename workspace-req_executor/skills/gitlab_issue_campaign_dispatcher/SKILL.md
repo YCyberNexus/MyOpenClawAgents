@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-30.2] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler with independent parallel-repository and per-repository Issue ceilings (the latter defaults to serial), crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-30.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and a late-bound two-Issue shared branch for one same-project one-to-one dependency declared in the dependent Issue body, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, shared-branch identity, a shared runtime-configurable strict round-robin scheduler with independent parallel-repository and per-repository Issue ceilings (the latter defaults to serial), crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -61,7 +61,7 @@ See [`references/paths.md`](references/paths.md) for the complete layout.
 
 ## Issue dependency branch baseline
 
-An Issue may declare one same-project prerequisite on its own description line:
+An Issue may declare one same-project prerequisite with a line-start prefix:
 
 ```text
 依赖 Issue #123
@@ -69,7 +69,9 @@ An Issue may declare one same-project prerequisite on its own description line:
 
 Accepted compatibility forms include `依赖于 #123`, `依赖于 Issue #123`, `前置 Issue: #123`,
 `Depends on #123`, `Blocked by #123`, `dependency: #123`, and
-`depends_on: 123`. Inline prose is deliberately ignored. Multiple distinct
+`depends_on: 123`. Other metadata may follow the valid IID after whitespace on
+the same line; the declaration does not need to occupy the whole line. Inline
+prose before the declaration is deliberately ignored. Multiple distinct
 dependencies, an invalid target, and a self-dependency fail closed through the
 normal per-Issue dispatcher-blocked path.
 

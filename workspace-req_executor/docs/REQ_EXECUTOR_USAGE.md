@@ -60,7 +60,7 @@ merge_target_branch=<auto_merge=true 时必填的 MR 目标分支>
 
 ### Issue 依赖分支
 
-若 issueC 需要在 issueA 的实现之上继续开发，请在 issueC 描述中单独写一行：
+若 issueC 需要在 issueA 的实现之上继续开发，请让 issueC 描述中的某一行以如下声明开头：
 
 ```text
 依赖 Issue #<issueA 的 IID>
@@ -74,8 +74,10 @@ merge_target_branch=<auto_merge=true 时必填的 MR 目标分支>
 
 兼容写法包括 `依赖于 #41`、`依赖于 Issue #41`、`前置 Issue: #41`、
 `Depends on #41`、`Blocked by #41`、`dependency: #41` 与
-`depends_on: 41`。声明必须位于独立行的行首，可带 Markdown 列表、标题或粗体前缀；正文中的
-普通提及不会被误判。目前只允许一个同项目直接依赖，多个不同依赖、非法 IID 和自依赖会失败关闭。
+`depends_on: 41`。声明必须从原始 Markdown 的行首开始，可带 Markdown 列表、标题或粗体前缀；
+合法 IID 后允许以空白继续书写 `page-name` 等其他内容，不要求声明占满整行。GitLab 将单换行
+渲染为空格不影响解析，正文中间的普通提及也不会被误判。目前只允许一个同项目直接依赖，多个
+不同依赖、非法 IID 和自依赖会失败关闭。
 
 issueA 处理时不会假设未来存在反向依赖：它先按普通 Issue 使用 `issue/<A IID>`，提交一次并创建
 只关闭 A 的普通 MR。只有轮到 issueC、解析到 C 正文中的声明后，executor 才建立 `A -> C` 绑定；

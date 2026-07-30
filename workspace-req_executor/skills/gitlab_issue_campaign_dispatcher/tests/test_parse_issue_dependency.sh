@@ -56,6 +56,12 @@ assert_resolved 'English blocked-by syntax' 'Blocked by #127' 127
 assert_resolved 'English dependency syntax' 'dependency: #128' 128
 assert_resolved 'machine-readable syntax' 'depends_on: 129' 129
 assert_resolved 'English matching is case-insensitive' 'BLOCKED BY #130' 130
+assert_resolved 'Chinese line-start prefix with trailing metadata' \
+  '依赖 Issue #131 page-name: Service' 131
+assert_resolved 'compact lowercase line-start prefix with trailing metadata' \
+  '依赖issue #132 page-name: Service' 132
+assert_resolved 'English line-start prefix with trailing metadata' \
+  'Blocked by #133 page-name: Service' 133
 assert_resolved 'maximum GitLab IID' '依赖 Issue #2147483647' 2147483647
 
 assert_resolved 'Markdown list and bold prefixes' '- **依赖 Issue #201**' 201
@@ -110,8 +116,8 @@ assert_json 'HTML opener inside indented code is literal' \
   "${indented_code_comment_opener}"
 
 trailing_code_declaration="$(run_parser 999 'Depends on #418 `note`')"
-assert_json 'dependency declaration with trailing inline code is invalid' \
-  '{"status":"invalid","reason":"invalid_dependency_target"}' \
+assert_json 'dependency declaration permits trailing inline code' \
+  '{"status":"resolved","dependency_iid":418,"base_branch":"issue/418"}' \
   "${trailing_code_declaration}"
 
 wrapped_code_target="$(run_parser 999 'dependency: `#419`')"
@@ -165,7 +171,7 @@ for invalid_description in \
   '前置 Issue: #0' \
   '依赖 Issue #2147483648' \
   'Depends on #-2' \
-  'Blocked by #123 trailing text' \
+  'Blocked by #123trailing' \
   'dependency:' \
   'depends_on: zero'; do
   invalid_output="$(run_parser 999 "${invalid_description}")"

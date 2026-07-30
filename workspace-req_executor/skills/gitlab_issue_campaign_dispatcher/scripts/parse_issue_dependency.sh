@@ -73,8 +73,11 @@ depends_on_pattern='^Depends[[:space:]]+on([[:space:]]+|[[:space:]]*:[[:space:]]
 blocked_by_pattern='^Blocked[[:space:]]+by([[:space:]]+|[[:space:]]*:[[:space:]]*|$)(.*)$'
 dependency_key_pattern='^dependency([[:space:]]*:[[:space:]]*|$)(.*)$'
 depends_on_key_pattern='^depends_on([[:space:]]*:[[:space:]]*|$)(.*)$'
-required_hash_target_pattern='^#([1-9][0-9]*)$'
-optional_hash_target_pattern='^#?([1-9][0-9]*)$'
+# The dependency declaration is a line-start prefix, not a whole-line record.
+# Keep a token boundary after the IID so `#123abc` remains invalid, while
+# allowing other Issue metadata to follow after whitespace on the same line.
+required_hash_target_pattern='^#([1-9][0-9]*)([[:space:]].*)?$'
+optional_hash_target_pattern='^#?([1-9][0-9]*)([[:space:]].*)?$'
 
 shopt -s nocasematch
 fence_marker=""
