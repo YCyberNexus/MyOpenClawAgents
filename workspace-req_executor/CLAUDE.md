@@ -22,8 +22,8 @@ LLM 修改配置文件或 scheduler JSON。
 1. `dispatch_prepare_tick.sh` validates the trigger, reconciles GitLab labels, selects IIDs, prepares worktrees, builds prompts, and emits spawn entries.
 2. The orchestrator calls `sessions_spawn` with the rendered outer executor prompt.
 3. The outer subagent makes one long call to `scripts/run_executor_attempt.sh`.
-4. That wrapper calls `run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"`; the same wrapper then stages, pushes, creates/updates the MR, summarizes, and atomically writes `${LOG_DIR}/worker_result.json`.
-5. The outer subagent echoes the wrapper's final compact JSON. If OpenClaw does not schedule that final model turn, the periodic heartbeat processes the durable result under the scheduler claim fence and reclaims the native child slot.
+4. That wrapper calls `run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"`; the same wrapper then stages, pushes, creates/updates the MR, summarizes, atomically writes `${LOG_DIR}/worker_result.json`, completes log/state persistence, and finally publishes the private hash-bound `${LOG_DIR}/attempt_finalized.json`.
+5. The outer subagent echoes the wrapper's final compact JSON. If OpenClaw does not schedule that final model turn, the periodic heartbeat processes the result only after the finalization marker matches the exact bytes and scheduler claim, then reclaims the native child slot.
 6. `dispatch_followup.sh` validates the compact JSON, updates state and labels, and reports terminal driven results to `req_dispatcher` when applicable.
 
 Ordinary native terminal callbacks preserve child sessions for diagnosis. The
@@ -45,7 +45,7 @@ ${REPO_PATH}/
       .req_executor/issue-<iid>/log/
 ```
 
-`clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. When business changes exist, `stage_and_guard.sh` force-adds `${OUTPUT_DIR}` and the complete staging-time `${LOG_DIR}` into the same Issue-branch commit. After `worker_result.json` is durable, `archive_execution_logs.sh` appends the complete terminal directory as a log-only child on that same `WORK_BRANCH`; later recovery evidence may append another child. It never creates a separate remote log branch. Unrelated `logs/` paths remain outside the commit index.
+`clone_or_pull.sh` writes `/.req_executor/` and `logs/` to local `.git/info/exclude`. When business changes exist, `stage_and_guard.sh` force-adds `${OUTPUT_DIR}` and the complete staging-time `${LOG_DIR}` into the same Issue-branch commit. After `worker_result.json` is durable, `archive_execution_logs.sh` appends the complete terminal directory as the one log-only child on that same `WORK_BRANCH`. For a single-Issue branch, `commit_sha` remains the business artifact while `work_branch_sha` records that exact remote log-child tip. It never creates a separate remote log branch. Unrelated `logs/` paths remain outside the commit index.
 
 The worktree, output directory, and local Git branch are fixed per Issue. Each
 run receives a random opaque `execution_id`, an isolated log directory, and an

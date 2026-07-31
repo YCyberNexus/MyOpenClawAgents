@@ -151,9 +151,12 @@ printf '%s' "${FIRST_TICK}" | jq -e '
   and [.dependency_waiting[].iid] == [range(1; 51)]
   and (all(.dependency_waiting[];
     .dependency_iid == (.iid + 100)
-    and .branch == ("issue/" + ((.iid + 100) | tostring) + "+" + (.iid | tostring))
+    and .branch == ("issue/" + ((.iid + 100) | tostring))
     and .reason == "dependency_not_completed"))
-' >/dev/null || fail "first tick did not defer exactly the first 50 dependency waiters"
+' >/dev/null || {
+  printf '%s\n' "${FIRST_TICK}" >&2
+  fail "first tick did not defer exactly the first 50 dependency waiters"
+}
 [ ! -s "${ALLOC_LOG}" ] \
   || fail "first tick allocated an attempt despite finding no runnable Issue"
 jq -e '

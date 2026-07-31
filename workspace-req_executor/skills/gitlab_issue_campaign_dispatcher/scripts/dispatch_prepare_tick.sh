@@ -1209,6 +1209,10 @@ fi
 # failure, and must not consume retry/attempt budget or add blocked labels.
 declare -A ISSUE_JSON_CACHE DEPENDENCY_IID_BY_IID DEPENDENCY_BRANCH_BY_IID
 declare -A DEPENDENCY_BASE_SHA_BY_IID
+declare -A DEPENDENCY_CONTRACT_VERSION_BY_IID DEPENDENCY_PLAN_SHA256_BY_IID
+declare -A DEPENDENCY_PLAN_JSON_BY_IID EXPECTED_COMMIT_PARENT_SHA_BY_IID
+declare -A DEPENDENCY_CLOSURE_IIDS_JSON_BY_IID
+declare -A DAG_CONTINUE_BY_IID
 declare -A DEPENDENCY_ERROR_BY_IID
 declare -A WORK_BRANCH_BY_IID BRANCH_MEMBERS_JSON_BY_IID SHARED_BRANCH_ROLE_BY_IID
 declare -A MULTI_DEPENDENCY_IIDS_JSON_BY_TAIL
@@ -1283,6 +1287,14 @@ record_dependency_preflight_wait() {
         dependency_branch:null
       })]')"
   fi
+}
+
+clear_dependency_wait_for_iid() {
+  local iid="$1"
+  DEPENDENCY_WAITING_JSON="$(printf '%s' "${DEPENDENCY_WAITING_JSON}" | jq -c \
+    --argjson iid "${iid}" 'map(select(.iid != $iid))')"
+  DEFERRED_ENTRIES_JSON="$(printf '%s' "${DEFERRED_ENTRIES_JSON}" | jq -c \
+    --argjson iid "${iid}" 'map(select(.iid != $iid))')"
 }
 
 DEPENDENCY_CANDIDATE_COUNT="$(printf '%s' "${CANDIDATE_ORDER_JSON}" | jq -r 'length')"
@@ -1482,41 +1494,50 @@ load_dependency_issue_snapshot() {
 }
 
 detect_live_dependency_cycle() {
-  local root_iid="$1" current_iid="$2"
-  local visited=",${root_iid},"
-  local depth=0 chain_description="" chain_parse_status="" next_iid=""
-  local chain_completed="false"
+  local root_iid="$1" first_iid="$2"
+  local -A visit_color=()
 
-  DEPENDENCY_CHAIN_STATUS="lookup_failed"
-  while :; do
-    case "${visited}" in
-      *",${current_iid},"*)
+  dependency_cycle_visit() {
+    local current_iid="$1" depth="$2"
+    local chain_description="" chain_parse_status="" next_iids_json='[]'
+    local next_iid="" chain_completed="false"
+
+    if [ "${current_iid}" = "${root_iid}" ]; then
+      DEPENDENCY_CHAIN_STATUS="cycle"
+      return 1
+    fi
+    case "${visit_color[${current_iid}]:-white}" in
+      gray)
+        # A cycle entirely inside the unresolved prerequisite subgraph still
+        # prevents the root from ever becoming runnable.
         DEPENDENCY_CHAIN_STATUS="cycle"
+        return 1
+        ;;
+      black)
         return 0
         ;;
     esac
     if [ "${depth}" -ge "${DEPENDENCY_CHAIN_MAX_DEPTH}" ]; then
       DEPENDENCY_CHAIN_STATUS="too_deep"
-      return 0
+      return 1
     fi
     if [ "${SECONDS}" -ge "${DEPENDENCY_GRAPH_PHASE_DEADLINE_SECONDS}" ]; then
       DEPENDENCY_CHAIN_STATUS="deferred_budget"
-      return 0
+      return 1
     fi
-    visited="${visited}${current_iid},"
-    if load_dependency_issue_snapshot "${current_iid}" chain; then
-      :
-    else
+    visit_color["${current_iid}"]=gray
+    if ! load_dependency_issue_snapshot "${current_iid}" chain; then
       case "${DEPENDENCY_CHAIN_LOAD_OUTCOME}" in
         budget|deadline) DEPENDENCY_CHAIN_STATUS="deferred_budget" ;;
         timeout) DEPENDENCY_CHAIN_STATUS="deferred_timeout" ;;
         *) DEPENDENCY_CHAIN_STATUS="lookup_failed" ;;
       esac
-      return 0
+      return 1
     fi
 
-    # A stable completed node no longer waits on its declaration, so a cycle
-    # beyond that point cannot keep the candidate blocked.
+    # A stable completed node is an immutable artifact boundary. Its old
+    # declaration cannot keep a new consumer waiting, and its exact commit is
+    # validated independently before the DAG plan is frozen.
     chain_completed="$(printf '%s' "${DEPENDENCY_CHAIN_ISSUE_JSON}" | jq -r '
       (.labels // []) as $labels
       | ((($labels | index("pr")) != null)
@@ -1528,7 +1549,7 @@ detect_live_dependency_cycle() {
           or . == "failed" or startswith("failed-"))] | length) == 0
     ')"
     if [ "${chain_completed}" = "true" ]; then
-      DEPENDENCY_CHAIN_STATUS="acyclic"
+      visit_color["${current_iid}"]=black
       return 0
     fi
 
@@ -1542,29 +1563,418 @@ detect_live_dependency_cycle() {
         timeout) DEPENDENCY_CHAIN_STATUS="deferred_timeout" ;;
         *) DEPENDENCY_CHAIN_STATUS="parser_failed" ;;
       esac
-      return 0
+      return 1
     fi
     case "${chain_parse_status}" in
       none)
-        DEPENDENCY_CHAIN_STATUS="acyclic"
-        return 0
+        next_iids_json='[]'
         ;;
       resolved)
-        next_iid="$(printf '%s' "${DEPENDENCY_PARSE_RESULT}" \
-          | jq -r '.dependency_iid')"
-        if ! [[ "${next_iid}" =~ ^[1-9][0-9]*$ ]]; then
-          DEPENDENCY_CHAIN_STATUS="chain_invalid"
-          return 0
-        fi
-        current_iid="${next_iid}"
+        next_iids_json="$(printf '%s' "${DEPENDENCY_PARSE_RESULT}" \
+          | jq -ce '[.dependency_iid]' 2>/dev/null)" || {
+            DEPENDENCY_CHAIN_STATUS="chain_invalid"
+            return 1
+          }
+        ;;
+      resolved_multiple)
+        next_iids_json="$(printf '%s' "${DEPENDENCY_PARSE_RESULT}" \
+          | jq -ce '
+            if (.dependency_iids | type == "array")
+              and (.dependency_iids | length) >= 2
+              and (.dependency_iids | length) <= 8
+              and all(.dependency_iids[];
+                type == "number" and . == floor and . > 0)
+              and ((.dependency_iids | length)
+                == (.dependency_iids | unique | length))
+            then .dependency_iids
+            else error("invalid dependency list")
+            end
+          ' 2>/dev/null)" || {
+            DEPENDENCY_CHAIN_STATUS="chain_invalid"
+            return 1
+          }
         ;;
       *)
         DEPENDENCY_CHAIN_STATUS="chain_invalid"
-        return 0
+        return 1
         ;;
     esac
-    depth=$((depth + 1))
-  done
+    while IFS= read -r next_iid; do
+      [ -n "${next_iid}" ] || continue
+      if ! [[ "${next_iid}" =~ ^[1-9][0-9]*$ ]]; then
+        DEPENDENCY_CHAIN_STATUS="chain_invalid"
+        return 1
+      fi
+      dependency_cycle_visit "${next_iid}" "$((depth + 1))" || return 1
+    done < <(jq -r '.[]' <<<"${next_iids_json}")
+    visit_color["${current_iid}"]=black
+    return 0
+  }
+
+  DEPENDENCY_CHAIN_STATUS="acyclic"
+  dependency_cycle_visit "${first_iid}" 0 || true
+  unset -f dependency_cycle_visit
+}
+
+# Recover the one crash window between pushing a deterministic terminal-log
+# child and persisting work_branch_sha. No other branch movement is accepted:
+# the remote tip must be exactly one direct child and every changed path must
+# stay under this execution's log directory.
+reconcile_terminal_log_state_tip() {
+  local source_iid="$1" state_file="$2" work_branch="$3"
+  local business_sha="$4" persisted_tip="$5" execution_id="$6"
+  local remote_tip parent_line diff_paths changed_path allowed_prefix
+  local prior_state state_tmp now state_bytes
+
+  remote_tip="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+    rev-parse --verify "refs/remotes/origin/${work_branch}^{commit}" \
+    2>/dev/null)" || return 1
+  remote_tip="${remote_tip,,}"
+  if [ "${remote_tip}" = "${persisted_tip,,}" ]; then
+    printf '%s\n' "${remote_tip}"
+    return 0
+  fi
+  [ "${persisted_tip,,}" = "${business_sha,,}" ] || return 1
+  parent_line="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+    rev-list --parents -n 1 "${remote_tip}" 2>/dev/null)" || return 1
+  [ "${parent_line}" = "${remote_tip} ${business_sha,,}" ] || return 1
+  diff_paths="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+    -c core.quotePath=true diff --name-only --no-renames \
+    "${business_sha}" "${remote_tip}" -- 2>/dev/null)" || return 1
+  [ -n "${diff_paths}" ] || return 1
+  allowed_prefix=".req_executor/issue-${source_iid}/log/execution-${execution_id}/"
+  while IFS= read -r changed_path; do
+    case "${changed_path}" in
+      "${allowed_prefix}"*) ;;
+      *) return 1 ;;
+    esac
+  done <<<"${diff_paths}"
+
+  [ -f "${state_file}" ] && [ ! -L "${state_file}" ] \
+    && [ "$(phase6_file_mode "${state_file}" 2>/dev/null || true)" = 600 ] \
+    && [ "$(phase6_file_owner "${state_file}" 2>/dev/null || true)" = "$(id -u)" ] \
+    || return 1
+  state_bytes="$(wc -c <"${state_file}" 2>/dev/null \
+    | tr -d '[:space:]' || true)"
+  [[ "${state_bytes}" =~ ^[1-9][0-9]*$ ]] \
+    && [ "${state_bytes}" -le 65536 ] || return 1
+  prior_state="$(jq -ce \
+    --argjson iid "${source_iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg work_branch "${work_branch}" \
+    --arg business_sha "${business_sha}" \
+    --arg persisted_tip "${persisted_tip}" '
+    if type == "object"
+      and .iid == $iid
+      and .dependency_pinned_execution_id == $execution_id
+      and .work_branch == $work_branch
+      and ((.commit_sha | ascii_downcase)
+        == ($business_sha | ascii_downcase))
+      and ((.work_branch_sha | ascii_downcase)
+        == ($persisted_tip | ascii_downcase))
+    then . else error("terminal-log state changed") end
+  ' "${state_file}" 2>/dev/null)" || return 1
+  state_tmp="$(umask 077; mktemp "${state_file}.recover.XXXXXX")" || return 1
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  if ! printf '%s' "${prior_state}" | jq \
+      --arg remote_tip "${remote_tip}" \
+      --arg updated_at "${now}" '
+      .work_branch_sha = $remote_tip
+      | .dependency_history_updated_at = $updated_at
+      | .terminal_log_recovered_at = $updated_at
+    ' >"${state_tmp}"; then
+    return 1
+  fi
+  chmod 600 "${state_tmp}" || return 1
+  mv "${state_tmp}" "${state_file}" || return 1
+  printf '%s\n' "${remote_tip}"
+}
+
+# Read one immutable predecessor identity from its private Issue state. The
+# dispatcher separately performs fresh GitLab MR reads; this function only
+# normalizes the durable local half of the v2 source snapshot.
+DAG_SOURCE_IDENTITY=""
+DAG_SOURCE_IDENTITY_REASON=""
+load_dependency_dag_source_identity() {
+  local source_iid="$1" source_state_file source_state_mode source_state_owner
+  local source_state_bytes source_commit_sha source_work_branch_sha
+  local reconciled_work_branch_sha
+
+  DAG_SOURCE_IDENTITY=""
+  DAG_SOURCE_IDENTITY_REASON="dependency_source_state_pending"
+  source_state_file="${ISSUES_ROOT}/issue-${source_iid}/state.json"
+  if [ ! -e "${source_state_file}" ]; then
+    return 1
+  fi
+  DAG_SOURCE_IDENTITY_REASON="dependency_source_state_unsafe"
+  if [ ! -f "${source_state_file}" ] || [ -L "${source_state_file}" ]; then
+    return 1
+  fi
+  source_state_mode="$(phase6_file_mode "${source_state_file}" \
+    2>/dev/null || true)"
+  source_state_owner="$(phase6_file_owner "${source_state_file}" \
+    2>/dev/null || true)"
+  source_state_bytes="$(wc -c <"${source_state_file}" \
+    2>/dev/null | tr -d '[:space:]' || true)"
+  if [ "${source_state_mode}" != 600 ] \
+      || [ "${source_state_owner}" != "$(id -u)" ] \
+      || ! [[ "${source_state_bytes}" =~ ^[1-9][0-9]*$ ]] \
+      || [ "${source_state_bytes}" -gt 65536 ]; then
+    return 1
+  fi
+  if ! DAG_SOURCE_IDENTITY="$(jq -ce --argjson iid "${source_iid}" '
+      def full_oid:
+        type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$");
+      def positive_integer:
+        type == "number" and . == floor and . > 0;
+      if type == "object"
+        and .iid == $iid
+        and .status == "done"
+        and (.latest_execution_id | positive_integer)
+        and .dependency_pinned_execution_id == .latest_execution_id
+        and (.work_branch | type == "string")
+        and (
+          .work_branch == ("issue/" + ($iid | tostring))
+          or (
+            .dependency_contract_version == 2
+            and (.dependency_plan_sha256 | type == "string"
+              and test("^[0-9a-f]{64}$"))
+            and .work_branch == (
+              "issue/" + ($iid | tostring) + "-dag-"
+              + .dependency_plan_sha256[0:16])
+            and (.dependency_plan | type == "object")
+            and .dependency_plan.version == 2
+            and .dependency_plan.consumer_iid == $iid
+            and .dependency_plan.work_branch == .work_branch
+            and .dependency_plan.plan_sha256 == .dependency_plan_sha256
+          )
+        )
+        and .branch_members == [$iid]
+        and (.shared_branch_role // null) == null
+        and .dependency_history_verified == true
+        and (.commit_sha | full_oid)
+        and (.work_branch_sha | full_oid)
+        and (.merge_request_url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
+      then {
+        iid:$iid,
+        execution_id:.latest_execution_id,
+        work_branch:.work_branch,
+        commit_sha:(.commit_sha | ascii_downcase),
+        work_branch_sha:(.work_branch_sha | ascii_downcase),
+        mr_url:.merge_request_url
+      }
+      else error("invalid immutable DAG source state")
+      end
+    ' "${source_state_file}" 2>/dev/null)"; then
+    DAG_SOURCE_IDENTITY_REASON="dependency_source_state_identity_mismatch"
+    return 1
+  fi
+  source_commit_sha="$(jq -r '.commit_sha' <<<"${DAG_SOURCE_IDENTITY}")"
+  source_work_branch_sha="$(jq -r \
+    '.work_branch_sha' <<<"${DAG_SOURCE_IDENTITY}")"
+  if ! reconciled_work_branch_sha="$(reconcile_terminal_log_state_tip \
+      "${source_iid}" "${source_state_file}" \
+      "$(jq -r '.work_branch' <<<"${DAG_SOURCE_IDENTITY}")" \
+      "${source_commit_sha}" "${source_work_branch_sha}" \
+      "$(jq -r '.execution_id' <<<"${DAG_SOURCE_IDENTITY}")")"; then
+    DAG_SOURCE_IDENTITY=""
+    DAG_SOURCE_IDENTITY_REASON="dependency_source_state_identity_mismatch"
+    return 1
+  fi
+  if [ "${reconciled_work_branch_sha}" != "${source_work_branch_sha}" ]; then
+    DAG_SOURCE_IDENTITY="$(printf '%s' "${DAG_SOURCE_IDENTITY}" | jq -c \
+      --arg work_branch_sha "${reconciled_work_branch_sha}" \
+      '.work_branch_sha = $work_branch_sha')"
+    source_work_branch_sha="${reconciled_work_branch_sha}"
+  fi
+  if [ "${source_commit_sha}" != "${source_work_branch_sha}" ] \
+      && ! GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+        merge-base --is-ancestor \
+        "${source_commit_sha}" "${source_work_branch_sha}" >/dev/null 2>&1; then
+    DAG_SOURCE_IDENTITY=""
+    DAG_SOURCE_IDENTITY_REASON="dependency_source_state_identity_mismatch"
+    return 1
+  fi
+}
+
+# Bind the durable source state to one current, exact, unique MR owned by the
+# current GitLab token. The returned object is the verified=true snapshot
+# consumed by resolve_dependency_dag_base.sh; no source ref or MR is mutated.
+DAG_SOURCE_SNAPSHOT=""
+DAG_SOURCE_MR_QUERY_OUTCOME="error"
+DAG_SOURCE_AUTHOR_USERNAME=""
+dependency_graph_bounded_timeout() {
+  local requested="$1" remaining
+  remaining=$((DEPENDENCY_GRAPH_PHASE_DEADLINE_SECONDS - SECONDS))
+  [ "${remaining}" -gt 0 ] || return 1
+  if [ "${requested}" -lt "${remaining}" ]; then
+    printf '%s\n' "${requested}"
+  else
+    printf '%s\n' "${remaining}"
+  fi
+}
+
+query_dependency_dag_source_snapshot() {
+  local source_identity="$1" target_branch="$2"
+  local source_iid source_execution_id source_branch source_sha
+  local source_work_branch_sha source_mr_url
+  local source_mr_iid glab_cmd verify_timeout user_response username
+  local live_response open_response encoded_source command_rc command_timeout
+
+  DAG_SOURCE_SNAPSHOT=""
+  DAG_SOURCE_MR_QUERY_OUTCOME="error"
+  source_iid="$(jq -r '.iid' <<<"${source_identity}")"
+  source_execution_id="$(jq -r '.execution_id' <<<"${source_identity}")"
+  source_branch="$(jq -r '.work_branch' <<<"${source_identity}")"
+  source_sha="$(jq -r '.commit_sha' <<<"${source_identity}")"
+  source_work_branch_sha="$(jq -r \
+    '.work_branch_sha' <<<"${source_identity}")"
+  source_mr_url="$(jq -r '.mr_url' <<<"${source_identity}")"
+  if [[ "${source_mr_url}" =~ /-/merge_requests/([1-9][0-9]*)/?$ ]]; then
+    source_mr_iid="${BASH_REMATCH[1]}"
+  else
+    return 2
+  fi
+  glab_cmd="${GLAB_BIN:-glab}"
+  verify_timeout="${PHASE6_MR_VERIFY_TIMEOUT_SECONDS:-120}"
+  [[ "${verify_timeout}" =~ ^[1-9][0-9]*$ ]] \
+    && [ "${verify_timeout}" -le 600 ] || return 2
+  command -v timeout >/dev/null 2>&1 || return 2
+  command -v "${glab_cmd}" >/dev/null 2>&1 || return 2
+
+  if [ -z "${DAG_SOURCE_AUTHOR_USERNAME}" ]; then
+    command_timeout="$(dependency_graph_bounded_timeout "${verify_timeout}")" \
+      || {
+        DAG_SOURCE_MR_QUERY_OUTCOME="timeout"
+        return 1
+      }
+    set +e
+    user_response="$(timeout --kill-after=5s "${command_timeout}s" \
+      "${glab_cmd}" api user 2>/dev/null)"
+    command_rc=$?
+    set -e
+    if [ "${command_rc}" -eq 124 ] || [ "${command_rc}" -eq 137 ]; then
+      DAG_SOURCE_MR_QUERY_OUTCOME="timeout"
+      return 1
+    fi
+    [ "${command_rc}" -eq 0 ] || return 1
+    DAG_SOURCE_AUTHOR_USERNAME="$(jq -er '
+      .username | select(type == "string" and length > 0 and length <= 255)
+    ' <<<"${user_response}" 2>/dev/null)" || return 1
+  fi
+  username="${DAG_SOURCE_AUTHOR_USERNAME}"
+
+  command_timeout="$(dependency_graph_bounded_timeout "${verify_timeout}")" \
+    || {
+      DAG_SOURCE_MR_QUERY_OUTCOME="timeout"
+      return 1
+    }
+  set +e
+  live_response="$(timeout --kill-after=5s "${command_timeout}s" \
+    "${glab_cmd}" api \
+      "projects/${PROJECT_URI}/merge_requests/${source_mr_iid}" 2>/dev/null)"
+  command_rc=$?
+  set -e
+  if [ "${command_rc}" -eq 124 ] || [ "${command_rc}" -eq 137 ]; then
+    DAG_SOURCE_MR_QUERY_OUTCOME="timeout"
+    return 1
+  fi
+  [ "${command_rc}" -eq 0 ] || return 1
+
+  encoded_source="$(jq -rn --arg value "${source_branch}" '$value | @uri')" \
+    || return 1
+  command_timeout="$(dependency_graph_bounded_timeout "${verify_timeout}")" \
+    || {
+      DAG_SOURCE_MR_QUERY_OUTCOME="timeout"
+      return 1
+    }
+  set +e
+  open_response="$(timeout --kill-after=5s "${command_timeout}s" \
+    "${glab_cmd}" api \
+      "projects/${PROJECT_URI}/merge_requests?scope=all&state=opened&source_branch=${encoded_source}&per_page=100" \
+      2>/dev/null)"
+  command_rc=$?
+  set -e
+  if [ "${command_rc}" -eq 124 ] || [ "${command_rc}" -eq 137 ]; then
+    DAG_SOURCE_MR_QUERY_OUTCOME="timeout"
+    return 1
+  fi
+  [ "${command_rc}" -eq 0 ] || return 1
+
+  if ! DAG_SOURCE_SNAPSHOT="$(jq -nce \
+      --argjson live "${live_response}" \
+      --argjson open_rows "${open_response}" \
+      --argjson iid "${source_iid}" \
+      --argjson execution_id "${source_execution_id}" \
+      --arg work_branch "${source_branch}" \
+      --arg commit_sha "${source_sha}" \
+      --arg work_branch_sha "${source_work_branch_sha}" \
+      --argjson mr_iid "${source_mr_iid}" \
+      --arg mr_url "${source_mr_url}" \
+      --arg target_branch "${target_branch}" \
+      --arg author_username "${username}" \
+      --arg closes_line "Closes #${source_iid}" '
+      def full_oid:
+        type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$");
+      if ($live | type) == "object"
+        and ($open_rows | type) == "array"
+        and ($live.iid == $mr_iid)
+        and ($live.web_url == $mr_url)
+        and (($live.state == "opened") or ($live.state == "merged"))
+        and ($live.source_branch == $work_branch)
+        and ($live.target_branch == $target_branch)
+        and ($live.sha | full_oid)
+        and (
+          if $live.state == "opened" then
+            (($live.sha | ascii_downcase)
+              == ($work_branch_sha | ascii_downcase))
+          else
+            (($live.sha | ascii_downcase)
+              == ($commit_sha | ascii_downcase))
+            or (($live.sha | ascii_downcase)
+              == ($work_branch_sha | ascii_downcase))
+          end
+        )
+        and ($live.author.username == $author_username)
+        and ($live.description | type == "string")
+        and (($live.description | split("\n")) | index($closes_line) != null)
+        and (
+          if $live.state == "opened" then
+            ($open_rows | length) == 1
+            and ($open_rows[0].iid == $mr_iid)
+            and ($open_rows[0].web_url == $mr_url)
+            and ($open_rows[0].source_branch == $work_branch)
+            and ($open_rows[0].state == "opened")
+          else
+            ($open_rows | length) == 0
+          end
+        )
+      then {
+        iid:$iid,
+        execution_id:$execution_id,
+        work_branch:$work_branch,
+        commit_sha:($commit_sha | ascii_downcase),
+        work_branch_sha:($work_branch_sha | ascii_downcase),
+        verified:true,
+        mr:{
+          iid:$mr_iid,
+          url:$mr_url,
+          state:$live.state,
+          source_branch:$work_branch,
+          target_branch:$target_branch,
+          sha:($live.sha | ascii_downcase)
+        }
+      }
+      else error("DAG predecessor MR identity mismatch")
+      end
+    ' 2>/dev/null)"; then
+    DAG_SOURCE_MR_QUERY_OUTCOME="identity_mismatch"
+    return 1
+  fi
+  DAG_SOURCE_MR_QUERY_OUTCOME="ok"
 }
 
 # ── Shared dependency branch planning ─────────────────────────────
@@ -1794,47 +2204,11 @@ while IFS= read -r planning_scope; do
         continue
         ;;
     esac
-    if [ "${head_reverse_count}" -gt 1 ]; then
-      mark_shared_dependency_error "${planning_iid}" \
-        "shared_branch_fanout_unsupported"
-      continue
-    fi
-    if [ -n "${head_dependency_iid}" ] || [ "${tail_reverse_count}" -gt 0 ]; then
-      mark_shared_dependency_error "${planning_iid}" \
-        "shared_branch_chain_unsupported"
-      continue
-    fi
-
-    shared_head_iid="${planning_dependency_iid}"
-    shared_tail_iid="${planning_iid}"
-    shared_work_branch="issue/${shared_head_iid}+${shared_tail_iid}"
-    shared_members_json="[${shared_head_iid},${shared_tail_iid}]"
-    existing_member_branch="$(printf '%s' "${STATE_JSON}" | jq -r \
-      --argjson head "${shared_head_iid}" --argjson tail "${shared_tail_iid}" '
-      [.shared_branch_groups | to_entries[]
-       | select(.value as $group
-         | (($group.dependency_iids // [$group.head_iid]) + [$group.tail_iid])
-         | (index($head) != null or index($tail) != null))
-       | .key] | unique | if length == 0 then "" else join(",") end')"
-    if [ -n "${existing_member_branch}" ] \
-        && [ "${existing_member_branch}" != "${shared_work_branch}" ]; then
-      mark_shared_dependency_error "${shared_head_iid}" \
-        "shared_branch_binding_conflict"
-      mark_shared_dependency_error "${shared_tail_iid}" \
-        "shared_branch_binding_conflict"
-      continue
-    fi
-    if [ -n "${existing_member_branch}" ]; then
-      # Persisted groups were loaded above and stay immutable. New reverse
-      # edges remain desired-only until C observes A completed on issue/A and
-      # the late-binding migration succeeds.
-      continue
-    fi
-    LATE_SHARED_HEAD_BY_TAIL["${shared_tail_iid}"]="${shared_head_iid}"
-    LATE_SHARED_TAIL_BY_HEAD["${shared_head_iid}"]="${shared_tail_iid}"
-    LATE_SHARED_BRANCH_BY_TAIL["${shared_tail_iid}"]="${shared_work_branch}"
-    LATE_SHARED_MEMBERS_BY_TAIL["${shared_tail_iid}"]="${shared_members_json}"
-    LATE_SHARED_SCOPE_BY_TAIL["${shared_tail_iid}"]="${planning_scope_id}"
+    # New dependency declarations are planned as immutable per-Issue DAG v2
+    # nodes below. The pair planner remains only for already-persisted v1
+    # shared groups loaded above; it must not claim a predecessor exclusively
+    # or reject fan-out / multi-level topology.
+    continue
   done
 done < <(printf '%s' "${DEPENDENCY_SCOPES_JSON}" | jq -c '.[]')
 
@@ -2055,6 +2429,122 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
     continue
   fi
 
+  # A DAG-v2 continue is authorized by its frozen full plan, never rebuilt
+  # from today's predecessor refs. Load that plan before looking up the
+  # content-addressed consumer branch so the generic ordinary-branch fallback
+  # cannot silently downgrade it to a fresh run.
+  candidate_dag_continue=false
+  candidate_dag_continue_work_sha=""
+  candidate_state_file="${ISSUES_ROOT}/issue-${candidate_iid}/state.json"
+  if [ "${candidate_requests_continue}" = true ] \
+      && [ -f "${candidate_state_file}" ] \
+      && [ ! -L "${candidate_state_file}" ] \
+      && [ "$(jq -r '.dependency_contract_version // 0' \
+        "${candidate_state_file}" 2>/dev/null || true)" = 2 ]; then
+    current_declared_dependency_iids='[]'
+    case "${dependency_status}" in
+      resolved)
+        current_declared_dependency_iids="$(printf '%s' "${dependency_result}" \
+          | jq -ce '[.dependency_iid]' 2>/dev/null || printf '%s' '[]')"
+        ;;
+      resolved_multiple)
+        current_declared_dependency_iids="$(printf '%s' "${dependency_result}" \
+          | jq -ce '.dependency_iids' 2>/dev/null || printf '%s' '[]')"
+        ;;
+    esac
+    candidate_state_mode="$(phase6_file_mode "${candidate_state_file}" \
+      2>/dev/null || true)"
+    candidate_state_owner="$(phase6_file_owner "${candidate_state_file}" \
+      2>/dev/null || true)"
+    if [ "${candidate_state_mode}" != 600 ] \
+        || [ "${candidate_state_owner}" != "$(id -u)" ] \
+        || ! candidate_dag_identity="$(jq -ce \
+          --argjson iid "${candidate_iid}" \
+          --arg target_branch "${candidate_merge_target}" \
+          --argjson declared_iids "${current_declared_dependency_iids}" '
+          def full_oid:
+            type == "string"
+            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$");
+          if type == "object"
+            and .iid == $iid
+            and .dependency_contract_version == 2
+            and (.dependency_plan_sha256 | type == "string"
+              and test("^[0-9a-f]{64}$"))
+            and (.dependency_plan | type == "object")
+            and .dependency_plan.version == 2
+            and .dependency_plan.consumer_iid == $iid
+            and .dependency_plan.target_branch == $target_branch
+            and .dependency_plan.plan_sha256 == .dependency_plan_sha256
+            and .dependency_plan.work_branch == .work_branch
+            and .work_branch == (
+              "issue/" + ($iid | tostring) + "-dag-"
+              + .dependency_plan_sha256[0:16])
+            and .branch_members == [$iid]
+            and (.shared_branch_role // null) == null
+            and (.dependency_plan.declared_inputs | type == "array")
+            and (.dependency_plan.declared_inputs | map(.iid)) == $declared_iids
+            and (.dependency_plan.aggregate_base_sha | full_oid)
+            and (.dependency_base_sha | full_oid)
+            and ((.dependency_plan.aggregate_base_sha | ascii_downcase)
+              == (.dependency_base_sha | ascii_downcase))
+            and (.work_branch_sha | full_oid)
+            and (.commit_sha | full_oid)
+            and (.dependency_pinned_execution_id | type == "number"
+              and .dependency_pinned_execution_id == floor
+              and .dependency_pinned_execution_id > 0)
+            and .dependency_history_verified == true
+            and (.dependency_plan.declared_inputs | length) >= 1
+            and .dependency_iid == .dependency_plan.declared_inputs[0].iid
+            and .dependency_branch ==
+              .dependency_plan.declared_inputs[0].work_branch
+          then {
+            plan:.dependency_plan,
+            plan_sha256:.dependency_plan_sha256,
+            work_branch:.work_branch,
+            work_branch_sha:(.work_branch_sha | ascii_downcase),
+            commit_sha:(.commit_sha | ascii_downcase),
+            execution_id:.dependency_pinned_execution_id,
+            dependency_iid:.dependency_iid,
+            dependency_branch:.dependency_branch,
+            dependency_base_sha:(.dependency_base_sha | ascii_downcase)
+          }
+          else error("invalid frozen DAG continue identity")
+          end
+        ' "${candidate_state_file}" 2>/dev/null)"; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="invalid_persisted_dependency_plan"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    if [ "${candidate_auto_merge}" = true ]; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_dag_auto_merge_unsupported"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    candidate_dag_continue=true
+    candidate_work_branch="$(jq -r '.work_branch' <<<"${candidate_dag_identity}")"
+    candidate_dag_continue_work_sha="$(jq -r \
+      '.work_branch_sha' <<<"${candidate_dag_identity}")"
+    WORK_BRANCH_BY_IID["${candidate_iid}"]="${candidate_work_branch}"
+    BRANCH_MEMBERS_JSON_BY_IID["${candidate_iid}"]="[${candidate_iid}]"
+    DEPENDENCY_CONTRACT_VERSION_BY_IID["${candidate_iid}"]=2
+    DEPENDENCY_PLAN_SHA256_BY_IID["${candidate_iid}"]="$(jq -r \
+      '.plan_sha256' <<<"${candidate_dag_identity}")"
+    DEPENDENCY_PLAN_JSON_BY_IID["${candidate_iid}"]="$(jq -c \
+      '.plan' <<<"${candidate_dag_identity}")"
+    DEPENDENCY_CLOSURE_IIDS_JSON_BY_IID["${candidate_iid}"]="$(jq -c \
+      '[.plan.declared_inputs[].iid] | unique | sort' \
+      <<<"${candidate_dag_identity}")"
+    DAG_CONTINUE_BY_IID["${candidate_iid}"]=true
+    DEPENDENCY_IID_BY_IID["${candidate_iid}"]="$(jq -r \
+      '.dependency_iid' <<<"${candidate_dag_identity}")"
+    DEPENDENCY_BRANCH_BY_IID["${candidate_iid}"]="$(jq -r \
+      '.dependency_branch' <<<"${candidate_dag_identity}")"
+    DEPENDENCY_BASE_SHA_BY_IID["${candidate_iid}"]="$(jq -r \
+      '.dependency_base_sha' <<<"${candidate_dag_identity}")"
+    EXPECTED_COMMIT_PARENT_SHA_BY_IID["${candidate_iid}"]="$(jq -r \
+      '.dependency_base_sha' <<<"${candidate_dag_identity}")"
+  fi
+
   candidate_resume_ref_ready=false
   candidate_resume_is_remote=false
   candidate_resume_ref=""
@@ -2077,6 +2567,47 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
     else
       candidate_resume_ref=""
     fi
+  fi
+  if [ "${candidate_dag_continue}" = true ]; then
+    if [ "${candidate_resume_ref_ready}" = true ] \
+        && [ "${candidate_resume_sha,,}" != \
+          "${candidate_dag_continue_work_sha,,}" ]; then
+      recovered_continue_sha="$(reconcile_terminal_log_state_tip \
+        "${candidate_iid}" "${candidate_state_file}" \
+        "${candidate_work_branch}" \
+        "$(jq -r '.commit_sha' <<<"${candidate_dag_identity}")" \
+        "${candidate_dag_continue_work_sha}" \
+        "$(jq -r '.execution_id' <<<"${candidate_dag_identity}")" \
+        2>/dev/null || true)"
+      if [ -n "${recovered_continue_sha}" ] \
+          && [ "${recovered_continue_sha,,}" = \
+            "${candidate_resume_sha,,}" ]; then
+        candidate_dag_continue_work_sha="${recovered_continue_sha,,}"
+      fi
+    fi
+    if [ "${candidate_resume_ref_ready}" != true ] \
+        || [ "${candidate_resume_sha,,}" != \
+          "${candidate_dag_continue_work_sha,,}" ]; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="continue_branch_history_mismatch"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    if ! GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+        merge-base --is-ancestor \
+        "${DEPENDENCY_BASE_SHA_BY_IID[${candidate_iid}]}" \
+        "${candidate_resume_sha}" >/dev/null 2>&1; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="continue_dependency_not_in_resume_history"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    CONTINUE_BASE_REQUIRED_BY_IID["${candidate_iid}"]=true
+    CONTINUE_BASE_SHA_BY_IID["${candidate_iid}"]="${candidate_resume_sha}"
+    CONTINUE_BASE_REF_BY_IID["${candidate_iid}"]="${candidate_resume_ref}"
+    EXPECTED_WORK_BRANCH_SHA_BY_IID["${candidate_iid}"]="${candidate_resume_sha}"
+    append_batch_iid "${candidate_iid}"
+    wrapper_log prepare_tick \
+      "iid=${candidate_iid} dependency_dag_continue_ready plan=${DEPENDENCY_PLAN_SHA256_BY_IID[${candidate_iid}]}"
+    continue
   fi
   if [ "${candidate_requests_continue}" = "true" ] \
       && [ "${candidate_resume_ref_ready}" = "true" ]; then
@@ -2269,6 +2800,288 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
   fi
   if [ -n "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ]; then
     append_batch_iid "${candidate_iid}"
+    continue
+  fi
+
+  # New dependency work uses DAG contract v2. Each predecessor keeps its own
+  # immutable branch/MR; the consumer freezes exact source identities and
+  # receives a content-addressed branch. Existing persisted v1 shared tails
+  # remain on the legacy path below until they drain.
+  if [ -z "${SHARED_BRANCH_ROLE_BY_IID[${candidate_iid}]:-}" ] \
+      && { [ "${dependency_status}" = resolved ] \
+        || [ "${dependency_status}" = resolved_multiple ]; }; then
+    dag_dependency_iids='[]'
+    case "${dependency_status}" in
+      resolved)
+        dag_dependency_iids="$(printf '%s' "${dependency_result}" \
+          | jq -ce '
+            if (.dependency_iid | type == "number"
+                and . == floor and . > 0)
+              and .base_branch ==
+                ("issue/" + (.dependency_iid | tostring))
+            then [.dependency_iid]
+            else error("invalid dependency result")
+            end
+          ' 2>/dev/null)" || {
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="invalid_dependency_parser_result"
+            append_batch_iid "${candidate_iid}"
+            continue
+          }
+        ;;
+      resolved_multiple)
+        dag_dependency_iids="$(printf '%s' "${dependency_result}" \
+          | jq -ce '
+            if (.dependency_iids | type == "array")
+              and (.dependency_iids | length) >= 2
+              and (.dependency_iids | length) <= 8
+              and all(.dependency_iids[];
+                type == "number" and . == floor and . > 0)
+              and ((.dependency_iids | length)
+                == (.dependency_iids | unique | length))
+              and .dependency_iid == .dependency_iids[0]
+            then .dependency_iids
+            else error("invalid dependency list")
+            end
+          ' 2>/dev/null)" || {
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="invalid_dependency_parser_result"
+            append_batch_iid "${candidate_iid}"
+            continue
+          }
+        ;;
+    esac
+    if jq -e --argjson iid "${candidate_iid}" \
+        'index($iid) != null' <<<"${dag_dependency_iids}" >/dev/null; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="self_dependency"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    if [ "${candidate_auto_merge}" = true ]; then
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_dag_auto_merge_unsupported"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+
+    dag_source_snapshots='[]'
+    dag_sources_ready=true
+    dag_wait_recorded=false
+    while IFS= read -r dag_source_iid; do
+      [ -n "${dag_source_iid}" ] || continue
+      if ! load_dependency_issue_snapshot "${dag_source_iid}" direct; then
+        case "${DEPENDENCY_CHAIN_LOAD_OUTCOME}" in
+          timeout|budget|deadline)
+            record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+              "issue/${dag_source_iid}" "dependency_dag_preflight_deferred"
+            dag_wait_recorded=true
+            ;;
+          *)
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_issue_lookup_failed"
+            ;;
+        esac
+        dag_sources_ready=false
+        break
+      fi
+      dag_source_issue_json="${DEPENDENCY_CHAIN_ISSUE_JSON}"
+      dag_source_completed="$(printf '%s' "${dag_source_issue_json}" | jq -r '
+        (.labels // []) as $labels
+        | ((($labels | index("pr")) != null)
+            or (($labels | index("finish")) != null))
+          and ([$labels[] | select(
+            . == "continue" or . == "contiune" or . == "doing"
+            or . == "retry" or . == "todo" or . == "new"
+            or . == "timeout" or . == "blocked" or startswith("blocked-")
+            or . == "failed" or startswith("failed-"))] | length) == 0
+      ')"
+      dag_source_settled="$(printf '%s' "${STATE_JSON}" | jq -r \
+        --argjson iid "${dag_source_iid}" '
+          ((.pending_subagents // {})[($iid | tostring)] // null) == null
+        ')"
+      if [ "${dag_source_completed}" != true ] \
+          || [ "${dag_source_settled}" != true ]; then
+        if [ "${dag_source_completed}" != true ]; then
+          detect_live_dependency_cycle "${candidate_iid}" "${dag_source_iid}"
+          case "${DEPENDENCY_CHAIN_STATUS}" in
+            cycle)
+              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_cycle"
+              ;;
+            too_deep)
+              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_too_deep"
+              ;;
+            chain_invalid)
+              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_invalid"
+              ;;
+            lookup_failed)
+              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_issue_lookup_failed"
+              ;;
+            parser_failed)
+              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_parser_failed"
+              ;;
+            deferred_timeout|deferred_budget)
+              record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+                "issue/${dag_source_iid}" "dependency_cycle_check_deferred"
+              dag_wait_recorded=true
+              ;;
+          esac
+        fi
+        if [ -z "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ] \
+            && [ "${dag_wait_recorded}" != true ]; then
+          record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+            "issue/${dag_source_iid}" "dependency_not_completed"
+          dag_wait_recorded=true
+        fi
+        dag_sources_ready=false
+        if [ -n "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ]; then
+          break
+        fi
+        # Continue checking every declared edge even though this source is
+        # not ready. A back-edge may be present only in a later input.
+        continue
+      fi
+
+      if ! load_dependency_dag_source_identity "${dag_source_iid}"; then
+        if [ "${DAG_SOURCE_IDENTITY_REASON}" = dependency_source_state_pending ]; then
+          record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+            "issue/${dag_source_iid}" "dependency_source_state_pending"
+          dag_wait_recorded=true
+          dag_sources_ready=false
+          continue
+        fi
+        DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="${DAG_SOURCE_IDENTITY_REASON}"
+        dag_sources_ready=false
+        break
+      fi
+      if ! query_dependency_dag_source_snapshot \
+          "${DAG_SOURCE_IDENTITY}" "${candidate_merge_target}"; then
+        if [ "${DAG_SOURCE_MR_QUERY_OUTCOME}" = identity_mismatch ]; then
+          DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_source_mr_identity_mismatch"
+        else
+          record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+            "$(jq -r '.work_branch' <<<"${DAG_SOURCE_IDENTITY}")" \
+            "dependency_source_mr_lookup_deferred"
+          dag_wait_recorded=true
+        fi
+        dag_sources_ready=false
+        break
+      fi
+      dag_source_snapshots="$(jq -cn \
+        --argjson current "${dag_source_snapshots}" \
+        --argjson source "${DAG_SOURCE_SNAPSHOT}" '$current + [$source]')"
+    done < <(jq -r '.[]' <<<"${dag_dependency_iids}")
+
+    if [ -n "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ]; then
+      # A later declared edge can prove the whole graph invalid after an
+      # earlier edge was tentatively recorded as waiting. A deterministic
+      # graph error wins over the stale wait/deferred observation.
+      clear_dependency_wait_for_iid "${candidate_iid}"
+      append_batch_iid "${candidate_iid}"
+      continue
+    fi
+    if [ "${dag_sources_ready}" != true ]; then
+      wrapper_log prepare_tick \
+        "iid=${candidate_iid} dependency_dag_waiting dependencies=${dag_dependency_iids}"
+      continue
+    fi
+
+    dag_resolve_output=""
+    dag_resolve_rc=0
+    dag_resolve_timeout="$(dependency_graph_bounded_timeout 900)" || {
+      record_dependency_wait "${candidate_iid}" \
+        "$(jq -r '.[0]' <<<"${dag_dependency_iids}")" \
+        "issue/$(jq -r '.[0]' <<<"${dag_dependency_iids}")" \
+        "dependency_dag_resolution_deferred"
+      wrapper_log prepare_tick \
+        "iid=${candidate_iid} dependency_dag_resolution_deferred reason=graph_deadline"
+      continue
+    }
+    set +e
+    dag_resolve_output="$(
+      timeout --kill-after=5s "${dag_resolve_timeout}s" \
+        env -i \
+        PATH="${PATH}" \
+        HOME=/nonexistent \
+        LC_ALL=C \
+        REPO_PATH="${REPO_PATH}" \
+        ISSUES_ROOT="${ISSUES_ROOT}" \
+        DAG_CONSUMER_IID="${candidate_iid}" \
+        DAG_TARGET_BRANCH="${candidate_merge_target}" \
+        DAG_SOURCE_SNAPSHOTS_JSON="${dag_source_snapshots}" \
+        bash "${SCRIPT_DIR}/resolve_dependency_dag_base.sh"
+    )"
+    dag_resolve_rc=$?
+    set -e
+    if [ "${dag_resolve_rc}" -eq 75 ] \
+        || [ "${dag_resolve_rc}" -eq 124 ] \
+        || [ "${dag_resolve_rc}" -eq 137 ]; then
+      record_dependency_wait "${candidate_iid}" \
+        "$(jq -r '.[0]' <<<"${dag_dependency_iids}")" \
+        "issue/$(jq -r '.[0]' <<<"${dag_dependency_iids}")" \
+        "dependency_dag_resolution_deferred"
+      wrapper_log prepare_tick \
+        "iid=${candidate_iid} dependency_dag_resolution_deferred rc=${dag_resolve_rc}"
+      continue
+    fi
+    if [ "${dag_resolve_rc}" -ne 0 ] \
+        || ! jq -e \
+          --argjson consumer_iid "${candidate_iid}" \
+          --arg target_branch "${candidate_merge_target}" \
+          --argjson declared_iids "${dag_dependency_iids}" '
+          .version == 2
+          and .status == "ready"
+          and .consumer_iid == $consumer_iid
+          and .target_branch == $target_branch
+          and (.declared_inputs | map(.iid)) == $declared_iids
+          and (.effective_inputs | type == "array" and length >= 1)
+          and (.closure_iids | type == "array" and length >= 1)
+          and all(.closure_iids[];
+            type == "number" and . == floor and . > 0)
+          and (.closure_iids == (.closure_iids | unique | sort))
+          and (.closure_iids | index($consumer_iid) == null)
+          and (.closure_iids as $closure
+            | all(.declared_inputs[].iid;
+              . as $declared_iid
+              | $closure | index($declared_iid) != null))
+          and (.aggregate_base_sha | type == "string"
+            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+          and (.plan_sha256 | type == "string"
+            and test("^[0-9a-f]{64}$"))
+          and .work_branch == (
+            "issue/" + ($consumer_iid | tostring) + "-dag-"
+            + .plan_sha256[0:16])
+        ' <<<"${dag_resolve_output}" >/dev/null 2>&1; then
+      dag_resolve_reason="$(printf '%s' "${dag_resolve_output}" \
+        | jq -r '.reason // "dependency_dag_resolution_failed"' \
+          2>/dev/null || printf '%s' dependency_dag_resolution_failed)"
+      DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="${dag_resolve_reason}"
+      append_batch_iid "${candidate_iid}"
+      wrapper_log prepare_tick \
+        "iid=${candidate_iid} dependency_dag_resolution_failed rc=${dag_resolve_rc} reason=${dag_resolve_reason}"
+      continue
+    fi
+
+    dag_anchor_iid="$(jq -r '.declared_inputs[0].iid' \
+      <<<"${dag_resolve_output}")"
+    dag_anchor_branch="$(jq -r '.declared_inputs[0].work_branch' \
+      <<<"${dag_resolve_output}")"
+    dag_base_sha="$(jq -r '.aggregate_base_sha' <<<"${dag_resolve_output}")"
+    dag_work_branch="$(jq -r '.work_branch' <<<"${dag_resolve_output}")"
+    dag_plan_sha256="$(jq -r '.plan_sha256' <<<"${dag_resolve_output}")"
+    DEPENDENCY_CONTRACT_VERSION_BY_IID["${candidate_iid}"]=2
+    DEPENDENCY_PLAN_SHA256_BY_IID["${candidate_iid}"]="${dag_plan_sha256}"
+    DEPENDENCY_PLAN_JSON_BY_IID["${candidate_iid}"]="$(jq -c '{
+      version,consumer_iid,target_branch,declared_inputs,effective_inputs,
+      aggregate_base_sha,plan_sha256,work_branch
+    }' <<<"${dag_resolve_output}")"
+    DEPENDENCY_CLOSURE_IIDS_JSON_BY_IID["${candidate_iid}"]="$(jq -c \
+      '.closure_iids' <<<"${dag_resolve_output}")"
+    DEPENDENCY_IID_BY_IID["${candidate_iid}"]="${dag_anchor_iid}"
+    DEPENDENCY_BRANCH_BY_IID["${candidate_iid}"]="${dag_anchor_branch}"
+    DEPENDENCY_BASE_SHA_BY_IID["${candidate_iid}"]="${dag_base_sha}"
+    EXPECTED_COMMIT_PARENT_SHA_BY_IID["${candidate_iid}"]="${dag_base_sha}"
+    WORK_BRANCH_BY_IID["${candidate_iid}"]="${dag_work_branch}"
+    BRANCH_MEMBERS_JSON_BY_IID["${candidate_iid}"]="[${candidate_iid}]"
+    SHARED_BRANCH_ROLE_BY_IID["${candidate_iid}"]=""
+    append_batch_iid "${candidate_iid}"
+    wrapper_log prepare_tick \
+      "iid=${candidate_iid} dependency_dag_ready dependencies=${dag_dependency_iids} effective=$(jq -c '[.effective_inputs[].iid]' <<<"${dag_resolve_output}") branch=${dag_work_branch} base_sha=${dag_base_sha}"
     continue
   fi
 
@@ -2932,6 +3745,47 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
   esac
 done
 
+# A completed predecessor may itself have been selected for force-rerun later
+# in this same tick. DAG planning above is read-only, so defer consumers whose
+# direct frozen inputs overlap the actual selected mutation set before any
+# execution ID is allocated or branch can move. Use the completed BATCH_JSON,
+# not the broader candidate universe: candidates that were merely inspected
+# but not selected cannot invalidate an immutable predecessor. A DAG continue
+# resumes its already materialized consumer branch and does not rebuild its
+# aggregate, so only fresh DAG plans participate in this antichain gate.
+ACTIVE_MUTATION_IIDS_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+  --argjson selected "${BATCH_JSON}" '
+  ($selected + ((.pending_subagents // {}) | keys | map(tonumber)))
+  | unique | sort
+')"
+mapfile -t PRE_ANTICHAIN_BATCH_IIDS < <(
+  printf '%s' "${BATCH_JSON}" | jq -r '.[]'
+)
+for candidate_iid in "${PRE_ANTICHAIN_BATCH_IIDS[@]}"; do
+  [ "${DEPENDENCY_CONTRACT_VERSION_BY_IID[${candidate_iid}]:-}" = 2 ] \
+    || continue
+  [ "${DAG_CONTINUE_BY_IID[${candidate_iid}]:-false}" != true ] \
+    || continue
+  conflicting_source_iid="$(printf '%s' \
+    "${DEPENDENCY_CLOSURE_IIDS_JSON_BY_IID[${candidate_iid}]}" | jq -r \
+      --argjson selected "${ACTIVE_MUTATION_IIDS_JSON}" '
+      [
+        .[] as $input_iid
+        | select($selected | index($input_iid) != null)
+        | $input_iid
+      ][0]
+      // empty
+    ')"
+  [ -n "${conflicting_source_iid}" ] || continue
+  BATCH_JSON="$(printf '%s' "${BATCH_JSON}" | jq -c \
+    --argjson iid "${candidate_iid}" 'map(select(. != $iid))')"
+  clear_dependency_wait_for_iid "${candidate_iid}"
+  record_dependency_wait "${candidate_iid}" "${conflicting_source_iid}" \
+    "issue/${conflicting_source_iid}" "dependency_source_selected_same_tick"
+  wrapper_log prepare_tick \
+    "iid=${candidate_iid} dependency_source_selected_same_tick source_iid=${conflicting_source_iid}"
+done
+
 # A fixed scan prefix lets a large set of waiting dependencies starve every
 # later candidate forever. When the bounded scan stopped before covering the
 # rotated stream and still did not fill the batch, persist the IID after the
@@ -3114,6 +3968,17 @@ for iid in "${BATCH_IIDS[@]}"; do
         dependency_base_sha:$dependency_base_sha
       }')"
   fi
+  if [ "${DEPENDENCY_CONTRACT_VERSION_BY_IID[${iid}]:-}" = 2 ]; then
+    STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+      --arg iid "${iid}" \
+      --arg plan_sha256 "${DEPENDENCY_PLAN_SHA256_BY_IID[${iid}]}" \
+      --argjson dependency_plan "${DEPENDENCY_PLAN_JSON_BY_IID[${iid}]}" '
+      .pending_subagents[$iid] += {
+        dependency_contract_version:2,
+        dependency_plan_sha256:$plan_sha256,
+        dependency_plan:$dependency_plan
+      }')"
+  fi
 done
 persist_state "${STATE_JSON}"
 
@@ -3140,11 +4005,14 @@ for iid in "${BATCH_IIDS[@]}"; do
   IID_DEPENDENCY_IID="${DEPENDENCY_IID_BY_IID[${iid}]:-}"
   IID_DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH_BY_IID[${iid}]:-}"
   IID_DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA_BY_IID[${iid}]:-}"
+  IID_DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION_BY_IID[${iid}]:-}"
+  IID_DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256_BY_IID[${iid}]:-}"
+  IID_DEPENDENCY_PLAN_JSON="${DEPENDENCY_PLAN_JSON_BY_IID[${iid}]:-null}"
   IID_WORK_BRANCH="${WORK_BRANCH_BY_IID[${iid}]:-issue/${iid}}"
   IID_BRANCH_MEMBERS_JSON="${BRANCH_MEMBERS_JSON_BY_IID[${iid}]:-[${iid}]}"
   IID_SHARED_BRANCH_ROLE="${SHARED_BRANCH_ROLE_BY_IID[${iid}]:-}"
   IID_EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA_BY_IID[${iid}]:-}"
-  IID_EXPECTED_COMMIT_PARENT_SHA=""
+  IID_EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA_BY_IID[${iid}]:-}"
   if [ "${IID_SHARED_BRANCH_ROLE}" = tail ]; then
     IID_EXPECTED_COMMIT_PARENT_SHA="${IID_DEPENDENCY_BASE_SHA}"
   fi
@@ -3165,6 +4033,7 @@ for iid in "${BATCH_IIDS[@]}"; do
   # dependent pushes its commit to the pair's frozen WORK_BRANCH=issue/<A>+<C>;
   # the request's independently resolved MR target remains unchanged.
   if [ -n "${DEPENDENCY_BRANCH_BY_IID[${iid}]:-}" ] \
+      && [ "${IID_DEPENDENCY_CONTRACT_VERSION}" != 2 ] \
       && [ "${CONTINUE_BASE_REQUIRED_BY_IID[${iid}]:-false}" != true ]; then
     IID_BRANCH="${DEPENDENCY_BRANCH_BY_IID[${iid}]}"
   fi
@@ -3178,6 +4047,8 @@ for iid in "${BATCH_IIDS[@]}"; do
     REPO_PARENT_PATH="${REPO_PARENT_PATH}"
     ISSUE_IID="${iid}" EXECUTION_ID="${execution_id}"
     WORK_BRANCH="${IID_WORK_BRANCH}"
+    DEPENDENCY_CONTRACT_VERSION="${IID_DEPENDENCY_CONTRACT_VERSION}"
+    DEPENDENCY_PLAN_SHA256="${IID_DEPENDENCY_PLAN_SHA256}"
   )
 
   # Resolve ISSUE_MODE from live labels. `continue` / `contiune` is the only
@@ -3347,6 +4218,9 @@ for iid in "${BATCH_IIDS[@]}"; do
       --arg dependency_iid "${IID_DEPENDENCY_IID}" \
       --arg dependency_branch "${IID_DEPENDENCY_BRANCH}" \
       --arg dependency_base_sha "${IID_DEPENDENCY_BASE_SHA}" \
+      --arg dependency_contract_version "${IID_DEPENDENCY_CONTRACT_VERSION}" \
+      --arg dependency_plan_sha256 "${IID_DEPENDENCY_PLAN_SHA256}" \
+      --argjson dependency_plan "${IID_DEPENDENCY_PLAN_JSON}" \
       --arg log_dir "${LOG_DIR_X}" '
       {iid:$iid, execution_id:$execution_id,
        execution_started_at:$started_at,
@@ -3365,6 +4239,14 @@ for iid in "${BATCH_IIDS[@]}"; do
        dependency_iid:(if $dependency_iid == "" then null else ($dependency_iid | tonumber) end),
        dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
        dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
+       dependency_contract_version:
+         (if $dependency_contract_version == "" then null
+          else ($dependency_contract_version | tonumber) end),
+       dependency_plan_sha256:
+         (if $dependency_plan_sha256 == "" then null
+          else $dependency_plan_sha256 end),
+       dependency_plan:
+         (if $dependency_contract_version == "" then null else $dependency_plan end),
        local_branch:null, log_dir:$log_dir,
        status:"preparing"}' | atomic_write_json "${EXECUTION_STATE_X}"; then
     prep_blocked "unable to persist fixed pre-prepare execution identity"
@@ -3386,7 +4268,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   env "${iid_env[@]}" BRANCH="${IID_BRANCH}" \
     CONFIG_BRANCH="${IID_CONFIG_BRANCH}" \
     DEPENDENCY_BASE_SHA="${IID_DEPENDENCY_BASE_SHA}" \
+    DEPENDENCY_CONTRACT_VERSION="${IID_DEPENDENCY_CONTRACT_VERSION}" \
+    DEPENDENCY_PLAN_SHA256="${IID_DEPENDENCY_PLAN_SHA256}" \
+    AUTO_MERGE="${IID_AUTO_MERGE}" \
     SHARED_BRANCH_ROLE="${IID_SHARED_BRANCH_ROLE}" \
+    EXPECTED_WORK_BRANCH_SHA="${IID_EXPECTED_WORK_BRANCH_SHA}" \
     EXPECTED_COMMIT_PARENT_SHA="${IID_EXPECTED_COMMIT_PARENT_SHA}" \
     CONTINUE_BASE_REQUIRED="${CONTINUE_BASE_REQUIRED_BY_IID[${iid}]:-false}" \
     CONTINUE_BASE_SHA="${CONTINUE_BASE_SHA_BY_IID[${iid}]:-}" \
@@ -3424,16 +4310,26 @@ for iid in "${BATCH_IIDS[@]}"; do
       ;;
   esac
 
-  if [ -n "${IID_SHARED_BRANCH_ROLE}" ]; then
-    IID_EXPECTED_COMMIT_PARENT_SHA="$(GIT_NO_REPLACE_OBJECTS=1 \
+  if [ -n "${IID_SHARED_BRANCH_ROLE}" ] \
+      || [ "${IID_DEPENDENCY_CONTRACT_VERSION}" = 2 ]; then
+    prepared_commit_parent_sha="$(GIT_NO_REPLACE_OBJECTS=1 \
       git -C "${REPO_PATH}" rev-parse --verify \
       "refs/heads/${LOCAL_ISSUE_BRANCH}^{commit}" 2>/dev/null || true)"
-    if ! [[ "${IID_EXPECTED_COMMIT_PARENT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
-      prep_blocked "shared branch prepared commit parent is unavailable"
+    if ! [[ "${prepared_commit_parent_sha}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+      prep_blocked "dependency branch prepared commit parent is unavailable"
       continue
     fi
+    if [ "${IID_DEPENDENCY_CONTRACT_VERSION}" = 2 ]; then
+      if [ "${prepared_commit_parent_sha,,}" != \
+          "${IID_EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
+        prep_blocked "DAG node was not compressed onto its frozen dependency commit"
+        continue
+      fi
+    else
+      IID_EXPECTED_COMMIT_PARENT_SHA="${prepared_commit_parent_sha}"
+    fi
     if [ "${IID_SHARED_BRANCH_ROLE}" = tail ] \
-        && [ "${IID_EXPECTED_COMMIT_PARENT_SHA,,}" != \
+        && [ "${prepared_commit_parent_sha,,}" != \
           "${IID_DEPENDENCY_BASE_SHA,,}" ]; then
       prep_blocked "shared tail was not compressed onto its frozen dependency commit"
       continue
@@ -3663,6 +4559,9 @@ for iid in "${BATCH_IIDS[@]}"; do
     --arg dependency_iid "${IID_DEPENDENCY_IID}" \
     --arg dependency_branch "${IID_DEPENDENCY_BRANCH}" \
     --arg dependency_base_sha "${IID_DEPENDENCY_BASE_SHA}" \
+    --arg dependency_contract_version "${IID_DEPENDENCY_CONTRACT_VERSION}" \
+    --arg dependency_plan_sha256 "${IID_DEPENDENCY_PLAN_SHA256}" \
+    --argjson dependency_plan "${IID_DEPENDENCY_PLAN_JSON}" \
     --arg log_dir "${LOG_DIR_X}" \
     '{iid:$iid, execution_id:$execution_id, execution_started_at:$started_at,
       issue_title:$issue_title,
@@ -3680,6 +4579,14 @@ for iid in "${BATCH_IIDS[@]}"; do
       dependency_iid:(if $dependency_iid == "" then null else ($dependency_iid | tonumber) end),
       dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
       dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
+      dependency_contract_version:
+        (if $dependency_contract_version == "" then null
+         else ($dependency_contract_version | tonumber) end),
+      dependency_plan_sha256:
+        (if $dependency_plan_sha256 == "" then null
+         else $dependency_plan_sha256 end),
+      dependency_plan:
+        (if $dependency_contract_version == "" then null else $dependency_plan end),
       local_branch:$local_branch, log_dir:$log_dir,
       status:"in_progress"}' | atomic_write_json "${EXECUTION_STATE_X}"
   chmod 600 "${EXECUTION_STATE_X}" 2>/dev/null \
@@ -3717,6 +4624,9 @@ for iid in "${BATCH_IIDS[@]}"; do
     --arg dependency_iid "${IID_DEPENDENCY_IID}" \
     --arg dependency_branch "${IID_DEPENDENCY_BRANCH}" \
     --arg dependency_base_sha "${IID_DEPENDENCY_BASE_SHA}" \
+    --arg dependency_contract_version "${IID_DEPENDENCY_CONTRACT_VERSION}" \
+    --arg dependency_plan_sha256 "${IID_DEPENDENCY_PLAN_SHA256}" \
+    --argjson dependency_plan "${IID_DEPENDENCY_PLAN_JSON}" \
     --arg updated_at "${NOW}" \
     'del(.attempts_total,.latest_attempt_number,.preparing_attempt_number,
          .latest_attempt_dir,.prior_attempt_count)
@@ -3730,6 +4640,22 @@ for iid in "${BATCH_IIDS[@]}"; do
       proposed_dependency_iid:(if $dependency_iid == "" then null else ($dependency_iid | tonumber) end),
       proposed_dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
       proposed_dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
+      dependency_contract_version:
+        (if $dependency_contract_version == "" then null
+         else ($dependency_contract_version | tonumber) end),
+      dependency_plan_sha256:
+        (if $dependency_plan_sha256 == "" then null
+         else $dependency_plan_sha256 end),
+      dependency_plan:
+        (if $dependency_contract_version == "" then null else $dependency_plan end),
+      proposed_dependency_contract_version:
+        (if $dependency_contract_version == "" then null
+         else ($dependency_contract_version | tonumber) end),
+      proposed_dependency_plan_sha256:
+        (if $dependency_plan_sha256 == "" then null
+         else $dependency_plan_sha256 end),
+      proposed_dependency_plan:
+        (if $dependency_contract_version == "" then null else $dependency_plan end),
       preparing_execution_id:$latest_execution_id,
       continue_count:$continue_count,
       model_tier:(if $model_tier == "" then (if $prior_model_tier == "" then null else $prior_model_tier end) else $model_tier end),
@@ -3802,6 +4728,8 @@ for iid in "${BATCH_IIDS[@]}"; do
               TPL_DEPENDENCY_IID="${IID_DEPENDENCY_IID}" \
               TPL_DEPENDENCY_BRANCH="${IID_DEPENDENCY_BRANCH}" \
               TPL_DEPENDENCY_BASE_SHA="${IID_DEPENDENCY_BASE_SHA}" \
+              TPL_DEPENDENCY_CONTRACT_VERSION="${IID_DEPENDENCY_CONTRACT_VERSION}" \
+              TPL_DEPENDENCY_PLAN_SHA256="${IID_DEPENDENCY_PLAN_SHA256}" \
               TPL_AUTO_MERGE="${IID_AUTO_MERGE}" \
               TPL_MERGE_TARGET_BRANCH="${IID_MERGE_TARGET_BRANCH}" \
               TPL_MERGE_TARGET_BRANCH_QUOTED="${IID_MERGE_TARGET_BRANCH_QUOTED}" \

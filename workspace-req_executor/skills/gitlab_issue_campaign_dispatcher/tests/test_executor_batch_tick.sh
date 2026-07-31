@@ -11,6 +11,40 @@ fail() {
   exit 1
 }
 
+test_sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+  else
+    shasum -a 256 "${path}" | awk '{print $1}'
+  fi
+}
+
+test_file_mode() {
+  local path="$1"
+  stat -f '%Lp' "${path}" 2>/dev/null \
+    || stat -c '%a' "${path}" 2>/dev/null
+}
+
+write_attempt_finalized_marker() {
+  local log_dir="$1" iid="$2" execution_id="$3" work_branch="$4"
+  local commit_sha="$5" completed_at_epoch="$6" result_sha256
+  result_sha256="$(test_sha256_file "${log_dir}/worker_result.json")"
+  jq -cnS \
+    --argjson iid "${iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg work_branch "${work_branch}" \
+    --arg commit_sha "${commit_sha}" \
+    --arg worker_result_sha256 "${result_sha256}" \
+    --argjson completed_at_epoch "${completed_at_epoch}" '{
+      version:1,iid:$iid,execution_id:$execution_id,
+      work_branch:$work_branch,commit_sha:$commit_sha,
+      worker_result_sha256:$worker_result_sha256,
+      completed_at_epoch:$completed_at_epoch
+    }' >"${log_dir}/attempt_finalized.json"
+  chmod 600 "${log_dir}/attempt_finalized.json"
+}
+
 [ -x "${TICK_SCRIPT}" ] || fail "run_executor_batch_tick.sh is missing or not executable"
 [ -x "${RECORD_RESULT_SCRIPT}" ] || fail "record_executor_batch_spawn.sh is missing or not executable"
 
@@ -20,6 +54,7 @@ TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-batch-tick.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
 FAKE_BIN="${TEST_ROOT}/fake-bin"
+REAL_GIT_BIN="$(command -v git)"
 ORDER_LOG="${TEST_ROOT}/order.log"
 SPAWN_SENTINEL="${TEST_ROOT}/sessions-spawn-called"
 RESERVE_COUNT_FILE="${TEST_ROOT}/reserve-count"
@@ -62,6 +97,23 @@ $*
 EOF
   chmod +x "${FAKE_BIN}/${name}"
 }
+
+cat >"${FAKE_BIN}/git" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${ARCHIVE_RECOVERY_TEST:-0}" = 1 ]; then
+  for git_arg in "$@"; do
+    if [ "${git_arg}" = ls-remote ]; then
+      printf '%s\trefs/heads/%s\n' \
+        "${ARCHIVE_RECOVERY_REMOTE_SHA:?}" \
+        "${ARCHIVE_RECOVERY_WORK_BRANCH:?}"
+      exit 0
+    fi
+  done
+fi
+exec "${REAL_GIT_BIN:?}" "$@"
+EOF
+chmod +x "${FAKE_BIN}/git"
 
 write_fake scheduler_env.sh '
 printf "%s\n" scheduler_env >>"${ORDER_LOG}"
@@ -113,6 +165,11 @@ write_fake reserve_driven_batch_items.sh '
 if [ "${SERIAL_GATE_RESERVE_SENTINEL:-0}" = 1 ]; then
   printf "%s\n" reserve-unexpected >>"${ORDER_LOG}"
   exit 98
+fi
+if [ "${FINALIZATION_GATE_TEST:-0}" = 1 ]; then
+  printf "%s\n" reserve-finalization-gate >>"${ORDER_LOG}"
+  jq -cn "{status:\"idle\",grants:[],active_count:1,available_slots:2}"
+  exit 0
 fi
 count=0
 [ ! -s "${RESERVE_COUNT_FILE}" ] || count="$(cat "${RESERVE_COUNT_FILE}")"
@@ -456,6 +513,10 @@ run_tick() {
   SCHEDULER_ROOT="${SCHEDULER_ROOT}" \
   RESERVE_COUNT_FILE="${RESERVE_COUNT_FILE}" \
   REFILL_BUDGET_TEST="${REFILL_BUDGET_TEST:-0}" \
+  ARCHIVE_RECOVERY_TEST="${ARCHIVE_RECOVERY_TEST:-0}" \
+  ARCHIVE_RECOVERY_REMOTE_SHA="${ARCHIVE_RECOVERY_REMOTE_SHA:-}" \
+  ARCHIVE_RECOVERY_WORK_BRANCH="${ARCHIVE_RECOVERY_WORK_BRANCH:-}" \
+  REAL_GIT_BIN="${REAL_GIT_BIN}" \
   EXECUTOR_REFILL_ROUND_LIMIT="${EXECUTOR_REFILL_ROUND_LIMIT:-32}" \
   EXECUTOR_TOPUP_PHASE_SECONDS="${EXECUTOR_TOPUP_PHASE_SECONDS:-90}" \
   PATH="${FAKE_BIN}:${PATH}" \
@@ -927,6 +988,18 @@ jq -cnS --arg log_dir "${RACE_RESULT_LOG_DIR}" --arg mr_url "${RACE_MR_URL}" '{
 jq -cnS '{
   version:1,iid:42,execution_id:7,exit_code:0,completed_at_epoch:2000000000
 }' >"${RACE_RESULT_LOG_DIR}/acpx_terminal.json"
+if command -v sha256sum >/dev/null 2>&1; then
+  result_sha256="\$(sha256sum "${RACE_RESULT_LOG_DIR}/worker_result.json" | awk '{print \$1}')"
+else
+  result_sha256="\$(shasum -a 256 "${RACE_RESULT_LOG_DIR}/worker_result.json" | awk '{print \$1}')"
+fi
+jq -cnS --arg result_sha256 "\${result_sha256}" '{
+  version:1,iid:42,execution_id:7,work_branch:"issue/42",
+  commit_sha:"0123456789abcdef",
+  worker_result_sha256:\$result_sha256,
+  completed_at_epoch:2000000000
+}' >"${RACE_RESULT_LOG_DIR}/attempt_finalized.json"
+chmod 600 "${RACE_RESULT_LOG_DIR}/attempt_finalized.json"
 printf "%s\n" race-result-published >>"\${ORDER_LOG}"
 jq -cn '{
   status:"ready",dispatch_entries:[],pending_iids:[42],
@@ -1303,6 +1376,74 @@ EOF
 cat >"${RESULT_LOG_DIR}/acpx_terminal.json" <<'EOF'
 {"version":1,"iid":42,"execution_id":3,"exit_code":0,"completed_at_epoch":100}
 EOF
+
+# worker_result.json is intentionally visible before the producer completes
+# archive/state finalization. Missing, non-private, or hash-mismatched latches
+# must neither consume that result nor enter the post-acpx MR/kill path.
+: >"${ORDER_LOG}"
+unfinalized_result_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+    FINALIZATION_GATE_TEST=1 run_tick
+)" || fail "missing finalization-latch tick failed"
+if grep -Eq '^(result|marker|shared-mr-recovery):' "${ORDER_LOG}"; then
+  fail "worker result without finalization latch entered terminal recovery"
+fi
+jq -e '
+  .status == "idle"
+  and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    or .operation == "post_acpx_shared_mr_recovery"
+    or .operation == "post_acpx_marker_reconcile"
+    or .operation == "post_acpx_watchdog")] | length) == 0
+' <<<"${unfinalized_result_output}" >/dev/null \
+  || fail "worker result without finalization latch escaped the safe gate"
+
+write_attempt_finalized_marker \
+  "${RESULT_LOG_DIR}" 42 3 "issue/42" "0123456789abcdef" 100
+chmod 644 "${RESULT_LOG_DIR}/attempt_finalized.json"
+: >"${ORDER_LOG}"
+public_latch_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+    FINALIZATION_GATE_TEST=1 run_tick
+)" || fail "non-private finalization-latch tick failed"
+if grep -Eq '^(result|marker|shared-mr-recovery):' "${ORDER_LOG}"; then
+  fail "non-private finalization latch authorized terminal recovery"
+fi
+jq -e '
+  .status == "idle" and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    or .operation == "post_acpx_watchdog")] | length) == 0
+' <<<"${public_latch_output}" >/dev/null \
+  || fail "non-private finalization latch escaped the safe gate"
+
+chmod 600 "${RESULT_LOG_DIR}/attempt_finalized.json"
+jq -c '.worker_result_sha256 = "0000000000000000000000000000000000000000000000000000000000000000"' \
+  "${RESULT_LOG_DIR}/attempt_finalized.json" \
+  >"${RESULT_LOG_DIR}/attempt_finalized.invalid.json"
+mv "${RESULT_LOG_DIR}/attempt_finalized.invalid.json" \
+  "${RESULT_LOG_DIR}/attempt_finalized.json"
+chmod 600 "${RESULT_LOG_DIR}/attempt_finalized.json"
+: >"${ORDER_LOG}"
+wrong_hash_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+    FINALIZATION_GATE_TEST=1 run_tick
+)" || fail "hash-mismatched finalization-latch tick failed"
+if grep -Eq '^(result|marker|shared-mr-recovery):' "${ORDER_LOG}"; then
+  fail "hash-mismatched finalization latch authorized terminal recovery"
+fi
+jq -e '
+  .status == "idle" and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    or .operation == "post_acpx_watchdog")] | length) == 0
+' <<<"${wrong_hash_output}" >/dev/null \
+  || fail "hash-mismatched finalization latch escaped the safe gate"
+
+write_attempt_finalized_marker \
+  "${RESULT_LOG_DIR}" 42 3 "issue/42" "0123456789abcdef" 100
+: >"${ORDER_LOG}"
 durable_result_output="$(
   RESULT_TEST_RELEASE=1 SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
 )" || fail "durable worker-result recovery tick failed"
@@ -1325,6 +1466,207 @@ jq -e '
     and .job_id == "A:snapshot-0" and .status == "handled")] | length) == 1
 ' <<<"${durable_result_output}" >/dev/null \
   || fail "durable worker result did not return one strict cleanup action"
+
+# A producer can crash in the narrower window after archive_execution_logs.sh
+# pushed the logs-only child L but before it persisted work_branch_sha=L and
+# published attempt_finalized.json. The heartbeat may recover only an exact
+# private single-Issue B -> L state, then must consume the synthesized latch in
+# the same tick without exposing the GitLab credential.
+RECOVERY_REPO="${TEST_ROOT}/repos/group/repo"
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" init -q
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" config user.name 'Batch Recovery Test'
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" config user.email 'batch-recovery@example.test'
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" remote add origin \
+  'https://oauth2:tick-fixture-secret@gitlab.example.test/group/repo.git'
+printf '%s\n' 'reviewed business tree' >"${RECOVERY_REPO}/business.txt"
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" add business.txt
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" commit -q -m 'business B'
+ARCHIVE_BUSINESS_SHA="$("${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" rev-parse HEAD)"
+ARCHIVE_TREE_DIR="${RECOVERY_REPO}/.req_executor/issue-42/log/execution-503"
+mkdir -p "${ARCHIVE_TREE_DIR}"
+printf '%s\n' 'archived execution log' >"${ARCHIVE_TREE_DIR}/wrapper.log"
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" add -f \
+  '.req_executor/issue-42/log/execution-503/wrapper.log'
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" commit -q -m 'archive logs L'
+ARCHIVE_LOG_SHA="$("${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" rev-parse HEAD)"
+
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":5,
+    "claim_token":"archive-recovery-private-claim","finalization":null,
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":5,"execution_id":503,
+  "run_id":"run-42-archive","child_session_key":"agent:req_executor:subagent:42",
+  "work_branch":"issue/42","branch_members":[42],"shared_branch_role":null
+}}}
+EOF
+ARCHIVE_RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/execution-503"
+ARCHIVE_ISSUE_DIR="${PROJECT_RUNTIME}/issues/issue-42"
+mkdir -p "${ARCHIVE_RESULT_LOG_DIR}" "${ARCHIVE_ISSUE_DIR}"
+cat >"${ARCHIVE_RESULT_LOG_DIR}/worker_result.json" <<EOF
+{"iid":42,"execution_id":503,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42","commit_sha":"${ARCHIVE_BUSINESS_SHA}","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/503","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${ARCHIVE_RESULT_LOG_DIR}"}
+EOF
+cat >"${ARCHIVE_RESULT_LOG_DIR}/acpx_terminal.json" <<'EOF'
+{"version":1,"iid":42,"execution_id":503,"exit_code":0,"completed_at_epoch":100}
+EOF
+cat >"${ARCHIVE_ISSUE_DIR}/state.json" <<EOF
+{
+  "iid":42,"dependency_pinned_execution_id":503,
+  "work_branch":"issue/42","branch_members":[42],"shared_branch_role":null,
+  "commit_sha":"${ARCHIVE_BUSINESS_SHA}",
+  "work_branch_sha":"${ARCHIVE_BUSINESS_SHA}",
+  "dependency_history_verified":true,
+  "dependency_history_updated_at":"2026-01-01T00:00:00Z",
+  "unchanged_probe":"must-survive-cas"
+}
+EOF
+chmod 600 "${ARCHIVE_RESULT_LOG_DIR}/worker_result.json" \
+  "${ARCHIVE_ISSUE_DIR}/state.json"
+ARCHIVE_STATE_BEFORE="$(jq -cS . "${ARCHIVE_ISSUE_DIR}/state.json")"
+archive_recovery_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  ARCHIVE_RECOVERY_TEST=1 \
+  ARCHIVE_RECOVERY_REMOTE_SHA="${ARCHIVE_LOG_SHA}" \
+  ARCHIVE_RECOVERY_WORK_BRANCH='issue/42' \
+  RESULT_TEST_RELEASE=1 SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
+)" || fail "logs-only archive crash recovery tick failed"
+ARCHIVE_STATE_AFTER="$(jq -cS . "${ARCHIVE_ISSUE_DIR}/state.json")"
+[ "$(test_sha256_file "${ARCHIVE_RESULT_LOG_DIR}/worker_result.json")" = \
+    "$(jq -r '.worker_result_sha256' \
+      "${ARCHIVE_RESULT_LOG_DIR}/attempt_finalized.json")" ] \
+  || fail "archive crash recovery latch did not bind the final worker result"
+[ "$(test_file_mode \
+    "${ARCHIVE_RESULT_LOG_DIR}/attempt_finalized.json")" = 600 ] \
+  || fail "archive crash recovery latch was not private"
+jq -nce \
+  --argjson before "${ARCHIVE_STATE_BEFORE}" \
+  --argjson after "${ARCHIVE_STATE_AFTER}" \
+  --arg business_sha "${ARCHIVE_BUSINESS_SHA}" \
+  --arg log_sha "${ARCHIVE_LOG_SHA}" '
+  (($before | del(.work_branch_sha,.dependency_history_updated_at))
+    == ($after | del(.work_branch_sha,.dependency_history_updated_at)))
+  and $after.commit_sha == $business_sha
+  and $after.work_branch_sha == $log_sha
+  and ($after.dependency_history_updated_at
+    | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"))
+' >/dev/null \
+  || fail "archive crash recovery changed fields beyond the logs-only CAS"
+if grep -q 'tick-fixture-secret' "${ORDER_LOG}" \
+    || grep -q 'tick-fixture-secret' <<<"${archive_recovery_output}"; then
+  fail "archive crash recovery exposed the GitLab credential"
+fi
+jq -e '
+  .status == "cleanup_required"
+  and (.cleanup_actions | length) == 1
+  and .cleanup_actions[0].reason == "durable_worker_result_recovered"
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_archive_finalize_recovery"
+    and .job_id == "A:snapshot-0" and .status == "recovered")] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "durable_worker_result_reconcile"
+    and .job_id == "A:snapshot-0" and .status == "handled")] | length) == 1
+' <<<"${archive_recovery_output}" >/dev/null \
+  || fail "archive crash recovery did not finalize and consume in one tick"
+
+# A one-parent remote descendant with any non-log path is not an archive tail.
+# Even after grace it must leave B/B unchanged, publish no latch, and never
+# request native child cleanup.
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" checkout -q --detach \
+  "${ARCHIVE_BUSINESS_SHA}"
+printf '%s\n' 'not an execution log' >"${RECOVERY_REPO}/arbitrary.txt"
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" add arbitrary.txt
+"${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" commit -q -m 'arbitrary child'
+ARBITRARY_CHILD_SHA="$("${REAL_GIT_BIN}" -C "${RECOVERY_REPO}" rev-parse HEAD)"
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":7,
+    "claim_token":"unsafe-archive-private-claim","finalization":null,
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":7,"execution_id":507,
+  "run_id":"run-42-unsafe-archive",
+  "child_session_key":"agent:req_executor:subagent:42",
+  "work_branch":"issue/42","branch_members":[42],"shared_branch_role":null
+}}}
+EOF
+UNSAFE_RESULT_LOG_DIR="${PROJECT_RUNTIME}/.worktrees/issue-42/.req_executor/issue-42/log/execution-507"
+mkdir -p "${UNSAFE_RESULT_LOG_DIR}"
+cat >"${UNSAFE_RESULT_LOG_DIR}/worker_result.json" <<EOF
+{"iid":42,"execution_id":507,"status":"done","mode_actual":"fresh","work_branch":"issue/42","local_branch":"issue/42","commit_sha":"${ARCHIVE_BUSINESS_SHA}","merge_request_url":"https://gitlab.example.test/group/repo/-/merge_requests/507","mr_action":"created","wiki_url":"","labels_added":["pr"],"labels_removed":["doing","done"],"summary_posted":true,"block_reason":"","log_dir":"${UNSAFE_RESULT_LOG_DIR}"}
+EOF
+cat >"${UNSAFE_RESULT_LOG_DIR}/acpx_terminal.json" <<'EOF'
+{"version":1,"iid":42,"execution_id":507,"exit_code":0,"completed_at_epoch":100}
+EOF
+cat >"${ARCHIVE_ISSUE_DIR}/state.json" <<EOF
+{
+  "iid":42,"dependency_pinned_execution_id":507,
+  "work_branch":"issue/42","branch_members":[42],"shared_branch_role":null,
+  "commit_sha":"${ARCHIVE_BUSINESS_SHA}",
+  "work_branch_sha":"${ARCHIVE_BUSINESS_SHA}",
+  "dependency_history_verified":true,
+  "dependency_history_updated_at":"2026-01-01T00:00:00Z"
+}
+EOF
+chmod 600 "${UNSAFE_RESULT_LOG_DIR}/worker_result.json" \
+  "${ARCHIVE_ISSUE_DIR}/state.json"
+UNSAFE_STATE_BEFORE="$(jq -cS . "${ARCHIVE_ISSUE_DIR}/state.json")"
+unchanged_remote_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  ARCHIVE_RECOVERY_TEST=1 \
+  ARCHIVE_RECOVERY_REMOTE_SHA="${ARCHIVE_BUSINESS_SHA}" \
+  ARCHIVE_RECOVERY_WORK_BRANCH='issue/42' \
+  FINALIZATION_GATE_TEST=1 run_tick
+)" || fail "unchanged remote archive recovery tick failed"
+[ "$(jq -cS . "${ARCHIVE_ISSUE_DIR}/state.json")" = \
+    "${UNSAFE_STATE_BEFORE}" ] \
+  && [ ! -e "${UNSAFE_RESULT_LOG_DIR}/attempt_finalized.json" ] \
+  || fail "remote B was incorrectly treated as a recovered archive child"
+jq -e '
+  .status == "idle"
+  and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_archive_finalize_recovery"
+    or .operation == "durable_worker_result_reconcile"
+    or .operation == "post_acpx_watchdog")] | length) == 0
+' <<<"${unchanged_remote_output}" >/dev/null \
+  || fail "remote B escaped the no-recovery/no-kill gate"
+
+unsafe_archive_output="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  ARCHIVE_RECOVERY_TEST=1 \
+  ARCHIVE_RECOVERY_REMOTE_SHA="${ARBITRARY_CHILD_SHA}" \
+  ARCHIVE_RECOVERY_WORK_BRANCH='issue/42' \
+  FINALIZATION_GATE_TEST=1 run_tick
+)" || fail "unsafe archive-child rejection tick failed"
+[ "$(jq -cS . "${ARCHIVE_ISSUE_DIR}/state.json")" = \
+    "${UNSAFE_STATE_BEFORE}" ] \
+  || fail "unsafe archive child advanced the private issue state"
+[ ! -e "${UNSAFE_RESULT_LOG_DIR}/attempt_finalized.json" ] \
+  || fail "unsafe archive child published a finalization latch"
+jq -e '
+  .status == "idle"
+  and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_archive_finalize_recovery"
+    or .operation == "durable_worker_result_reconcile"
+    or .operation == "post_acpx_watchdog")] | length) == 0
+' <<<"${unsafe_archive_output}" >/dev/null \
+  || fail "unsafe archive child escaped the no-recovery/no-kill gate"
 
 # If the wrapper died after acpx_terminal.json but before worker_result.json,
 # wait for a bounded grace period and then reclaim only the matching native
@@ -1453,6 +1795,26 @@ cat >"${SHARED_MR_LOG_DIR}/worker_result.json" <<EOF
   "log_dir":"${SHARED_MR_LOG_DIR}"
 }
 EOF
+chmod 600 "${SHARED_MR_LOG_DIR}/worker_result.json"
+shared_without_latch_out="$(
+  NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
+  FINALIZATION_GATE_TEST=1 run_tick
+)" || fail "legacy shared archive-recovery rejection tick failed"
+if grep -Eq '^(result|marker|shared-mr-recovery):' "${ORDER_LOG}"; then
+  fail "legacy shared branch entered archive-tail recovery without a latch"
+fi
+jq -e '
+  .status == "idle"
+  and .cleanup_actions == []
+  and ([.operation_results[] | select(
+    .operation == "post_acpx_archive_finalize_recovery"
+    or .operation == "durable_worker_result_reconcile"
+    or .operation == "post_acpx_shared_mr_recovery"
+    or .operation == "post_acpx_watchdog")] | length) == 0
+' <<<"${shared_without_latch_out}" >/dev/null \
+  || fail "legacy shared branch escaped the no-recovery/no-kill gate"
+write_attempt_finalized_marker \
+  "${SHARED_MR_LOG_DIR}" 42 6 "issue/9+42" "${SHARED_COMMIT_SHA}" 100
 shared_mr_recovery_out="$(
   NOW_EPOCH=2000 EXECUTOR_POST_ACPX_GRACE_SECONDS=900 \
   RESULT_TEST_SHARED_MR_PENDING=1 MARKER_TEST_STATUS=marker_not_ready \

@@ -86,18 +86,21 @@ Core contract:
 - The outer subagent receives `references/executor_prompt.md`.
 - The outer subagent makes one long call to `scripts/run_executor_attempt.sh`.
   That wrapper owns the complete acpx-to-finalization sequence and atomically
-  persists `${LOG_DIR}/worker_result.json` before returning.
+  persists `${LOG_DIR}/worker_result.json` before returning. The result is not
+  heartbeat-consumable until the wrapper publishes the private, hash-bound
+  `${LOG_DIR}/attempt_finalized.json` as its final local write.
 - Only `scripts/run_executor_attempt.sh` may invoke
   `scripts/run_acpx_attempt.sh`; the latter owns the fixed
   `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` invocation
   and writes `${LOG_DIR}/acpx_terminal.json` immediately after acpx exits.
-- A heartbeat may claim-fence and process a durable worker result, or emit one
+- A heartbeat may claim-fence and process a finalized durable worker result,
+  or emit one
   `cleanup_actions[]` kill after the post-acpx watchdog expires. This is the
   recovery path when OpenClaw does not schedule the outer model's final turn.
 - `build_prompt.sh` writes `${LOG_DIR}/prompt.txt` from the issue title, description, and all non-system issue comments in every mode; continue mode also separates historical agent summaries.
 - Runtime state lives under `${REPO_PATH}/.req_executor/`.
 - There are no runtime basename, project data directory, or UI account-pool trigger/config fields.
-- `clone_or_pull.sh` locally ignores `/.req_executor/` and `logs/`; when business changes exist, `stage_and_guard.sh` force-adds the current issue's output plus the complete staging-time `${LOG_DIR}` into the same Issue-branch commit. After `worker_result.json` is durable, `archive_execution_logs.sh` appends the complete terminal directory as a log-only child on that same `WORK_BRANCH`; later recovery evidence may append another child. It never creates a separate remote log branch. Unrelated `logs/` paths remain outside the commit index.
+- `clone_or_pull.sh` locally ignores `/.req_executor/` and `logs/`; when business changes exist, `stage_and_guard.sh` force-adds the current issue's output plus the complete staging-time `${LOG_DIR}` into the same Issue-branch commit. After `worker_result.json` is durable, `archive_execution_logs.sh` appends the complete terminal directory as the one log-only child on that same `WORK_BRANCH`. A single-Issue state keeps `commit_sha` at the business commit and records the exact log-child tip separately as `work_branch_sha`. It never creates a separate remote log branch. Unrelated `logs/` paths remain outside the commit index.
 
 The standard wrapper environment is:
 

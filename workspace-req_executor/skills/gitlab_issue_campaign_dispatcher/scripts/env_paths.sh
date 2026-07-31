@@ -75,6 +75,9 @@
 #   WORK_BRANCH     trusted canonical source branch selected by the dispatcher;
 #                   either issue/<current IID> or a two-member dependency
 #                   branch issue/<head IID>+<tail IID> containing current IID
+#   DEPENDENCY_CONTRACT_VERSION / DEPENDENCY_PLAN_SHA256
+#                   required together for DAG-v2 branch
+#                   issue/<current IID>-dag-<plan SHA-256 prefix>
 #
 # Outputs (exported into the calling shell): see lists above. Plus:
 #   GITLAB_HOST, GITLAB_API_PROTOCOL    (loaded via glab_auth.sh)
@@ -87,6 +90,8 @@ set -euo pipefail
 
 : "${PROJECT:?env_paths.sh: PROJECT must be set (trigger)}"
 WORK_BRANCH_INPUT="${WORK_BRANCH:-}"
+DEPENDENCY_CONTRACT_VERSION_INPUT="${DEPENDENCY_CONTRACT_VERSION:-}"
+DEPENDENCY_PLAN_SHA256_INPUT="${DEPENDENCY_PLAN_SHA256:-}"
 
 # Optional trigger field `repo_path` lets the orchestrator place clones under
 # a parent directory other than `/data`. The trigger value is forwarded as
@@ -224,14 +229,24 @@ if [ -n "${ISSUE_IID:-}" ]; then
     WORK_BRANCH_INPUT="issue/${ISSUE_IID}"
   fi
   if [ "${WORK_BRANCH_INPUT}" = "issue/${ISSUE_IID}" ]; then
+    if [ -n "${DEPENDENCY_CONTRACT_VERSION_INPUT}${DEPENDENCY_PLAN_SHA256_INPUT}" ]; then
+      echo "env_paths.sh: ordinary Issue branch cannot carry a DAG dependency contract" >&2
+      return 2 2>/dev/null || exit 2
+    fi
+    :
+  elif [ "${DEPENDENCY_CONTRACT_VERSION_INPUT}" = 2 ] \
+      && [[ "${DEPENDENCY_PLAN_SHA256_INPUT}" =~ ^[0-9a-f]{64}$ ]] \
+      && [ "${WORK_BRANCH_INPUT}" = \
+        "issue/${ISSUE_IID}-dag-${DEPENDENCY_PLAN_SHA256_INPUT:0:16}" ]; then
     :
   elif [[ "${WORK_BRANCH_INPUT}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]] \
       && [ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ] \
       && { [ "${ISSUE_IID}" = "${BASH_REMATCH[1]}" ] \
-        || [ "${ISSUE_IID}" = "${BASH_REMATCH[2]}" ]; }; then
+        || [ "${ISSUE_IID}" = "${BASH_REMATCH[2]}" ]; } \
+      && [ -z "${DEPENDENCY_CONTRACT_VERSION_INPUT}${DEPENDENCY_PLAN_SHA256_INPUT}" ]; then
     :
   else
-    echo "env_paths.sh: WORK_BRANCH must be issue/<current IID> or a two-member issue/<head IID>+<tail IID> branch containing the current IID" >&2
+    echo "env_paths.sh: WORK_BRANCH does not match the ordinary, legacy shared, or authenticated DAG-v2 Issue branch contract" >&2
     return 2 2>/dev/null || exit 2
   fi
   export WORK_BRANCH="${WORK_BRANCH_INPUT}"

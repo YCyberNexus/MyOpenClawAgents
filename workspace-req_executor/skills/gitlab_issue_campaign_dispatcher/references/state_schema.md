@@ -49,28 +49,22 @@ that field in memory and the next state write persists the migrated shape.
 scheduled tick uses it only to rotate the bounded dependency-preflight view;
 it resets after a complete scan or a full runnable batch, so a large waiting
 prefix cannot permanently starve later candidates.
-`shared_branch_groups` is an object keyed by the exact frozen branch
-`issue/<head>+<tail>`. Each value contains the same `work_branch`, positive and
-distinct `head_iid` / `tail_iid`, ordered `members:[head,tail]`, a non-empty
-`scope_id`, and an optional non-empty `merge_target_branch`. A fan-in group also
-contains `dependency_mode:"fan_in"` and ordered unique
-`dependency_iids:[head,...]` with two through eight entries; the tail may not
-appear in that list. `members` intentionally remains `[head,tail]` because the
-first dependency is the compatibility anchor for the existing execution/MR
-contract. Uniqueness is enforced across every group's effective participants
-`(dependency_iids // [head]) + [tail]`, so auxiliary fan-in sources cannot be
-reused through their absence from `members`. The key must encode the anchor and
-tail exactly. Malformed keys, duplicate participation, invalid targets,
-declaration changes, or a second group binding fail closed before allocation.
+`shared_branch_groups` is a legacy compatibility object keyed by the exact
+frozen branch `issue/<head>+<tail>`. Existing values retain their version-1
+head/tail, fan-in, migration, and MR-recovery meaning so an in-flight deployment
+can drain safely. DAG v2 planning never creates, expands, or rebinds this
+object. In particular, DAG v2 does not enforce participant uniqueness across
+consumers: one immutable predecessor artifact may be reused by any number of
+independent consumer plans.
 
-Graph discovery from a frozen planning scope is advisory for topology already
-visible. An incomplete scope never delays or changes an ordinary A. When C is
-processed, its direct declaration may bind a completed A from the same scope or
-an earlier campaign. API/parse uncertainty uses bounded non-terminal preflight
-reasons. Deterministic cycles, fan-out, longer chains, binding conflicts, and
-invalid declarations are persisted through the ordinary per-Issue blocked
-state. A driven project response also carries an
-exact scheduler `skipped_entries[]` handoff so the physical job terminates.
+Graph discovery from a frozen planning scope supports fan-out, multiple
+dependency levels, and one through eight declared inputs per consumer.
+Incomplete discovery or API uncertainty uses bounded non-terminal preflight
+reasons. A deterministic cycle, invalid declaration, unsafe or moved
+predecessor artifact, identity mismatch, aggregation conflict, or changed
+frozen plan is persisted through the ordinary per-Issue blocked state. A
+driven project response also carries an exact scheduler `skipped_entries[]`
+handoff so the physical job terminates.
 
 ### Driven project launch receipts
 
@@ -109,70 +103,144 @@ Scheduler-driven pending entries freeze `auto_merge:boolean`,
 `shared_branch_role`, optional `expected_work_branch_sha`, and optional
 `expected_commit_parent_sha` from the exact active job.
 `expected_work_branch_sha` is the old remote tip used only by the push lease;
-`expected_commit_parent_sha` is the required sole parent of the new shared
-commit. Ordinary automatic requests require a non-empty merge target;
-shared groups require `auto_merge:false`. Legacy ordinary records missing the
-new branch fields normalize to `issue/<iid>`, `[iid]`, and a null shared role;
-a two-member record never receives that compatibility default. Phase 6 reads
-only this trusted pending configuration, not callback-authored labels.
+`expected_commit_parent_sha` is the required sole parent of the new business
+commit. Ordinary automatic requests require a non-empty merge target. DAG v2
+and legacy shared-pair requests require `auto_merge:false`. Phase 6 reads only
+this trusted pending configuration, not callback-authored labels.
+
+A DAG v2 pending entry additionally freezes:
+
+- `dependency_contract_version:2`;
+- the complete lowercase 64-hex `dependency_plan_sha256`;
+- `dependency_plan`, with exactly `version:2`, positive `consumer_iid`,
+  `target_branch`, ordered `declared_inputs`, ordered `effective_inputs`,
+  `aggregate_base_sha`, `plan_sha256`, and `work_branch`;
+- `work_branch:"issue/<iid>-dag-<first 16 hex of dependency_plan_sha256>"`;
+- `branch_members:[iid]`, `shared_branch_role:null`;
+- `dependency_base_sha` and `expected_commit_parent_sha`, both equal to
+  `dependency_plan.aggregate_base_sha`.
+
+Every `declared_inputs` entry is an immutable predecessor snapshot containing
+the exact `iid`, `execution_id`, `work_branch`, business `commit_sha`, exact
+remote `work_branch_sha`, `verified:true`, and `mr` identity (`iid`, `url`,
+`state`, `source_branch`, `target_branch`, `sha`). An opened MR SHA equals
+`work_branch_sha`; a merged MR may retain the business SHA or the log-child
+tip. Any unequal business/tip pair must be one direct, single-parent child
+whose complete diff is inside that execution's log directory.
+`effective_inputs` is the transitive-reduction frontier, preserves
+declared order, and contains the same snapshot shape. `plan_sha256` inside the
+object equals the top-level `dependency_plan_sha256`; the full hash is
+authoritative even though the branch suffix contains only its first 16 hex.
+The legacy scalar `dependency_iid` / `dependency_branch` /
+`dependency_base_sha` tuple remains a compatibility projection and must not be
+used to reconstruct a multi-input plan.
 
 Dependency and branch identity are committed in two phases. Before worktree
-preparation, immutable `executions/execution-<execution_id>.json` binds `work_branch`, `branch_members`,
-`shared_branch_role`, `expected_work_branch_sha`,
-`expected_commit_parent_sha`, and the all-null or
-all-present `dependency_iid` / `dependency_branch` / `dependency_base_sha`
-tuple to the exact IID, execution identity, title, mode, merge policy, and target. A shared
-head requires a null dependency tuple. A shared tail requires the complete
-tuple with `dependency_iid=head`, `dependency_branch=work_branch`; in fresh mode
-`expected_work_branch_sha` must equal `dependency_base_sha`. Every shared
-execution requires a full `expected_commit_parent_sha`; for C it equals
-`dependency_base_sha`, while for A it is the frozen target baseline. At that point
-`state.json` retains the last successfully pushed identity and stores the new
-values only under `proposed_*` plus `preparing_execution_id`.
+preparation, immutable `executions/execution-<execution_id>.json` binds the
+exact IID, execution identity, title, mode, merge policy, target, branch
+identity, expected SHAs, and dependency contract. For DAG v2 this includes the
+version, full plan hash, and frozen plan described above. At that point
+`state.json` writes the exact `dependency_plan` as the authoritative immutable
+plan before preparation, while retaining the last successfully pushed branch
+identity. It also stores the new values under the corresponding `proposed_*`
+fields, including
+`proposed_dependency_contract_version`,
+`proposed_dependency_plan_sha256`, and `proposed_dependency_plan`, plus
+`preparing_execution_id`.
 
-`run_executor_attempt.sh` does not use this file as an authorization or
-consistency gate. Its IID, execution ID, branch, dependency, and merge inputs
-come from the rendered wrapper invocation. Before sourcing the path bootstrap
-or creating runtime output, it validates `ISSUE_IID` and `WORK_BRANCH` and
-derives branch identity directly from them: `issue/<iid>` means ordered
-`branch_members:[iid]` with a null shared role, while a distinct two-member
-`issue/<head>+<tail>` containing the current IID means ordered
-`branch_members:[head,tail]` with role `head` or `tail` according to the IID's
-position. Every other ordinary or shared shape fails without side effects.
-Caller-provided branch-member/role environment leftovers and execution-file
-fields cannot override this derivation. When readable, the execution file may
-supply only the optional string `issue_title`; missing, malformed, forged,
-mismatched, or nonstandard file metadata does not reject a run and no other
-field is read as runtime context.
+`run_executor_attempt.sh` does not use mutable Issue text to reconstruct this
+contract. Its IID, execution ID, branch, dependency, and merge inputs come from
+the rendered wrapper invocation. It validates the complete DAG v2 tuple before
+creating runtime output: version 2, full plan hash, content-addressed branch,
+single-Issue membership, null shared role, equal base/parent SHAs, and
+`auto_merge:false` must all agree. An absent contract version selects only the
+legacy grammar: ordinary `issue/<iid>` or an existing two-member
+`issue/<head>+<tail>` shared pair. Cross-version, partial, or mismatched shapes
+fail without side effects.
 
 Only after `run_executor_attempt.sh` has pushed the exact remote branch,
 matched it to the returned commit, and verified the dependency history does it
-promote the identity in `state.json`. The promoted fields include
-`work_branch`, `branch_members`, `shared_branch_role`, `work_branch_sha`, the
-dependency tuple, `dependency_history_verified:true`,
+promote the identity in `state.json`. A DAG v2 promotion includes
+`dependency_contract_version:2`, `dependency_plan_sha256`, the exact
+`dependency_plan`, `work_branch`, `branch_members:[iid]`,
+`shared_branch_role:null`, `work_branch_sha`, the compatibility dependency
+tuple, `dependency_history_verified:true`,
 `dependency_pinned_execution_id`, and `dependency_history_updated_at`.
-For fresh C, the commit must have A's frozen SHA as its only parent and the push
-uses that same SHA as an explicit lease. For continued C, the lease is the old
-C tip while the new commit's sole parent remains A, so C1 is replaced by C2
-instead of producing `A -> C1 -> C2`. A published shared head cannot enter the
-ordinary continue path. Continue mode otherwise requires this complete identity
-and an exact resume SHA. A two-member state can never normalize to a
-dependency-free tail. Missing, legacy, partial, moved, or mismatched metadata
-fails closed and is never reconstructed from current Issue text.
+The business commit's sole parent must equal the frozen aggregate base. Fresh
+mode starts from that base. Continue mode leases the old consumer tip while
+replacing the old business commit from the same frozen base, so repeated
+attempts do not lengthen the dependency history. Missing, partial, moved, or
+mismatched metadata fails closed and is never reconstructed from current Issue
+text. Promotion verifies the exact trusted proposed plan against the already
+authoritative `dependency_plan`, preserves that plan, and deletes all three DAG
+proposal fields atomically.
 
-After the compact terminal result is durable, `archive_execution_logs.sh`
+After the compact terminal result is written, `archive_execution_logs.sh`
 builds a tree from the current `HEAD` plus only the current `ISSUE_LOG_REL` and
 pushes it as a direct log-only child on the same `WORK_BRANCH`. A private Git
 index prevents staged or unstaged partial business work from entering that
 child. Ordinary log-only executions may create `issue/<iid>` from the current
-base even when `stage_and_guard.sh` returned `NO_CHANGES`. For non-auto and
-shared open-MR flows, the wrapper advances `work_branch_sha`, the private MR
-marker/checkpoint, and the compact callback `commit_sha` to the new source tip.
-A verified merged automatic MR keeps its immutable merged SHA in the callback
-while only `work_branch_sha` advances. An unresolved automatic MR and a shared
-failure that has not installed its exact MR checkpoint keep post-push evidence
-local because moving those source refs would destroy their recovery fence. No
-`req-executor-logs/*` ref is created.
+base even when `stage_and_guard.sh` returned `NO_CHANGES`. For every
+single-Issue business execution, including DAG v2, `commit_sha`, the compact
+callback, and the private MR marker remain at the reviewed business commit
+`B`; only `work_branch_sha` advances to the exact terminal-log child `L`.
+Dependency aggregation binds both identities but merges only `B`. Existing
+legacy shared-pair flows retain their old checkpoint/callback promotion to
+`L`. An unresolved automatic MR and a shared failure that has not installed
+its exact MR checkpoint keep post-push evidence local because moving those
+source refs would destroy their recovery fence. No `req-executor-logs/*` ref
+is created.
+
+`worker_result.json` is provisional recovery evidence while that archive/state
+tail is running. The wrapper atomically publishes private mode-0600
+`attempt_finalized.json` only after all terminal persistence succeeds. The
+marker has exactly `version`, `iid`, `execution_id`, `work_branch`,
+`commit_sha`, `worker_result_sha256`, and `completed_at_epoch`; only a marker
+whose SHA-256 and identities match authorizes the heartbeat to consume the
+result. A missing or invalid marker never authorizes MR recovery or child
+cleanup. If a crash occurs after pushing `L` but before updating state, the
+claim-fenced recovery path may repair only `work_branch_sha` after proving
+`L` is the single direct log-only child of `B`.
+
+### DAG v2 predecessor plan
+
+The dispatcher resolves every DAG v2 plan without mutating a predecessor's
+private state, branch, ref, or MR. Each declared snapshot must still match the
+predecessor's durable terminal state, exact remote ref SHA, and unique verified
+MR identity. The DAG planning path walks predecessor plans to reject cycles.
+It then applies transitive reduction: an input already reachable through
+another declared input is omitted from `effective_inputs`, but remains in
+`declared_inputs` for audit and plan hashing.
+
+A single effective input uses its exact commit as `aggregate_base_sha`.
+Multiple incomparable inputs are combined in declared order into a
+deterministic aggregate Git object. No ref or MR is created for that object.
+An ancestry or identity check failure, missing or moved source, deterministic
+merge conflict, or aggregate verification failure blocks the consumer without
+changing any predecessor. The same verified snapshots reproduce the same plan
+hash, aggregate base, work branch, and failure classification on replay.
+
+The consumer owns its branch and MR independently. Phase 6 verifies that MR's
+exact IID/URL, source/target branch, source SHA, author, and open state before
+recording `pr`. DAG v2 never enters the automatic-merge mutation path.
+
+### Legacy shared-pair compatibility
+
+The remaining version-1 shared-pair schema is retained only to finish or
+recover a previously persisted `issue/<head>+<tail>` job. New DAG v2 planning
+must not create `shared_branch_groups`, `branch_migration`,
+`dependency_aggregation`, `joined_dependency_group`, or shared
+`mr_finalization` records. Legacy replay continues to verify every stored SHA,
+branch, MR identity, intent, and execution fence before an external mutation;
+it must never silently convert a head/tail record into a DAG v2 plan.
+
+An existing `shared_branch_groups` value keeps its exact
+`work_branch`, distinct `head_iid` / `tail_iid`, ordered
+`members:[head,tail]`, `scope_id`, and optional `merge_target_branch`. A legacy
+fan-in also keeps `dependency_mode:"fan_in"` and ordered unique
+`dependency_iids:[head,...]`. Its old key, membership, declaration, and target
+validation remains in force within the legacy object; that uniqueness rule
+does not constrain any DAG v2 predecessor or consumer.
 
 Before C starts, `migrate_shared_dependency_head.sh` moves an ordinary completed
 A from `issue/A` to `issue/A+C` without changing A's commit. A's state first
@@ -395,7 +463,9 @@ ${LOG_DIR}/worker_result.json
 
 The outer subagent normally echoes that same line as its final reply. The
 heartbeat may instead consume the file through claim-fenced result reconcile
-when OpenClaw does not schedule the final model turn. The object has exactly:
+when OpenClaw does not schedule the final model turn, but only after the exact
+private `attempt_finalized.json` marker described above is present. The object
+has exactly:
 
 - `iid`
 - `execution_id`

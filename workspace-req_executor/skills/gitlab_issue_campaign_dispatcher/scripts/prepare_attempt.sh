@@ -2,8 +2,9 @@
 # prepare_attempt.sh — ensure a per-issue linked git worktree exists for
 # this IID and put it on the right starting point for the current attempt.
 #
-# Strategy A — single fixed remote branch ${WORK_BRANCH}; either `issue/<iid>`
-# or a frozen two-Issue `issue/<head>+<tail>` branch.
+# Strategy A — single fixed remote branch ${WORK_BRANCH}; either `issue/<iid>`,
+# a frozen two-Issue `issue/<head>+<tail>` branch, or an independently frozen
+# DAG v2 `issue/<iid>-dag-<plan-prefix>` branch.
 # Every run uses one IID-local branch (${LOCAL_ISSUE_BRANCH}, `issue/<iid>`)
 # checked out into one per-issue linked worktree at
 # ${WORKTREE_DIR}=${WORKTREES_ROOT}/issue-${ISSUE_IID}. Neither path includes
@@ -60,8 +61,9 @@
 #   REPO_PATH, ISSUE_IID, ISSUE_MODE,
 #   WORKTREE_DIR, OUTPUT_DIR, LOG_DIR,
 #   EXECUTION_ID, WORK_BRANCH, LOCAL_ISSUE_BRANCH
-# Optional shared-tail inputs:
-#   SHARED_BRANCH_ROLE, EXPECTED_COMMIT_PARENT_SHA
+# Optional fixed-parent inputs:
+#   SHARED_BRANCH_ROLE, EXPECTED_COMMIT_PARENT_SHA,
+#   DEPENDENCY_CONTRACT_VERSION, DEPENDENCY_PLAN_SHA256
 #
 # Output (to stdout, two lines):
 #   <actual-mode>           "fresh" or "continue"
@@ -84,8 +86,12 @@ GIT_NETWORK_GUARD_CONTEXT=prepare_attempt
 BRANCH="${BRANCH:-}"
 CONFIG_BRANCH="${CONFIG_BRANCH:-}"
 DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION:-}"
+DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256:-}"
 SHARED_BRANCH_ROLE="${SHARED_BRANCH_ROLE:-}"
+EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
 EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
 CONTINUE_BASE_REQUIRED="${CONTINUE_BASE_REQUIRED:-false}"
 CONTINUE_BASE_SHA="${CONTINUE_BASE_SHA:-}"
 CONTINUE_BASE_REF="${CONTINUE_BASE_REF:-}"
@@ -137,6 +143,49 @@ if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
     exit 2
   fi
 fi
+case "${DEPENDENCY_CONTRACT_VERSION}" in
+  '')
+    if [ -n "${DEPENDENCY_PLAN_SHA256}" ]; then
+      echo "prepare_attempt: DEPENDENCY_PLAN_SHA256 requires DEPENDENCY_CONTRACT_VERSION=2" >&2
+      exit 2
+    fi
+    ;;
+  2)
+    if ! [[ "${DEPENDENCY_PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "prepare_attempt: DAG v2 DEPENDENCY_PLAN_SHA256 must be a lowercase SHA-256 digest" >&2
+      exit 2
+    fi
+    if [ "${WORK_BRANCH}" != \
+        "issue/${ISSUE_IID}-dag-${DEPENDENCY_PLAN_SHA256:0:16}" ]; then
+      echo "prepare_attempt: DAG v2 WORK_BRANCH must match ISSUE_IID and DEPENDENCY_PLAN_SHA256" >&2
+      exit 2
+    fi
+    if [ -n "${SHARED_BRANCH_ROLE}" ]; then
+      echo "prepare_attempt: DAG v2 uses an independent non-shared work branch" >&2
+      exit 2
+    fi
+    if [ -z "${DEPENDENCY_BASE_SHA}" ] \
+        || [ -z "${EXPECTED_COMMIT_PARENT_SHA}" ] \
+        || [ "${DEPENDENCY_BASE_SHA,,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
+      echo "prepare_attempt: DAG v2 requires DEPENDENCY_BASE_SHA as EXPECTED_COMMIT_PARENT_SHA" >&2
+      exit 2
+    fi
+    if [ "${AUTO_MERGE}" != false ]; then
+      echo "prepare_attempt: DAG v2 forbids automatic merge" >&2
+      exit 2
+    fi
+    if [ "${ISSUE_MODE}" = continue ] \
+        && { [ -z "${EXPECTED_WORK_BRANCH_SHA}" ] \
+          || ! [[ "${EXPECTED_WORK_BRANCH_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; }; then
+      echo "prepare_attempt: DAG v2 continue requires a full EXPECTED_WORK_BRANCH_SHA" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "prepare_attempt: DEPENDENCY_CONTRACT_VERSION must be empty or 2" >&2
+    exit 2
+    ;;
+esac
 
 case "${ISSUE_MODE}" in
   fresh|continue) ;;
@@ -720,20 +769,22 @@ else
 fi
 validate_runtime_path_boundary || exit 7
 refresh_shared_config_from_branch
-if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
+if [ "${SHARED_BRANCH_ROLE}" = tail ] \
+    || [ "${DEPENDENCY_CONTRACT_VERSION}" = 2 ]; then
   if [ "${ACTUAL_MODE}" = continue ]; then
-    # Continue resumes C's published tree, but the shared branch contract keeps
-    # exactly one replaceable C commit above frozen A. Move only the local
-    # issue branch/index back to A and leave the working tree intact, turning
-    # all prior C content plus this attempt's later edits into one aggregate
-    # worktree diff. EXPECTED_WORK_BRANCH_SHA remains the independent C lease.
+    # Continue resumes the published tree, but a fixed-parent contract keeps
+    # exactly one replaceable business commit above its frozen aggregate base.
+    # Move only the local issue branch/index back to that base and leave the
+    # working tree intact, turning prior content plus later edits into one
+    # aggregate worktree diff. EXPECTED_WORK_BRANCH_SHA remains an independent
+    # remote lease.
     materialize_git -C "${WORKTREE_DIR}" reset --mixed \
       --no-recurse-submodules "${EXPECTED_COMMIT_PARENT_SHA}" >&2
   fi
   prepared_parent_sha="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" \
     rev-parse --verify HEAD^{commit})"
   if [ "${prepared_parent_sha,,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
-    echo "prepare_attempt: shared tail local branch is not based on its frozen commit parent" >&2
+    echo "prepare_attempt: fixed-parent local branch is not based on its frozen commit parent" >&2
     exit 5
   fi
 fi
@@ -851,11 +902,18 @@ git worktree prune >&2
 # Each execution has an isolated log directory. Defensive invalidation below
 # protects against the extremely unlikely reuse of a random execution identity.
 mkdir -p "${LOG_DIR}"
-for evidence_name in acpx_terminal.json worker_result.json mr_result.json; do
+for evidence_name in \
+  acpx_terminal.json worker_result.json mr_result.json attempt_finalized.json
+do
   evidence_path="${LOG_DIR}/${evidence_name}"
   if [ -L "${evidence_path}" ] \
       || { [ -e "${evidence_path}" ] && [ ! -f "${evidence_path}" ]; }; then
     quarantine_path "${evidence_path}" "unsafe-${evidence_name}"
+  fi
+  if [ "${evidence_name}" = attempt_finalized.json ] \
+      && [ -f "${evidence_path}" ]; then
+    quarantine_path "${evidence_path}" "stale-${evidence_name}"
+    continue
   fi
   if [ -f "${evidence_path}" ]; then
     evidence_reset_tmp="$(umask 077; mktemp "${LOG_DIR}/.${evidence_name}.reset.XXXXXX")"

@@ -88,9 +88,12 @@ expected and does not mean the global timeout was dropped.
 
 `run_executor_attempt.sh` keeps acpx and all deterministic finalization in one
 long Bash call and writes `${LOG_DIR}/worker_result.json` atomically before it
-returns. The periodic executor tick processes that result under the exact
-job/generation/token-digest fence and emits `cleanup_actions[]` for the stale
-native child if OpenClaw never schedules the outer model's final turn.
+returns. That file is provisional until the wrapper completes archive/state
+persistence and publishes private `${LOG_DIR}/attempt_finalized.json` last;
+the marker binds its SHA-256, Issue, execution, branch, and business commit.
+The periodic executor tick processes only that finalized result under the
+exact job/generation/token-digest fence and emits `cleanup_actions[]` for the
+stale native child if OpenClaw never schedules the outer model's final turn.
 
 `run_acpx_attempt.sh` also writes exact-schema `${LOG_DIR}/acpx_terminal.json`
 as soon as the inner process exits. If no durable final result appears after
@@ -107,7 +110,12 @@ provide the fallback.
 
 ## Runtime Layout
 
-`req_executor` stores its own state under the fixed in-repo directory `${REPO_PATH}/.req_executor/`. This directory is not configurable through trigger fields or tracked config. `clone_or_pull.sh` adds `/.req_executor/` and `logs/` to the local `.git/info/exclude`. When business changes exist, `stage_and_guard.sh` force-adds the current issue's output directory and complete staging-time `${LOG_DIR}` into the same Issue-branch commit; a log-only run still returns `NO_CHANGES` for business-change classification. After the terminal `worker_result.json` is written, `archive_execution_logs.sh` appends the complete directory as a log-only child on that same `WORK_BRANCH`; later recovery evidence may append another child. No separate remote log branch is created. Unrelated `logs/` paths remain outside the commit index.
+`req_executor` stores its own state under the fixed in-repo directory `${REPO_PATH}/.req_executor/`. This directory is not configurable through trigger fields or tracked config. `clone_or_pull.sh` adds `/.req_executor/` and `logs/` to the local `.git/info/exclude`. When business changes exist, `stage_and_guard.sh` force-adds the current issue's output directory and complete staging-time `${LOG_DIR}` into the same Issue-branch commit; a log-only run still returns `NO_CHANGES` for business-change classification. After the terminal `worker_result.json` is written, `archive_execution_logs.sh` appends the complete directory as the one log-only child on that same `WORK_BRANCH`. Single-Issue state keeps the reviewed business `commit_sha` separate from the exact remote `work_branch_sha` log child. No separate remote log branch is created. Unrelated `logs/` paths remain outside the commit index.
+
+Deployments upgrading to the `attempt_finalized.json` contract must drain
+active jobs started by an older wrapper before switching the heartbeat. New
+ticks deliberately do not infer authority from an unlatched legacy
+`worker_result.json`.
 
 Driven-batch scheduling state is agent-wide rather than repository-local. By default, `scheduler_env.sh` initializes the following layout without replacing an existing valid `scheduler_state.json`:
 

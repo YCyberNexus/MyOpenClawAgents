@@ -10,6 +10,24 @@ fail() {
   exit 1
 }
 
+sha256_text() {
+  local value="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${value}" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+  else
+    shasum -a 256 "${path}" | awk '{print $1}'
+  fi
+}
+
 [ -x "${WRAPPER}" ] || fail "run_executor_attempt.sh is missing or not executable"
 
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/run-executor-attempt.XXXXXX")"
@@ -220,6 +238,9 @@ cat >"${FAKE_SCRIPTS}/archive_execution_logs.sh" <<'EOF'
 set -euo pipefail
 parent_commit_sha="${COMMIT_SHA:-0123456789abcdef0123456789abcdef01234567}"
 log_commit_sha="${LOG_TEST_SHA:-${parent_commit_sha}}"
+if [ "${ARCHIVE_TEST_EXIT:-0}" -ne 0 ]; then
+  exit "${ARCHIVE_TEST_EXIT}"
+fi
 if [ "${log_commit_sha}" != "${parent_commit_sha}" ]; then
   : "${ARCHIVE_ADVANCED_FILE:?}"
   printf '%s\n' "${log_commit_sha}" >"${ARCHIVE_ADVANCED_FILE}"
@@ -256,6 +277,164 @@ shared-duplicate|issue/42+42
 shared-nonmember|issue/9+10
 shared-malformed|issue/9+42+77
 EOF
+
+expect_dag_rejection() {
+  local name="$1" version="$2" plan_sha="$3" work_branch="$4"
+  local base_sha="$5" parent_sha="$6" auto_merge="$7"
+  local issue_mode="${8:-fresh}"
+  local invalid_repo="${TEST_ROOT}/invalid-dag-${name}/repo"
+  local invalid_output invalid_rc
+  set +e
+  invalid_output="$({
+    PATH="${FAKE_BIN}:${PATH}" \
+    ORDER_LOG="${ORDER_LOG}" \
+    PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 \
+    REPO_PATH="${invalid_repo}" ISSUE_MODE="${issue_mode}" BRANCH=main \
+    WORK_BRANCH="${work_branch}" ACPX_TIMEOUT_SECONDS=60 \
+    DEPENDENCY_CONTRACT_VERSION="${version}" \
+    DEPENDENCY_PLAN_SHA256="${plan_sha}" \
+    DEPENDENCY_BASE_SHA="${base_sha}" \
+    EXPECTED_COMMIT_PARENT_SHA="${parent_sha}" \
+    AUTO_MERGE="${auto_merge}" \
+      bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+  } 2>&1)"
+  invalid_rc=$?
+  set -e
+  [ "${invalid_rc}" -eq 2 ] \
+    || fail "invalid DAG ${name} returned ${invalid_rc}: ${invalid_output}"
+  [ ! -e "${invalid_repo}" ] \
+    || fail "invalid DAG ${name} reached env_paths side effects"
+}
+
+DAG_BASE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+DAG_INPUT_JSON="$(jq -cn \
+  --arg commit_sha "${DAG_BASE_SHA}" '{
+    iid:9,
+    execution_id:1,
+    work_branch:"issue/9",
+    commit_sha:$commit_sha,
+    work_branch_sha:$commit_sha,
+    verified:true,
+    mr:{
+      iid:90,
+      url:"https://gitlab.example.test/group/repo/-/merge_requests/90",
+      state:"opened",
+      source_branch:"issue/9",
+      target_branch:"main",
+      sha:$commit_sha
+    }
+  }')"
+DAG_PLAN_CANONICAL="$(jq -cnS \
+  --argjson input "${DAG_INPUT_JSON}" \
+  --arg aggregate_base_sha "${DAG_BASE_SHA}" '{
+    version:2,
+    algorithm:"ordered-frontier-merge-v1",
+    consumer_iid:42,
+    target_branch:"main",
+    declared_inputs:[$input],
+    effective_inputs:[$input],
+    aggregate_base_sha:$aggregate_base_sha
+  }')"
+DAG_PLAN_SHA="$(sha256_text "${DAG_PLAN_CANONICAL}")"
+DAG_WORK_BRANCH="issue/42-dag-${DAG_PLAN_SHA:0:16}"
+DAG_PLAN_JSON="$(jq -cnS \
+  --argjson input "${DAG_INPUT_JSON}" \
+  --arg aggregate_base_sha "${DAG_BASE_SHA}" \
+  --arg plan_sha256 "${DAG_PLAN_SHA}" \
+  --arg work_branch "${DAG_WORK_BRANCH}" '{
+    version:2,
+    consumer_iid:42,
+    target_branch:"main",
+    declared_inputs:[$input],
+    effective_inputs:[$input],
+    aggregate_base_sha:$aggregate_base_sha,
+    plan_sha256:$plan_sha256,
+    work_branch:$work_branch
+  }')"
+expect_dag_rejection plan-without-v2 '' "${DAG_PLAN_SHA}" issue/42 \
+  '' '' false
+expect_dag_rejection unknown-version 3 "${DAG_PLAN_SHA}" "${DAG_WORK_BRANCH}" \
+  "${DAG_BASE_SHA}" "${DAG_BASE_SHA}" false
+expect_dag_rejection invalid-plan 2 ABCDEF "${DAG_WORK_BRANCH}" \
+  "${DAG_BASE_SHA}" "${DAG_BASE_SHA}" false
+expect_dag_rejection branch-plan-mismatch 2 "${DAG_PLAN_SHA}" \
+  issue/42-dag-ffffffffffffffff \
+  "${DAG_BASE_SHA}" "${DAG_BASE_SHA}" false
+expect_dag_rejection missing-base 2 "${DAG_PLAN_SHA}" "${DAG_WORK_BRANCH}" \
+  '' "${DAG_BASE_SHA}" false
+expect_dag_rejection parent-mismatch 2 "${DAG_PLAN_SHA}" "${DAG_WORK_BRANCH}" \
+  "${DAG_BASE_SHA}" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb false
+expect_dag_rejection auto-merge 2 "${DAG_PLAN_SHA}" "${DAG_WORK_BRANCH}" \
+  "${DAG_BASE_SHA}" "${DAG_BASE_SHA}" true
+expect_dag_rejection continue-without-lease 2 "${DAG_PLAN_SHA}" \
+  "${DAG_WORK_BRANCH}" "${DAG_BASE_SHA}" "${DAG_BASE_SHA}" false continue
+
+# DAG v2 keeps one branch and MR per consumer while persisting its immutable
+# plan identity. It is deliberately not classified as a legacy shared pair.
+DAG_REPO_PATH="${TEST_ROOT}/dag/repo"
+DAG_ORDER_LOG="${TEST_ROOT}/dag-order.log"
+DAG_ISSUE_ROOT="${DAG_REPO_PATH}/.req_executor/issues/issue-42"
+mkdir -p "${DAG_ISSUE_ROOT}"
+jq -n \
+  --argjson execution_id 2 \
+  --arg work_branch "${DAG_WORK_BRANCH}" \
+  --arg dependency_plan_sha256 "${DAG_PLAN_SHA}" \
+  --argjson dependency_plan "${DAG_PLAN_JSON}" \
+  --arg dependency_base_sha "${DAG_BASE_SHA}" '{
+    latest_execution_id:$execution_id,
+    preparing_execution_id:$execution_id,
+    proposed_work_branch:$work_branch,
+    proposed_branch_members:[42],
+    proposed_shared_branch_role:null,
+    proposed_expected_work_branch_sha:null,
+    proposed_expected_commit_parent_sha:$dependency_base_sha,
+    proposed_dependency_iid:9,
+    proposed_dependency_branch:"issue/9",
+    proposed_dependency_base_sha:$dependency_base_sha,
+    proposed_dependency_contract_version:2,
+    proposed_dependency_plan_sha256:$dependency_plan_sha256,
+    proposed_dependency_plan:$dependency_plan
+  }' >"${DAG_ISSUE_ROOT}/state.json"
+chmod 600 "${DAG_ISSUE_ROOT}/state.json"
+dag_output="$(
+  PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${DAG_ORDER_LOG}" \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=2 \
+  REPO_PATH="${DAG_REPO_PATH}" ISSUE_TITLE='DAG consumer' ISSUE_MODE=fresh \
+  BRANCH=main WORK_BRANCH="${DAG_WORK_BRANCH}" ACPX_TIMEOUT_SECONDS=60 \
+  DEPENDENCY_CONTRACT_VERSION=2 \
+  DEPENDENCY_PLAN_SHA256="${DAG_PLAN_SHA}" \
+  DEPENDENCY_IID=9 \
+  DEPENDENCY_BRANCH=issue/9 \
+  DEPENDENCY_BASE_SHA="${DAG_BASE_SHA}" \
+  EXPECTED_COMMIT_PARENT_SHA="${DAG_BASE_SHA}" \
+  AUTO_MERGE=false \
+    bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+)" || fail "valid DAG v2 wrapper attempt failed"
+printf '%s\n' "${dag_output}" | tail -n 1 | jq -e \
+  --arg branch "${DAG_WORK_BRANCH}" \
+  '.status == "done" and .work_branch == $branch and .mr_action == "created"' \
+  >/dev/null || fail "DAG v2 wrapper did not return its independent MR result"
+jq -e \
+  --arg branch "${DAG_WORK_BRANCH}" \
+  --arg plan_sha "${DAG_PLAN_SHA}" \
+  --arg base_sha "${DAG_BASE_SHA}" \
+  --argjson dependency_plan "${DAG_PLAN_JSON}" '
+    .work_branch == $branch
+    and .branch_members == [42]
+    and .shared_branch_role == null
+    and .dependency_contract_version == 2
+    and .dependency_plan_sha256 == $plan_sha
+    and .dependency_plan == $dependency_plan
+    and .latest_execution_id == 2
+    and .dependency_iid == 9
+    and .dependency_branch == "issue/9"
+    and .dependency_base_sha == $base_sha
+    and (.commit_sha | type == "string")
+    and .commit_sha == .work_branch_sha
+    and .dependency_history_verified == true
+    and (has("mr_finalization") | not)
+  ' "${DAG_REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
+  || fail "DAG v2 push did not persist its frozen non-shared identity"
 
 write_execution_state() {
   local execution_id="$1" auto_merge="$2" target_branch="$3"
@@ -369,9 +548,35 @@ else
   result_mode="$(stat -c '%a' "${result_file}")"
 fi
 [ "${result_mode}" = 600 ] || fail "worker_result.json mode is ${result_mode}, expected 600"
+finalized_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-3/attempt_finalized.json"
+[ -f "${finalized_file}" ] && [ ! -L "${finalized_file}" ] \
+  || fail "attempt_finalized.json was not written"
+if finalized_mode="$(stat -f '%Lp' "${finalized_file}" 2>/dev/null)"; then
+  :
+else
+  finalized_mode="$(stat -c '%a' "${finalized_file}")"
+fi
+[ "${finalized_mode}" = 600 ] \
+  || fail "attempt_finalized.json mode is ${finalized_mode}, expected 600"
+jq -e \
+  --arg result_sha256 "$(sha256_file "${result_file}")" '
+  (keys | sort) == ([
+    "commit_sha","completed_at_epoch","execution_id","iid",
+    "version","work_branch","worker_result_sha256"
+  ] | sort)
+  and .version == 1
+  and .iid == 42
+  and .execution_id == 3
+  and .work_branch == "issue/42"
+  and .commit_sha == "0123456789abcdef0123456789abcdef01234567"
+  and .worker_result_sha256 == $result_sha256
+  and (.completed_at_epoch | type == "number" and . == floor and . > 0)
+' "${finalized_file}" >/dev/null \
+  || fail "attempt_finalized.json does not bind the final worker result"
 
-# A real terminal append advances an open MR source branch. The final compact
-# result, durable state, and private MR marker must all move to that exact tip.
+# A real terminal append advances an open MR source branch, but the durable
+# result and MR marker retain the reviewed business SHA. State binds both
+# identities so downstream dependency aggregation excludes executor logs.
 : >"${ORDER_LOG}"
 LOG_TEST_SHA=abcdefabcdefabcdefabcdefabcdefabcdefabcd
 ARCHIVE_ADVANCED_FILE="${TEST_ROOT}/archive-advanced.sha"
@@ -387,18 +592,21 @@ advanced_output="$(
 )" || fail "same-branch terminal log promotion failed"
 advanced_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-17/worker_result.json"
 printf '%s\n' "${advanced_output}" | tail -n 1 | jq -e \
-  --arg sha "${LOG_TEST_SHA}" '.status == "done" and .commit_sha == $sha' \
-  >/dev/null || fail "printed result did not advance to the terminal log commit"
-jq -e --arg sha "${LOG_TEST_SHA}" '.commit_sha == $sha' \
+  '.status == "done"
+    and .commit_sha == "0123456789abcdef0123456789abcdef01234567"' \
+  >/dev/null || fail "printed result did not retain the business commit"
+jq -e '.commit_sha == "0123456789abcdef0123456789abcdef01234567"' \
   "${advanced_result_file}" >/dev/null \
-  || fail "durable result did not advance to the terminal log commit"
+  || fail "durable result did not retain the business commit"
 jq -e --arg sha "${LOG_TEST_SHA}" \
-  '.work_branch_sha == $sha and .dependency_pinned_execution_id == 17' \
+  '.commit_sha == "0123456789abcdef0123456789abcdef01234567"
+    and .work_branch_sha == $sha
+    and .dependency_pinned_execution_id == 17' \
   "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
-  || fail "Issue state did not advance to the terminal log commit"
-jq -e --arg sha "${LOG_TEST_SHA}" '.sha == $sha' \
+  || fail "Issue state did not separate business and terminal-log commits"
+jq -e '.sha == "0123456789abcdef0123456789abcdef01234567"' \
   "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-17/mr_result.json" \
-  >/dev/null || fail "MR marker did not advance to the terminal log commit"
+  >/dev/null || fail "MR marker did not retain the business commit"
 
 # NO_CHANGES still means no business MR, but its complete terminal evidence
 # must create/advance issue/42 instead of disappearing with an empty index.
@@ -424,6 +632,32 @@ jq -e --arg sha "${NO_CHANGE_LOG_SHA}" \
   '.work_branch_sha == $sha and .dependency_pinned_execution_id == 18' \
   "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
   || fail "NO_CHANGES log-only Issue branch identity was not persisted"
+no_change_result_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-18/worker_result.json"
+no_change_finalized_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-18/attempt_finalized.json"
+jq -e \
+  --arg commit_sha "${NO_CHANGE_LOG_SHA}" \
+  --arg result_sha256 "$(sha256_file "${no_change_result_file}")" '
+  .iid == 42 and .execution_id == 18 and .work_branch == "issue/42"
+  and .commit_sha == $commit_sha
+  and .worker_result_sha256 == $result_sha256
+' "${no_change_finalized_file}" >/dev/null \
+  || fail "blocked NO_CHANGES path did not publish its finalization marker last"
+
+# A persistence failure leaves worker_result.json as non-authoritative evidence:
+# the final latch must not appear until terminal archive and state writes finish.
+write_execution_state 19 false main
+set +e
+PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${ORDER_LOG}" ARCHIVE_TEST_EXIT=7 \
+PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=19 \
+REPO_PATH="${REPO_PATH}" ISSUE_TITLE='归档失败' ISSUE_MODE=fresh \
+BRANCH=main ACPX_TIMEOUT_SECONDS=60 \
+  bash "${FAKE_SCRIPTS}/run_executor_attempt.sh" >/dev/null 2>&1
+archive_failure_rc=$?
+set -e
+[ "${archive_failure_rc}" -eq 4 ] \
+  || fail "archive failure returned ${archive_failure_rc}, expected 4"
+[ ! -e "${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-19/attempt_finalized.json" ] \
+  || fail "archive failure published attempt_finalized.json"
 
 # Auto-merge uses MERGE_TARGET_BRANCH for verification/MR creation and writes
 # finish only when the exact durable marker says the MR is verified merged.

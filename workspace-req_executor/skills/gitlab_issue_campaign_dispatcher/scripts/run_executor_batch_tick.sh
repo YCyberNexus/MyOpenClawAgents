@@ -173,6 +173,8 @@ fi
 
 # shellcheck disable=SC1091
 source "${SCRIPT_DIR}/_driven_launch_coordinator.sh"
+# shellcheck disable=SC1091
+source "${SCRIPT_DIR}/git_network_guard.sh"
 
 OPERATIONS='[]'
 SPAWN_GRANTS='[]'
@@ -215,6 +217,350 @@ tick_read_private_json() {
     && [ "${bytes}" -le 65536 ] || return 1
   jq -ce 'if type == "object" then . else error("not an object") end' \
     "${path}" 2>/dev/null
+}
+
+tick_atomic_write_private_json() {
+  local path="$1" json="$2" tmp
+  tmp="$(mktemp "${path}.tmp.XXXXXX")" || return 1
+  if ! (umask 077; printf '%s\n' "${json}" >"${tmp}") \
+      || ! chmod 600 "${tmp}" \
+      || ! jq -e 'type == "object"' "${tmp}" >/dev/null 2>&1 \
+      || ! mv -f "${tmp}" "${path}" \
+      || ! chmod 600 "${path}"; then
+    return 1
+  fi
+}
+
+post_acpx_private_worker_result() {
+  local result_file="$1" iid="$2" execution_id="$3"
+  local work_branch="$4" log_dir="$5" acpx_exit="$6" result
+  result="$(tick_read_private_json "${result_file}")" || return 1
+  jq -ce \
+    --argjson iid "${iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg work_branch "${work_branch}" \
+    --arg local_branch "issue/${iid}" \
+    --arg log_dir "${log_dir}" \
+    --argjson acpx_exit "${acpx_exit}" '
+    if (keys | sort) == ([
+        "execution_id","block_reason","commit_sha","iid",
+        "labels_added","labels_removed","local_branch","log_dir",
+        "merge_request_url","mode_actual","mr_action","status",
+        "summary_posted","wiki_url","work_branch"
+      ] | sort)
+      and .iid == $iid
+      and .execution_id == $execution_id
+      and (.status as $status
+        | ["done","no_changes","blocked","failed","timeout"]
+        | index($status)) != null
+      and (.mode_actual == "fresh" or .mode_actual == "continue")
+      and .work_branch == $work_branch
+      and .local_branch == $local_branch
+      and (.commit_sha | type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+      and (.merge_request_url | type == "string")
+      and (.mr_action == "created" or .mr_action == "rotated"
+        or .mr_action == "reused" or .mr_action == "none")
+      and .wiki_url == ""
+      and (.labels_added | type == "array"
+        and all(.[]; type == "string"))
+      and (.labels_removed | type == "array"
+        and all(.[]; type == "string"))
+      and (.summary_posted | type == "boolean")
+      and (.block_reason | type == "string")
+      and .log_dir == $log_dir
+      and (if .status == "blocked" or .status == "failed"
+          or .status == "timeout"
+        then (.block_reason | length) > 0 else true end)
+      and (if .status == "done" then $acpx_exit == 0 else true end)
+    then . else error("invalid private worker result") end
+  ' <<<"${result}" 2>/dev/null
+}
+
+post_acpx_archive_state_matches() {
+  local state="$1" iid="$2" execution_id="$3"
+  local work_branch="$4" business_sha="$5"
+  jq -nce \
+    --argjson state "${state}" \
+    --argjson iid "${iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg work_branch "${work_branch}" \
+    --arg business_sha "${business_sha}" '
+    if ($state | type) == "object"
+      and $state.iid == $iid
+      and $state.dependency_pinned_execution_id == $execution_id
+      and $state.work_branch == $work_branch
+      and $state.branch_members == [$iid]
+      and ($state.shared_branch_role // null) == null
+      and $state.dependency_history_verified == true
+      and ($state.commit_sha | type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+      and ($state.work_branch_sha | type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+      and (($state.commit_sha | ascii_downcase)
+        == ($business_sha | ascii_downcase))
+      and (($state.work_branch_sha | ascii_downcase)
+        == ($business_sha | ascii_downcase))
+    then true else error("archive recovery state mismatch") end
+  ' >/dev/null 2>&1
+}
+
+# Recover one narrowly defined producer crash: archive_execution_logs.sh
+# already pushed a logs-only child L of the reviewed business commit B, but
+# run_executor_attempt.sh died before it could persist work_branch_sha=L and
+# publish attempt_finalized.json. This recovery never promotes commit_sha and
+# never accepts a shared branch, an arbitrary descendant, or an unverified
+# remote observation.
+post_acpx_recover_archive_tail() {
+  local repo="$1" group="$2" project="$3" pending="$4"
+  local campaign_state_file="$5" issue_state_file="$6"
+  local result_file="$7" finalized_file="$8" log_dir="$9"
+  local iid="${10}" execution_id="${11}" work_branch="${12}"
+  local job_id="${13}" generation="${14}" run_id="${15}"
+  local child_session_key="${16}" acpx_exit="${17}"
+  local acpx_completed_at="${18}" now_epoch="${19}"
+  local worker_result worker_result_hash worker_result_hash_check business_sha
+  local issue_state remote_rows remote_tips remote_tip_count remote_tip
+  local canonical_business canonical_remote parent_row changed_paths
+  local path prefix repo_lock_file campaign_lock_file current_campaign
+  local current_state next_state updated_at final_worker final_hash marker
+  local repo_lock_fd campaign_lock_fd
+
+  # The producer's ordinary branch state is single-member. Requiring this
+  # shape rejects every legacy shared pair before any network access.
+  jq -nce \
+    --argjson pending "${pending}" \
+    --argjson iid "${iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg work_branch "${work_branch}" \
+    --arg job_id "${job_id}" \
+    --argjson generation "${generation}" \
+    --arg run_id "${run_id}" \
+    --arg child_session_key "${child_session_key}" '
+    if ($pending | type) == "object"
+      and $pending.job_id == $job_id
+      and $pending.claim_generation == $generation
+      and $pending.execution_id == $execution_id
+      and $pending.run_id == $run_id
+      and $pending.child_session_key == $child_session_key
+      and $pending.work_branch == $work_branch
+      and $pending.branch_members == [$iid]
+      and ($pending.shared_branch_role // null) == null
+    then true else error("archive recovery pending mismatch") end
+  ' >/dev/null 2>&1 || return 1
+
+  worker_result="$(post_acpx_private_worker_result \
+    "${result_file}" "${iid}" "${execution_id}" "${work_branch}" \
+    "${log_dir}" "${acpx_exit}")" || return 1
+  business_sha="$(jq -r '.commit_sha' <<<"${worker_result}")"
+  worker_result_hash="$(dlc_sha256 <"${result_file}" 2>/dev/null)" \
+    || return 1
+  worker_result_hash_check="$(dlc_sha256 <"${result_file}" 2>/dev/null)" \
+    || return 1
+  [ "${worker_result_hash}" = "${worker_result_hash_check}" ] || return 1
+
+  issue_state="$(tick_read_private_json "${issue_state_file}")" || return 1
+  post_acpx_archive_state_matches "${issue_state}" "${iid}" \
+    "${execution_id}" "${work_branch}" "${business_sha}" || return 1
+
+  repo_lock_file="${repo}/.req_executor/_dispatcher/locks/repo.lock"
+  mkdir -p "$(dirname "${repo_lock_file}")" || return 1
+  exec {repo_lock_fd}>"${repo_lock_file}" || return 1
+  if ! flock -w 5 -x "${repo_lock_fd}"; then
+    exec {repo_lock_fd}>&-
+    return 1
+  fi
+
+  # The guard authenticates and audits the exact origin before the one bounded
+  # network read. Credentials remain process-private and neither stderr nor
+  # the remote URL is copied into the tick result.
+  set +e
+  remote_rows="$(
+    (
+      export GITLAB_TOKEN="${GITLAB_TOKEN_EFF}"
+      export PROJECT_FULL="${group}/${project}"
+      GIT_NETWORK_GUARD_CONTEXT=post_acpx_archive_recovery
+      git_network_guard_assert_repo "${repo}" || exit
+      GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/usr/bin/false \
+        timeout --kill-after=5s 30s \
+          git -C "${repo}" "${GIT_NETWORK_GUARD_CONFIG_ARGS[@]}" \
+            ls-remote --heads origin "refs/heads/${work_branch}"
+    ) 2>/dev/null
+  )"
+  local remote_rc=$?
+  set -e
+  if [ "${remote_rc}" -ne 0 ]; then
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  fi
+  remote_tips="$(awk -v expected_ref="refs/heads/${work_branch}" \
+    '$2 == expected_ref {print $1}' <<<"${remote_rows}")"
+  remote_tip_count="$(awk 'NF {count++} END {print count+0}' \
+    <<<"${remote_tips}")"
+  remote_tip="$(awk 'NF {print; exit}' <<<"${remote_tips}")"
+  if [ "${remote_tip_count}" -ne 1 ] \
+      || ! [[ "${remote_tip}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+      || [ "${remote_tip,,}" = "${business_sha,,}" ]; then
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  fi
+
+  canonical_business="$(GIT_NO_REPLACE_OBJECTS=1 \
+    git -C "${repo}" rev-parse --verify "${business_sha}^{commit}" \
+      2>/dev/null)" || {
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  }
+  canonical_remote="$(GIT_NO_REPLACE_OBJECTS=1 \
+    git -C "${repo}" rev-parse --verify "${remote_tip}^{commit}" \
+      2>/dev/null)" || {
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  }
+  parent_row="$(GIT_NO_REPLACE_OBJECTS=1 \
+    git -C "${repo}" rev-list --parents -n 1 "${canonical_remote}" \
+      2>/dev/null)" || {
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  }
+  if [ "${canonical_remote,,}" != "${remote_tip,,}" ] \
+      || [ "${canonical_business,,}" != "${business_sha,,}" ] \
+      || [ "${parent_row,,}" != \
+        "${canonical_remote,,} ${canonical_business,,}" ]; then
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  fi
+  changed_paths="$(GIT_NO_REPLACE_OBJECTS=1 \
+    git -C "${repo}" -c core.quotePath=true \
+      diff-tree --no-commit-id --name-only -r "${canonical_remote}" -- \
+      2>/dev/null)" || {
+    flock -u "${repo_lock_fd}" 2>/dev/null || true
+    exec {repo_lock_fd}>&-
+    return 1
+  }
+  flock -u "${repo_lock_fd}" 2>/dev/null || true
+  exec {repo_lock_fd}>&-
+
+  [ -n "${changed_paths}" ] || return 1
+  prefix=".req_executor/issue-${iid}/log/execution-${execution_id}/"
+  while IFS= read -r path; do
+    [ -n "${path}" ] \
+      && [ "${path#${prefix}}" != "${path}" ] \
+      && [ "${path}" != "${prefix}" ] \
+      && [[ "${path}" != *$'\r'* ]] \
+      && [[ "${path}" != *$'\t'* ]] || return 1
+  done <<<"${changed_paths}"
+
+  # Re-check the project claim and private issue state under campaign.lock,
+  # then perform a field-level compare-and-swap. No MR/business identity or
+  # dependency plan field is rewritten.
+  campaign_lock_file="${repo}/.req_executor/_dispatcher/campaign.lock"
+  exec {campaign_lock_fd}>"${campaign_lock_file}" || return 1
+  if ! flock -w 5 -x "${campaign_lock_fd}"; then
+    exec {campaign_lock_fd}>&-
+    return 1
+  fi
+  current_campaign="$(jq -ce 'if type == "object" then . else error("invalid") end' \
+    "${campaign_state_file}" 2>/dev/null)" || {
+    flock -u "${campaign_lock_fd}" 2>/dev/null || true
+    exec {campaign_lock_fd}>&-
+    return 1
+  }
+  if ! jq -nce \
+      --argjson campaign "${current_campaign}" \
+      --argjson iid "${iid}" \
+      --arg job_id "${job_id}" \
+      --argjson generation "${generation}" \
+      --argjson execution_id "${execution_id}" \
+      --arg work_branch "${work_branch}" \
+      --arg run_id "${run_id}" \
+      --arg child_session_key "${child_session_key}" '
+      ($campaign.pending_subagents[($iid | tostring)] // null) as $pending
+      | if ($pending | type) == "object"
+        and $pending.job_id == $job_id
+        and $pending.claim_generation == $generation
+        and $pending.execution_id == $execution_id
+        and $pending.run_id == $run_id
+        and $pending.child_session_key == $child_session_key
+        and $pending.work_branch == $work_branch
+        and $pending.branch_members == [$iid]
+        and ($pending.shared_branch_role // null) == null
+      then true else error("archive recovery claim changed") end
+    ' >/dev/null 2>&1; then
+    flock -u "${campaign_lock_fd}" 2>/dev/null || true
+    exec {campaign_lock_fd}>&-
+    return 1
+  fi
+  current_state="$(tick_read_private_json "${issue_state_file}")" || {
+    flock -u "${campaign_lock_fd}" 2>/dev/null || true
+    exec {campaign_lock_fd}>&-
+    return 1
+  }
+  if ! post_acpx_archive_state_matches "${current_state}" "${iid}" \
+      "${execution_id}" "${work_branch}" "${business_sha}"; then
+    flock -u "${campaign_lock_fd}" 2>/dev/null || true
+    exec {campaign_lock_fd}>&-
+    return 1
+  fi
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  next_state="$(jq -ce \
+    --arg work_branch_sha "${canonical_remote}" \
+    --arg updated_at "${updated_at}" '
+    .work_branch_sha = $work_branch_sha
+    | .dependency_history_updated_at = $updated_at
+  ' <<<"${current_state}")" || {
+    flock -u "${campaign_lock_fd}" 2>/dev/null || true
+    exec {campaign_lock_fd}>&-
+    return 1
+  }
+  if ! jq -nce \
+      --argjson before "${current_state}" \
+      --argjson after "${next_state}" \
+      --arg work_branch_sha "${canonical_remote}" \
+      --arg updated_at "${updated_at}" '
+      (($before | del(.work_branch_sha,.dependency_history_updated_at))
+        == ($after | del(.work_branch_sha,.dependency_history_updated_at)))
+      and $after.work_branch_sha == $work_branch_sha
+      and $after.dependency_history_updated_at == $updated_at
+    ' >/dev/null 2>&1 \
+      || ! tick_atomic_write_private_json "${issue_state_file}" \
+        "${next_state}"; then
+    flock -u "${campaign_lock_fd}" 2>/dev/null || true
+    exec {campaign_lock_fd}>&-
+    return 1
+  fi
+  flock -u "${campaign_lock_fd}" 2>/dev/null || true
+  exec {campaign_lock_fd}>&-
+
+  # Bind the exact final worker_result bytes only after the state CAS. The
+  # ordinary same-tick durable-result path below will then consume this latch.
+  final_worker="$(post_acpx_private_worker_result \
+    "${result_file}" "${iid}" "${execution_id}" "${work_branch}" \
+    "${log_dir}" "${acpx_exit}")" || return 1
+  final_hash="$(dlc_sha256 <"${result_file}" 2>/dev/null)" || return 1
+  [ "${final_hash}" = "${worker_result_hash}" ] \
+    && [ "$(jq -r '.commit_sha' <<<"${final_worker}")" = "${business_sha}" ] \
+    || return 1
+  [ "${now_epoch}" -ge "${acpx_completed_at}" ] || return 1
+  marker="$(jq -cnS \
+    --argjson iid "${iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg work_branch "${work_branch}" \
+    --arg commit_sha "${business_sha}" \
+    --arg worker_result_sha256 "${final_hash}" \
+    --argjson completed_at_epoch "${now_epoch}" '{
+      version:1,iid:$iid,execution_id:$execution_id,
+      work_branch:$work_branch,commit_sha:$commit_sha,
+      worker_result_sha256:$worker_result_sha256,
+      completed_at_epoch:$completed_at_epoch
+    }')" || return 1
+  tick_atomic_write_private_json "${finalized_file}" "${marker}"
 }
 
 # Return the exact pending checkpoint only when both private state files and
@@ -463,10 +809,11 @@ PROJECTS_JSON="$(jq -c '[.active_jobs[].project] | unique' \
 
 # Recover the exact failure mode where the fixed outer wrapper completed acpx
 # (or even the whole attempt) but OpenClaw never scheduled the outer model's
-# next/final turn. A durable worker_result.json is processed immediately under
-# the scheduler claim fence. If only acpx_terminal.json exists and finalization
-# has exceeded its short grace period, request native child cleanup so the
-# OpenClaw subagent slot is not held until the multi-hour running lease expires.
+# next/final turn. A durable worker_result.json is processed only after the
+# attempt producer publishes its private, hash-bound attempt_finalized.json
+# last. If only acpx_terminal.json exists and finalization has exceeded its
+# short grace period, request native child cleanup so the OpenClaw subagent slot
+# is not held until the multi-hour running lease expires.
 POST_ACPX_NOW_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 POST_ACPX_RUNNING_JOBS="$(jq -c '
   [.active_jobs[]
@@ -513,10 +860,17 @@ while IFS= read -r post_job; do
   post_log_dir="${post_repo}/.req_executor/.worktrees/issue-${post_iid}/.req_executor/issue-${post_iid}/log/execution-${post_attempt}"
   post_result_file="${post_log_dir}/worker_result.json"
   post_marker_file="${post_log_dir}/acpx_terminal.json"
+  post_finalized_file="${post_log_dir}/attempt_finalized.json"
+  post_result_present=false
+  if [ -e "${post_result_file}" ] || [ -L "${post_result_file}" ]; then
+    post_result_present=true
+  fi
 
   # A durable result is valid only after the fixed acpx wrapper has written its
-  # exact terminal marker for this attempt. This prevents a stray or partial
-  # result file from racing an inner acpx process that is still running.
+  # exact terminal marker and the attempt producer has atomically published a
+  # private finalization marker. The latter binds the exact worker-result bytes
+  # and final business identity, so an early or partially rewritten result can
+  # never race the archive/state finalization tail.
   post_marker_json=""
   post_marker_bytes=""
   if [ -f "${post_marker_file}" ] && [ ! -L "${post_marker_file}" ]; then
@@ -537,53 +891,133 @@ while IFS= read -r post_job; do
     ' "${post_marker_file}" 2>/dev/null || true)"
   fi
 
+  # The logs-only archive push may have succeeded immediately before the
+  # producer died. After the normal grace, recover only the exact single-Issue
+  # B -> L transition and publish the same finalization latch the producer
+  # would have written. Any mismatch leaves worker_result.json present, which
+  # keeps the existing fail-closed no-kill gate below in force.
+  if [ -n "${post_marker_json}" ] \
+      && [ "${post_result_present}" = true ] \
+      && [ ! -e "${post_finalized_file}" ] \
+      && [ ! -L "${post_finalized_file}" ]; then
+    post_archive_completed_at="$(jq -r '.completed_at_epoch' \
+      <<<"${post_marker_json}")"
+    if [ "${post_archive_completed_at}" -le "${POST_ACPX_NOW_EPOCH}" ] \
+        && [ $((POST_ACPX_NOW_EPOCH - post_archive_completed_at)) \
+          -ge "${EXECUTOR_POST_ACPX_GRACE_SECONDS}" ]; then
+      post_archive_issue_state="${post_repo}/.req_executor/issues/issue-${post_iid}/state.json"
+      if post_acpx_recover_archive_tail \
+          "${post_repo}" \
+          "$(jq -r '.group' <<<"${post_context}")" \
+          "$(jq -r '.slug' <<<"${post_context}")" \
+          "${post_pending}" "${post_state_file}" \
+          "${post_archive_issue_state}" "${post_result_file}" \
+          "${post_finalized_file}" "${post_log_dir}" \
+          "${post_iid}" "${post_attempt}" "${post_work_branch}" \
+          "${post_job_id}" "${post_generation}" "${post_run_id}" \
+          "${post_child_session_key}" \
+          "$(jq -r '.exit_code' <<<"${post_marker_json}")" \
+          "${post_archive_completed_at}" "${POST_ACPX_NOW_EPOCH}"; then
+        append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+          operation:"post_acpx_archive_finalize_recovery",
+          job_id:$job_id,status:"recovered"
+        }')"
+      fi
+    fi
+  fi
+
+  post_finalized_json=""
+  if [ -n "${post_marker_json}" ]; then
+    post_finalized_json="$(
+      tick_read_private_json "${post_finalized_file}" 2>/dev/null | \
+        jq -ce \
+          --argjson iid "${post_iid}" \
+          --argjson attempt "${post_attempt}" \
+          --arg work_branch "${post_work_branch}" \
+          --argjson acpx_completed_at \
+            "$(jq -r '.completed_at_epoch' <<<"${post_marker_json}")" '
+          if type == "object"
+            and (keys | sort) == ([
+              "commit_sha","completed_at_epoch","execution_id","iid",
+              "version","work_branch","worker_result_sha256"
+            ] | sort)
+            and .version == 1
+            and .iid == $iid
+            and .execution_id == $attempt
+            and .work_branch == $work_branch
+            and (.commit_sha | type == "string"
+              and (length == 0 or test("^[0-9a-fA-F]{7,64}$")))
+            and (.worker_result_sha256 | type == "string"
+              and test("^[0-9a-f]{64}$"))
+            and (.completed_at_epoch | type == "number"
+              and . == floor and . >= $acpx_completed_at)
+          then . else error("invalid attempt finalization marker") end
+        ' 2>/dev/null || true
+    )"
+  fi
+
   post_result_json=""
   post_result_bytes=""
+  post_result_sha256=""
   if [ -n "${post_marker_json}" ] \
+      && [ -n "${post_finalized_json}" ] \
       && [ -f "${post_result_file}" ] && [ ! -L "${post_result_file}" ]; then
     post_result_bytes="$(wc -c <"${post_result_file}" 2>/dev/null | tr -d ' ' || true)"
   fi
   if [[ "${post_result_bytes}" =~ ^[0-9]+$ ]] \
       && [ "${post_result_bytes}" -gt 0 ] \
       && [ "${post_result_bytes}" -le 1048576 ]; then
-    post_result_json="$(jq -ce \
-      --argjson iid "${post_iid}" \
-      --argjson attempt "${post_attempt}" \
-      --arg work_branch "${post_work_branch}" \
-      --arg local_branch "issue/${post_iid}" \
-      --arg log_dir "${post_log_dir}" \
-      --argjson acpx_exit "$(jq -r '.exit_code' <<<"${post_marker_json}")" '
-      if type == "object"
-        and (keys | sort) == ([
-          "execution_id","block_reason","commit_sha","iid",
-          "labels_added","labels_removed","local_branch","log_dir",
-          "merge_request_url","mode_actual","mr_action","status",
-          "summary_posted","wiki_url","work_branch"
-        ] | sort)
-        and .iid == $iid
-        and .execution_id == $attempt
-        and (.status as $status
-          | ["done","no_changes","blocked","failed","timeout"]
-          | index($status)) != null
-        and (.mode_actual == "fresh" or .mode_actual == "continue")
-        and .work_branch == $work_branch
-        and .local_branch == $local_branch
-        and (.commit_sha | type == "string"
-          and (length == 0 or test("^[0-9a-fA-F]{7,64}$")))
-        and (.merge_request_url | type == "string")
-        and (.mr_action == "created" or .mr_action == "rotated"
-          or .mr_action == "reused" or .mr_action == "none")
-        and .wiki_url == ""
-        and (.labels_added | type == "array" and all(.[]; type == "string"))
-        and (.labels_removed | type == "array" and all(.[]; type == "string"))
-        and (.summary_posted | type == "boolean")
-        and (.block_reason | type == "string")
-        and .log_dir == $log_dir
-        and (if .status == "blocked" or .status == "failed" or .status == "timeout"
-          then (.block_reason | length) > 0 else true end)
-        and (if .status == "done" then $acpx_exit == 0 else true end)
-      then . else error("invalid durable worker result") end
-    ' "${post_result_file}" 2>/dev/null || true)"
+    post_result_sha256="$(dlc_sha256 <"${post_result_file}" 2>/dev/null || true)"
+    if [ "${post_result_sha256}" = \
+        "$(jq -r '.worker_result_sha256' <<<"${post_finalized_json}")" ]; then
+      post_result_json="$(jq -ce \
+        --argjson iid "${post_iid}" \
+        --argjson attempt "${post_attempt}" \
+        --arg work_branch "${post_work_branch}" \
+        --arg local_branch "issue/${post_iid}" \
+        --arg log_dir "${post_log_dir}" \
+        --arg final_commit "$(jq -r '.commit_sha' <<<"${post_finalized_json}")" \
+        --argjson acpx_exit "$(jq -r '.exit_code' <<<"${post_marker_json}")" '
+        if type == "object"
+          and (keys | sort) == ([
+            "execution_id","block_reason","commit_sha","iid",
+            "labels_added","labels_removed","local_branch","log_dir",
+            "merge_request_url","mode_actual","mr_action","status",
+            "summary_posted","wiki_url","work_branch"
+          ] | sort)
+          and .iid == $iid
+          and .execution_id == $attempt
+          and (.status as $status
+            | ["done","no_changes","blocked","failed","timeout"]
+            | index($status)) != null
+          and (.mode_actual == "fresh" or .mode_actual == "continue")
+          and .work_branch == $work_branch
+          and .local_branch == $local_branch
+          and (.commit_sha | type == "string"
+            and (length == 0 or test("^[0-9a-fA-F]{7,64}$")))
+          and .commit_sha == $final_commit
+          and (.merge_request_url | type == "string")
+          and (.mr_action == "created" or .mr_action == "rotated"
+            or .mr_action == "reused" or .mr_action == "none")
+          and .wiki_url == ""
+          and (.labels_added | type == "array" and all(.[]; type == "string"))
+          and (.labels_removed | type == "array" and all(.[]; type == "string"))
+          and (.summary_posted | type == "boolean")
+          and (.block_reason | type == "string")
+          and .log_dir == $log_dir
+          and (if .status == "blocked" or .status == "failed" or .status == "timeout"
+            then (.block_reason | length) > 0 else true end)
+          and (if .status == "done" then $acpx_exit == 0 else true end)
+        then . else error("invalid durable worker result") end
+      ' "${post_result_file}" 2>/dev/null || true)"
+      # Re-hash after parsing so a concurrent replacement cannot make the JSON
+      # we consume differ from the exact bytes named by the finalization latch.
+      if [ -n "${post_result_json}" ] \
+          && [ "$(dlc_sha256 <"${post_result_file}" 2>/dev/null || true)" \
+            != "${post_result_sha256}" ]; then
+        post_result_json=""
+      fi
+    fi
   fi
   if [ -n "${post_result_json}" ]; then
     post_result_claim_retained=false
@@ -647,6 +1081,11 @@ while IFS= read -r post_job; do
     # and for a shared MR pending checkpoint. Do not let the durable worker
     # result shadow the marker/MR-only recovery section on every later tick.
     [ "${post_result_claim_retained}" = true ] || continue
+  elif [ "${post_result_present}" = true ]; then
+    # worker_result.json is deliberately written before archive/state
+    # finalization. Until the producer publishes the exact private latch last,
+    # neither MR recovery nor native child cleanup is safe.
+    continue
   fi
 
   if [ -z "${post_marker_json}" ]; then

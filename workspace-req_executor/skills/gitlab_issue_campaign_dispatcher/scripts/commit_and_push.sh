@@ -8,13 +8,19 @@
 #   ISSUE_IID                from env_paths.sh
 #   EXECUTION_ID            opaque execution identity
 #   LOCAL_ISSUE_BRANCH       "issue/<iid>"
-#   WORK_BRANCH              `issue/<iid>` or shared `issue/<head>+<tail>`
+#   WORK_BRANCH              `issue/<iid>`, shared `issue/<head>+<tail>`, or
+#                            DAG v2 `issue/<iid>-dag-<plan-prefix>`
 #   EXPECTED_WORK_BRANCH_SHA  optional full old remote tip used only as the
 #                             explicit push lease; required when updating an
-#                             existing shared issue/<A>+<C> branch
+#                             existing shared issue/<A>+<C> or DAG v2 branch
 #   EXPECTED_COMMIT_PARENT_SHA
-#                             full commit that must be the new shared commit's
-#                             only parent; required for every shared branch push
+#                             full commit that must be the new fixed-parent
+#                             commit's only parent; required for every shared
+#                             branch and DAG v2 push
+#   DEPENDENCY_CONTRACT_VERSION
+#                             empty for legacy behavior, or `2` for DAG v2
+#   DEPENDENCY_PLAN_SHA256    required full lowercase digest for DAG v2
+#   DEPENDENCY_BASE_SHA       frozen aggregate base for DAG v2
 #   ISSUE_TITLE              short human title for commit message
 #
 # Strategy A keeps a single MR pointing at a single remote branch. The local
@@ -33,6 +39,10 @@ GIT_NETWORK_GUARD_CONTEXT=commit_and_push
   "${LOCAL_ISSUE_BRANCH:?}" "${WORK_BRANCH:?}" "${ISSUE_TITLE:?}"
 EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
 EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
+DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION:-}"
+DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256:-}"
+DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+AUTO_MERGE="${AUTO_MERGE:-false}"
 if [ -n "${EXPECTED_WORK_BRANCH_SHA}" ] \
     && ! [[ "${EXPECTED_WORK_BRANCH_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
   echo "commit_and_push: EXPECTED_WORK_BRANCH_SHA must be a full hexadecimal Git object ID" >&2
@@ -43,13 +53,57 @@ if [ -n "${EXPECTED_COMMIT_PARENT_SHA}" ] \
   echo "commit_and_push: EXPECTED_COMMIT_PARENT_SHA must be a full hexadecimal Git object ID" >&2
   exit 2
 fi
-SHARED_WORK_BRANCH=false
+case "${DEPENDENCY_CONTRACT_VERSION}" in
+  '')
+    if [ -n "${DEPENDENCY_PLAN_SHA256}" ]; then
+      echo "commit_and_push: DEPENDENCY_PLAN_SHA256 requires DEPENDENCY_CONTRACT_VERSION=2" >&2
+      exit 2
+    fi
+    ;;
+  2)
+    if ! [[ "${DEPENDENCY_PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "commit_and_push: DAG v2 DEPENDENCY_PLAN_SHA256 must be a lowercase SHA-256 digest" >&2
+      exit 2
+    fi
+    if [ "${WORK_BRANCH}" != \
+        "issue/${ISSUE_IID}-dag-${DEPENDENCY_PLAN_SHA256:0:16}" ]; then
+      echo "commit_and_push: DAG v2 WORK_BRANCH must match ISSUE_IID and DEPENDENCY_PLAN_SHA256" >&2
+      exit 2
+    fi
+    if [ -z "${DEPENDENCY_BASE_SHA}" ] \
+        || ! [[ "${DEPENDENCY_BASE_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+        || [ -z "${EXPECTED_COMMIT_PARENT_SHA}" ] \
+        || [ "${DEPENDENCY_BASE_SHA,,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
+      echo "commit_and_push: DAG v2 requires DEPENDENCY_BASE_SHA as EXPECTED_COMMIT_PARENT_SHA" >&2
+      exit 2
+    fi
+    if [ "${AUTO_MERGE}" != false ]; then
+      echo "commit_and_push: DAG v2 forbids automatic merge" >&2
+      exit 2
+    fi
+    if [ "${ISSUE_MODE:-}" = continue ] \
+        && [ -z "${EXPECTED_WORK_BRANCH_SHA}" ]; then
+      echo "commit_and_push: DAG v2 continue requires EXPECTED_WORK_BRANCH_SHA" >&2
+      exit 2
+    fi
+    ;;
+  *)
+    echo "commit_and_push: DEPENDENCY_CONTRACT_VERSION must be empty or 2" >&2
+    exit 2
+    ;;
+esac
+FIXED_PARENT_WORK_BRANCH=false
+PLANNED_LEASE_REQUIRED=false
 if [[ "${WORK_BRANCH}" == issue/*+* ]]; then
-  SHARED_WORK_BRANCH=true
+  FIXED_PARENT_WORK_BRANCH=true
+  PLANNED_LEASE_REQUIRED=true
   if [ -z "${EXPECTED_COMMIT_PARENT_SHA}" ]; then
     echo "commit_and_push: shared work branch requires EXPECTED_COMMIT_PARENT_SHA" >&2
     exit 5
   fi
+fi
+if [ "${DEPENDENCY_CONTRACT_VERSION}" = 2 ]; then
+  FIXED_PARENT_WORK_BRANCH=true
 fi
 
 cd "${WORKTREE_DIR}"
@@ -64,14 +118,14 @@ if ! [[ "${NEW_COMMIT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
   exit 5
 fi
 
-if [ "${SHARED_WORK_BRANCH}" = true ]; then
+if [ "${FIXED_PARENT_WORK_BRANCH}" = true ]; then
   commit_parents_line="$(GIT_NO_REPLACE_OBJECTS=1 \
     git rev-list --parents -n 1 "${NEW_COMMIT_SHA}" 2>/dev/null || true)"
   read -r -a commit_parents <<<"${commit_parents_line}"
   if [ "${#commit_parents[@]}" -ne 2 ] \
       || [ "${commit_parents[0],,}" != "${NEW_COMMIT_SHA,,}" ] \
       || [ "${commit_parents[1],,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
-    echo "commit_and_push: new shared commit must have exactly EXPECTED_COMMIT_PARENT_SHA as its only parent" >&2
+    echo "commit_and_push: new fixed-parent commit must have exactly EXPECTED_COMMIT_PARENT_SHA as its only parent" >&2
     exit 5
   fi
 fi
@@ -135,13 +189,13 @@ remote_tip="$(awk 'NF {print; exit}' <<<"${remote_tips}")"
 if [ "${remote_tip_count}" -eq 1 ]; then
     if [ -n "${EXPECTED_WORK_BRANCH_SHA}" ]; then
       if [ "${remote_tip,,}" != "${EXPECTED_WORK_BRANCH_SHA,,}" ]; then
-        echo "commit_and_push: shared work branch moved from its expected tip" >&2
+        echo "commit_and_push: work branch moved from its expected tip" >&2
         exit 5
       fi
       push_and_confirm_remote_tip "${NEW_COMMIT_SHA}" \
         "--force-with-lease=refs/heads/${WORK_BRANCH}:${EXPECTED_WORK_BRANCH_SHA}" \
         origin "${NEW_COMMIT_SHA}:refs/heads/${WORK_BRANCH}"
-    elif [[ "${WORK_BRANCH}" == issue/*+* ]]; then
+    elif [ "${PLANNED_LEASE_REQUIRED}" = true ]; then
       echo "commit_and_push: updating a shared work branch requires EXPECTED_WORK_BRANCH_SHA" >&2
       exit 5
     else
@@ -151,7 +205,7 @@ if [ "${remote_tip_count}" -eq 1 ]; then
     fi
 else
     if [ -n "${EXPECTED_WORK_BRANCH_SHA}" ]; then
-      echo "commit_and_push: expected shared work branch is missing" >&2
+      echo "commit_and_push: expected fixed-parent work branch is missing" >&2
       exit 5
     fi
     push_and_confirm_remote_tip "${NEW_COMMIT_SHA}" \

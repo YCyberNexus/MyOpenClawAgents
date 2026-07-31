@@ -340,7 +340,7 @@ git_network_guard_run() {
   printf '\n' >>"${GIT_LOG}"
   case "${1:-}" in
     ls-remote)
-      remote_sha="${EXPECTED_WORK_BRANCH_SHA:?}"
+      remote_sha="${REMOTE_BEFORE_PUSH_SHA:-${EXPECTED_WORK_BRANCH_SHA:?}}"
       if [ "${PUSH_ACCEPTED:-false}" = true ]; then
         remote_sha="${REMOTE_AFTER_PUSH_SHA:-4444444444444444444444444444444444444444}"
       fi
@@ -374,9 +374,16 @@ done
 case "${1:-}" in
   commit) ;;
   rev-list)
-    printf '%s %s\n' \
-      '4444444444444444444444444444444444444444' \
-      "${EXPECTED_COMMIT_PARENT_SHA:?}"
+    if [ "${SIMULATE_MERGE_PARENT:-false}" = true ]; then
+      printf '%s %s %s\n' \
+        '4444444444444444444444444444444444444444' \
+        "${EXPECTED_COMMIT_PARENT_SHA:?}" \
+        '5555555555555555555555555555555555555555'
+    else
+      printf '%s %s\n' \
+        '4444444444444444444444444444444444444444' \
+        "${EXPECTED_COMMIT_PARENT_SHA:?}"
+    fi
     ;;
   rev-parse)
     printf '%s\n' '4444444444444444444444444444444444444444'
@@ -436,6 +443,77 @@ ambiguous_push_out="$({
 grep -F 'exact remote tip confirms success' \
   "${PUSH_ROOT}/ambiguous.stderr" >/dev/null \
   || fail "ambiguous accepted push did not record its exact-ref recovery"
+
+# DAG v2 uses the same explicit lease and one-parent safety, but publishes to
+# an IID-specific plan-derived branch instead of the legacy two-member branch.
+DAG_PUSH_PLAN=abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
+DAG_PUSH_BRANCH=issue/43-dag-abcdefabcdefabcd
+: >"${GIT_LOG}"
+dag_push_out="$(
+  PATH="${PUSH_BIN}:${PATH}" GIT_LOG="${GIT_LOG}" \
+    PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=9 ISSUE_MODE=continue \
+    ISSUE_TITLE='DAG consumer' \
+    WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
+    WORK_BRANCH="${DAG_PUSH_BRANCH}" \
+    DEPENDENCY_CONTRACT_VERSION=2 \
+    DEPENDENCY_PLAN_SHA256="${DAG_PUSH_PLAN}" \
+    DEPENDENCY_BASE_SHA="${EXPECTED_PARENT_SHA}" \
+    EXPECTED_WORK_BRANCH_SHA="${EXPECTED_LEASE_SHA}" \
+    EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" AUTO_MERGE=false \
+    bash "${PUSH_SCRIPTS}/commit_and_push.sh"
+)" || fail "commit_and_push rejected a valid DAG v2 fixed-parent push"
+[ "${dag_push_out}" = 4444444444444444444444444444444444444444 ] \
+  || fail "DAG v2 push did not return the new commit SHA"
+grep -Fq -- \
+  "--force-with-lease=refs/heads/${DAG_PUSH_BRANCH}:${EXPECTED_LEASE_SHA}" \
+  "${GIT_LOG}" \
+  || fail "DAG v2 push did not lease its exact plan-derived branch"
+
+# A fresh retry of the same immutable plan is single-Issue owned. It may
+# observe the existing exact remote tip at push time and lease that value,
+# while continue remains bound to its planning-time expected SHA above.
+: >"${GIT_LOG}"
+dag_fresh_push_out="$(
+  PATH="${PUSH_BIN}:${PATH}" GIT_LOG="${GIT_LOG}" \
+    REMOTE_BEFORE_PUSH_SHA="${EXPECTED_LEASE_SHA}" \
+    PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=10 ISSUE_MODE=fresh \
+    ISSUE_TITLE='DAG fresh retry' \
+    WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
+    WORK_BRANCH="${DAG_PUSH_BRANCH}" \
+    DEPENDENCY_CONTRACT_VERSION=2 \
+    DEPENDENCY_PLAN_SHA256="${DAG_PUSH_PLAN}" \
+    DEPENDENCY_BASE_SHA="${EXPECTED_PARENT_SHA}" \
+    EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" AUTO_MERGE=false \
+    bash "${PUSH_SCRIPTS}/commit_and_push.sh"
+)" || fail "commit_and_push rejected a valid DAG v2 fresh observed lease"
+[ "${dag_fresh_push_out}" = 4444444444444444444444444444444444444444 ] \
+  || fail "DAG v2 fresh retry did not return the new commit SHA"
+grep -Fq -- \
+  "--force-with-lease=refs/heads/${DAG_PUSH_BRANCH}:${EXPECTED_LEASE_SHA}" \
+  "${GIT_LOG}" \
+  || fail "DAG v2 fresh retry did not use the observed exact lease"
+
+: >"${GIT_LOG}"
+set +e
+PATH="${PUSH_BIN}:${PATH}" GIT_LOG="${GIT_LOG}" \
+  SIMULATE_MERGE_PARENT=true \
+  PROJECT=repo GROUP=group ISSUE_IID=43 EXECUTION_ID=11 \
+  ISSUE_TITLE='reject DAG merge commit' \
+  WORKTREE_DIR="${PUSH_WORKTREE}" LOCAL_ISSUE_BRANCH='issue/43' \
+  WORK_BRANCH="${DAG_PUSH_BRANCH}" \
+  DEPENDENCY_CONTRACT_VERSION=2 \
+  DEPENDENCY_PLAN_SHA256="${DAG_PUSH_PLAN}" \
+  DEPENDENCY_BASE_SHA="${EXPECTED_PARENT_SHA}" \
+  EXPECTED_WORK_BRANCH_SHA="${EXPECTED_LEASE_SHA}" \
+  EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_PARENT_SHA}" AUTO_MERGE=false \
+  bash "${PUSH_SCRIPTS}/commit_and_push.sh" >/dev/null 2>&1
+dag_merge_parent_rc=$?
+set -e
+[ "${dag_merge_parent_rc}" -eq 5 ] \
+  || fail "commit_and_push accepted a DAG v2 merge commit"
+if grep -Fq guarded "${GIT_LOG}"; then
+  fail "DAG v2 merge-commit rejection happened after remote access"
+fi
 
 # A merge commit can have A as its first parent while also importing a second
 # parent. The shared pair contract is linear, so the wrapper must reject that

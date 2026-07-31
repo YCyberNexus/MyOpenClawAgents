@@ -9,6 +9,15 @@ fail() {
   exit 1
 }
 
+sha256_text() {
+  local value="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${value}" | sha256sum | awk '{print $1}'
+  else
+    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+  fi
+}
+
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/create-mr-auto.XXXXXX")"
 FIXTURE_SCRIPTS="${TEST_ROOT}/scripts"
 FAKE_BIN="${TEST_ROOT}/bin"
@@ -41,11 +50,13 @@ case "${1:-} ${2:-}" in
     if [ "${count}" -eq 1 ]; then
       printf '%s\n' '[]'
     else
-      jq -cn '[{
+      jq -cn \
+        --arg source_branch "${EXPECTED_SOURCE_BRANCH:-issue/42}" \
+        --arg target_branch "${EXPECTED_TARGET_BRANCH:-release}" '[{
         iid:7,
         web_url:"https://gitlab.example.test/group/repo/-/merge_requests/7",
-        source_branch:"issue/42",
-        target_branch:"release",
+        source_branch:$source_branch,
+        target_branch:$target_branch,
         state:"opened"
       }]'
     fi
@@ -67,12 +78,17 @@ case "${1:-} ${2:-}" in
     if [ "${GLAB_SCENARIO}" = merged ] && [ "${api_count}" -gt 1 ]; then
       state=merged
     fi
-    jq -cn --arg state "${state}" '{
+    jq -cn \
+      --arg state "${state}" \
+      --arg source_branch "${EXPECTED_SOURCE_BRANCH:-issue/42}" \
+      --arg target_branch "${EXPECTED_TARGET_BRANCH:-release}" \
+      --arg sha \
+        "${EXPECTED_COMMIT_SHA:-0123456789abcdef0123456789abcdef01234567}" '{
       iid:7,
       web_url:"https://gitlab.example.test/group/repo/-/merge_requests/7",
-      source_branch:"issue/42",
-      target_branch:"release",
-      sha:"0123456789abcdef0123456789abcdef01234567",
+      source_branch:$source_branch,
+      target_branch:$target_branch,
+      sha:$sha,
       state:$state
     }'
     ;;
@@ -139,6 +155,110 @@ opened_out="$(run_create opened false)" || fail "ordinary MR creation failed"
 if grep -Fq -- '--method PUT' "${TEST_ROOT}/opened-false/glab.log"; then
   fail "AUTO_MERGE=false issued a merge mutation"
 fi
+
+# A real DAG-v2 MR gate consumes the post-push Issue-state checkpoint. This
+# positive path catches drift between run_executor_attempt persistence and
+# create_mr's exact state contract.
+dag_case_root="${TEST_ROOT}/dag-opened"
+dag_worktree="${dag_case_root}/worktree"
+dag_log_dir="${dag_case_root}/log"
+dag_issue_state="${dag_case_root}/issue-state.json"
+dag_commit_sha='0123456789abcdef0123456789abcdef01234567'
+dag_base_sha='89abcdef0123456789abcdef0123456789abcdef'
+dag_input="$(jq -cn \
+  --arg base_sha "${dag_base_sha}" '{
+    iid:9,
+    execution_id:1,
+    work_branch:"issue/9",
+    commit_sha:$base_sha,
+    work_branch_sha:$base_sha,
+    verified:true,
+    mr:{
+      iid:6,
+      url:"https://gitlab.example.test/group/repo/-/merge_requests/6",
+      state:"opened",
+      source_branch:"issue/9",
+      target_branch:"release",
+      sha:$base_sha
+    }
+  }')"
+dag_plan_canonical="$(jq -cnS \
+  --argjson input "${dag_input}" \
+  --arg base_sha "${dag_base_sha}" '{
+    version:2,
+    algorithm:"ordered-frontier-merge-v1",
+    consumer_iid:42,
+    target_branch:"release",
+    declared_inputs:[$input],
+    effective_inputs:[$input],
+    aggregate_base_sha:$base_sha
+  }')"
+dag_plan_sha="$(sha256_text "${dag_plan_canonical}")"
+dag_work_branch="issue/42-dag-${dag_plan_sha:0:16}"
+mkdir -p "${dag_worktree}" "${dag_log_dir}"
+jq -n \
+  --arg plan_sha "${dag_plan_sha}" \
+  --arg work_branch "${dag_work_branch}" \
+  --arg commit_sha "${dag_commit_sha}" \
+  --arg base_sha "${dag_base_sha}" \
+  --argjson input "${dag_input}" '{
+    iid:42,
+    latest_execution_id:1,
+    dependency_pinned_execution_id:1,
+    dependency_contract_version:2,
+    dependency_plan_sha256:$plan_sha,
+    dependency_plan:{
+      version:2,
+      consumer_iid:42,
+      target_branch:"release",
+      declared_inputs:[$input],
+      effective_inputs:[$input],
+      aggregate_base_sha:$base_sha,
+      plan_sha256:$plan_sha,
+      work_branch:$work_branch
+    },
+    work_branch:$work_branch,
+    branch_members:[42],
+    shared_branch_role:null,
+    dependency_iid:9,
+    dependency_branch:"issue/9",
+    dependency_base_sha:$base_sha,
+    dependency_history_verified:true,
+    commit_sha:$commit_sha,
+    work_branch_sha:$commit_sha
+  }' >"${dag_issue_state}"
+chmod 600 "${dag_issue_state}"
+dag_opened_out="$(
+  PATH="${FAKE_BIN}:${PATH}" \
+  GLAB_SCENARIO=opened GLAB_LOG="${dag_case_root}/glab.log" \
+  LIST_COUNT_FILE="${dag_case_root}/list.count" \
+  API_COUNT_FILE="${dag_case_root}/api.count" \
+  EXPECTED_SOURCE_BRANCH="${dag_work_branch}" \
+  EXPECTED_TARGET_BRANCH=release \
+  EXPECTED_COMMIT_SHA="${dag_commit_sha}" \
+  PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID=1 \
+  ISSUE_MODE=fresh ISSUE_TITLE='DAG consumer' \
+  WORKTREE_DIR="${dag_worktree}" LOG_DIR="${dag_log_dir}" \
+  ISSUE_STATE_FILE="${dag_issue_state}" \
+  BRANCH=main MERGE_TARGET_BRANCH=release \
+  WORK_BRANCH="${dag_work_branch}" AUTO_MERGE=false \
+  DEPENDENCY_IID=9 DEPENDENCY_BRANCH=issue/9 \
+  DEPENDENCY_BASE_SHA="${dag_base_sha}" \
+  DEPENDENCY_CONTRACT_VERSION=2 \
+  DEPENDENCY_PLAN_SHA256="${dag_plan_sha}" \
+  COMMIT_SHA="${dag_commit_sha}" \
+    bash "${FIXTURE_SCRIPTS}/create_mr.sh"
+)" || fail "valid DAG-v2 post-push state was rejected by the real MR gate"
+[ "$(printf '%s\n' "${dag_opened_out}" | tail -n 1)" = opened ] \
+  || fail "valid DAG-v2 MR did not remain open"
+jq -e --arg branch "${dag_work_branch}" '
+  .source_branch == $branch
+  and .issue_iid == 42
+  and .execution_id == 1
+  and .verified == true
+  and .outcome == "opened"
+' "${dag_log_dir}/mr_result.json" >/dev/null \
+  || fail "DAG-v2 MR identity was not persisted"
 
 readonly_out="$(run_create opened false opened-readonly readonly)" \
   || fail "read-only stale MR evidence blocked MR creation"

@@ -58,7 +58,7 @@ merge_target_branch=<auto_merge=true 时必填的 MR 目标分支>
 `force_rerun_pr=true` 表示用户明确要求重跑，并同时覆盖已有 `pr` 与 `finish` 两种稳定完成态；
 字段名保留 `pr` 只是为了兼容既有 I1 schema。
 
-### Issue 依赖分支
+### Issue 依赖 DAG v2
 
 若 issueC 需要在一个或多个已完成 Issue 的实现之上继续开发，请让其描述中的某一行以声明开头：
 
@@ -74,62 +74,64 @@ Markdown 的行首开始，可带列表、标题或粗体前缀；合法 IID 列
 等其他内容，不要求声明占满整行。声明按出现顺序稳定去重，最多 8 个；超过上限、非法 IID 和自依赖
 会失败关闭。
 
-每个上游处理时都不会假设未来存在反向依赖：它先使用普通 `issue/<IID>` 分支，提交并创建只关闭
-自己的普通 MR。只有轮到 C 后，executor 才建立 `A -> C` 或 `[A1,A2,...,An] -> C` 绑定。当前支持
-一个上游或 2–8 个独立上游汇入一个 C。各上游不能再有前置依赖，也不能同时参加另一个共享组；C
-不能再被其他 Issue 依赖。扇出、三层以上链、环、合并冲突和重叠绑定都会失败关闭。
+新依赖使用 DAG v2。每个 Issue 独立拥有 worktree、远端工作分支、私有状态和 MR；consumer 只读取
+已完成 predecessor 的不可变 artifact，不会迁移、删除或改写 predecessor 分支，不会关闭或替换其 MR，
+也不会把 predecessor 私有状态改成共享 head。因此同一 predecessor 可以供多个 consumer 使用
+（fan-out），已完成 consumer 也可以继续成为后续层级的 predecessor。支持单输入、2–8 个多输入以及
+多级依赖；自依赖和环仍失败关闭。
 
-唯一远端工作分支继续采用二元兼容命名；多依赖时以声明中的第一个上游作为 anchor：
+每个 DAG v2 consumer 的分支由完整计划摘要内容寻址：
 
 ```text
-issue/<anchor IID>+<C IID>
+issue/<consumer IID>-dag-<plan_sha256 前 16 位>
 ```
 
-例如依赖 `#41,#42` 的 C=`43` 使用 `issue/41+43`。每个 IID 的固定本地分支仍是 `issue/<IID>`，所以
-多个 worktree 不会检出同一个本地分支。单依赖历史为
-`target -> commit(A) -> commit(C)`；多依赖先生成包含全部固定上游 SHA 的 merge commit 链，最终为
-`target -> aggregate(A1,...,An) -> commit(C)`。
+完整 64 位小写 `plan_sha256` 才是权威身份，短后缀只用于可读分支名。每个 consumer 从自己的分支创建
+或重用自己的 MR，不重用 predecessor MR。一个典型图可以同时包含 `#9 -> #12/#13`、
+`#9+#13 -> #14`、`#13+#14 -> #15` 和 `#15 -> #16`。
 
-C 会等待每个上游都具有稳定的 `pr` 或 `finish`，且没有 `continue`、`doing`、`retry`、blocked、
-failed 或 timeout 标签，也不能仍有 campaign `pending_subagents` claim。迁移器还会逐个校验 mode-600
-私有 `done` 状态、普通远端分支完整 SHA、提交身份和唯一开放普通 MR。
+consumer 会等待所有可达 predecessor 都具有稳定的 `pr` 或 `finish`，且没有 `continue`、`doing`、
+`retry`、blocked、failed 或 timeout 标签，也没有 campaign `pending_subagents` claim。固定 planner
+逐项校验 mode-600 私有 `done` 状态、execution ID、完整 work branch/commit SHA，以及唯一验证 MR 的
+IID、URL、`opened|merged` 状态、source、target 和 SHA。这些字段组成不可变 predecessor artifact；
+只凭标签、callback URL、历史 marker 或可变 Issue 正文不能放行 consumer。
 
-单依赖由 `migrate_shared_dependency_head.sh` 写入 `branch_migration.status=pending`，以空期望 lease
-创建组合分支，关闭旧 MR，创建同时关闭 A/C 的唯一替代 MR，再按精确 SHA 删除普通分支。多依赖由
-`migrate_multi_dependency_heads.sh` 在任何远端变更前固定全部 source identity，用
-`git merge-tree --write-tree` 计算无冲突树，并持久化包含 sources 和 aggregate SHA 的
-`dependency_aggregation.status=pending`。随后它复用 anchor 迁移、以精确 lease 推进组合分支、给唯一
-MR 加上所有 `Closes`，确认可观察后才关闭其他普通 MR、删除其分支并记录
-`joined_dependency_group`。任一步骤中断都可幂等重放；内容冲突返回 `dependency_merge_conflict`，
-不会自动选择 ours/theirs，也不会先破坏 source MR/ref。
+predecessor snapshot 同时冻结业务 `commit_sha=B` 与远端实际
+`work_branch_sha=L`。两者不同时，`L` 必须恰好是 `B` 的单父直接子提交，且全部 diff 都位于该次
+execution 的日志目录；打开的 MR SHA 绑定 `L`，已合并 MR 可记录 `B` 或 `L`。计划摘要绑定两者，
+但传递约简和聚合只使用业务提交 `B`，不会把终态执行日志当成下游业务基线。
 
-C 的 fresh attempt 将 anchor SHA 或 aggregate SHA 同时固定为 `DEPENDENCY_BASE_SHA`、
-`EXPECTED_WORK_BRANCH_SHA` 和唯一允许的父提交。推送使用相同 SHA 的显式 lease；远端移动、消失或
-父提交不一致都会失败关闭。唯一组合 MR 描述包含每个上游及 C 的 `Closes`，并携带与私有状态一致的
-64 位 `intent_id`。C 推送后只复用该 MR；来源、目标、当前 SHA、作者和全部冻结 closing lines 都由
-固定脚本重新验证。共享分支仍强制 `auto_merge=false`，目标分支冻结后不能改变。
+planner 先做传递约简：若某个声明输入的精确提交已经是另一声明输入提交的祖先，就从 effective frontier
+删除前者。例如 `#14` 声明依赖 `#9,#13` 且 `#13` 已包含 `#9` 时，`declared_inputs` 仍保留两项，
+`effective_inputs` 只保留 `#13`，基线直接使用 `#13` 的 SHA。多个互不可比 frontier 按声明顺序使用
+确定性的 `merge-tree` / `commit-tree` 聚合。内容冲突返回 `dependency_merge_conflict` 并阻塞
+consumer；系统不自动选择 ours/theirs，也不改变任何 predecessor artifact、分支、MR 或状态。同一组
+输入重放会得到相同 aggregate SHA 和 `plan_sha256`。
 
-迁移 A 时先使用 `branch_migration.status=pending` 检查点；C 在 push 并核对远端 SHA 后、进入 MR
-阶段前使用 `mr_finalization.status=pending` 检查点。若 MR 创建、回读、标签写入或 callback 在此后
-中断，当前 claim 会继续保留；迁移重放或 heartbeat 只针对已经固定的 SHA 恢复/核验 MR，然后把
-状态提升为 `completed` 或 `verified_open`，不会再次运行 acpx、暂存、提交或推送。恢复只复用来源
-分支、目标分支、所有权 intent 和 source SHA 全部一致的唯一开放替代 MR。
-若精确 MR 身份已知但上次观察为 unknown，固定脚本会保留只读 identity evidence，再由 Phase 6
-同时执行精确 IID GET 与来源分支开放 MR 唯一性查询后实时判定；关闭、移动、改目标或外来 MR
-不能授权成功或替代 MR，GitLab 暂不可用才保留 claim。所有历史按页读取；同源分支存在多条历史、
-分页被截断或重复时写入 `shared_mr_history_conflict` evidence，立即终态
-`failed-dispatcher` 并生成 scheduler handoff，绝不创建替代 MR。
-Phase 6 与 C 的依赖门禁都会重新实时读取 GitLab；`pr` 标签和 C 放行都不能仅凭 callback 中的 URL、
-历史 `verified_open` 状态或未验证 marker 决定。
+权威 `dependency_plan` 固定 `version:2`、consumer IID、目标分支、`declared_inputs`、
+`effective_inputs`、`aggregate_base_sha`、完整 `plan_sha256` 和派生 `work_branch`。执行态同时保存
+`dependency_contract_version:2` 与 `dependency_plan_sha256`。旧的标量
+`dependency_iid/dependency_branch/dependency_base_sha` tuple 只作为兼容投影存在，不表示完整 DAG。
+
+fresh attempt 将 `aggregate_base_sha` 同时固定为 `DEPENDENCY_BASE_SHA` 和
+`EXPECTED_COMMIT_PARENT_SHA`，业务提交必须且只能有这一个父提交。continue 使用旧 consumer tip 作为
+push lease，但 mixed-reset 到同一个冻结基线并保留工作树差异，因此替换 consumer 提交而不是形成
+`base -> C1 -> C2`。正文依赖、目标分支、predecessor artifact、基线、计划摘要或远端身份在冻结后
+发生变化，都失败关闭。
+
+DAG v2 每个 Issue 独立创建 MR，并强制 `auto_merge=false`，成功停在 `pr`。自动合并单个 DAG 节点会
+绕过拓扑调度及冻结父提交合同，因此即使 batch 请求启用了自动合并也不会降级执行。普通无依赖 Issue
+仍保留原有 server-verified auto-merge 流程。
+
+已有 `issue/<head>+<tail>` shared pair 和 version-1 fan-in durable state 仅用于滚动升级兼容。固定
+wrapper 仍可按旧的 head/tail、branch migration、replacement MR 与 recovery checkpoint 合同完成
+已经在途的工作；新依赖声明一律创建 DAG v2 计划，不再新建或扩展 legacy shared group。
 
 等待期间 C 不分配 attempt、不创建 pending placeholder、不添加 blocked 标签，也不占用 agent-wide
 scheduler 执行槽。查询或解析 timeout 使用非终态 deferred 原因并在后续 tick 重试；确定性的非法
-拓扑会先落盘 blocked 状态，再向 driven scheduler 返回精确 skip handoff。共享组、成员顺序、依赖
-声明或目标分支一旦冻结，后续正文变更不能重写历史。`continue` 只恢复与 durable state 完全一致的
-远端或 IID 本地 attempt ref，并再次固定其 SHA；旧格式、缺失、部分写入、分支移动或依赖 tuple
-不匹配都会失败关闭。已发布的共享 anchor 不允许走普通 `continue`；C 的 `continue` 会从冻结的
-dependency/aggregate SHA 重新形成替代提交，并用旧 C SHA 做 lease，不会形成
-`dependency -> C1 -> C2`。
+拓扑、环、artifact 身份或合并冲突会先落盘 blocked 状态，再向 driven scheduler 返回精确 skip
+handoff。`continue` 只恢复与 durable contract 完全一致的远端或 IID 本地 attempt ref；缺失、部分
+写入、分支移动、版本或 plan digest 不匹配都会失败关闭。
 
 业务代码来自已固定的基线 SHA，但直接执行控制路径（任意层级的 `.claude/`、`CLAUDE.md`、
 `CLAUDE.local.md`、`.mcp.json` 与 `.acpxrc.json`）仍只从原始可信处理分支刷新。物化依赖提交时
@@ -152,7 +154,7 @@ memory、hook、MCP 或 plugin 改写模型启动链。任一能力或固定包�
 
 该功能沿用 req_executor 现有的同 UID 仓库执行信任模型，并不把依赖业务代码变成安全沙箱。也就是
 说，固定 adapter、安全模式和空 MCP 配置会收窄模型启动入口，但不能阻止同一系统用户有权执行的
-业务脚本访问该用户本来就能访问的文件或进程。仅应在同一信任域内使用共享依赖分支。
+业务脚本访问该用户本来就能访问的文件或进程。仅应在同一信任域内使用依赖 DAG。
 
 `iid_list` 的 `iids` 必须是至少两个升序去重的逗号分隔正整数，例如 `1,4,5`。I1 字段用于
 项目、selector、处理及合并策略与回调路由；executor 按进程环境优先、tracked
@@ -183,12 +185,15 @@ status,batch_id,matched_count,snapshot_digest,scheduler_status
 RUN_EXECUTOR_BATCH_TICK
 ```
 
-建议每分钟在 executor main session 唤醒一次。tick 会先对账 durable terminal counts，再检查运行任务的 `${LOG_DIR}/worker_result.json`。若 OpenClaw 在长工具调用返回后没有调度外层模型的最终回复，tick 会在当前 claim fence 下直接完成 Phase 6，并通过 `cleanup_actions` 回收仍占用 slot 的 child；随后扫描项目 durable intent、导入 terminal handoff、投递 callback outbox，并恢复未完成的 post-spawn coordinator。`run_acpx_attempt.sh` 会在 acpx 结束时先写 `${LOG_DIR}/acpx_terminal.json`；若完整结果在默认 2400 秒宽限期后仍未出现，tick 仅回收身份完全匹配的 child。之后 tick 用 scheduler active job 与未完成 launch coordinator 构造保护集，在项目锁内清除不受保护且没有任何运行标识的旧 placeholder。项目预检发现 running Issue 已有 `pr`、`finish` 或已关闭时，tick 会立即按当前 claim fence 重新核验 GitLab 并生成 `skipped` handoff，不再等待运行租约；超过运行租约且确已越过项目 ACPX 截止时间的丢回调任务仍由 timeout 路径兜底。最后才按严格 round-robin 补满空槽。单次 agent 级 topup 事务最多处理 256 个候选和 32 轮 skip 补位，具有 90 秒阶段 deadline，单个项目 wrapper 另有 75 秒墙钟上限；达到任一上限后立即释放锁，未处理的 reserved job 留到下一 tick。进程重启或聊天 turn 中断后，下一次 tick 从 durable state 继续。完成批次、已确认 outbox 和完成的 launch action 会退出热索引并保留在按 ID 可定位的冷记录中，周期成本只随活动工作量增长。
+建议每分钟在 executor main session 唤醒一次。tick 会先对账 durable terminal counts，再同时检查运行任务的 `${LOG_DIR}/worker_result.json` 与最后发布的私有 `${LOG_DIR}/attempt_finalized.json`。只有 marker 的 Issue、execution、工作分支、业务 commit 和 `worker_result` SHA-256 全部匹配，结果才可消费；归档/状态尚未收尾时不会提前 Phase 6 或回收 child。若进程在推送日志子提交后崩溃，当前 claim 下的恢复路径只会在严格证明 `B -> L` 为该 execution 的直接 log-only 子提交后修复 `work_branch_sha` 并补齐 marker。若 OpenClaw 在长工具调用返回后没有调度外层模型的最终回复，tick 会在当前 claim fence 下直接完成 Phase 6，并通过 `cleanup_actions` 回收仍占用 slot 的 child；随后扫描项目 durable intent、导入 terminal handoff、投递 callback outbox，并恢复未完成的 post-spawn coordinator。`run_acpx_attempt.sh` 会在 acpx 结束时先写 `${LOG_DIR}/acpx_terminal.json`；若完整结果在默认 2400 秒宽限期后仍未出现，tick 仅回收身份完全匹配的 child。之后 tick 用 scheduler active job 与未完成 launch coordinator 构造保护集，在项目锁内清除不受保护且没有任何运行标识的旧 placeholder。项目预检发现 running Issue 已有 `pr`、`finish` 或已关闭时，tick 会立即按当前 claim fence 重新核验 GitLab 并生成 `skipped` handoff，不再等待运行租约；超过运行租约且确已越过项目 ACPX 截止时间的丢回调任务仍由 timeout 路径兜底。最后才按严格 round-robin 补满空槽。单次 agent 级 topup 事务最多处理 256 个候选和 32 轮 skip 补位，具有 90 秒阶段 deadline，单个项目 wrapper 另有 75 秒墙钟上限；达到任一上限后立即释放锁，未处理的 reserved job 留到下一 tick。进程重启或聊天 turn 中断后，下一次 tick 从 durable state 继续。完成批次、已确认 outbox 和完成的 launch action 会退出热索引并保留在按 ID 可定位的冷记录中，周期成本只随活动工作量增长。
 
 整个 topup/skip-finalize 事务由 agent 级 nonblocking tick 锁串行化；重叠唤醒立即返回 `idle`，不会使用旧的 pending 快照终结刚创建的新任务。
 锁内所有子进程、scheduler 子锁和 launch-coordinator 双锁都只使用阶段剩余时间；超时后保留 durable
 reserved 状态并由下一 tick 恢复。旧版迁移产生的 `legacy_running` 没有 secret claim token，遇到依赖
 延期时只报告 `legacy_running_recovery_required`，不会放宽 CAS 或直接改写为 `retry_wait`。
+
+从未生成 `attempt_finalized.json` 的旧 wrapper 升级到该合同时，必须先 drain 旧版本 active jobs，
+再切换周期 tick；新 heartbeat 不会把无 marker 的旧 `worker_result.json` 猜测为已完成。
 
 每个 Issue 的终态逐项发送，不发送一条代替明细的聚合结果。callback transport 固定为：
 
@@ -278,7 +283,9 @@ ${REPO_PATH}/.req_executor/
 ```
 
 The outer subagent calls `run_executor_attempt.sh` exactly once. That fixed
-wrapper owns the full execution and persists `${LOG_DIR}/worker_result.json`.
+wrapper owns the full execution, persists `${LOG_DIR}/worker_result.json`,
+completes archive/state persistence, and publishes
+`${LOG_DIR}/attempt_finalized.json` last.
 Inside it, `run_acpx_attempt.sh` runs from `${WORKTREE_DIR}` and invokes:
 
 ```bash

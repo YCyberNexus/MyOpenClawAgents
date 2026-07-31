@@ -34,6 +34,11 @@ esac
 VALID_WORK_BRANCH=false
 if [ "${WORK_BRANCH}" = "issue/${ISSUE_IID}" ]; then
   VALID_WORK_BRANCH=true
+elif [ "${DEPENDENCY_CONTRACT_VERSION:-}" = 2 ] \
+    && [[ "${DEPENDENCY_PLAN_SHA256:-}" =~ ^[0-9a-f]{64}$ ]] \
+    && [ "${WORK_BRANCH}" = \
+      "issue/${ISSUE_IID}-dag-${DEPENDENCY_PLAN_SHA256:0:16}" ]; then
+  VALID_WORK_BRANCH=true
 elif [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]] \
     && [ "${BASH_REMATCH[1]}" != "${BASH_REMATCH[2]}" ] \
     && { [ "${ISSUE_IID}" = "${BASH_REMATCH[1]}" ] \
@@ -79,8 +84,10 @@ if [ "${REMOTE_TIP_COUNT}" -gt 1 ]; then
   exit 5
 fi
 REMOTE_TIP="$(awk 'NF {print; exit}' <<<"${REMOTE_TIPS}")"
-if [ "${REMOTE_TIP_COUNT}" -eq 0 ] && [[ "${WORK_BRANCH}" == issue/*+* ]]; then
-  echo "archive_execution_logs: shared Issue branch is not remotely published" >&2
+if [ "${REMOTE_TIP_COUNT}" -eq 0 ] \
+    && { [[ "${WORK_BRANCH}" == issue/*+* ]] \
+      || [ "${DEPENDENCY_CONTRACT_VERSION:-}" = 2 ]; }; then
+  echo "archive_execution_logs: fixed dependency Issue branch is not remotely published" >&2
   exit 5
 fi
 

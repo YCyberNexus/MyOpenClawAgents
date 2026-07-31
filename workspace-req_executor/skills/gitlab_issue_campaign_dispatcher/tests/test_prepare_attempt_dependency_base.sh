@@ -330,6 +330,61 @@ PINNED_CONTINUE_WORKTREE="${REPO_PATH}/.req_executor/.worktrees/issue-6"
     "${VERIFIED_CONTINUE_SHA}" ] \
   || fail "prepare did not use the fixed verified local issue branch"
 
+# A DAG v2 attempt always prepares its IID-local branch on the frozen
+# aggregate base. Fresh starts there directly; continue first restores the
+# published consumer tree and then mixed-resets to the same parent so the next
+# business commit replaces, rather than appends to, the previous attempt.
+DAG_PLAN_SHA=abcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcdefabcd
+DAG_WORK_BRANCH=issue/14-dag-abcdefabcdefabcd
+DAG_FRESH_OUTPUT="$(
+  CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
+  GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
+  GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
+  ISSUE_IID=14 EXECUTION_ID=1 ISSUE_MODE=fresh \
+  BRANCH=main CONFIG_BRANCH=main WORK_BRANCH="${DAG_WORK_BRANCH}" \
+  DEPENDENCY_CONTRACT_VERSION=2 \
+  DEPENDENCY_PLAN_SHA256="${DAG_PLAN_SHA}" \
+  DEPENDENCY_BASE_SHA="${PINNED_SHA}" \
+  EXPECTED_COMMIT_PARENT_SHA="${PINNED_SHA}" AUTO_MERGE=false \
+    bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
+)" || fail "DAG v2 fresh preparation failed"
+[ "$(sed -n '1p' <<<"${DAG_FRESH_OUTPUT}")" = fresh ] \
+  || fail "DAG v2 fresh preparation returned the wrong mode"
+DAG_WORKTREE="${REPO_PATH}/.req_executor/.worktrees/issue-14"
+[ "$(git -C "${DAG_WORKTREE}" rev-parse HEAD)" = "${PINNED_SHA}" ] \
+  || fail "DAG v2 fresh preparation did not use its frozen aggregate parent"
+
+git -C "${AUTHOR_REPO}" switch -q -C "${DAG_WORK_BRANCH}" "${PINNED_SHA}"
+printf 'dag-c1\n' >"${AUTHOR_REPO}/dag-c.txt"
+git -C "${AUTHOR_REPO}" add dag-c.txt
+git -C "${AUTHOR_REPO}" commit -qm dag-c1
+DAG_C1_SHA="$(git -C "${AUTHOR_REPO}" rev-parse HEAD)"
+git -C "${AUTHOR_REPO}" push -q -u origin "${DAG_WORK_BRANCH}"
+DAG_CONTINUE_OUTPUT="$(
+  CONFIG_DIR="${CONFIG_DIR}" PROJECT=project GROUP=group \
+  GITLAB_HOST=gitlab.test.invalid GITLAB_API_PROTOCOL=https \
+  GITLAB_TOKEN=dependency-test-token REPO_PARENT_PATH="${REPO_PARENT}" \
+  ISSUE_IID=14 EXECUTION_ID=2 ISSUE_MODE=continue \
+  BRANCH=main CONFIG_BRANCH=main WORK_BRANCH="${DAG_WORK_BRANCH}" \
+  DEPENDENCY_CONTRACT_VERSION=2 \
+  DEPENDENCY_PLAN_SHA256="${DAG_PLAN_SHA}" \
+  DEPENDENCY_BASE_SHA="${PINNED_SHA}" \
+  EXPECTED_WORK_BRANCH_SHA="${DAG_C1_SHA}" \
+  EXPECTED_COMMIT_PARENT_SHA="${PINNED_SHA}" AUTO_MERGE=false \
+  CONTINUE_BASE_REQUIRED=true CONTINUE_BASE_SHA="${DAG_C1_SHA}" \
+  CONTINUE_BASE_REF="refs/remotes/origin/${DAG_WORK_BRANCH}" \
+    bash "${FIXTURE_SCRIPTS}/prepare_attempt.sh"
+)" || fail "DAG v2 continue preparation failed"
+[ "$(sed -n '1p' <<<"${DAG_CONTINUE_OUTPUT}")" = continue ] \
+  || fail "DAG v2 continue unexpectedly downgraded"
+[ "$(git -C "${DAG_WORKTREE}" rev-parse HEAD)" = "${PINNED_SHA}" ] \
+  || fail "DAG v2 continue did not reset to its frozen aggregate parent"
+[ "$(cat "${DAG_WORKTREE}/dag-c.txt")" = dag-c1 ] \
+  || fail "DAG v2 continue lost the published consumer tree"
+[ "$(git -C "${DAG_WORKTREE}" status --porcelain -- dag-c.txt)" = \
+    '?? dag-c.txt' ] \
+  || fail "DAG v2 continue did not convert the prior tree into a replacement diff"
+
 # A shared tail continue must resume C's published tree without appending a
 # second C commit. Preparation leaves the C tree in place but mixed-resets the
 # local issue branch/index to frozen A, so the next commit replaces C1 as A's

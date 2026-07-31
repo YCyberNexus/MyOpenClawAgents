@@ -10,16 +10,39 @@
 #   acpx -> stage -> commit/push -> verify -> labels -> MR -> summary
 #        -> persist worker result -> append terminal logs to WORK_BRANCH
 #
-# The final compact worker result is written atomically to
-# ${LOG_DIR}/worker_result.json before it is printed. The executor heartbeat can
-# therefore recover the exact result even if OpenClaw never asks the outer model
-# to echo the line and finish its run. Git receives the staging-time LOG_DIR in
-# the business commit and the complete terminal LOG_DIR in a log-only child
-# commit on that same Issue branch. No second class of remote branch is used.
+# The compact worker result is written atomically to
+# ${LOG_DIR}/worker_result.json, but becomes heartbeat-consumable only after
+# ${LOG_DIR}/attempt_finalized.json is published last with its exact SHA-256.
+# Git receives the staging-time LOG_DIR in the business commit and the complete
+# terminal LOG_DIR in a log-only child on that same Issue branch. Single-Issue
+# state keeps the business commit distinct from that exact remote tip. No
+# second class of remote branch is used.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+sha256_text() {
+  local value="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${value}" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+sha256_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${path}" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "${path}" | awk '{print $1}'
+  else
+    return 1
+  fi
+}
 
 # Reject an invalid caller identity before env_paths.sh can create or migrate
 # any runtime directories.  The work branch itself is the canonical source of
@@ -34,28 +57,103 @@ if ! [[ "${ISSUE_IID}" =~ ^[1-9][0-9]*$ ]]; then
   exit 2
 fi
 
+AUTO_MERGE="${AUTO_MERGE:-false}"
+MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
+DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION:-}"
+DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256:-}"
+DEPENDENCY_IID="${DEPENDENCY_IID:-}"
+DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH:-}"
+DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
+EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
 WORK_BRANCH="${WORK_BRANCH:-issue/${ISSUE_IID}}"
 BRANCH_MEMBERS_JSON=""
 SHARED_BRANCH_ROLE=""
-if [ "${WORK_BRANCH}" = "issue/${ISSUE_IID}" ]; then
-  BRANCH_MEMBERS_JSON="[${ISSUE_IID}]"
-elif [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]]; then
-  SHARED_HEAD_IID="${BASH_REMATCH[1]}"
-  SHARED_TAIL_IID="${BASH_REMATCH[2]}"
-  if [ "${SHARED_HEAD_IID}" = "${SHARED_TAIL_IID}" ]; then
-    echo "run_executor_attempt.sh: shared WORK_BRANCH members must be distinct" >&2
+
+case "${DEPENDENCY_CONTRACT_VERSION}" in
+  '')
+    if [ -n "${DEPENDENCY_PLAN_SHA256}" ]; then
+      echo "run_executor_attempt.sh: DEPENDENCY_PLAN_SHA256 requires DEPENDENCY_CONTRACT_VERSION=2" >&2
+      exit 2
+    fi
+    if [ "${WORK_BRANCH}" = "issue/${ISSUE_IID}" ]; then
+      BRANCH_MEMBERS_JSON="[${ISSUE_IID}]"
+    elif [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]]; then
+      SHARED_HEAD_IID="${BASH_REMATCH[1]}"
+      SHARED_TAIL_IID="${BASH_REMATCH[2]}"
+      if [ "${SHARED_HEAD_IID}" = "${SHARED_TAIL_IID}" ]; then
+        echo "run_executor_attempt.sh: shared WORK_BRANCH members must be distinct" >&2
+        exit 2
+      elif [ "${ISSUE_IID}" = "${SHARED_HEAD_IID}" ]; then
+        SHARED_BRANCH_ROLE=head
+      elif [ "${ISSUE_IID}" = "${SHARED_TAIL_IID}" ]; then
+        SHARED_BRANCH_ROLE=tail
+      else
+        echo "run_executor_attempt.sh: current ISSUE_IID must belong to shared WORK_BRANCH" >&2
+        exit 2
+      fi
+      BRANCH_MEMBERS_JSON="[${SHARED_HEAD_IID},${SHARED_TAIL_IID}]"
+    else
+      echo "run_executor_attempt.sh: WORK_BRANCH must be issue/<current IID> or a two-member issue/<head IID>+<tail IID> branch containing the current IID" >&2
+      exit 2
+    fi
+    ;;
+  2)
+    if ! command -v sha256sum >/dev/null 2>&1 \
+        && ! command -v shasum >/dev/null 2>&1; then
+      echo "run_executor_attempt.sh: DAG v2 requires sha256sum or shasum" >&2
+      exit 2
+    fi
+    if ! [[ "${DEPENDENCY_PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]]; then
+      echo "run_executor_attempt.sh: DAG v2 DEPENDENCY_PLAN_SHA256 must be a lowercase SHA-256 digest" >&2
+      exit 2
+    fi
+    DAG_WORK_BRANCH="issue/${ISSUE_IID}-dag-${DEPENDENCY_PLAN_SHA256:0:16}"
+    if [ "${WORK_BRANCH}" != "${DAG_WORK_BRANCH}" ]; then
+      echo "run_executor_attempt.sh: DAG v2 WORK_BRANCH must match ISSUE_IID and DEPENDENCY_PLAN_SHA256" >&2
+      exit 2
+    fi
+    if [ -z "${DEPENDENCY_BASE_SHA}" ] \
+        || ! [[ "${DEPENDENCY_BASE_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+      echo "run_executor_attempt.sh: DAG v2 requires a full DEPENDENCY_BASE_SHA" >&2
+      exit 2
+    fi
+    if [ -z "${EXPECTED_COMMIT_PARENT_SHA}" ] \
+        || ! [[ "${EXPECTED_COMMIT_PARENT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+        || [ "${DEPENDENCY_BASE_SHA,,}" != "${EXPECTED_COMMIT_PARENT_SHA,,}" ]; then
+      echo "run_executor_attempt.sh: DAG v2 requires DEPENDENCY_BASE_SHA as EXPECTED_COMMIT_PARENT_SHA" >&2
+      exit 2
+    fi
+    if [ "${AUTO_MERGE}" != false ]; then
+      echo "run_executor_attempt.sh: DAG v2 forbids automatic merge" >&2
+      exit 2
+    fi
+    if [ "${ISSUE_MODE}" = continue ] \
+        && [ -z "${EXPECTED_WORK_BRANCH_SHA}" ]; then
+      echo "run_executor_attempt.sh: DAG v2 continue requires EXPECTED_WORK_BRANCH_SHA" >&2
+      exit 2
+    fi
+    BRANCH_MEMBERS_JSON="[${ISSUE_IID}]"
+    ;;
+  *)
+    echo "run_executor_attempt.sh: DEPENDENCY_CONTRACT_VERSION must be empty or 2" >&2
     exit 2
-  elif [ "${ISSUE_IID}" = "${SHARED_HEAD_IID}" ]; then
-    SHARED_BRANCH_ROLE=head
-  elif [ "${ISSUE_IID}" = "${SHARED_TAIL_IID}" ]; then
-    SHARED_BRANCH_ROLE=tail
-  else
-    echo "run_executor_attempt.sh: current ISSUE_IID must belong to shared WORK_BRANCH" >&2
-    exit 2
-  fi
-  BRANCH_MEMBERS_JSON="[${SHARED_HEAD_IID},${SHARED_TAIL_IID}]"
-else
-  echo "run_executor_attempt.sh: WORK_BRANCH must be issue/<current IID> or a two-member issue/<head IID>+<tail IID> branch containing the current IID" >&2
+    ;;
+esac
+
+if [ -n "${EXPECTED_WORK_BRANCH_SHA}" ] \
+    && ! [[ "${EXPECTED_WORK_BRANCH_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "run_executor_attempt.sh: EXPECTED_WORK_BRANCH_SHA must be a full hexadecimal Git object ID" >&2
+  exit 2
+fi
+if [ -n "${EXPECTED_COMMIT_PARENT_SHA}" ] \
+    && ! [[ "${EXPECTED_COMMIT_PARENT_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "run_executor_attempt.sh: EXPECTED_COMMIT_PARENT_SHA must be a full hexadecimal Git object ID" >&2
+  exit 2
+fi
+if [ -n "${DEPENDENCY_BASE_SHA}" ] \
+    && ! [[ "${DEPENDENCY_BASE_SHA}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "run_executor_attempt.sh: DEPENDENCY_BASE_SHA must be a full hexadecimal Git object ID" >&2
   exit 2
 fi
 
@@ -75,14 +173,6 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-AUTO_MERGE="${AUTO_MERGE:-false}"
-MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
-DEPENDENCY_IID="${DEPENDENCY_IID:-}"
-DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH:-}"
-DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
-EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA:-}"
-EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA:-}"
-
 execution_state_file_mode() {
   local path="$1"
   if stat -f '%Lp' "${path}" 2>/dev/null; then
@@ -99,6 +189,17 @@ execution_state_file_owner() {
   else
     stat -c '%u' "${path}" 2>/dev/null
   fi
+}
+
+create_private_temp_file() {
+  local target="$1" tmp mode owner
+  tmp="$(umask 077; mktemp "${target}.tmp.XXXXXX")" || return 1
+  [ -f "${tmp}" ] && [ ! -L "${tmp}" ] || return 1
+  chmod 600 "${tmp}" || return 1
+  mode="$(execution_state_file_mode "${tmp}")" || return 1
+  owner="$(execution_state_file_owner "${tmp}")" || return 1
+  [ "${mode}" = 600 ] && [ "${owner}" = "$(id -u)" ] || return 1
+  printf '%s\n' "${tmp}"
 }
 
 # Execution state is optional title context only. It never supplies business
@@ -181,7 +282,14 @@ last_error_line() {
 # never replace the tuple bound to the last remotely recoverable branch.
 persist_pushed_branch_identity() {
   local branch_tip_sha="${1:-${COMMIT_SHA}}"
+  local preserve_commit_sha="${2:-false}"
   local canonical_commit remote_commit prior_state state_tmp now
+  local prior_commit_sha
+  local dependency_plan_json dependency_plan_canonical dependency_plan_hash
+  case "${preserve_commit_sha}" in
+    true|false) ;;
+    *) return 1 ;;
+  esac
   canonical_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" rev-parse --verify \
     "${branch_tip_sha}^{commit}" 2>/dev/null)" || return 1
   remote_commit="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" rev-parse --verify \
@@ -204,8 +312,168 @@ persist_pushed_branch_identity() {
       'if type == "object" then . else error("invalid issue state") end' \
       "${ISSUE_STATE_FILE}" 2>/dev/null)" || return 1
   fi
+  if [ "${preserve_commit_sha}" = true ]; then
+    prior_commit_sha="$(printf '%s' "${prior_state}" | jq -er '
+      .commit_sha
+      | select(type == "string"
+          and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+      | ascii_downcase
+    ' 2>/dev/null)" || return 1
+    GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" merge-base \
+      --is-ancestor "${prior_commit_sha}" "${remote_commit}" \
+      >/dev/null 2>&1 || return 1
+  fi
+  dependency_plan_json='null'
+  if [ "${DEPENDENCY_CONTRACT_VERSION}" = 2 ]; then
+    dependency_plan_json="$(printf '%s' "${prior_state}" | jq -ce \
+      --argjson iid "${ISSUE_IID}" \
+      --argjson execution_id "${EXECUTION_ID}" \
+      --arg work_branch "${WORK_BRANCH}" \
+      --argjson branch_members "${BRANCH_MEMBERS_JSON}" \
+      --arg expected_work_branch_sha "${EXPECTED_WORK_BRANCH_SHA}" \
+      --arg expected_commit_parent_sha "${EXPECTED_COMMIT_PARENT_SHA}" \
+      --arg dependency_base_sha "${DEPENDENCY_BASE_SHA}" \
+      --arg dependency_plan_sha256 "${DEPENDENCY_PLAN_SHA256}" \
+      --arg target_branch "${MERGE_TARGET_BRANCH}" '
+      def positive_integer:
+        type == "number" and . == floor and . > 0;
+      def full_sha:
+        type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$");
+      def plan_sha:
+        type == "string"
+        and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
+      def valid_input($target_branch):
+        . as $input
+        | type == "object"
+        and ((keys | sort) == ([
+          "commit_sha", "execution_id", "iid", "mr", "verified",
+          "work_branch", "work_branch_sha"
+        ] | sort))
+        and ($input.iid | positive_integer and . <= 2147483647)
+        and ($input.execution_id
+          | positive_integer and . <= 281474976710655)
+        and (
+          $input.work_branch == ("issue/" + ($input.iid | tostring))
+          or ($input.work_branch | test(
+            "^issue/" + ($input.iid | tostring)
+            + "-dag-[0-9a-f]{16}$"))
+        )
+        and ($input.commit_sha | plan_sha)
+        and ($input.work_branch_sha | plan_sha)
+        and $input.verified == true
+        and ($input.mr | type == "object")
+        and (($input.mr | keys | sort) == ([
+          "iid", "sha", "source_branch", "state", "target_branch", "url"
+        ] | sort))
+        and ($input.mr.iid | positive_integer and . <= 2147483647)
+        and ($input.mr.url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
+        and ($input.mr.url | test(
+          "/-/merge_requests/" + ($input.mr.iid | tostring) + "/?$"))
+        and ($input.mr.state == "opened" or $input.mr.state == "merged")
+        and $input.mr.source_branch == $input.work_branch
+        and $input.mr.target_branch == $target_branch
+        and ($input.mr.sha | plan_sha)
+        and (
+          if $input.mr.state == "opened" then
+            $input.mr.sha == $input.work_branch_sha
+          else
+            $input.mr.sha == $input.commit_sha
+            or $input.mr.sha == $input.work_branch_sha
+          end
+        );
+      (if type == "object"
+          and .preparing_execution_id == $execution_id
+          and .proposed_dependency_contract_version == 2
+          and .proposed_dependency_plan_sha256 == $dependency_plan_sha256
+          and .proposed_work_branch == $work_branch
+          and .proposed_branch_members == $branch_members
+          and .proposed_shared_branch_role == null
+          and (if $expected_work_branch_sha == "" then
+            .proposed_expected_work_branch_sha == null
+          else
+            (.proposed_expected_work_branch_sha | full_sha)
+            and ((.proposed_expected_work_branch_sha | ascii_downcase)
+              == ($expected_work_branch_sha | ascii_downcase))
+          end)
+          and (.proposed_expected_commit_parent_sha | full_sha)
+          and ((.proposed_expected_commit_parent_sha | ascii_downcase)
+            == ($expected_commit_parent_sha | ascii_downcase))
+          and (.proposed_dependency_base_sha | full_sha)
+          and ((.proposed_dependency_base_sha | ascii_downcase)
+            == ($dependency_base_sha | ascii_downcase))
+        then .proposed_dependency_plan
+        elif type == "object"
+          and .dependency_pinned_execution_id == $execution_id
+          and .dependency_contract_version == 2
+          and .dependency_plan_sha256 == $dependency_plan_sha256
+          and .work_branch == $work_branch
+          and .branch_members == $branch_members
+          and .shared_branch_role == null
+          and (.dependency_base_sha | full_sha)
+          and ((.dependency_base_sha | ascii_downcase)
+            == ($dependency_base_sha | ascii_downcase))
+        then .dependency_plan
+        else null
+        end) as $plan
+      | ($plan.effective_inputs
+        | if type == "array" then map(.iid) else [] end) as $effective_iids
+      | if ($plan | type == "object")
+        and (($plan | keys | sort) == ([
+          "aggregate_base_sha", "consumer_iid", "declared_inputs",
+          "effective_inputs", "plan_sha256", "target_branch", "version",
+          "work_branch"
+        ] | sort))
+        and $plan.version == 2
+        and $plan.consumer_iid == $iid
+        and $plan.target_branch == $target_branch
+        and $plan.work_branch == $work_branch
+        and $plan.plan_sha256 == $dependency_plan_sha256
+        and ($plan.aggregate_base_sha | plan_sha)
+        and (($plan.aggregate_base_sha | ascii_downcase)
+          == ($dependency_base_sha | ascii_downcase))
+        and ($plan.declared_inputs | type == "array"
+          and length >= 1 and length <= 8)
+        and ([$plan.declared_inputs[].iid]
+          | length == (unique | length))
+        and ($plan.effective_inputs | type == "array"
+          and length >= 1 and length <= 8)
+        and ([$plan.effective_inputs[].iid]
+          | length == (unique | length))
+        and all($plan.declared_inputs[];
+          valid_input($target_branch))
+        and all($plan.effective_inputs[];
+          valid_input($target_branch))
+        and all($plan.effective_inputs[];
+          . as $effective
+          | any($plan.declared_inputs[]; . == $effective))
+        and ([
+          $plan.declared_inputs[].iid
+          | . as $declared_iid
+          | select($effective_iids | index($declared_iid) != null)
+        ] == $effective_iids)
+      then $plan
+      else error("invalid DAG dependency plan identity")
+      end
+    ' 2>/dev/null)" || return 1
+    dependency_plan_canonical="$(printf '%s' "${dependency_plan_json}" | jq -cS '{
+      version:2,
+      algorithm:"ordered-frontier-merge-v1",
+      consumer_iid:.consumer_iid,
+      target_branch:.target_branch,
+      declared_inputs:.declared_inputs,
+      effective_inputs:.effective_inputs,
+      aggregate_base_sha:.aggregate_base_sha
+    }' 2>/dev/null)" || return 1
+    dependency_plan_hash="$(sha256_text "${dependency_plan_canonical}")" \
+      || return 1
+    if [ "${dependency_plan_hash}" != "${DEPENDENCY_PLAN_SHA256}" ]; then
+      return 1
+    fi
+  fi
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  state_tmp="${ISSUE_STATE_FILE}.tmp.$$"
+  state_tmp="$(create_private_temp_file "${ISSUE_STATE_FILE}")" || return 1
   if ! (umask 077; printf '%s' "${prior_state}" | jq \
       --argjson iid "${ISSUE_IID}" \
       --argjson execution_id "${EXECUTION_ID}" \
@@ -215,7 +483,11 @@ persist_pushed_branch_identity() {
       --arg dependency_iid "${DEPENDENCY_IID}" \
       --arg dependency_branch "${DEPENDENCY_BRANCH}" \
       --arg dependency_base_sha "${DEPENDENCY_BASE_SHA}" \
+      --arg dependency_contract_version "${DEPENDENCY_CONTRACT_VERSION}" \
+      --arg dependency_plan_sha256 "${DEPENDENCY_PLAN_SHA256}" \
+      --argjson dependency_plan "${dependency_plan_json}" \
       --arg work_branch_sha "${remote_commit}" \
+      --argjson preserve_commit_sha "${preserve_commit_sha}" \
       --arg updated_at "${now}" '
       . + {
         iid:$iid,
@@ -226,10 +498,24 @@ persist_pushed_branch_identity() {
         dependency_branch:(if $dependency_branch == "" then null else $dependency_branch end),
         dependency_base_sha:(if $dependency_base_sha == "" then null else $dependency_base_sha end),
         dependency_pinned_execution_id:$execution_id,
+        commit_sha:(
+          if $preserve_commit_sha then .commit_sha
+          else $work_branch_sha
+          end
+        ),
         work_branch_sha:$work_branch_sha,
         dependency_history_verified:true,
         dependency_history_updated_at:$updated_at
       }
+      | if $dependency_contract_version == "" then
+          del(.dependency_contract_version,
+              .dependency_plan_sha256,
+              .dependency_plan)
+        else
+          .dependency_contract_version = ($dependency_contract_version | tonumber)
+          | .dependency_plan_sha256 = $dependency_plan_sha256
+          | .dependency_plan = $dependency_plan
+        end
       | del(.proposed_config_branch,
             .proposed_work_branch,
             .proposed_branch_members,
@@ -239,6 +525,9 @@ persist_pushed_branch_identity() {
             .proposed_dependency_iid,
             .proposed_dependency_branch,
             .proposed_dependency_base_sha,
+            .proposed_dependency_contract_version,
+            .proposed_dependency_plan_sha256,
+            .proposed_dependency_plan,
             .preparing_execution_id)
     ' >"${state_tmp}"); then
     return 1
@@ -340,7 +629,7 @@ persist_shared_mr_pending_checkpoint() {
   [[ "${intent_id}" =~ ^[0-9a-f]{64}$ ]] || return 1
   SHARED_MR_INTENT_ID="${intent_id}"
 
-  state_tmp="${ISSUE_STATE_FILE}.tmp.$$"
+  state_tmp="$(create_private_temp_file "${ISSUE_STATE_FILE}")" || return 1
   if ! (umask 077; printf '%s' "${prior_state}" | jq \
       --argjson execution_id "${EXECUTION_ID}" \
       --arg work_branch "${WORK_BRANCH}" \
@@ -407,7 +696,7 @@ advance_shared_mr_checkpoint() {
     ' >/dev/null 2>&1; then
     return 1
   fi
-  state_tmp="${ISSUE_STATE_FILE}.tmp.$$"
+  state_tmp="$(create_private_temp_file "${ISSUE_STATE_FILE}")" || return 1
   if ! (umask 077; printf '%s' "${prior_state}" | jq \
       --arg new_commit_sha "${new_commit_sha}" '
       .mr_finalization.commit_sha = $new_commit_sha
@@ -445,7 +734,7 @@ advance_mr_result_marker() {
     ' "${marker_file}" >/dev/null 2>&1; then
     return 1
   fi
-  marker_tmp="${marker_file}.tmp.$$"
+  marker_tmp="$(create_private_temp_file "${marker_file}")" || return 1
   if ! (umask 077; jq --arg new_commit_sha "${new_commit_sha}" \
       '.sha = $new_commit_sha' "${marker_file}" >"${marker_tmp}"); then
     return 1
@@ -561,9 +850,12 @@ build_worker_result() {
 write_worker_result() {
   local result="$1"
   local result_file="${LOG_DIR}/worker_result.json"
-  local result_tmp="${result_file}.tmp.$$"
+  local result_tmp
+  result_tmp="$(create_private_temp_file "${result_file}")" || {
+    echo "run_executor_attempt.sh: failed to allocate private result file" >&2
+    exit 3
+  }
   if ! (
-    umask 077
     printf '%s\n' "${result}" >"${result_tmp}"
     chmod 600 "${result_tmp}"
     mv "${result_tmp}" "${result_file}"
@@ -573,9 +865,51 @@ write_worker_result() {
   fi
 }
 
+write_attempt_finalized_marker() {
+  local result_file="${LOG_DIR}/worker_result.json"
+  local marker_file="${LOG_DIR}/attempt_finalized.json"
+  local marker_tmp
+  local result_sha256 completed_at_epoch
+  [ -f "${result_file}" ] && [ ! -L "${result_file}" ] || {
+    echo "run_executor_attempt.sh: worker result is unavailable for finalization" >&2
+    exit 3
+  }
+  result_sha256="$(sha256_file "${result_file}")" || {
+    echo "run_executor_attempt.sh: failed to hash ${result_file}" >&2
+    exit 3
+  }
+  completed_at_epoch="$(date +%s)"
+  marker_tmp="$(create_private_temp_file "${marker_file}")" || {
+    echo "run_executor_attempt.sh: failed to allocate private finalization marker" >&2
+    exit 3
+  }
+  if ! (
+    jq -cn \
+      --argjson iid "${ISSUE_IID}" \
+      --argjson execution_id "${EXECUTION_ID}" \
+      --arg work_branch "${WORK_BRANCH}" \
+      --arg commit_sha "${COMMIT_SHA}" \
+      --arg worker_result_sha256 "${result_sha256}" \
+      --argjson completed_at_epoch "${completed_at_epoch}" '{
+        version:1,
+        iid:$iid,
+        execution_id:$execution_id,
+        work_branch:$work_branch,
+        commit_sha:$commit_sha,
+        worker_result_sha256:$worker_result_sha256,
+        completed_at_epoch:$completed_at_epoch
+      }' >"${marker_tmp}"
+    chmod 600 "${marker_tmp}"
+    mv "${marker_tmp}" "${marker_file}"
+  ); then
+    echo "run_executor_attempt.sh: failed to persist ${marker_file}" >&2
+    exit 3
+  fi
+}
+
 persist_and_print_result() {
   local result archive_output log_parent_commit log_commit_sha prior_commit_sha
-  local archive_logs=true promote_log_commit=true
+  local archive_logs=true promote_log_commit=true preserve_business_commit=false
   result="$(build_worker_result)"
   write_worker_result "${result}"
 
@@ -585,6 +919,19 @@ persist_and_print_result() {
   if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ] \
       && { [ -z "${COMMIT_SHA}" ] || [ -z "${SHARED_MR_INTENT_ID}" ]; }; then
     archive_logs=false
+  fi
+  if [ "${DEPENDENCY_CONTRACT_VERSION}" = 2 ] \
+      && [ -z "${COMMIT_SHA}" ]; then
+    archive_logs=false
+  fi
+
+  # A single-Issue branch has two distinct terminal identities: COMMIT_SHA is
+  # the reviewed business artifact and the remote work-branch tip may advance
+  # once to a direct log-only child. Dependency plans always freeze the former
+  # while validating and binding the latter separately.
+  if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 1 ] \
+      && [ -n "${COMMIT_SHA}" ]; then
+    promote_log_commit=false
   fi
 
   # An unresolved automatic merge is still fenced to the pre-archive source
@@ -621,7 +968,9 @@ persist_and_print_result() {
       echo "run_executor_attempt.sh: terminal log persistence returned an invalid branch identity" >&2
       exit 4
     fi
-    if ! persist_pushed_branch_identity "${log_commit_sha}"; then
+    [ "${promote_log_commit}" = true ] || preserve_business_commit=true
+    if ! persist_pushed_branch_identity \
+        "${log_commit_sha}" "${preserve_business_commit}"; then
       echo "run_executor_attempt.sh: terminal log branch identity could not be persisted" >&2
       exit 4
     fi
@@ -643,6 +992,11 @@ persist_and_print_result() {
     printf '%s\n' "${archive_output}" >&2
   fi
 
+  # This marker is intentionally written last and is not part of the remote
+  # log commit. The scheduler must not consume worker_result.json or reclaim
+  # the child until this exact result hash proves all terminal persistence has
+  # completed.
+  write_attempt_finalized_marker
   printf '%s\n' "${result}"
 }
 
@@ -686,6 +1040,10 @@ stage_partial_work() {
 commit_partial_work() {
   run_bounded_step commit-and-push 300 env \
     ISSUE_TITLE="${ISSUE_TITLE}" \
+    DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION}" \
+    DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256}" \
+    DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA}" \
+    AUTO_MERGE="${AUTO_MERGE}" \
     EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA}" \
     EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA}" \
     bash "${SCRIPT_DIR}/commit_and_push.sh"
@@ -712,11 +1070,15 @@ verify_partial_work() {
 }
 
 # The bounded commit helper can be killed after the server accepted its push
-# but before it printed the SHA. For a shared branch, recover only when the
-# current local HEAD is a new one-parent commit on the frozen parent and a fresh
-# fetch proves the exact remote-tracking ref equals that HEAD.
-recover_ambiguous_shared_push() {
-  [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -eq 2 ] || return 1
+# but before it printed the SHA. For any fixed-parent branch (a legacy shared
+# tail or DAG v2), recover only when the current local HEAD is a new one-parent
+# commit on the frozen parent and a fresh fetch proves the exact
+# remote-tracking ref equals that HEAD.
+recover_ambiguous_fixed_parent_push() {
+  if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -ne 2 ] \
+      && [ "${DEPENDENCY_CONTRACT_VERSION}" != 2 ]; then
+    return 1
+  fi
   local candidate_sha parents_line remote_sha
   local -a candidate_parents
   candidate_sha="$(GIT_NO_REPLACE_OBJECTS=1 git -C "${WORKTREE_DIR}" \
@@ -815,13 +1177,17 @@ esac
 
 run_bounded_step commit-and-push 300 env \
   ISSUE_TITLE="${ISSUE_TITLE}" \
+  DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION}" \
+  DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256}" \
+  DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA}" \
+  AUTO_MERGE="${AUTO_MERGE}" \
   EXPECTED_WORK_BRANCH_SHA="${EXPECTED_WORK_BRANCH_SHA}" \
   EXPECTED_COMMIT_PARENT_SHA="${EXPECTED_COMMIT_PARENT_SHA}" \
   bash "${SCRIPT_DIR}/commit_and_push.sh"
 if [ "${STEP_RC}" -ne 0 ]; then
   COMMIT_PUSH_FAILURE="$(last_error_line "${STEP_STDERR}" "rc=${STEP_RC}")"
-  if recover_ambiguous_shared_push; then
-    append_reason "commit_and_push returned an ambiguous failure, but the exact shared remote tip confirms the local commit"
+  if recover_ambiguous_fixed_parent_push; then
+    append_reason "commit_and_push returned an ambiguous failure, but the exact fixed-parent remote tip confirms the local commit"
   else
     BLOCK_REASON="git push failed: ${COMMIT_PUSH_FAILURE}"
     finish_blocked
@@ -881,6 +1247,8 @@ while :; do
     DEPENDENCY_IID="${DEPENDENCY_IID}" \
     DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH}" \
     DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA}" \
+    DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION}" \
+    DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256}" \
     COMMIT_SHA="${COMMIT_SHA}" \
     SHARED_MR_RECOVERY="${SHARED_MR_RECOVERY}" \
     bash "${SCRIPT_DIR}/create_mr.sh"

@@ -9,9 +9,11 @@ The complete technical execution now runs through one fixed wrapper. This is a
 correctness boundary, not only a prompt simplification: a long synchronous acpx
 tool call can return without OpenClaw scheduling another model turn. Keeping
 acpx and all deterministic finalization in one Bash process removes that gap.
-The wrapper also persists its final compact result to
-`${LOG_DIR}/worker_result.json`, allowing the periodic executor tick to recover
-the result and release a stuck native subagent slot.
+The wrapper first persists its compact result to
+`${LOG_DIR}/worker_result.json`, then completes log/state persistence and
+publishes private hash-bound `${LOG_DIR}/attempt_finalized.json` last. The
+periodic executor tick may recover the result and release a stuck native
+subagent slot only when that marker matches the exact bytes and identities.
 
 GitLab credentials are never rendered into this payload. Fixed scripts resolve
 credentials from the private process/deployment environment, and
@@ -29,16 +31,18 @@ credentials from the private process/deployment environment, and
 | `{BRANCH}` | resolved processing base branch |
 | `{BRANCH_QUOTED}` | shell-safe single-quoted processing base branch |
 | `{CONFIG_BRANCH}` | trusted branch supplying `.claude/` runtime config |
+| `{DEPENDENCY_CONTRACT_VERSION}` | empty for legacy ordinary/pair execution, or `2` for the DAG contract |
+| `{DEPENDENCY_PLAN_SHA256}` | full lowercase SHA-256 identity of the frozen DAG plan, or empty for legacy execution |
 | `{DEPENDENCY_IID}` | prerequisite IID, or empty when none applies |
 | `{DEPENDENCY_BRANCH}` | shared `issue/A+C` branch for C, legacy ordinary dependency branch, or empty |
-| `{DEPENDENCY_BASE_SHA}` | immutable prerequisite commit used by fresh checkout, or empty |
+| `{DEPENDENCY_BASE_SHA}` | immutable prerequisite/aggregate commit used by fresh checkout, or empty |
 | `{AUTO_MERGE}` | `true` only when the user explicitly requested automatic merge |
 | `{MERGE_TARGET_BRANCH}` | resolved merge-request target branch |
 | `{MERGE_TARGET_BRANCH_QUOTED}` | shell-safe single-quoted merge-request target branch |
-| `{WORK_BRANCH}` | fixed `issue/<iid>` branch or frozen shared `issue/A+C` branch |
+| `{WORK_BRANCH}` | fixed `issue/<iid>`, frozen shared `issue/A+C`, or DAG v2 `issue/<iid>-dag-<plan-prefix>` branch |
 | `{WORK_BRANCH_QUOTED}` | shell-safe single-quoted work branch |
-| `{EXPECTED_WORK_BRANCH_SHA}` | exact old shared-branch tip used only for the explicit push lease, or empty for a new/ordinary branch |
-| `{EXPECTED_COMMIT_PARENT_SHA}` | exact commit required as the new shared commit's only parent, or empty for an ordinary branch |
+| `{EXPECTED_WORK_BRANCH_SHA}` | exact old shared/DAG-continue tip used only for the explicit push lease; empty for a new/ordinary/DAG-fresh branch |
+| `{EXPECTED_COMMIT_PARENT_SHA}` | exact commit required as the new shared/DAG business commit's only parent, or empty for an ordinary branch |
 | `{LOCAL_ISSUE_BRANCH}` | fixed issue-local branch |
 | `{REPO_PATH}` | parent checkout |
 | `{WORKTREE_DIR}` | shared per-IID linked worktree |
@@ -86,6 +90,8 @@ EXECUTION_ID={EXECUTION_ID}
 ISSUE_MODE={ISSUE_MODE}
 BRANCH={BRANCH}
 CONFIG_BRANCH={CONFIG_BRANCH}
+DEPENDENCY_CONTRACT_VERSION={DEPENDENCY_CONTRACT_VERSION}
+DEPENDENCY_PLAN_SHA256={DEPENDENCY_PLAN_SHA256}
 DEPENDENCY_IID={DEPENDENCY_IID}
 DEPENDENCY_BRANCH={DEPENDENCY_BRANCH}
 DEPENDENCY_BASE_SHA={DEPENDENCY_BASE_SHA}
@@ -114,6 +120,8 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
      REPO_PARENT_PATH= REPO_PATH={REPO_PATH} \
      ISSUE_MODE={ISSUE_MODE} BRANCH={BRANCH_QUOTED} \
      WORK_BRANCH={WORK_BRANCH_QUOTED} \
+     DEPENDENCY_CONTRACT_VERSION={DEPENDENCY_CONTRACT_VERSION} \
+     DEPENDENCY_PLAN_SHA256={DEPENDENCY_PLAN_SHA256} \
      EXPECTED_WORK_BRANCH_SHA={EXPECTED_WORK_BRANCH_SHA} \
      EXPECTED_COMMIT_PARENT_SHA={EXPECTED_COMMIT_PARENT_SHA} \
      DEPENDENCY_IID={DEPENDENCY_IID} \
@@ -148,7 +156,10 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
   Staging-time execution logs are committed with the business changes on the
   Issue branch. After atomically writing `{LOG_DIR}/worker_result.json`, it
   appends the complete terminal directory as a log-only child on that same
-  branch and then prints the compact result; it creates no log branch.
+  branch, persists the business/log-tip identities, publishes
+  `{LOG_DIR}/attempt_finalized.json`, and then prints the compact result; it
+  creates no log branch. For a single-Issue branch the callback commit remains
+  the business commit while `work_branch_sha` records the log child.
 - The whole outer run remains bounded by the deployment's global subagent
   timeout; the periodic heartbeat additionally reclaims post-acpx stalls.
 - Never paste logs, diffs, prompt contents, or credentials into the reply.

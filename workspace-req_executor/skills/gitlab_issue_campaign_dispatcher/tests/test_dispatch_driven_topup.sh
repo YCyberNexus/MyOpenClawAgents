@@ -85,7 +85,7 @@ mkdir -p "${STATE_DIR}"
 for name in dispatch_driven_topup.sh dispatch_prepare_tick.sh _dispatch_lib.sh \
   branch_utils.sh env_paths.sh git_network_guard.sh glab_auth.sh \
   gitlab_env_resolver.sh parse_issue_dependency.sh \
-  resolve_driven_repo_path.sh; do
+  resolve_dependency_dag_base.sh resolve_driven_repo_path.sh; do
   cp "${SKILL_DIR}/scripts/${name}" "${FIXTURE_SCRIPTS}/${name}"
 done
 cp "${SKILL_DIR}/references/executor_prompt.md" "${FIXTURE_REFS}/executor_prompt.md"
@@ -153,7 +153,7 @@ cat >"${FIXTURE_SCRIPTS}/allocate_execution_id.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' "${IID}" >>"${TEST_ALLOC_LOG}"
-printf '1\n'
+printf '%s\n' "${FAKE_ALLOC_EXECUTION_ID:-1}"
 EOF
 cat >"${FIXTURE_SCRIPTS}/prepare_attempt.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -182,7 +182,11 @@ fi
 source "${SCRIPT_DIR}/env_paths.sh"
 mkdir -p "${WORKTREE_DIR}/.git" "${WORKTREE_DIR}/.claude" "${LOG_DIR}" "${OUTPUT_DIR}"
 local_branch="issue/${ISSUE_IID}"
-if [ -n "${SHARED_BRANCH_ROLE:-}" ]; then
+if [ "${DEPENDENCY_CONTRACT_VERSION:-}" = 2 ]; then
+  prepared_parent_sha="${EXPECTED_COMMIT_PARENT_SHA:?}"
+  git -C "${REPO_PATH}" update-ref \
+    "refs/heads/${local_branch}" "${prepared_parent_sha}"
+elif [ -n "${SHARED_BRANCH_ROLE:-}" ]; then
   if [ "${SHARED_BRANCH_ROLE}" = tail ]; then
     prepared_parent_sha="${EXPECTED_COMMIT_PARENT_SHA:?}"
   else
@@ -358,6 +362,27 @@ cat >"${BIN_DIR}/glab" <<'EOF'
 set -euo pipefail
 if [ "$*" = 'api user' ]; then
   jq -cn '{username:"req-executor-bot"}'
+  exit 0
+fi
+if [ -n "${FAKE_DAG_MRS_JSON:-}" ] \
+    && [[ "$*" =~ ^api\ projects/group%2Fproject/merge_requests/([1-9][0-9]*)$ ]]; then
+  mr_iid="${BASH_REMATCH[1]}"
+  jq -ce --argjson iid "${mr_iid}" \
+    '.[] | select(.iid == $iid)' <<<"${FAKE_DAG_MRS_JSON}"
+  exit 0
+fi
+if [ -n "${FAKE_DAG_MRS_JSON:-}" ] \
+    && [[ "$*" == api\ projects/group%2Fproject/merge_requests\?* ]]; then
+  request_args="$*"
+  encoded_source="${request_args#*source_branch=}"
+  encoded_source="${encoded_source%%&*}"
+  source_branch="${encoded_source//%2F//}"
+  source_branch="${source_branch//%2B/+}"
+  jq -c --arg source_branch "${source_branch}" '
+    [.[] | select(
+      .state == "opened" and .source_branch == $source_branch)
+      | {iid,web_url,source_branch,state}]
+  ' <<<"${FAKE_DAG_MRS_JSON}"
   exit 0
 fi
 if [ "$*" = 'api projects/group%2Fproject/merge_requests/17' ]; then
@@ -1022,114 +1047,9 @@ for preserved_terminal in finish pr; do
     || fail "mutation-boundary ${preserved_terminal} race left pending state"
 done
 
-# A declared dependency is a deferred ordering condition, not a failed
-# attempt. Until the prerequisite has both a successful workflow label and a
-# matching durable commit on the shared branch, the dependent consumes no
-# attempt and creates no project pending placeholder. Once ready, it appends to
-# the frozen shared branch while the independently resolved MR target stays main.
-for dependency_cycle_case in root_cycle upstream_cycle; do
-  write_terminal_race_state
-  case "${dependency_cycle_case}" in
-    root_cycle)
-      export FAKE_ISSUE_DESCRIPTIONS_JSON='{
-        "2":"依赖 Issue #9",
-        "9":"依赖 Issue #10",
-        "10":"依赖 Issue #2"
-      }'
-      ;;
-    upstream_cycle)
-      export FAKE_ISSUE_DESCRIPTIONS_JSON='{
-        "2":"依赖 Issue #9",
-        "9":"依赖 Issue #10",
-        "10":"依赖 Issue #9"
-      }'
-      ;;
-  esac
-  DEPENDENCY_CYCLE_OUTPUT="$(run_wrapper "${RACE_REQUEST}")"
-  unset FAKE_ISSUE_DESCRIPTIONS_JSON
-  printf '%s' "${DEPENDENCY_CYCLE_OUTPUT}" | jq -e '
-    .status == "no_eligible_iids"
-    and .dispatch_entries == []
-    and .pending_iids == []
-    and .dependency_waiting == []
-    and .deferred_entries == []
-    and .skipped_entries == [{
-      job_id:"job-2",batch_id:"batch-A",snapshot_index:0,
-      project:"group/project",iid:2,status:"skipped",
-      reason:"dependency_cycle"
-    }]
-    and .tick_outcome_per_iid["2"] ==
-      "blocked: issue_dependency_invalid: dependency_cycle"
-  ' >/dev/null || fail "${dependency_cycle_case} was not rejected explicitly"
-  [ "$(cat "${ALLOC_LOG}")" = 2 ] && [ ! -s "${PREP_LOG}" ] \
-    || fail "${dependency_cycle_case} reached worktree preparation or allocated repeatedly"
-  jq -e '
-    (.pending_subagents | has("2") | not)
-    and (.blocked_iids | index(2) != null)
-  ' "${STATE_FILE}" >/dev/null \
-    || fail "${dependency_cycle_case} did not drain its placeholder into blocked state"
-done
-
-# A stable completed prerequisite no longer waits on its old declaration, so
-# that historical edge must cut off cycle traversal.
-write_terminal_race_state
-export FAKE_ISSUE_DESCRIPTIONS_JSON='{
-  "2":"依赖 Issue #9",
-  "9":"依赖 Issue #2"
-}'
-export FAKE_ISSUE_LABELS_JSON='{"9":["pr"]}'
-COMPLETED_EDGE_OUTPUT="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
-printf '%s' "${COMPLETED_EDGE_OUTPUT}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .skipped_entries == []
-  and .dependency_waiting == [{
-    iid:2,dependency_iid:9,branch:"issue/9+2",
-    reason:"dependency_branch_migration_pending"
-  }]
-' >/dev/null || fail "completed dependency did not enter late branch migration"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-  || fail "completed-edge branch wait consumed an attempt"
-
-# A bounded parser timeout is a non-terminal ordering retry. It must release
-# the scheduler slot without allocating an attempt or misreporting completion.
-export TEST_REAL_TIMEOUT="$(command -v timeout)"
-cat >"${BIN_DIR}/timeout" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-if [[ " $* " == *" ISSUE_IID=9 "* ]]; then
-  exit 124
-fi
-exec "${TEST_REAL_TIMEOUT}" "$@"
-EOF
-chmod +x "${BIN_DIR}/timeout"
-write_terminal_race_state
-export FAKE_ISSUE_DESCRIPTIONS_JSON='{
-  "2":"依赖 Issue #9",
-  "9":"依赖 Issue #10"
-}'
-DEPENDENCY_CHECK_DEFERRED="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_ISSUE_DESCRIPTIONS_JSON
-mv "${BIN_DIR}/timeout" "${BIN_DIR}/timeout.injected-test"
-unset TEST_REAL_TIMEOUT
-printf '%s' "${DEPENDENCY_CHECK_DEFERRED}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .pending_iids == []
-  and .skipped_entries == []
-  and .dependency_waiting == [{
-    iid:2,dependency_iid:9,branch:"issue/9+2",
-    reason:"dependency_cycle_check_deferred"
-  }]
-  and .deferred_entries[0].reason == "dependency_cycle_check_deferred"
-' >/dev/null || fail "dependency cycle-check timeout was not deferred"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-  || fail "dependency cycle-check timeout consumed an attempt"
-
-# Root parser and Issue lookup timeouts happen before a dependency IID is
-# known. They must use the nullable preflight deferral envelope, keep the
-# scheduler membership retryable, and consume no attempt.
+# Dependency parsing and graph reads are bounded preflight work. Timeouts keep
+# the scheduler grant retryable and must happen before execution allocation,
+# placeholder persistence, worktree preparation, or workflow-label mutation.
 export TEST_REAL_TIMEOUT="$(command -v timeout)"
 cat >"${BIN_DIR}/timeout" <<'EOF'
 #!/usr/bin/env bash
@@ -1146,9 +1066,10 @@ exec "${TEST_REAL_TIMEOUT}" "$@"
 EOF
 chmod +x "${BIN_DIR}/timeout"
 for root_preflight_timeout in parser lookup; do
-  export FAKE_ROOT_TIMEOUT_MODE="${root_preflight_timeout}"
   write_terminal_race_state
+  export FAKE_ROOT_TIMEOUT_MODE="${root_preflight_timeout}"
   ROOT_PREFLIGHT_DEFERRED="$(run_wrapper "${RACE_REQUEST}")"
+  unset FAKE_ROOT_TIMEOUT_MODE
   if [ "${root_preflight_timeout}" = parser ]; then
     expected_root_deferred_reason=dependency_preflight_deferred
   else
@@ -1161,26 +1082,69 @@ for root_preflight_timeout in parser lookup; do
     and .pending_iids == []
     and .skipped_entries == []
     and .dependency_waiting == [{
-      iid:2,dependency_iid:null,branch:null,
-      reason:$reason
+      iid:2,dependency_iid:null,branch:null,reason:$reason
     }]
     and .deferred_entries == [{
       job_id:"job-2",batch_id:"batch-A",snapshot_index:0,
       project:"group/project",iid:2,status:"deferred",
-      reason:$reason,dependency_iid:null,
-      dependency_branch:null
+      reason:$reason,dependency_iid:null,dependency_branch:null
     }]
-  ' >/dev/null \
-    || fail "root ${root_preflight_timeout} timeout was not retryably deferred"
+  ' >/dev/null || {
+    printf '%s\n' "${ROOT_PREFLIGHT_DEFERRED}" >&2
+    fail "root ${root_preflight_timeout} timeout was not retryably deferred"
+  }
   [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-    || fail "root ${root_preflight_timeout} timeout consumed an attempt"
+    && [ ! -s "${LABEL_LOG}" ] \
+    || fail "root ${root_preflight_timeout} timeout crossed the preflight boundary"
+  jq -e '
+    (.pending_subagents | has("2") | not)
+    and (.unfinished_iids | index(2) != null)
+  ' "${STATE_FILE}" >/dev/null \
+    || fail "root ${root_preflight_timeout} timeout persisted a placeholder"
 done
-unset FAKE_ROOT_TIMEOUT_MODE TEST_REAL_TIMEOUT
+unset TEST_REAL_TIMEOUT
 mv "${BIN_DIR}/timeout" "${BIN_DIR}/timeout.root-preflight-test"
 
-# The first declared prerequisite lookup shares the same phase deadline and
-# per-call timeout as chain traversal, while retaining the known dependency in
-# its deferral envelope.
+# A timeout while traversing an unfinished predecessor retains the known edge
+# in the retry envelope but does not classify the graph as invalid.
+export TEST_REAL_TIMEOUT="$(command -v timeout)"
+cat >"${BIN_DIR}/timeout" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ " $* " == *" ISSUE_IID=9 "* ]]; then
+  exit 124
+fi
+exec "${TEST_REAL_TIMEOUT}" "$@"
+EOF
+chmod +x "${BIN_DIR}/timeout"
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"依赖 Issue #9",
+  "9":"依赖 Issue #10"
+}'
+DEPENDENCY_CHECK_DEFERRED="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON TEST_REAL_TIMEOUT
+mv "${BIN_DIR}/timeout" "${BIN_DIR}/timeout.chain-parser-test"
+printf '%s' "${DEPENDENCY_CHECK_DEFERRED}" | jq -e '
+  .status == "no_eligible_iids"
+  and .dispatch_entries == []
+  and .pending_iids == []
+  and .skipped_entries == []
+  and .dependency_waiting == [{
+    iid:2,dependency_iid:9,branch:"issue/9",
+    reason:"dependency_cycle_check_deferred"
+  }]
+  and .deferred_entries[0].reason == "dependency_cycle_check_deferred"
+' >/dev/null || {
+  printf '%s\n' "${DEPENDENCY_CHECK_DEFERRED}" >&2
+  fail "dependency parser timeout was not deferred"
+}
+[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
+  && [ ! -s "${LABEL_LOG}" ] \
+  || fail "dependency parser timeout consumed an attempt"
+
+# The direct predecessor GET is under the same graph deadline. Its IID and
+# immutable ordinary branch are already known when the lookup times out.
 export TEST_REAL_TIMEOUT="$(command -v timeout)"
 cat >"${BIN_DIR}/timeout" <<'EOF'
 #!/usr/bin/env bash
@@ -1193,7 +1157,7 @@ EOF
 chmod +x "${BIN_DIR}/timeout"
 write_terminal_race_state
 export FAKE_DEPENDENT_IID=2
-export FAKE_DEPENDENCY_DESCRIPTION='依赖于 Issue #9'
+export FAKE_DEPENDENCY_DESCRIPTION='依赖 Issue #9'
 DIRECT_LOOKUP_DEFERRED="$(run_wrapper "${RACE_REQUEST}")"
 unset FAKE_DEPENDENT_IID FAKE_DEPENDENCY_DESCRIPTION TEST_REAL_TIMEOUT
 mv "${BIN_DIR}/timeout" "${BIN_DIR}/timeout.direct-lookup-test"
@@ -1203,177 +1167,539 @@ printf '%s' "${DIRECT_LOOKUP_DEFERRED}" | jq -e '
   and .pending_iids == []
   and .skipped_entries == []
   and .dependency_waiting == [{
-    iid:2,dependency_iid:9,branch:"issue/9+2",
-    reason:"dependency_cycle_check_deferred"
+    iid:2,dependency_iid:9,branch:"issue/9",
+    reason:"dependency_dag_preflight_deferred"
   }]
-  and .deferred_entries[0].reason == "dependency_cycle_check_deferred"
-' >/dev/null || fail "direct dependency lookup timeout was not deferred"
+  and .deferred_entries[0].reason == "dependency_dag_preflight_deferred"
+' >/dev/null || {
+  printf '%s\n' "${DIRECT_LOOKUP_DEFERRED}" >&2
+  fail "direct dependency lookup timeout was not deferred"
+}
 [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
+  && [ ! -s "${LABEL_LOG}" ] \
   || fail "direct dependency lookup timeout consumed an attempt"
 
-write_terminal_race_state
-export FAKE_DEPENDENT_IID=2
-export FAKE_DEPENDENCY_DESCRIPTION='依赖于 Issue #9'
-export FAKE_DEPENDENCY_LABEL=pr
-DEPENDENCY_WAIT="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_DEPENDENCY_LABEL
-printf '%s' "${DEPENDENCY_WAIT}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .pending_iids == []
-  and .dependency_waiting == [{
-    iid:2,dependency_iid:9,branch:"issue/9+2",
-    reason:"dependency_branch_migration_pending"
-  }]
-  and .deferred_entries == [{
-    job_id:"job-2",batch_id:"batch-A",snapshot_index:0,
-    project:"group/project",iid:2,status:"deferred",
-    reason:"dependency_branch_migration_pending",dependency_iid:9,
-    dependency_branch:"issue/9+2"
-  }]
-' >/dev/null || fail "unready dependency migration was not deferred without launch"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] && [ ! -s "${LABEL_LOG}" ] \
-  || fail "unready dependency consumed attempt, prepared a worktree, or changed labels"
-jq -e '
-  (.pending_subagents | has("2") | not)
-  and (.unfinished_iids | index(2) != null)
-' "${STATE_FILE}" >/dev/null \
-  || fail "unready dependency did not remain retryable without a placeholder"
+# New DAG-v2 planning keeps every predecessor immutable and gives each
+# consumer its own plan-addressed branch.
+write_ordinary_dag_source_state() {
+  local iid="$1" execution_id="$2" branch="$3" sha="$4" mr_iid="$5"
+  local work_branch_sha="${6:-${sha}}"
+  local state_dir="${PROJECT_REPO}/.req_executor/issues/issue-${iid}"
+  mkdir -p "${state_dir}"
+  jq -n \
+    --argjson iid "${iid}" \
+    --argjson execution_id "${execution_id}" \
+    --arg branch "${branch}" \
+    --arg sha "${sha}" \
+    --arg work_branch_sha "${work_branch_sha}" \
+    --arg mr_url \
+      "https://gitlab.test/group/project/-/merge_requests/${mr_iid}" '{
+      iid:$iid,status:"done",
+      latest_execution_id:$execution_id,
+      dependency_pinned_execution_id:$execution_id,
+      work_branch:$branch,branch_members:[$iid],shared_branch_role:null,
+      dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
+      commit_sha:$sha,work_branch_sha:$work_branch_sha,
+      dependency_history_verified:true,merge_request_url:$mr_url
+    }' >"${state_dir}/state.json"
+  chmod 600 "${state_dir}/state.json"
+}
 
-git -C "${PROJECT_REPO}" update-ref refs/remotes/origin/issue/9+2 HEAD
-: >"${ALLOC_LOG}"
-: >"${PREP_LOG}"
-: >"${LABEL_LOG}"
-: >"${GLAB_LOG}"
-DEPENDENCY_INCOMPLETE="$(run_wrapper "${RACE_REQUEST}")"
-printf '%s' "${DEPENDENCY_INCOMPLETE}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .dependency_waiting == [{
-    iid:2,dependency_iid:9,branch:"issue/9+2",reason:"dependency_not_completed"
-  }]
-' >/dev/null || fail "existing partial dependency branch was released before successful completion"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] && [ ! -s "${LABEL_LOG}" ] \
-  || fail "incomplete dependency branch consumed execution budget"
+DAG_SOURCE_9_SHA="$(git -C "${PROJECT_REPO}" rev-parse HEAD)"
+DAG_LOG_INDEX="$(mktemp "${TEST_ROOT}/dag-log-index.XXXXXX")"
+cp "${PROJECT_REPO}/.git/index" "${DAG_LOG_INDEX}"
+mkdir -p \
+  "${PROJECT_REPO}/.req_executor/issue-9/log/execution-901"
+printf '{"status":"archived"}\n' \
+  >"${PROJECT_REPO}/.req_executor/issue-9/log/execution-901/summary.json"
+GIT_INDEX_FILE="${DAG_LOG_INDEX}" git -C "${PROJECT_REPO}" add \
+  ".req_executor/issue-9/log/execution-901/summary.json"
+DAG_SOURCE_9_LOG_TREE="$(GIT_INDEX_FILE="${DAG_LOG_INDEX}" \
+  git -C "${PROJECT_REPO}" write-tree)"
+DAG_SOURCE_9_LOG_SHA="$(printf 'terminal log child\n' \
+  | git -C "${PROJECT_REPO}" commit-tree "${DAG_SOURCE_9_LOG_TREE}" \
+    -p "${DAG_SOURCE_9_SHA}")"
 
-export FAKE_DEPENDENCY_LABELS_JSON='["pr","continue"]'
-DEPENDENCY_RESUMING="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_DEPENDENCY_LABELS_JSON
-printf '%s' "${DEPENDENCY_RESUMING}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .dependency_waiting[0].reason == "dependency_not_completed"
-' >/dev/null || fail "dependency with a pending continue request was treated as stable"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] && [ ! -s "${LABEL_LOG}" ] \
-  || fail "resuming dependency released its dependent"
+DAG_BUSINESS_INDEX="$(mktemp "${TEST_ROOT}/dag-business-index.XXXXXX")"
+cp "${PROJECT_REPO}/.git/index" "${DAG_BUSINESS_INDEX}"
+printf 'unreviewed business change\n' \
+  >"${PROJECT_REPO}/unexpected-business-change.txt"
+GIT_INDEX_FILE="${DAG_BUSINESS_INDEX}" git -C "${PROJECT_REPO}" add \
+  "unexpected-business-change.txt"
+DAG_SOURCE_9_BUSINESS_TREE="$(GIT_INDEX_FILE="${DAG_BUSINESS_INDEX}" \
+  git -C "${PROJECT_REPO}" write-tree)"
+DAG_SOURCE_9_BUSINESS_SHA="$(printf 'unexpected business child\n' \
+  | git -C "${PROJECT_REPO}" commit-tree "${DAG_SOURCE_9_BUSINESS_TREE}" \
+    -p "${DAG_SOURCE_9_SHA}")"
 
-export FAKE_DEPENDENCY_LABEL=pr
-: >"${ALLOC_LOG}"
-: >"${PREP_LOG}"
-: >"${LABEL_LOG}"
-: >"${GLAB_LOG}"
-DEPENDENCY_UNVERIFIED="$(run_wrapper "${RACE_REQUEST}")"
-printf '%s' "${DEPENDENCY_UNVERIFIED}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .dependency_waiting[0].reason == "dependency_branch_migration_pending"
-' >/dev/null || fail "dependency branch was released without migration-safe durable state"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] && [ ! -s "${LABEL_LOG}" ] \
-  || fail "unverified dependency commit consumed execution budget"
-
-# A stacked dependency commit is allowed as a manual-review development
-# baseline, but C must not auto-merge that unreviewed commit into main. The
-# pinned prerequisite SHA has to be an ancestor of the exact merge target.
-STACKED_DEPENDENCY_SHA="$(printf 'stacked dependency\n' \
-  | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} -p HEAD)"
+# A branch move cannot be reconciled merely because it is a direct child of
+# the reviewed business SHA. Non-log content fails closed and leaves the
+# durable B/B identity untouched.
 git -C "${PROJECT_REPO}" update-ref \
-  refs/remotes/origin/issue/9+2 "${STACKED_DEPENDENCY_SHA}"
-mkdir -p "${PROJECT_REPO}/.req_executor/issues/issue-9"
-jq -n --arg sha "${STACKED_DEPENDENCY_SHA}" \
-  '{iid:9,status:"done",commit_sha:$sha,work_branch:"issue/9+2",
-    branch_members:[9,2],shared_branch_role:"head",
-    dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
-    merge_request_url:"https://gitlab.test/group/project/-/merge_requests/17"}' \
-  >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+  refs/remotes/origin/issue/9 "${DAG_SOURCE_9_BUSINESS_SHA}"
+write_ordinary_dag_source_state 9 901 issue/9 "${DAG_SOURCE_9_SHA}" 16
+export FAKE_DAG_MRS_JSON="$(jq -nc \
+  --arg sha "${DAG_SOURCE_9_BUSINESS_SHA}" '[{
+    iid:16,
+    web_url:"https://gitlab.test/group/project/-/merge_requests/16",
+    source_branch:"issue/9",target_branch:"main",sha:$sha,state:"opened",
+    author:{username:"req-executor-bot"},description:"Closes #9"
+  }]')"
 write_terminal_race_state
-AUTO_MERGE_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c \
-  '.grants[0].auto_merge = true | .grants[0].merge_target_branch = "main"')"
-AUTO_MERGE_WAIT="$(run_wrapper "${AUTO_MERGE_REQUEST}")"
-printf '%s' "${AUTO_MERGE_WAIT}" | jq -e '
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{"2":"依赖 Issue #9"}'
+export FAKE_ISSUE_LABELS_JSON='{"2":["blocked-dispatcher"],"9":["pr"]}'
+DAG_BUSINESS_CHILD_BLOCK="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_BUSINESS_CHILD_BLOCK}" | jq -e '
   .status == "no_eligible_iids"
   and .dispatch_entries == []
   and .pending_iids == []
   and .dependency_waiting == []
-  and .skipped_entries[0].reason == "shared_branch_auto_merge_unsupported"
-' >/dev/null || fail "auto-merge bypassed the prerequisite merge target gate"
+  and .skipped_entries[0].reason ==
+    "dependency_source_state_identity_mismatch"
+' >/dev/null || {
+  printf '%s\n' "${DAG_BUSINESS_CHILD_BLOCK}" >&2
+  fail "arbitrary business child was accepted as a terminal-log recovery"
+}
 [ "$(cat "${ALLOC_LOG}")" = 2 ] && [ ! -s "${PREP_LOG}" ] \
-  && grep -Fq '2|add blocked-dispatcher' "${LABEL_LOG}" \
-  || fail "shared-branch auto-merge rejection reached worktree preparation"
+  || fail "arbitrary source child reached worktree preparation"
+jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
+  .commit_sha == $sha and .work_branch_sha == $sha
+' "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" >/dev/null \
+  || fail "rejected business child mutated the source B/B identity"
 
+# A deterministic direct child containing only execution-901 log paths is the
+# one accepted crash-recovery shape. Use B/L for the same-tick gate below;
+# the next normal consumer resets state to B/B to exercise automatic CAS.
+git -C "${PROJECT_REPO}" update-ref \
+  refs/remotes/origin/issue/9 "${DAG_SOURCE_9_LOG_SHA}"
+export FAKE_DAG_MRS_JSON="$(printf '%s' "${FAKE_DAG_MRS_JSON}" | jq -c \
+  --arg sha "${DAG_SOURCE_9_LOG_SHA}" '.[0].sha = $sha')"
+write_ordinary_dag_source_state 9 901 issue/9 \
+  "${DAG_SOURCE_9_SHA}" 16 "${DAG_SOURCE_9_LOG_SHA}"
+
+# A completed predecessor selected for force-rerun in this same tick is no
+# longer an immutable input. The consumer is removed from the batch before its
+# execution ID or pending placeholder is allocated, while the source proceeds.
+write_terminal_race_state
+SAME_TICK_DIRECT_STATE_TMP="$(mktemp \
+  "${STATE_FILE}.same-tick-direct.XXXXXX")"
+jq '.issue_min_iid=2 | .issue_max_iid=9
+  | .issue_iids_whitelist=[9,2]
+  | .unfinished_iids=[9,2] | .completed_iids=[9]' \
+  "${STATE_FILE}" >"${SAME_TICK_DIRECT_STATE_TMP}"
+mv "${SAME_TICK_DIRECT_STATE_TMP}" "${STATE_FILE}"
+SAME_TICK_DIRECT_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0] as $consumer
+  | .grants = [
+      ($consumer
+        | .job_id="job-9" | .iid=9 | .snapshot_index=2
+        | .branch="main" | .entry_mode="fresh"
+        | .force_rerun_pr=true | .auto_merge=false
+        | .merge_target_branch=null),
+      ($consumer
+        | .job_id="job-2" | .iid=2 | .snapshot_index=0
+        | .branch="main" | .entry_mode="fresh"
+        | .force_rerun_pr=false | .auto_merge=false
+        | .merge_target_branch=null)
+    ]')"
+SOURCE_9_STATE_SAME_TICK_BACKUP="$(mktemp \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.same-tick.XXXXXX")"
+cp "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" \
+  "${SOURCE_9_STATE_SAME_TICK_BACKUP}"
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{"2":"依赖 Issue #9","9":"body"}'
+export FAKE_ISSUE_LABELS_JSON='{"2":["blocked-dispatcher"],"9":["pr"]}'
+export FAKE_ALLOC_EXECUTION_ID=902
+SAME_TICK_DIRECT_OUTPUT="$(run_wrapper "${SAME_TICK_DIRECT_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON \
+  FAKE_ALLOC_EXECUTION_ID
+cp "${SOURCE_9_STATE_SAME_TICK_BACKUP}" \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+printf '%s' "${SAME_TICK_DIRECT_OUTPUT}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [9]
+  and .pending_iids == [9]
+  and .dependency_waiting == [{
+    iid:2,dependency_iid:9,branch:"issue/9",
+    reason:"dependency_source_selected_same_tick"
+  }]
+  and .deferred_entries[0].reason ==
+    "dependency_source_selected_same_tick"
+' >/dev/null || {
+  printf '%s\n' "${SAME_TICK_DIRECT_OUTPUT}" >&2
+  fail "direct same-tick predecessor mutation did not defer its consumer"
+}
+[ "$(cat "${ALLOC_LOG}")" = 9 ] \
+  && [ "$(cat "${PREP_LOG}")" = '9|main|fresh' ] \
+  || fail "direct same-tick gate allocated or prepared its consumer"
+jq -e '
+  (.pending_subagents | has("9"))
+  and (.pending_subagents | has("2") | not)
+' "${STATE_FILE}" >/dev/null \
+  || fail "direct same-tick gate persisted a consumer placeholder"
+if grep -Fq '2|' "${LABEL_LOG}"; then
+  fail "direct same-tick gate mutated consumer workflow labels"
+fi
+
+# Simulate the crash after L was pushed but before state moved from B/B to
+# B/L. The normal dependency read must CAS only work_branch_sha, then build a
+# plan whose declared input keeps both identities and whose aggregate is B.
+write_ordinary_dag_source_state 9 901 issue/9 "${DAG_SOURCE_9_SHA}" 16
+: >"${MIGRATION_LOG}"
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{"2":"依赖 Issue #9"}'
+export FAKE_ISSUE_LABELS_JSON='{"2":["blocked-dispatcher"],"9":["pr"]}'
+DAG_TWO_READY="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_TWO_READY}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [2]
+  and .dependency_waiting == []
+' >/dev/null || fail "single-input DAG consumer was not released"
+DAG_TWO_STATE="${PROJECT_REPO}/.req_executor/issues/issue-2/state.json"
+DAG_TWO_WORK_BRANCH="$(jq -r '.dependency_plan.work_branch' "${DAG_TWO_STATE}")"
+DAG_TWO_PLAN_SHA256="$(jq -r \
+  '.dependency_plan_sha256' "${DAG_TWO_STATE}")"
+jq -e --arg sha "${DAG_SOURCE_9_SHA}" \
+  --arg log_sha "${DAG_SOURCE_9_LOG_SHA}" '
+  .dependency_contract_version == 2
+  and (.dependency_plan | keys | sort) == ([
+    "aggregate_base_sha","consumer_iid","declared_inputs",
+    "effective_inputs","plan_sha256","target_branch","version","work_branch"
+  ] | sort)
+  and .dependency_plan.consumer_iid == 2
+  and (.dependency_plan.declared_inputs | map(.iid)) == [9]
+  and (.dependency_plan.effective_inputs | map(.iid)) == [9]
+  and .dependency_plan.declared_inputs[0].commit_sha == $sha
+  and .dependency_plan.declared_inputs[0].work_branch_sha == $log_sha
+  and .dependency_plan.effective_inputs[0].commit_sha == $sha
+  and .dependency_plan.effective_inputs[0].work_branch_sha == $log_sha
+  and .dependency_plan.aggregate_base_sha == $sha
+  and .proposed_dependency_plan == .dependency_plan
+  and .proposed_expected_commit_parent_sha == $sha
+' "${DAG_TWO_STATE}" >/dev/null \
+  || fail "single-input DAG plan was not frozen in Issue state"
+[[ "${DAG_TWO_WORK_BRANCH}" =~ ^issue/2-dag-[0-9a-f]{16}$ ]] \
+  || fail "DAG consumer did not receive a plan-addressed branch"
+[ "${DAG_TWO_WORK_BRANCH}" = \
+    "issue/2-dag-${DAG_TWO_PLAN_SHA256:0:16}" ] \
+  || fail "DAG branch prefix does not match its full plan identity"
+[ "$(cat "${PREP_LOG}")" = '2|main|fresh' ] \
+  || fail "DAG consumer did not prepare from its independent target baseline"
+[ ! -s "${MIGRATION_LOG}" ] \
+  || fail "DAG planning invoked a destructive legacy migration"
+jq -e --arg sha "${DAG_SOURCE_9_SHA}" \
+  --arg log_sha "${DAG_SOURCE_9_LOG_SHA}" '
+  .commit_sha == $sha
+  and .work_branch_sha == $log_sha
+  and (.terminal_log_recovered_at | type == "string" and length > 0)
+' "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" >/dev/null \
+  || fail "terminal-log crash replay did not CAS source state from B/B to B/L"
+SOURCE_9_STATE_HASH="$(sha256_file \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json")"
+[ "$(git -C "${PROJECT_REPO}" rev-parse refs/remotes/origin/issue/9)" = \
+    "${DAG_SOURCE_9_LOG_SHA}" ] \
+  || fail "DAG planning moved the predecessor branch"
+DAG_TWO_PAYLOAD="$(printf '%s' "${DAG_TWO_READY}" \
+  | jq -r '.dispatch_entries[0].payload_path')"
+DAG_TWO_MANIFEST="$(sed -n 's/^manifest_path=//p' "${DAG_TWO_PAYLOAD}")"
+DAG_TWO_EXECUTOR_PAYLOAD="$(jq -r '.executor_payload_path' \
+  "${DAG_TWO_MANIFEST}")"
+grep -Fq 'DEPENDENCY_CONTRACT_VERSION=2' "${DAG_TWO_EXECUTOR_PAYLOAD}" \
+  || fail "DAG contract version was not rendered"
+grep -Fq "DEPENDENCY_PLAN_SHA256=${DAG_TWO_PLAN_SHA256}" \
+  "${DAG_TWO_EXECUTOR_PAYLOAD}" \
+  || fail "DAG full plan identity was not rendered"
+grep -Fq "EXPECTED_COMMIT_PARENT_SHA=${DAG_SOURCE_9_SHA}" \
+  "${DAG_TWO_EXECUTOR_PAYLOAD}" \
+  || fail "DAG consumer did not freeze its exact commit parent"
+grep -Fq "WORK_BRANCH=${DAG_TWO_WORK_BRANCH}" \
+  "${DAG_TWO_EXECUTOR_PAYLOAD}" \
+  || fail "DAG consumer work branch was not rendered"
+
+# A second consumer may reuse the same immutable predecessor without sharing
+# a branch or mutating the first consumer.
+write_terminal_race_state
+DAG_THREE_STATE_TMP="$(mktemp "${STATE_FILE}.dag-three.XXXXXX")"
+jq '.issue_min_iid=3 | .issue_max_iid=3 | .issue_iids_whitelist=[3]
+  | .unfinished_iids=[3] | .completed_iids=[9]' \
+  "${STATE_FILE}" >"${DAG_THREE_STATE_TMP}"
+mv "${DAG_THREE_STATE_TMP}" "${STATE_FILE}"
+DAG_THREE_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0] |= (
+    .job_id="job-3" | .iid=3 | .snapshot_index=1 | .branch="main"
+    | .entry_mode="fresh" | .force_rerun_pr=false
+    | .auto_merge=false | .merge_target_branch=null
+  )')"
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{"3":"依赖 Issue #9"}'
+export FAKE_ISSUE_LABELS_JSON='{"3":["blocked-dispatcher"],"9":["pr"]}'
+DAG_THREE_READY="$(run_wrapper "${DAG_THREE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_THREE_READY}" | jq -e '
+  .status == "ready" and [.dispatch_entries[].iid] == [3]
+' >/dev/null || fail "fan-out consumer did not reuse its predecessor"
+DAG_THREE_WORK_BRANCH="$(jq -r '.dependency_plan.work_branch' \
+  "${PROJECT_REPO}/.req_executor/issues/issue-3/state.json")"
+[ "${DAG_THREE_WORK_BRANCH}" != "${DAG_TWO_WORK_BRANCH}" ] \
+  || fail "fan-out consumers were assigned the same work branch"
+jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
+  .dependency_plan.aggregate_base_sha == $sha
+  and (.dependency_plan.declared_inputs | map(.iid)) == [9]
+' "${PROJECT_REPO}/.req_executor/issues/issue-3/state.json" >/dev/null \
+  || fail "fan-out consumer did not freeze the reused predecessor SHA"
+[ "$(sha256_file \
+    "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json")" = \
+    "${SOURCE_9_STATE_HASH}" ] \
+  || fail "fan-out planning modified the shared predecessor state"
+
+# Promote the first consumer to a completed immutable artifact, then declare
+# both its ancestor and itself. Transitive reduction must keep only Issue 2.
+DAG_TWO_COMMIT_SHA="$(printf 'DAG consumer 2 result\n' \
+  | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} \
+    -p "${DAG_SOURCE_9_SHA}")"
+git -C "${PROJECT_REPO}" update-ref \
+  "refs/remotes/origin/${DAG_TWO_WORK_BRANCH}" "${DAG_TWO_COMMIT_SHA}"
+DAG_TWO_DONE_TMP="$(mktemp "${DAG_TWO_STATE}.done.XXXXXX")"
+jq --arg commit_sha "${DAG_TWO_COMMIT_SHA}" \
+  --arg work_branch "${DAG_TWO_WORK_BRANCH}" '
+  .status="done"
+  | .latest_execution_id=1
+  | .dependency_pinned_execution_id=1
+  | .work_branch=$work_branch
+  | .branch_members=[2]
+  | .shared_branch_role=null
+  | .dependency_iid=9
+  | .dependency_branch="issue/9"
+  | .dependency_base_sha=.dependency_plan.aggregate_base_sha
+  | .commit_sha=$commit_sha
+  | .work_branch_sha=$commit_sha
+  | .dependency_history_verified=true
+  | .merge_request_url=
+    "https://gitlab.test/group/project/-/merge_requests/19"
+' "${DAG_TWO_STATE}" >"${DAG_TWO_DONE_TMP}"
+chmod 600 "${DAG_TWO_DONE_TMP}"
+mv "${DAG_TWO_DONE_TMP}" "${DAG_TWO_STATE}"
+export FAKE_DAG_MRS_JSON="$(printf '%s' "${FAKE_DAG_MRS_JSON}" | jq -c \
+  --arg sha "${DAG_TWO_COMMIT_SHA}" \
+  --arg branch "${DAG_TWO_WORK_BRANCH}" '. + [{
+    iid:19,
+    web_url:"https://gitlab.test/group/project/-/merge_requests/19",
+    source_branch:$branch,target_branch:"main",sha:$sha,state:"opened",
+    author:{username:"req-executor-bot"},description:"Closes #2"
+  }]')"
+
+# The antichain gate uses the resolver's transitive closure, not only direct
+# declarations. Here Issue 6 directly consumes completed Issue 2, while Issue
+# 9 is Issue 2's frozen ancestor and is selected for force-rerun in this tick.
+write_terminal_race_state
+SAME_TICK_TRANSITIVE_STATE_TMP="$(mktemp \
+  "${STATE_FILE}.same-tick-transitive.XXXXXX")"
+jq '.issue_min_iid=6 | .issue_max_iid=9
+  | .issue_iids_whitelist=[9,6]
+  | .unfinished_iids=[9,6] | .completed_iids=[9,2]' \
+  "${STATE_FILE}" >"${SAME_TICK_TRANSITIVE_STATE_TMP}"
+mv "${SAME_TICK_TRANSITIVE_STATE_TMP}" "${STATE_FILE}"
+SAME_TICK_TRANSITIVE_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0] as $consumer
+  | .grants = [
+      ($consumer
+        | .job_id="job-9" | .iid=9 | .snapshot_index=2
+        | .branch="main" | .entry_mode="fresh"
+        | .force_rerun_pr=true | .auto_merge=false
+        | .merge_target_branch=null),
+      ($consumer
+        | .job_id="job-6" | .batch_id="batch-C" | .snapshot_index=0
+        | .iid=6 | .branch="main" | .entry_mode="fresh"
+        | .force_rerun_pr=true | .auto_merge=false
+        | .merge_target_branch=null)
+    ]')"
+SOURCE_9_TRANSITIVE_BACKUP="$(mktemp \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.transitive.XXXXXX")"
+cp "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" \
+  "${SOURCE_9_TRANSITIVE_BACKUP}"
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"依赖 Issue #9",
+  "6":"依赖 Issue #2",
+  "9":"body"
+}'
+export FAKE_ISSUE_LABELS_JSON='{
+  "2":["pr"],"6":["blocked-dispatcher"],"9":["pr"]
+}'
+export FAKE_ALLOC_EXECUTION_ID=903
+SAME_TICK_TRANSITIVE_OUTPUT="$(
+  run_wrapper "${SAME_TICK_TRANSITIVE_REQUEST}"
+)"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON \
+  FAKE_ALLOC_EXECUTION_ID
+cp "${SOURCE_9_TRANSITIVE_BACKUP}" \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+printf '%s' "${SAME_TICK_TRANSITIVE_OUTPUT}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [9]
+  and .pending_iids == [9]
+  and .dependency_waiting == [{
+    iid:6,dependency_iid:9,branch:"issue/9",
+    reason:"dependency_source_selected_same_tick"
+  }]
+  and .deferred_entries[0].reason ==
+    "dependency_source_selected_same_tick"
+' >/dev/null || {
+  printf '%s\n' "${SAME_TICK_TRANSITIVE_OUTPUT}" >&2
+  fail "transitive same-tick predecessor mutation did not defer its consumer"
+}
+[ "$(cat "${ALLOC_LOG}")" = 9 ] \
+  && [ "$(cat "${PREP_LOG}")" = '9|main|fresh' ] \
+  || fail "transitive same-tick gate allocated or prepared its consumer"
+jq -e '
+  (.pending_subagents | has("9"))
+  and (.pending_subagents | has("6") | not)
+' "${STATE_FILE}" >/dev/null \
+  || fail "transitive same-tick gate persisted a consumer placeholder"
+if grep -Fq '6|' "${LABEL_LOG}"; then
+  fail "transitive same-tick gate mutated consumer workflow labels"
+fi
+
+write_terminal_race_state
+DAG_SIX_STATE_TMP="$(mktemp "${STATE_FILE}.dag-six.XXXXXX")"
+jq '.issue_min_iid=6 | .issue_max_iid=6 | .issue_iids_whitelist=[6]
+  | .unfinished_iids=[6] | .completed_iids=[9,2]' \
+  "${STATE_FILE}" >"${DAG_SIX_STATE_TMP}"
+mv "${DAG_SIX_STATE_TMP}" "${STATE_FILE}"
+DAG_SIX_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0] |= (
+    .job_id="job-6" | .batch_id="batch-C" | .snapshot_index=0
+    | .iid=6 | .branch="main" | .entry_mode="fresh"
+    | .force_rerun_pr=true | .auto_merge=false
+    | .merge_target_branch=null
+  )')"
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"依赖 Issue #9",
+  "6":"依赖 Issue #9,#2"
+}'
+export FAKE_ISSUE_LABELS_JSON='{
+  "2":["pr"],"6":["blocked-dispatcher"],"9":["pr"]
+}'
+DAG_SIX_READY="$(run_wrapper "${DAG_SIX_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_SIX_READY}" | jq -e '
+  .status == "ready" and [.dispatch_entries[].iid] == [6]
+' >/dev/null || {
+  printf '%s\n' "${DAG_SIX_READY}" >&2
+  fail "multi-level DAG consumer was not released"
+}
+jq -e --arg sha "${DAG_TWO_COMMIT_SHA}" '
+  (.dependency_plan.declared_inputs | map(.iid)) == [9,2]
+  and (.dependency_plan.effective_inputs | map(.iid)) == [2]
+  and .dependency_plan.aggregate_base_sha == $sha
+' "${PROJECT_REPO}/.req_executor/issues/issue-6/state.json" >/dev/null \
+  || fail "multi-level DAG transitive reduction chose the wrong frontier"
+
+# Cycle detection traverses every edge, including a back-edge that appears
+# only in the second element of a multi-input declaration.
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"依赖 Issue #9,#10",
+  "9":"body",
+  "10":"依赖 Issue #2"
+}'
+export FAKE_ISSUE_LABELS_JSON='{
+  "2":["blocked-dispatcher"],"9":[],"10":[]
+}'
+DAG_SECOND_EDGE_CYCLE="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_SECOND_EDGE_CYCLE}" | jq -e '
+  .status == "no_eligible_iids"
+  and .dispatch_entries == []
+  and .dependency_waiting == []
+  and .skipped_entries[0].reason == "dependency_cycle"
+  and .tick_outcome_per_iid["2"] ==
+    "blocked: issue_dependency_invalid: dependency_cycle"
+' >/dev/null || {
+  printf '%s\n' "${DAG_SECOND_EDGE_CYCLE}" >&2
+  fail "cycle on a non-first dependency edge was not rejected"
+}
+[ ! -s "${PREP_LOG}" ] \
+  || fail "non-first-edge cycle reached worktree preparation"
+
+# A repeated ancestor in a diamond is black/visited, not an active-stack
+# recurrence, and therefore remains a normal dependency wait.
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"依赖 Issue #9",
+  "9":"依赖 Issue #10,#3",
+  "10":"依赖 Issue #3",
+  "3":"body"
+}'
+export FAKE_ISSUE_LABELS_JSON='{
+  "2":["blocked-dispatcher"],"3":[],"9":[],"10":[]
+}'
+DAG_DIAMOND_WAIT="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_DIAMOND_WAIT}" | jq -e '
+  .status == "no_eligible_iids"
+  and .dispatch_entries == []
+  and .skipped_entries == []
+  and .dependency_waiting[0].reason == "dependency_not_completed"
+' >/dev/null || fail "diamond dependency graph was mistaken for a cycle"
+[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
+  || fail "diamond wait consumed an attempt"
+unset FAKE_DAG_MRS_JSON
+
+# Restore the single-head fixture used by the remaining continue tests.
 DEPENDENCY_SHA="$(git -C "${PROJECT_REPO}" rev-parse HEAD)"
-git -C "${PROJECT_REPO}" update-ref refs/remotes/origin/issue/9+2 "${DEPENDENCY_SHA}"
+git -C "${PROJECT_REPO}" update-ref \
+  refs/remotes/origin/issue/9+2 "${DEPENDENCY_SHA}"
 mkdir -p "${PROJECT_REPO}/.req_executor/issues/issue-9"
-  jq -n --arg sha "${DEPENDENCY_SHA}" \
-  '{iid:9,status:"done",commit_sha:$sha,work_branch:"issue/9+2",
-    branch_members:[9,2],shared_branch_role:"head",
-    work_branch_sha:$sha,dependency_history_verified:true,
-    latest_execution_id:1,dependency_pinned_execution_id:1,
-    dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
-    merge_request_url:"https://gitlab.test/group/project/-/merge_requests/17",
-    mr_finalization:{
-      status:"verified_open",source_execution_id:1,
-      work_branch:"issue/9+2",branch_members:[9,2],shared_branch_role:"head",
-      commit_sha:$sha,
-      intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      target_branch:"main",iid:17,
-      web_url:"https://gitlab.test/group/project/-/merge_requests/17",
-      mr_action:"created",verified_at:"2026-07-19T00:00:00Z"
-    }}' \
-  >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+jq -n --arg sha "${DEPENDENCY_SHA}" '{
+  iid:9,status:"done",commit_sha:$sha,work_branch:"issue/9+2",
+  branch_members:[9,2],shared_branch_role:"head",
+  work_branch_sha:$sha,dependency_history_verified:true,
+  latest_execution_id:1,dependency_pinned_execution_id:1,
+  dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
+  merge_request_url:"https://gitlab.test/group/project/-/merge_requests/17",
+  mr_finalization:{
+    status:"verified_open",source_execution_id:1,
+    work_branch:"issue/9+2",branch_members:[9,2],shared_branch_role:"head",
+    commit_sha:$sha,
+    intent_id:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    target_branch:"main",iid:17,
+    web_url:"https://gitlab.test/group/project/-/merge_requests/17",
+    mr_action:"created",verified_at:"2026-07-19T00:00:00Z"
+  }}' >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
 chmod 600 "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-export FAKE_SHARED_MR_SHA="${DEPENDENCY_SHA}"
 VALID_DEPENDENCY_STATE="$(mktemp \
   "${PROJECT_REPO}/.req_executor/issues/issue-9/state.valid.XXXXXX")"
 cp "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" \
   "${VALID_DEPENDENCY_STATE}"
-for invalid_dependency_binding in missing_finalization mismatched_target unverified_history; do
-  case "${invalid_dependency_binding}" in
-    missing_finalization)
-      jq 'del(.mr_finalization)' "${VALID_DEPENDENCY_STATE}" \
-        >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-      ;;
-    mismatched_target)
-      jq '.mr_finalization.target_branch = "release"' \
-        "${VALID_DEPENDENCY_STATE}" \
-        >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-      ;;
-    unverified_history)
-      jq '.dependency_history_verified = false' "${VALID_DEPENDENCY_STATE}" \
-        >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-      ;;
-  esac
-  write_terminal_race_state
-  INVALID_DEPENDENCY_BINDING="$(run_wrapper "${RACE_REQUEST}")"
-  printf '%s' "${INVALID_DEPENDENCY_BINDING}" | jq -e '
-    .status == "no_eligible_iids"
-    and .dispatch_entries == []
-    and .dependency_waiting[0].reason == "dependency_commit_unverified"
-  ' >/dev/null \
-    || fail "${invalid_dependency_binding} dependency MR binding released C"
-  [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-    || fail "${invalid_dependency_binding} dependency MR binding reached preparation"
-done
+export FAKE_SHARED_MR_SHA="${DEPENDENCY_SHA}"
 cp "${VALID_DEPENDENCY_STATE}" \
   "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+git -C "${PROJECT_REPO}" update-ref \
+  refs/remotes/origin/issue/9+2 "${DEPENDENCY_SHA}"
+export FAKE_SHARED_MR_SHA="${DEPENDENCY_SHA}"
 
-# A pending claim still blocks C during the Phase-6 crash window. Once that
-# claim is absent, A may come from an earlier campaign and need not appear in
-# this campaign's completed_iids; its private migration-safe state supplies
-# the durable proof for the late-binding transaction.
-write_terminal_race_state
-UNSETTLED_STATE_TMP="$(mktemp "${STATE_FILE}.dependency-unsettled.XXXXXX")"
+write_legacy_pair_campaign_state() {
+  local state_tmp
+  write_terminal_race_state
+  state_tmp="$(mktemp "${STATE_FILE}.legacy-pair.XXXXXX")"
+  jq '.shared_branch_groups = {
+    "issue/9+2":{
+      work_branch:"issue/9+2",head_iid:9,tail_iid:2,
+      members:[9,2],scope_id:"batch-A",merge_target_branch:"main"
+    }
+  }' "${STATE_FILE}" >"${state_tmp}"
+  mv "${state_tmp}" "${STATE_FILE}"
+}
+
+# A persisted v1 shared pair remains supported while it drains. During the
+# source's Phase-6 crash window its campaign claim is authoritative even if
+# live labels and private state already look terminal; the tail must not spend
+# an execution ID or create a placeholder.
+write_legacy_pair_campaign_state
+LEGACY_PENDING_TMP="$(mktemp "${STATE_FILE}.legacy-source-pending.XXXXXX")"
 jq --arg now "${NOW}" '.pending_subagents["9"] = {
-    execution_id:1,run_id:"run-A",child_session_key:"child-A",
+    execution_id:901,run_id:"run-legacy-head",
+    child_session_key:"child-legacy-head",
     spawned_at:$now,placeholder:false,acpx_timeout_seconds:18000,
     auto_merge:false,branch:"main",merge_target_branch:"main",
     work_branch:"issue/9+2",branch_members:[9,2],shared_branch_role:"head",
@@ -1381,230 +1707,118 @@ jq --arg now "${NOW}" '.pending_subagents["9"] = {
   }
   | .active_issue_iids=[9]
   | .active_issue_sessions=["issue-project-9"]' \
-  "${STATE_FILE}" >"${UNSETTLED_STATE_TMP}"
-mv "${UNSETTLED_STATE_TMP}" "${STATE_FILE}"
-DEPENDENCY_HEAD_PENDING="$(run_wrapper "${RACE_REQUEST}")"
-printf '%s' "${DEPENDENCY_HEAD_PENDING}" | jq -e '
+  "${STATE_FILE}" >"${LEGACY_PENDING_TMP}"
+mv "${LEGACY_PENDING_TMP}" "${STATE_FILE}"
+export FAKE_DEPENDENT_IID=2
+export FAKE_DEPENDENCY_DESCRIPTION='依赖 Issue #9'
+export FAKE_DEPENDENCY_LABEL=pr
+LEGACY_PHASE6_WAIT="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_DEPENDENT_IID FAKE_DEPENDENCY_DESCRIPTION FAKE_DEPENDENCY_LABEL
+printf '%s' "${LEGACY_PHASE6_WAIT}" | jq -e '
   .status == "waiting_for_callbacks"
   and .dispatch_entries == []
   and .pending_iids == [9]
-' >/dev/null || fail "repository-serial topup did not wait for campaign-pending A"
+' >/dev/null || fail "legacy shared tail crossed the source Phase-6 crash window"
 [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-  || fail "campaign-pending A allowed C to allocate or prepare"
+  && [ ! -s "${LABEL_LOG}" ] \
+  || fail "legacy Phase-6 crash window consumed an attempt"
 
-write_terminal_race_state
-MISSING_COMPLETED_TMP="$(mktemp "${STATE_FILE}.dependency-completed.XXXXXX")"
-jq '.completed_iids=[]' "${STATE_FILE}" >"${MISSING_COMPLETED_TMP}"
-mv "${MISSING_COMPLETED_TMP}" "${STATE_FILE}"
-DEPENDENCY_NOT_CLASSIFIED="$(run_wrapper "${RACE_REQUEST}")"
-printf '%s' "${DEPENDENCY_NOT_CLASSIFIED}" | jq -e '
+# Once the source claim disappears, the already-persisted pair may resume
+# without invoking either retired branch-migration helper.
+write_legacy_pair_campaign_state
+jq -n --arg sha "${DEPENDENCY_SHA}" '{
+  iid:2,status:"blocked",retry_count:0,
+  work_branch:"issue/9+2",branch_members:[9,2],shared_branch_role:"tail",
+  dependency_iid:9,dependency_branch:"issue/9+2",
+  dependency_base_sha:$sha,work_branch_sha:$sha,
+  dependency_history_verified:true
+}' >"${PROJECT_REPO}/.req_executor/issues/issue-2/state.json"
+: >"${MIGRATION_LOG}"
+export FAKE_DEPENDENT_IID=2
+export FAKE_DEPENDENCY_DESCRIPTION='依赖 Issue #9'
+export FAKE_DEPENDENCY_LABEL=pr
+export FAKE_ALLOC_EXECUTION_ID=902
+LEGACY_PAIR_READY="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_DEPENDENT_IID FAKE_DEPENDENCY_DESCRIPTION FAKE_DEPENDENCY_LABEL \
+  FAKE_ALLOC_EXECUTION_ID
+printf '%s' "${LEGACY_PAIR_READY}" | jq -e '
   .status == "ready"
   and [.dispatch_entries[].iid] == [2]
   and .dependency_waiting == []
-' >/dev/null || fail "earlier-campaign A did not release C after durable migration proof"
+' >/dev/null || {
+  printf '%s\n' "${LEGACY_PAIR_READY}" >&2
+  fail "persisted legacy shared pair did not resume"
+}
 [ "$(cat "${ALLOC_LOG}")" = 2 ] \
-  || fail "earlier-campaign A did not allocate exactly one C attempt"
+  && [ "$(cat "${PREP_LOG}")" = '2|issue/9+2|fresh' ] \
+  || fail "persisted legacy shared pair did not preserve its tail branch"
+[ ! -s "${MIGRATION_LOG}" ] \
+  || fail "persisted legacy pair invoked a retired migration helper"
+jq -e --arg sha "${DEPENDENCY_SHA}" '
+  .shared_branch_groups["issue/9+2"].members == [9,2]
+  and .pending_subagents["2"].work_branch == "issue/9+2"
+  and .pending_subagents["2"].shared_branch_role == "tail"
+  and .pending_subagents["2"].dependency_iid == 9
+  and .pending_subagents["2"].dependency_base_sha == $sha
+' "${STATE_FILE}" >/dev/null \
+  || fail "persisted legacy pair identity was not carried into the attempt"
 
-# Historical `verified_open` state is not enough to release C. If A's one MR
-# is closed after Phase 6, the fresh dependency gate must keep C unstarted.
-write_terminal_race_state
-: >"${ALLOC_LOG}"
-: >"${PREP_LOG}"
-: >"${LABEL_LOG}"
+# The durable v1 proof is still live-bound to its one MR. A closed MR cannot
+# release the tail merely because the old state says verified_open.
+write_legacy_pair_campaign_state
+export FAKE_DEPENDENT_IID=2
+export FAKE_DEPENDENCY_DESCRIPTION='依赖 Issue #9'
+export FAKE_DEPENDENCY_LABEL=pr
 export FAKE_SHARED_MR_STATE=closed
-DEPENDENCY_MR_CLOSED="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_SHARED_MR_STATE
-printf '%s' "${DEPENDENCY_MR_CLOSED}" | jq -e '
+LEGACY_CLOSED_MR_WAIT="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_DEPENDENT_IID FAKE_DEPENDENCY_DESCRIPTION FAKE_DEPENDENCY_LABEL \
+  FAKE_SHARED_MR_STATE
+printf '%s' "${LEGACY_CLOSED_MR_WAIT}" | jq -e '
   .status == "no_eligible_iids"
   and .dispatch_entries == []
+  and .pending_iids == []
   and .dependency_waiting[0].reason == "dependency_commit_unverified"
-' >/dev/null || fail "closed A MR released C from the live dependency gate"
+' >/dev/null || fail "closed legacy source MR released its shared tail"
 [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-  || fail "closed A MR allowed C to allocate or prepare"
+  || fail "closed legacy source MR consumed a tail attempt"
 
-# A is the immutable head commit of issue/9+2. A continue request must remain
-# a retryable scheduler deferral and must not enter attempt preparation or the
-# prep-blocked Phase-6 path, because either path could overwrite the verified
-# A state that releases C. Removing continue then lets the existing C gate use
-# these exact same state bytes.
-HEAD_CONTINUE_STATE_TMP="$(mktemp "${STATE_FILE}.head-continue.XXXXXX")"
+# The shared head is immutable while the v1 pair drains. A continue request is
+# deferred before allocation and cannot overwrite the verified source state.
+write_legacy_pair_campaign_state
+LEGACY_HEAD_CAMPAIGN_TMP="$(mktemp "${STATE_FILE}.legacy-head.XXXXXX")"
 jq '.issue_min_iid=9 | .issue_max_iid=9 | .issue_iids_whitelist=[9]
   | .unfinished_iids=[9] | .completed_iids=[]' \
-  "${STATE_FILE}" >"${HEAD_CONTINUE_STATE_TMP}"
-mv "${HEAD_CONTINUE_STATE_TMP}" "${STATE_FILE}"
-HEAD_CONTINUE_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  "${STATE_FILE}" >"${LEGACY_HEAD_CAMPAIGN_TMP}"
+mv "${LEGACY_HEAD_CAMPAIGN_TMP}" "${STATE_FILE}"
+LEGACY_HEAD_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
   .grants[0] |= (
     .job_id="job-9" | .iid=9 | .snapshot_index=2 | .branch="main"
     | .entry_mode="auto" | .force_rerun_pr=false
     | .auto_merge=false | .merge_target_branch=null
   )')"
-HEAD_STATE_BEFORE="$(mktemp "${TEST_ROOT}/head-state-before.XXXXXX")"
-cp "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" \
-  "${HEAD_STATE_BEFORE}"
-: >"${ALLOC_LOG}"
-: >"${PREP_LOG}"
-: >"${LABEL_LOG}"
-: >"${GLAB_LOG}"
+LEGACY_HEAD_STATE_HASH="$(sha256_file \
+  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json")"
 export FAKE_ISSUE_LABELS_JSON='{"9":["pr","continue"]}'
-HEAD_CONTINUE_DEFERRED="$(run_wrapper "${HEAD_CONTINUE_REQUEST}")"
+LEGACY_HEAD_CONTINUE="$(run_wrapper "${LEGACY_HEAD_REQUEST}")"
 unset FAKE_ISSUE_LABELS_JSON
-printf '%s' "${HEAD_CONTINUE_DEFERRED}" | jq -e '
+printf '%s' "${LEGACY_HEAD_CONTINUE}" | jq -e '
   .status == "no_eligible_iids"
   and .dispatch_entries == []
   and .pending_iids == []
-  and .skipped_entries == []
   and .dependency_waiting == [{
     iid:9,dependency_iid:null,branch:null,
     reason:"shared_branch_head_continue_unsupported"
   }]
-  and .deferred_entries == [{
-    job_id:"job-9",batch_id:"batch-A",snapshot_index:2,
-    project:"group/project",iid:9,status:"deferred",
-    reason:"shared_branch_head_continue_unsupported",
-    dependency_iid:null,dependency_branch:null
-  }]
-' >/dev/null || fail "shared head continue was not deferred before attempt allocation"
+  and .deferred_entries[0].reason ==
+    "shared_branch_head_continue_unsupported"
+' >/dev/null || fail "legacy shared head continue was not deferred"
 [ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
   && [ ! -s "${LABEL_LOG}" ] \
-  || fail "shared head continue allocated, prepared, or mutated workflow labels"
-cmp -s "${HEAD_STATE_BEFORE}" \
-  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" \
-  || fail "shared head continue overwrote A verified Issue state"
-
-# The continue label is now absent from the fake live A response. Reuse the
-# byte-identical A state above and prove C can still cross its dependency gate.
-write_terminal_race_state
-: >"${ALLOC_LOG}"
-: >"${PREP_LOG}"
-: >"${LABEL_LOG}"
-: >"${GLAB_LOG}"
-DEPENDENCY_READY="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_DEPENDENCY_LABEL FAKE_DEPENDENT_IID FAKE_DEPENDENCY_DESCRIPTION
-printf '%s' "${DEPENDENCY_READY}" | jq -e '
-  .status == "ready"
-  and [.dispatch_entries[].iid] == [2]
-  and .dependency_waiting == []
-' >/dev/null || fail "completed dependency did not release its dependent"
-[ "$(cat "${ALLOC_LOG}")" = '2' ] \
-  || fail "released dependency did not allocate exactly one dependent attempt"
-[ "$(cat "${PREP_LOG}")" = '2|issue/9+2|fresh' ] \
-  || fail "dependent fresh attempt did not use the prerequisite issue branch"
-
-DEPENDENCY_PAYLOAD="$(printf '%s' "${DEPENDENCY_READY}" | jq -r '.dispatch_entries[0].payload_path')"
-DEPENDENCY_MANIFEST="$(sed -n 's/^manifest_path=//p' "${DEPENDENCY_PAYLOAD}")"
-DEPENDENCY_EXECUTOR_PAYLOAD="$(jq -r '.executor_payload_path' "${DEPENDENCY_MANIFEST}")"
-grep -Fq 'BRANCH=issue/9+2' "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependency base branch was not rendered into the executor payload"
-grep -Fq "CONFIG_BRANCH=main" "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependency changed the trusted Claude config branch"
-grep -Fq "DEPENDENCY_BASE_SHA=${DEPENDENCY_SHA}" "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependency base commit was not pinned in the executor payload"
-grep -Fq "EXPECTED_WORK_BRANCH_SHA=${DEPENDENCY_SHA}" \
-  "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependent push lease was not pinned to A's exact commit"
-grep -Fq "EXPECTED_COMMIT_PARENT_SHA=${DEPENDENCY_SHA}" \
-  "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependent commit parent was not pinned to A's exact commit"
-grep -Fq 'MERGE_TARGET_BRANCH=main' "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependency unexpectedly changed the independently resolved MR target"
-grep -Fq 'WORK_BRANCH=issue/9+2' "${DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "dependent Issue did not retain the shared canonical work branch"
-
-# Two completed ordinary heads are aggregated before C is allocated. The
-# pair-shaped execution contract keeps the first dependency as its anchor, but
-# the campaign group freezes the complete ordered source list and pins C to the
-# aggregate commit that contains both heads.
-write_terminal_race_state
-MULTI_SOURCE_9_SHA="$(git -C "${PROJECT_REPO}" rev-parse HEAD)"
-MULTI_SOURCE_10_SHA="$(printf 'multi source 10\n' \
-  | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} -p HEAD)"
-MULTI_AGGREGATE_SHA="$(printf 'aggregate 9 and 10\n' \
-  | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} \
-    -p "${MULTI_SOURCE_9_SHA}" -p "${MULTI_SOURCE_10_SHA}")"
-mkdir -p "${PROJECT_REPO}/.req_executor/issues/issue-9"
-jq -n --arg sha "${MULTI_SOURCE_9_SHA}" '{
-  iid:9,status:"done",latest_execution_id:1,
-  dependency_pinned_execution_id:1,
-  work_branch:"issue/9",branch_members:[9],shared_branch_role:null,
-  dependency_iid:null,dependency_branch:null,dependency_base_sha:null,
-  commit_sha:$sha,work_branch_sha:$sha,dependency_history_verified:true,
-  merge_request_url:"https://gitlab.test/group/project/-/merge_requests/16"
-}' >"${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-chmod 600 "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-export FAKE_MULTI_AGGREGATE_SHA="${MULTI_AGGREGATE_SHA}"
-export FAKE_SHARED_MR_SHA="${MULTI_AGGREGATE_SHA}"
-export FAKE_ISSUE_DESCRIPTIONS_JSON='{
-  "2":"依赖issue #9,#10 page-name: BOM"
-}'
-export FAKE_ISSUE_LABELS_JSON='{"9":["pr"],"10":["pr"]}'
-: >"${MIGRATION_LOG}"
-MULTI_DEPENDENCY_READY="$(run_wrapper "${RACE_REQUEST}")"
-unset FAKE_MULTI_AGGREGATE_SHA FAKE_ISSUE_DESCRIPTIONS_JSON \
-  FAKE_ISSUE_LABELS_JSON
-printf '%s' "${MULTI_DEPENDENCY_READY}" | jq -e '
-  .status == "ready"
-  and [.dispatch_entries[].iid] == [2]
-  and .dependency_waiting == []
-' >/dev/null || fail "multi-dependency fan-in did not release its dependent"
-jq -e --arg sha "${MULTI_AGGREGATE_SHA}" '
-  .shared_branch_groups["issue/9+2"].dependency_iids == [9,10]
-  and .shared_branch_groups["issue/9+2"].dependency_mode == "fan_in"
-  and .shared_branch_groups["issue/9+2"].members == [9,2]
-  and .pending_subagents["2"].dependency_iid == 9
-  and .pending_subagents["2"].dependency_base_sha == $sha
-  and .pending_subagents["2"].work_branch == "issue/9+2"
-' "${STATE_FILE}" >/dev/null \
-  || fail "multi-dependency fan-in identity was not frozen durably"
-grep -Fxq 'multi:[9,10]->2' "${MIGRATION_LOG}" \
-  || fail "dispatcher did not invoke the multi-head migration transaction"
-MULTI_DEPENDENCY_PAYLOAD="$(printf '%s' "${MULTI_DEPENDENCY_READY}" \
-  | jq -r '.dispatch_entries[0].payload_path')"
-MULTI_DEPENDENCY_MANIFEST="$(sed -n 's/^manifest_path=//p' \
-  "${MULTI_DEPENDENCY_PAYLOAD}")"
-MULTI_DEPENDENCY_EXECUTOR_PAYLOAD="$(jq -r '.executor_payload_path' \
-  "${MULTI_DEPENDENCY_MANIFEST}")"
-grep -Fq "DEPENDENCY_BASE_SHA=${MULTI_AGGREGATE_SHA}" \
-  "${MULTI_DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "multi-dependency attempt did not pin the aggregate commit"
-grep -Fq "EXPECTED_COMMIT_PARENT_SHA=${MULTI_AGGREGATE_SHA}" \
-  "${MULTI_DEPENDENCY_EXECUTOR_PAYLOAD}" \
-  || fail "multi-dependency attempt did not require the aggregate parent"
-
-MULTI_AUX_STATE_TMP="$(mktemp "${STATE_FILE}.multi-aux.XXXXXX")"
-jq '.issue_min_iid=10 | .issue_max_iid=10 | .issue_iids_whitelist=[10]
-  | .unfinished_iids=[10] | .completed_iids=[9,10]
-  | .pending_subagents={} | .active_issue_iids=[] | .active_issue_sessions=[]' \
-  "${STATE_FILE}" >"${MULTI_AUX_STATE_TMP}"
-mv "${MULTI_AUX_STATE_TMP}" "${STATE_FILE}"
-MULTI_AUX_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
-  .grants[0] |= (
-    .job_id="job-10" | .iid=10 | .snapshot_index=3 | .branch="main"
-    | .entry_mode="auto" | .force_rerun_pr=false
-  )')"
-export FAKE_ISSUE_LABELS_JSON='{"10":["pr","continue"]}'
-: >"${ALLOC_LOG}"
-: >"${PREP_LOG}"
-: >"${LABEL_LOG}"
-MULTI_AUX_CONTINUE="$(run_wrapper "${MULTI_AUX_REQUEST}")"
-unset FAKE_ISSUE_LABELS_JSON
-printf '%s' "${MULTI_AUX_CONTINUE}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .dependency_waiting == [{
-    iid:10,dependency_iid:null,branch:null,
-    reason:"shared_branch_source_continue_unsupported"
-  }]
-' >/dev/null \
-  || fail "auxiliary fan-in source was allowed to diverge after aggregation"
-[ ! -s "${ALLOC_LOG}" ] && [ ! -s "${PREP_LOG}" ] \
-  || fail "auxiliary fan-in continue consumed an attempt"
-
-# Restore the single-head fixture used by the remaining continue tests.
-cp "${VALID_DEPENDENCY_STATE}" \
-  "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
-git -C "${PROJECT_REPO}" update-ref \
-  refs/remotes/origin/issue/9+2 "${DEPENDENCY_SHA}"
-export FAKE_SHARED_MR_SHA="${DEPENDENCY_SHA}"
+  || fail "legacy shared head continue crossed the preflight boundary"
+[ "$(sha256_file \
+    "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json")" = \
+    "${LEGACY_HEAD_STATE_HASH}" ] \
+  || fail "legacy shared head continue overwrote its verified state"
 
 # Once C has pushed the shared branch, continue resumes that exact C tip even
 # if A is no longer in a stable completed state.

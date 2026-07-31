@@ -68,6 +68,14 @@ if ! printf '%s\n' "${rendered_block}" \
     | grep -Fq 'EXPECTED_COMMIT_PARENT_SHA={EXPECTED_COMMIT_PARENT_SHA} \'; then
   fail "outer executor prompt must keep the commit parent separate from the remote push lease"
 fi
+if ! printf '%s\n' "${rendered_block}" \
+    | grep -Fq 'DEPENDENCY_CONTRACT_VERSION={DEPENDENCY_CONTRACT_VERSION} \'; then
+  fail "outer executor prompt must pass the dependency contract version"
+fi
+if ! printf '%s\n' "${rendered_block}" \
+    | grep -Fq 'DEPENDENCY_PLAN_SHA256={DEPENDENCY_PLAN_SHA256} \'; then
+  fail "outer executor prompt must pass the frozen DAG plan identity"
+fi
 if [ ! -x "${ATTEMPT_WRAPPER}" ]; then
   fail "run_executor_attempt.sh is missing or not executable"
 fi

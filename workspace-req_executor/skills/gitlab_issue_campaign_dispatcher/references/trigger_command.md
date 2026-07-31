@@ -260,8 +260,10 @@ five-field public acceptance contract.
 performs these phases in order:
 
 1. Reconcile durable batch terminal counters before any new reservation.
-2. Recover exact durable worker results and emit post-acpx child cleanup under
-   the current job/generation/token-digest fence.
+2. Recover exact hash-latched durable worker results and emit post-acpx child
+   cleanup under the current job/generation/token-digest fence. An unlatched
+   result is provisional; the narrow crash repair accepts only a single-parent
+   execution-log child and CASes its exact `work_branch_sha`.
 3. Reconcile expired positive-generation running claims against their exact
    project claim fence and ACPX deadline; due claims synthesize `timeout` via
    the ordinary durable handoff path.

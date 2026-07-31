@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-30.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, and late-bound same-project shared branches for either one prerequisite or a bounded multi-Issue fan-in declared in the dependent Issue body, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. The executor owns GitLab discovery, dependency graph planning and deferral, replayable ordinary-to-shared branch migration, deterministic multi-head aggregation, shared-branch identity, a shared runtime-configurable strict round-robin scheduler with independent parallel-repository and per-repository Issue ceilings (the latter defaults to serial), crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish; shared dependency branches reject automatic merge and keep their one replacement MR at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-31.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -59,7 +59,7 @@ run counter. Later runs reset the fixed local branch to their selected base;
 earlier execution evidence is never overwritten by a new launch.
 See [`references/paths.md`](references/paths.md) for the complete layout.
 
-## Issue dependency branch baseline
+## Issue dependency DAG v2 baseline
 
 An Issue may declare one or more same-project prerequisites with a line-start
 prefix:
@@ -83,93 +83,82 @@ comma, and optional surrounding spaces are accepted. More than eight distinct
 dependencies, an invalid target, and a self-dependency fail closed through the
 normal per-Issue dispatcher-blocked path.
 
-An ordinary A never infers a future reverse edge. It starts on `issue/A`, makes
-one commit, and creates its ordinary A-only MR. The dispatcher binds A -> C
-only when C itself is processed and C's declaration is parsed. A and C may be
-in the same frozen batch or different campaigns. Frozen-scope discovery may
-reject topology that is already visible, but an incomplete scope never blocks
-a dependency-free A and an already-completed A need not belong to C's current
-scope.
-Lookup/parse timeouts use `dependency_graph_preflight_deferred`,
-`dependency_preflight_deferred`, or `dependency_cycle_check_deferred` and retry
-on a later tick. Deterministic topology/parser failures persist the normal
-dispatcher-blocked state and, in driven mode, emit an exact scheduler
-`skipped_entries[]` handoff.
+Dependency declarations form DAG v2. Every Issue keeps its own worktree, local
+branch, remote branch, private result, and MR. A predecessor artifact is an
+immutable, verified snapshot of one completed Issue: its IID, execution ID,
+exact work branch, business `commit_sha`, remote `work_branch_sha`, plus its
+exact MR identity, observed
+`opened|merged` state, source, target, and SHA. Planning or executing a consumer
+never renames or deletes a
+predecessor branch, closes or supersedes its MR, or rewrites its private state.
+The same predecessor artifact may therefore feed multiple consumers (fan-out),
+and a completed consumer artifact may itself feed later levels.
 
-The current version supports either one two-node group `A -> C`, or one bounded
-fan-in `[A1,A2,...,An] -> C` with two to eight completed independent heads. A
-source must have no prerequisite, each source may belong to only this group,
-and C must not have a dependent. Fan-out and longer chains remain unsupported;
-cycles, merge conflicts, overlapping group membership, changed declarations,
-and changed targets fail closed. The first declared dependency is the anchor,
-so the frozen remote source branch remains pair-shaped for compatibility:
+When the two SHAs differ, the remote tip must be exactly one direct,
+single-parent child of the business commit and every changed path must be under
+that execution's terminal log directory. The frozen plan binds both SHAs but
+ancestry reduction and aggregation use only the business commit, so executor
+logs never become the current node's downstream baseline.
+
+For a consumer IID and frozen plan SHA-256, the DAG branch is:
 
 ```text
-branch: issue/<A1 IID>+<C IID>
-history: target -> aggregate(A1,...,An) -> commit(C)
+issue/<consumer IID>-dag-<first 16 hex of plan_sha256>
 ```
 
-A and C keep fixed IID-local branches `issue/<iid>` and separate worktrees,
-while an unrelated B remains on `issue/<B IID>` and may run alongside A. A
-first publishes `issue/A`. C remains deferred without consuming an attempt,
-label mutation, project placeholder, or agent-wide slot until A has a stable
-`pr` or `finish`, no conflicting workflow label, no current campaign pending
-claim, and durable `status:"done"` state whose ordinary branch, commit SHA, and
-unique open MR identity all match live GitLab state. An A from the current
-campaign may also appear in `completed_iids`; an A from an earlier campaign is
-authorized by the stronger private-state, exact-ref, and live-MR checks.
+The full lowercase 64-hex plan digest remains authoritative; the short suffix
+is only a readable branch discriminator. Each consumer creates or reuses only
+its own MR from this branch. DAG v2 never reuses a predecessor MR as the
+consumer MR.
 
-GitLab cannot update an MR source branch or atomically rename a branch. For one
-head, `migrate_shared_dependency_head.sh` writes a private
-`branch_migration.status:"pending"` checkpoint, creates `issue/A+C` at A's
-exact SHA with an empty expected lease, closes A's old MR, creates one
-intent-owned replacement MR containing `Closes #A` and `Closes #C`, deletes
-`issue/A` with an exact SHA lease, and rewrites A as the shared head. Every
-step is replayable. A transient stop never reruns or recommits A and never
-creates a duplicate replacement MR. Steady state has one open shared MR, while
-GitLab history retains the closed ordinary MR plus the open replacement MR.
-For fan-in, `migrate_multi_dependency_heads.sh` first validates every ordinary
-source's private done state, exact remote SHA, and unique owned MR. Before any
-remote mutation it computes clean deterministic merge commits and persists a
-`dependency_aggregation` checkpoint. It then reuses the ordinary anchor
-migration, advances the shared branch with an exact lease, adds `Closes` for
-every source, and only then closes and retires the remaining source MRs and
-branches. Replay never recomputes or duplicates the owned MR. A content conflict
-returns `dependency_merge_conflict` before the source MRs or refs are changed.
+Before allocation, the dispatcher resolves the complete reachable dependency
+graph, rejects cycles, and freezes each predecessor artifact from durable
+`status:"done"` state plus exact live ref/MR verification. A predecessor must
+have stable `pr` or `finish`, no conflicting workflow label, and no current
+campaign pending claim. A predecessor from an earlier campaign is allowed when
+the same private-state and live-identity proof succeeds. Lookup/parse
+uncertainty uses bounded non-terminal dependency deferrals; deterministic
+invalid declarations, cycles, unsafe artifacts, changed frozen plans, and
+content conflicts take the normal dispatcher-blocked path and emit an exact
+driven scheduler handoff.
 
-C receives the anchor SHA (single head) or aggregate SHA (fan-in) as both
-`DEPENDENCY_BASE_SHA` and
-`EXPECTED_WORK_BRANCH_SHA`. Its new commit must have exactly one parent and that
-parent must equal that frozen SHA. Updating the shared ref uses an explicit
-lease; a missing or moved ref fails
-closed. The migration's shared-ref creation uses an empty expected lease, and every push
-publishes and re-reads the immutable SHA captured immediately after the commit,
-never a later mutable local ref. The migration creates the only open shared MR
-with `Closes` for every dependency and C. After C
-pushes, it must reuse the exact replacement MR URL/IID persisted by A; it never closes
-or creates another MR. A's private state and the replacement MR description share one random
-64-hex `intent_id`; live verification also requires the current token author
-and all frozen closing lines. The shared target is frozen, and any shared member with
-`auto_merge=true` fails as `shared_branch_auto_merge_unsupported`.
+DAG v2 supports fan-out, multiple levels, and one through eight declared inputs
+per consumer. Before aggregation it performs transitive reduction: a declared
+input whose exact commit is already an ancestor of another declared input is
+removed from the effective frontier. One effective input is used directly as
+the aggregate base SHA. Multiple incomparable inputs are combined in stable
+declared order with deterministic `merge-tree`/`commit-tree` operations. A
+content conflict returns `dependency_merge_conflict`; it never chooses
+ours/theirs and never mutates a predecessor artifact, branch, MR, or state.
+Replaying the same verified input set produces the same base and
+`plan_sha256`.
 
-The A migration uses its `branch_migration` checkpoint. After C pushes and
-verifies the remote tip, the fixed wrapper persists an exact
-`mr_finalization.status:"pending"` checkpoint before MR reuse. A bounded
-in-wrapper retry and the heartbeat's MR-only recovery may then reuse and verify
-the owned replacement MR for that already-pushed SHA without running acpx,
-stage, commit, or push again. A private current-
-attempt marker may carry verified-open state or identity-only evidence; it must
-always bind the role-specific `created|reused` action, intent, and exact
-branch/target/SHA. Phase 6 performs a fresh exact GitLab read plus an open-source-
-branch uniqueness read before it promotes the Issue binding to `verified_open`.
-A closed, moved, retargeted, or foreign identity fails closed; unavailable
-GitLab retains the claim, while ambiguous or truncated source history becomes
-an immediate terminal `failed-dispatcher` conflict. Phase 6 and C's release gate each
-perform fresh exact GitLab reads; any historical MR without one exact open,
-owned identity blocks recovery and can never authorize a replacement. C cannot
-start from a URL, callback, label, historical state, or unverified marker alone.
-A failed final `pr` label write
-also retains the same claim for a marker-only retry.
+The authoritative version-2 plan freezes `consumer_iid`, target branch,
+ordered `declared_inputs`, reduced `effective_inputs`, `aggregate_base_sha`,
+full `plan_sha256`, and derived `work_branch`. The consumer receives the
+aggregate base as both `DEPENDENCY_BASE_SHA` and
+`EXPECTED_COMMIT_PARENT_SHA`. Its business commit must have exactly that one
+parent. Fresh execution materializes the frozen base; continue may use the old
+consumer tip only as the push lease and mixed-resets to the same frozen base,
+so it replaces rather than appends another consumer business commit.
+`DEPENDENCY_CONTRACT_VERSION=2` and `DEPENDENCY_PLAN_SHA256` distinguish this
+contract from ordinary and legacy shared-pair execution. The legacy scalar
+dependency tuple remains a compatibility projection and never represents the
+complete DAG.
+
+Every DAG v2 Issue has an independent MR and stops at `pr`. `auto_merge=true`
+is rejected for DAG v2 because merging one node independently would bypass
+topology scheduling and the frozen-parent contract. The target branch, plan,
+predecessor artifacts, aggregate base, and consumer branch identity are
+immutable after allocation. Exact same-plan replay may resume recovery; a body
+edit, moved predecessor ref/MR, changed target, partial state, or plan-digest
+mismatch fails closed.
+
+Persisted `issue/<head>+<tail>` shared-pair and version-1 fan-in records are
+legacy compatibility state. Their existing branch migration, replacement-MR,
+head/tail roles, checkpoints, and MR-only recovery remain available so an
+in-flight deployment can finish safely. New dependency declarations always use
+DAG v2 and never create or expand a legacy shared group.
 
 Fresh business code comes from the pinned baseline SHA, but direct
 execution-control paths at any depth (`.claude/`, `CLAUDE.md`,
@@ -184,16 +173,12 @@ commit/tree/ancestry/materialization reads disable Git replace objects. The runt
 permission flags narrow the launch path but do not create an OS sandbox;
 ordinary business scripts still run with the executor UID's authority.
 
-`continue` may resume only an exact remote shared tip or IID-local attempt ref
-whose SHA and complete dependency/work-branch identity match durable state.
-A shared tail can never normalize to a dependency-free history, a shared head
-can never acquire a dependency tuple, and a fresh C lease must equal A's pinned
-or aggregated SHA. Missing, legacy, partial, moved, or rewritten state fails closed rather
-than being reconstructed from current Issue text. An already-published shared
-head cannot enter the ordinary code-changing continue path. A shared-tail
-continue uses the old C tip only as the explicit push lease, resets the new
-commit's sole parent to the pinned dependency SHA, and therefore replaces C1 with C2 rather
-than appending a third commit.
+`continue` may resume only an exact remote DAG/legacy tip or IID-local attempt
+ref whose SHA and complete persisted contract identity match durable state.
+DAG v2 requires the exact contract version, full plan digest, plan object, and
+frozen base; legacy shared-pair recovery retains its existing all-null/all-set
+tuple and head/tail rules. Missing, partial, moved, or cross-version state fails
+closed rather than being reconstructed from current Issue text.
 
 ## Three task layers you MUST NOT confuse (read this first)
 
@@ -874,7 +859,7 @@ files. **Do not reconstruct from memory** — trust the wrappers.
 | Phase 6 validation + label sync + state writes + classification + drain | `dispatch_followup.sh` + `_dispatch_lib.sh::phase6_process` |
 | Ordinary terminal cleanup decision (preserves native terminal child sessions for diagnosis) | `_dispatch_lib.sh::phase6_decide_cleanup`; LLM acts on `envelope.cleanup.action` |
 | One-call acpx through deterministic finalization and durable compact result | `run_executor_attempt.sh` + `run_acpx_attempt.sh` |
-| Claim-fenced durable-result recovery and post-acpx stale-child reclamation | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal result reconcile; LLM acts on `cleanup_actions[]` |
+| Claim-fenced finalized-result recovery and post-acpx stale-child reclamation | `run_executor_batch_tick.sh` requires hash-bound `attempt_finalized.json`, then uses `dispatch_followup.sh` internal result reconcile; LLM acts on `cleanup_actions[]` |
 | Driven batch intake, OPEN snapshot, and idempotency | `run_driven_issue_batch.sh` → `create_driven_batch.sh` |
 | Recovery-first handoff/outbox/coordinator replay and strict round-robin refill | `run_executor_batch_tick.sh` |
 | Claim-fenced immediate recovery for running jobs already `pr`/`finish`/closed | `run_executor_batch_tick.sh` + `dispatch_followup.sh` internal completion reconcile |
@@ -1029,7 +1014,8 @@ is normally accepted inside a protected native `task_completion` event (or
 bounded authenticated history recovery) through
 `ingest_subagent_completion.sh` → `dispatch_followup.sh`; a claim-fenced tick
 may consume the identical durable worker result when the final model turn is
-not scheduled.
+not scheduled, but only after private `attempt_finalized.json` binds its exact
+SHA-256 and execution identity.
 
 The subagent invokes scripts at `<workspace>/skills/gitlab_issue_campaign_dispatcher/scripts/<name>.sh`
 by absolute path (the wrapper renders `{SCRIPTS_DIR}` into the prompt).

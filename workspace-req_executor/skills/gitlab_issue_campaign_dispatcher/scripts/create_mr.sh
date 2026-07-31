@@ -69,6 +69,8 @@ MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH}}"
 DEPENDENCY_IID="${DEPENDENCY_IID:-}"
 DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH:-}"
 DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+DEPENDENCY_CONTRACT_VERSION="${DEPENDENCY_CONTRACT_VERSION:-}"
+DEPENDENCY_PLAN_SHA256="${DEPENDENCY_PLAN_SHA256:-}"
 SHARED_MR_RECOVERY="${SHARED_MR_RECOVERY:-false}"
 MR_RESULT_FILE="${LOG_DIR}/mr_result.json"
 SHARED_BRANCH=false
@@ -78,6 +80,7 @@ SHARED_TAIL_IID=""
 EXPECTED_SHARED_MR_IID=""
 EXPECTED_SHARED_MR_URL=""
 SHARED_MR_INTENT_ID=""
+DAG_BRANCH=false
 RECOVERY_MARKER_MR_IID=""
 RECOVERY_MARKER_MR_URL=""
 if [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]]; then
@@ -99,6 +102,18 @@ if [[ "${WORK_BRANCH}" =~ ^issue/([1-9][0-9]*)\+([1-9][0-9]*)$ ]]; then
     echo "create_mr: automatic merge is unsupported for shared work branches" >&2
     exit 2
   fi
+fi
+if [ -n "${DEPENDENCY_CONTRACT_VERSION}${DEPENDENCY_PLAN_SHA256}" ]; then
+  if [ "${DEPENDENCY_CONTRACT_VERSION}" != 2 ] \
+      || ! [[ "${DEPENDENCY_PLAN_SHA256}" =~ ^[0-9a-f]{64}$ ]] \
+      || [ "${WORK_BRANCH}" != \
+        "issue/${ISSUE_IID}-dag-${DEPENDENCY_PLAN_SHA256:0:16}" ] \
+      || [ "${SHARED_BRANCH}" = true ] \
+      || [ "${AUTO_MERGE}" != false ]; then
+    echo "create_mr: invalid DAG-v2 branch identity" >&2
+    exit 2
+  fi
+  DAG_BRANCH=true
 fi
 
 case "${AUTO_MERGE}" in
@@ -155,11 +170,18 @@ if [ -n "${DEPENDENCY_IID}${DEPENDENCY_BRANCH}${DEPENDENCY_BASE_SHA}" ]; then
       echo "create_mr: shared tail dependency identity does not match the work branch" >&2
       exit 2
     fi
+  elif [ "${DAG_BRANCH}" = true ]; then
+    if [ -z "${DEPENDENCY_BRANCH}" ]; then
+      echo "create_mr: DAG-v2 dependency anchor branch is missing" >&2
+      exit 2
+    fi
   elif [ "${DEPENDENCY_BRANCH}" != "issue/${DEPENDENCY_IID}" ]; then
     echo "create_mr: dependency branch does not match its IID" >&2
     exit 2
   fi
-elif [ "${SHARED_BRANCH}" = true ] && [ "${SHARED_BRANCH_ROLE}" = tail ]; then
+elif { [ "${SHARED_BRANCH}" = true ] \
+      && [ "${SHARED_BRANCH_ROLE}" = tail ]; } \
+    || [ "${DAG_BRANCH}" = true ]; then
   echo "create_mr: shared branch tail requires a complete dependency identity" >&2
   exit 2
 fi
@@ -188,6 +210,159 @@ require_private_state_file() {
     && [[ "${bytes}" =~ ^[1-9][0-9]*$ ]] \
     && [ "${bytes}" -le 65536 ]
 }
+
+sha256_text() {
+  local value="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${value}" | sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+  else
+    return 1
+  fi
+}
+
+if [ "${DAG_BRANCH}" = true ]; then
+  DAG_PLAN_JSON=""
+  DAG_PLAN_CANONICAL=""
+  DAG_PLAN_CALCULATED_SHA=""
+  require_private_state_file "${ISSUE_STATE_FILE}" || {
+    echo "create_mr: DAG-v2 Issue state is missing or unsafe" >&2
+    exit 2
+  }
+  if ! jq -e \
+      --argjson iid "${ISSUE_IID}" \
+      --argjson execution_id "${EXECUTION_ID}" \
+      --arg work_branch "${WORK_BRANCH}" \
+      --arg commit_sha "${COMMIT_SHA}" \
+      --arg target_branch "${MERGE_TARGET_BRANCH}" \
+      --argjson dependency_iid "${DEPENDENCY_IID}" \
+      --arg dependency_branch "${DEPENDENCY_BRANCH}" \
+      --arg dependency_base_sha "${DEPENDENCY_BASE_SHA}" \
+      --arg plan_sha256 "${DEPENDENCY_PLAN_SHA256}" '
+      def full_oid:
+        type == "string"
+        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$");
+      def positive_integer:
+        type == "number" and . == floor and . > 0;
+      def source_snapshot($target_branch):
+        . as $input
+        | type == "object"
+        and ((keys | sort) == ([
+          "commit_sha","execution_id","iid","mr","verified",
+          "work_branch","work_branch_sha"
+        ] | sort))
+        and ($input.iid | positive_integer and . <= 2147483647)
+        and ($input.execution_id
+          | positive_integer and . <= 281474976710655)
+        and (
+          $input.work_branch == ("issue/" + ($input.iid | tostring))
+          or ($input.work_branch | test(
+            "^issue/" + ($input.iid | tostring)
+            + "-dag-[0-9a-f]{16}$"))
+        )
+        and ($input.commit_sha | full_oid)
+        and ($input.work_branch_sha | full_oid)
+        and $input.verified == true
+        and ($input.mr | type == "object")
+        and (($input.mr | keys | sort) == ([
+          "iid","sha","source_branch","state","target_branch","url"
+        ] | sort))
+        and ($input.mr.iid | positive_integer and . <= 2147483647)
+        and ($input.mr.url | type == "string"
+          and test("^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
+        and ($input.mr.url | test(
+          "/-/merge_requests/" + ($input.mr.iid | tostring) + "/?$"))
+        and ($input.mr.state == "opened" or $input.mr.state == "merged")
+        and $input.mr.source_branch == $input.work_branch
+        and $input.mr.target_branch == $target_branch
+        and ($input.mr.sha | full_oid)
+        and (
+          if $input.mr.state == "opened" then
+            (($input.mr.sha | ascii_downcase)
+              == ($input.work_branch_sha | ascii_downcase))
+          else
+            (($input.mr.sha | ascii_downcase)
+              == ($input.commit_sha | ascii_downcase))
+            or (($input.mr.sha | ascii_downcase)
+              == ($input.work_branch_sha | ascii_downcase))
+          end
+        );
+      .dependency_plan as $plan
+      | ($plan.effective_inputs | map(.iid)) as $effective_iids
+      |
+      type == "object"
+      and .iid == $iid
+      and .latest_execution_id == $execution_id
+      and .dependency_pinned_execution_id == $execution_id
+      and .dependency_contract_version == 2
+      and .dependency_plan_sha256 == $plan_sha256
+      and (.dependency_plan | type == "object")
+      and ((.dependency_plan | keys | sort) == ([
+        "aggregate_base_sha","consumer_iid","declared_inputs",
+        "effective_inputs","plan_sha256","target_branch","version",
+        "work_branch"
+      ] | sort))
+      and .dependency_plan.version == 2
+      and .dependency_plan.consumer_iid == $iid
+      and .dependency_plan.plan_sha256 == $plan_sha256
+      and .dependency_plan.work_branch == $work_branch
+      and .dependency_plan.target_branch == $target_branch
+      and .dependency_plan.aggregate_base_sha == $dependency_base_sha
+      and (.dependency_plan.aggregate_base_sha | full_oid)
+      and (.dependency_plan.declared_inputs | type == "array"
+        and length >= 1 and length <= 8)
+      and ([.dependency_plan.declared_inputs[].iid]
+        | length == (unique | length))
+      and all(.dependency_plan.declared_inputs[];
+        source_snapshot($target_branch))
+      and (.dependency_plan.effective_inputs | type == "array"
+        and length >= 1 and length <= 8)
+      and ([.dependency_plan.effective_inputs[].iid]
+        | length == (unique | length))
+      and all(.dependency_plan.effective_inputs[];
+        . as $effective
+        | any($plan.declared_inputs[]; . == $effective))
+      and ([
+        $plan.declared_inputs[].iid
+        | . as $declared_iid
+        | select($effective_iids | index($declared_iid) != null)
+      ] == $effective_iids)
+      and .dependency_plan.declared_inputs[0].iid == $dependency_iid
+      and .dependency_plan.declared_inputs[0].work_branch == $dependency_branch
+      and .work_branch == $work_branch
+      and .branch_members == [$iid]
+      and (.shared_branch_role // null) == null
+      and .dependency_iid == $dependency_iid
+      and .dependency_branch == $dependency_branch
+      and .dependency_base_sha == $dependency_base_sha
+      and .dependency_history_verified == true
+      and ((.commit_sha | ascii_downcase) == ($commit_sha | ascii_downcase))
+      and ((.work_branch_sha | ascii_downcase)
+        == ($commit_sha | ascii_downcase))
+    ' "${ISSUE_STATE_FILE}" >/dev/null 2>&1; then
+    echo "create_mr: DAG-v2 Issue state does not match the fixed execution" >&2
+    exit 2
+  fi
+  DAG_PLAN_JSON="$(jq -cS '.dependency_plan' "${ISSUE_STATE_FILE}")" || exit 2
+  DAG_PLAN_CANONICAL="$(printf '%s' "${DAG_PLAN_JSON}" | jq -cS '{
+    version:2,
+    algorithm:"ordered-frontier-merge-v1",
+    consumer_iid:.consumer_iid,
+    target_branch:.target_branch,
+    declared_inputs:.declared_inputs,
+    effective_inputs:.effective_inputs,
+    aggregate_base_sha:.aggregate_base_sha
+  }')" || exit 2
+  DAG_PLAN_CALCULATED_SHA="$(sha256_text "${DAG_PLAN_CANONICAL}")" || {
+    echo "create_mr: unable to hash DAG-v2 dependency plan" >&2
+    exit 2
+  }
+  if [ "${DAG_PLAN_CALCULATED_SHA}" != "${DEPENDENCY_PLAN_SHA256}" ]; then
+    echo "create_mr: DAG-v2 dependency plan digest mismatch" >&2
+    exit 2
+  fi
+fi
 
 # Every shared MR operation is authorized by the private post-push checkpoint.
 # A generates this intent; C inherits it from A's verified binding. The same
