@@ -120,13 +120,23 @@ A DAG v2 pending entry additionally freezes:
 - `dependency_base_sha` and `expected_commit_parent_sha`, both equal to
   `dependency_plan.aggregate_base_sha`.
 
-Every `declared_inputs` entry is an immutable predecessor snapshot containing
-the exact `iid`, `execution_id`, `work_branch`, business `commit_sha`, exact
-remote `work_branch_sha`, `verified:true`, and `mr` identity (`iid`, `url`,
-`state`, `source_branch`, `target_branch`, `sha`). An opened MR SHA equals
-`work_branch_sha`; a merged MR may retain the business SHA or the log-child
-tip. Any unequal business/tip pair must be one direct, single-parent child
-whose complete diff is inside that execution's log directory.
+Every `declared_inputs` entry is one of two immutable predecessor snapshots:
+
+- an ordinary GitLab-authoritative snapshot with exact `iid`,
+  `identity_source:"gitlab_pr_label_branch"`, `work_branch:"issue/<iid>"`,
+  equal `commit_sha` / `work_branch_sha` frozen from the fetched remote branch,
+  and `verified:true`; this shape deliberately has no local `execution_id` or
+  MR object because live `pr` plus the exact ordinary branch is the contract;
+- an executor-state snapshot with exact `iid`, `execution_id`, `work_branch`,
+  business `commit_sha`, exact remote `work_branch_sha`, `verified:true`, and
+  `mr` identity (`iid`, `url`, `state`, `source_branch`, `target_branch`,
+  `sha`). This richer shape is used for content-addressed DAG predecessors that
+  do not expose an ordinary `issue/<iid>` ref.
+
+For the richer shape, an opened MR SHA equals `work_branch_sha`; a merged MR may
+retain the business SHA or the log-child tip. Any unequal business/tip pair must
+be one direct, single-parent child whose complete diff is inside that
+execution's log directory.
 `effective_inputs` is the transitive-reduction frontier, preserves
 declared order, and contains the same snapshot shape. `plan_sha256` inside the
 object equals the top-level `dependency_plan_sha256`; the full hash is
@@ -205,9 +215,13 @@ claim-fenced recovery path may repair only `work_branch_sha` after proving
 ### DAG v2 predecessor plan
 
 The dispatcher resolves every DAG v2 plan without mutating a predecessor's
-private state, branch, ref, or MR. Each declared snapshot must still match the
-predecessor's durable terminal state, exact remote ref SHA, and unique verified
-MR identity. The DAG planning path walks predecessor plans to reject cycles.
+private state, branch, ref, or MR. GitLab live workflow labels decide whether
+the predecessor is complete. For an ordinary predecessor, stable `pr` plus the
+exact fetched `issue/<iid>` ref is sufficient regardless of local batch/state
+history, and the current ref SHA is frozen directly. Content-addressed DAG
+predecessors without that ordinary ref still require their durable terminal
+state, exact remote ref SHA, and unique verified MR identity. The DAG planning
+path walks persisted predecessor plans to reject cycles.
 It then applies transitive reduction: an input already reachable through
 another declared input is omitted from `effective_inputs`, but remains in
 `declared_inputs` for audit and plan hashing.

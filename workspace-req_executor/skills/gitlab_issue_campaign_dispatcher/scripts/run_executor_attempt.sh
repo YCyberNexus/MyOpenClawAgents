@@ -343,7 +343,21 @@ persist_pushed_branch_identity() {
       def plan_sha:
         type == "string"
         and test("^([0-9a-f]{40}|[0-9a-f]{64})$");
-      def valid_input($target_branch):
+      def label_branch_input:
+        . as $input
+        | type == "object"
+        and ((keys | sort) == ([
+          "commit_sha", "identity_source", "iid", "verified",
+          "work_branch", "work_branch_sha"
+        ] | sort))
+        and $input.identity_source == "gitlab_pr_label_branch"
+        and ($input.iid | positive_integer and . <= 2147483647)
+        and $input.work_branch == ("issue/" + ($input.iid | tostring))
+        and ($input.commit_sha | plan_sha)
+        and ($input.work_branch_sha | plan_sha)
+        and $input.commit_sha == $input.work_branch_sha
+        and $input.verified == true;
+      def executor_input($target_branch):
         . as $input
         | type == "object"
         and ((keys | sort) == ([
@@ -383,6 +397,8 @@ persist_pushed_branch_identity() {
             or $input.mr.sha == $input.work_branch_sha
           end
         );
+      def valid_input($target_branch):
+        label_branch_input or executor_input($target_branch);
       (if type == "object"
           and .preparing_execution_id == $execution_id
           and .proposed_dependency_contract_version == 2

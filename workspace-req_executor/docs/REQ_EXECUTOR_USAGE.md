@@ -91,15 +91,23 @@ issue/<consumer IID>-dag-<plan_sha256 前 16 位>
 `#9+#13 -> #14`、`#13+#14 -> #15` 和 `#15 -> #16`。
 
 consumer 会等待所有可达 predecessor 都具有稳定的 `pr` 或 `finish`，且没有 `continue`、`doing`、
-`retry`、blocked、failed 或 timeout 标签，也没有 campaign `pending_subagents` claim。固定 planner
-逐项校验 mode-600 私有 `done` 状态、execution ID、完整 work branch/commit SHA，以及唯一验证 MR 的
-IID、URL、`opened|merged` 状态、source、target 和 SHA。这些字段组成不可变 predecessor artifact；
-只凭标签、callback URL、历史 marker 或可变 Issue 正文不能放行 consumer。
+`retry`、blocked、failed 或 timeout 标签。GitLab 实时标签是完成状态的权威来源：对已有的普通
+Issue，只要 live Issue 为稳定 `pr`（兼容 `finish`）且本次 fetch 后存在精确的
+`refs/remotes/origin/issue/<iid>`，就直接冻结该分支当前 SHA 并放行；不要求该 Issue 曾进入当前
+batch，也不要求本机存在对应的 execution ID、`state.json` 或 `pending_subagents` 历史缓存。缓存中的
+残留 pending claim 不能推翻 live `pr`；同一 tick 明确选择 predecessor 重跑时仍由独立 fence 阻止
+consumer 抢跑。
+
+普通 GitLab-authoritative snapshot 记录 `identity_source:"gitlab_pr_label_branch"`、IID、
+`issue/<iid>` 和相等的 `commit_sha` / `work_branch_sha`。只有没有普通 `issue/<iid>` ref 的
+content-addressed DAG predecessor 才继续校验 mode-600 私有 `done` 状态、execution ID、完整 work
+branch/commit SHA，以及唯一 MR 的 IID、URL、`opened|merged` 状态、source、target 和 SHA。
 
 predecessor snapshot 同时冻结业务 `commit_sha=B` 与远端实际
 `work_branch_sha=L`。两者不同时，`L` 必须恰好是 `B` 的单父直接子提交，且全部 diff 都位于该次
 execution 的日志目录；打开的 MR SHA 绑定 `L`，已合并 MR 可记录 `B` 或 `L`。计划摘要绑定两者，
-但传递约简和聚合只使用业务提交 `B`，不会把终态执行日志当成下游业务基线。
+但传递约简和聚合只使用业务提交 `B`。该 B/L 拆分只适用于 executor-state snapshot；普通
+GitLab-authoritative snapshot 明确以 `issue/<iid>` 当前分支 tip 作为基线，因此其中 `B=L`。
 
 planner 先做传递约简：若某个声明输入的精确提交已经是另一声明输入提交的祖先，就从 effective frontier
 删除前者。例如 `#14` 声明依赖 `#9,#13` 且 `#13` 已包含 `#9` 时，`declared_inputs` 仍保留两项，

@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Resolve an immutable dependency baseline for one DAG-v2 consumer.
 #
-# This helper is deliberately non-destructive. It reads private per-Issue state,
-# verifies it against dispatcher-authenticated source snapshots and exact local
-# origin refs, performs transitive reduction, and (when necessary) writes only
-# new, unreachable Git tree/commit objects for a deterministic aggregate base.
-# It never creates, updates, or deletes a ref or Merge Request.
+# This helper is deliberately non-destructive. It verifies
+# dispatcher-authenticated source snapshots against exact local origin refs,
+# consults private per-Issue state only for the richer executor-state snapshot
+# shape, performs transitive reduction, and (when necessary) writes only new,
+# unreachable Git tree/commit objects for a deterministic aggregate base. It
+# never creates, updates, or deletes a ref or Merge Request.
 #
 # Required environment:
 #   REPO_PATH
@@ -16,8 +17,20 @@
 #
 # DAG_SOURCE_SNAPSHOTS_JSON is the ordered, dispatcher-verified direct-input
 # vector. The dispatcher remains responsible for the fresh GitLab reads. This
-# helper requires the explicit verified=true assertion and binds it to private
-# state plus the locally fetched exact branch/SHA:
+# helper requires the explicit verified=true assertion and binds it to the
+# locally fetched exact branch/SHA. Ordinary historical sources may use the
+# GitLab-authoritative label/branch shape:
+#
+# {
+#   "iid": 9,
+#   "identity_source": "gitlab_pr_label_branch",
+#   "work_branch": "issue/9",
+#   "commit_sha": "<exact fetched issue/9 tip>",
+#   "work_branch_sha": "<same exact tip>",
+#   "verified": true
+# }
+#
+# Content-addressed DAG sources use the richer executor-state shape:
 #
 # [
 #   {
@@ -256,60 +269,79 @@ if ! DECLARED_INPUTS_JSON="$(printf '%s' "${DAG_SOURCE_SNAPSHOTS_JSON}" \
       def clean_string:
         type == "string" and length > 0
         and (explode | all(. >= 32 and . != 127));
+      def label_branch_source:
+        . as $source
+        | type == "object"
+        and (keys | sort) == ([
+          "commit_sha","identity_source","iid","verified",
+          "work_branch","work_branch_sha"
+        ] | sort)
+        and .identity_source == "gitlab_pr_label_branch"
+        and (.iid | type == "number" and . == floor
+          and . > 0 and . <= 2147483647)
+        and .work_branch == ("issue/" + ($source.iid | tostring))
+        and (.commit_sha | full_oid)
+        and (.work_branch_sha | full_oid)
+        and ((.commit_sha | ascii_downcase)
+          == (.work_branch_sha | ascii_downcase))
+        and .verified == true;
+      def executor_source($target):
+        . as $source
+        | type == "object"
+        and (keys | sort) ==
+          ([
+            "commit_sha","execution_id","iid","mr","verified",
+            "work_branch","work_branch_sha"
+          ] | sort)
+        and (.iid | type == "number" and . == floor
+          and . > 0 and . <= 2147483647)
+        and (.execution_id | type == "number" and . == floor
+          and . > 0 and . <= 281474976710655)
+        and (
+          .work_branch == ("issue/" + ($source.iid | tostring))
+          or (.work_branch | test(
+            "^issue/" + ($source.iid | tostring)
+            + "-dag-[0-9a-f]{16}$"))
+        )
+        and (.commit_sha | full_oid)
+        and (.work_branch_sha | full_oid)
+        and .verified == true
+        and (.mr | type == "object")
+        and (.mr | keys | sort) ==
+          (["iid","sha","source_branch","state","target_branch","url"] | sort)
+        and (.mr.iid | type == "number" and . == floor
+          and . > 0 and . <= 2147483647)
+        and (.mr.url | clean_string)
+        and (.mr.url | test(
+          "^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
+        and (.mr as $mr
+          | $mr.url | test(
+            "/-/merge_requests/" + ($mr.iid | tostring) + "/?$"))
+        and (.mr.state == "opened" or .mr.state == "merged")
+        and .mr.source_branch == .work_branch
+        and .mr.target_branch == $target
+        and (.mr.sha | full_oid)
+        and (
+          if .mr.state == "opened" then
+            ((.mr.sha | ascii_downcase)
+              == (.work_branch_sha | ascii_downcase))
+          else
+            ((.mr.sha | ascii_downcase)
+              == (.commit_sha | ascii_downcase))
+            or ((.mr.sha | ascii_downcase)
+              == (.work_branch_sha | ascii_downcase))
+          end
+        );
       if type == "array"
         and length >= 1 and length <= 8
         and ([.[].iid] | length == (unique | length))
-        and all(.[];
-          . as $source
-          | type == "object"
-          and (keys | sort) ==
-            ([
-              "commit_sha","execution_id","iid","mr","verified",
-              "work_branch","work_branch_sha"
-            ] | sort)
-          and (.iid | type == "number" and . == floor
-            and . > 0 and . <= 2147483647)
-          and (.execution_id | type == "number" and . == floor
-            and . > 0 and . <= 281474976710655)
-          and (
-            .work_branch == ("issue/" + ($source.iid | tostring))
-            or (.work_branch | test(
-              "^issue/" + ($source.iid | tostring)
-              + "-dag-[0-9a-f]{16}$"))
-          )
-          and (.commit_sha | full_oid)
-          and (.work_branch_sha | full_oid)
-          and .verified == true
-          and (.mr | type == "object")
-          and (.mr | keys | sort) ==
-            (["iid","sha","source_branch","state","target_branch","url"] | sort)
-          and (.mr.iid | type == "number" and . == floor
-            and . > 0 and . <= 2147483647)
-          and (.mr.url | clean_string)
-          and (.mr.url | test(
-            "^https?://[^[:space:]]+/-/merge_requests/[1-9][0-9]*/?$"))
-          and (.mr as $mr
-            | $mr.url | test(
-              "/-/merge_requests/" + ($mr.iid | tostring) + "/?$"))
-          and (.mr.state == "opened" or .mr.state == "merged")
-          and .mr.source_branch == .work_branch
-          and .mr.target_branch == $target_branch
-          and (.mr.sha | full_oid)
-          and (
-            if .mr.state == "opened" then
-              ((.mr.sha | ascii_downcase)
-                == (.work_branch_sha | ascii_downcase))
-            else
-              ((.mr.sha | ascii_downcase)
-                == (.commit_sha | ascii_downcase))
-              or ((.mr.sha | ascii_downcase)
-                == (.work_branch_sha | ascii_downcase))
-            end
-          ))
+        and all(.[]; label_branch_source or executor_source($target_branch))
       then map(
         .commit_sha = (.commit_sha | ascii_downcase)
         | .work_branch_sha = (.work_branch_sha | ascii_downcase)
-        | .mr.sha = (.mr.sha | ascii_downcase)
+        | if has("mr") then
+            .mr.sha = (.mr.sha | ascii_downcase)
+          else . end
       )
       else error("invalid DAG source snapshots")
       end
@@ -337,77 +369,89 @@ for ((source_index = 0; source_index < DECLARED_COUNT; source_index++)); do
   source_sha="${DECLARED_SHAS[source_index]}"
   source_snapshot="$(printf '%s' "${DECLARED_INPUTS_JSON}" \
     | jq -c --argjson index "${source_index}" '.[$index]')"
+  source_identity_source="$(printf '%s' "${source_snapshot}" \
+    | jq -r '.identity_source // "executor_state"')"
   source_execution_id="$(printf '%s' "${source_snapshot}" \
-    | jq -r '.execution_id')"
+    | jq -r '.execution_id // empty')"
   source_branch="$(printf '%s' "${source_snapshot}" | jq -r '.work_branch')"
   source_work_branch_sha="$(printf '%s' "${source_snapshot}" \
     | jq -r '.work_branch_sha')"
-  source_mr_iid="$(printf '%s' "${source_snapshot}" | jq -r '.mr.iid')"
-  source_mr_url="$(printf '%s' "${source_snapshot}" | jq -r '.mr.url')"
+  source_mr_iid="$(printf '%s' "${source_snapshot}" | jq -r '.mr.iid // empty')"
+  source_mr_url="$(printf '%s' "${source_snapshot}" | jq -r '.mr.url // empty')"
   source_state_dir="${ISSUES_ROOT}/issue-${source_iid}"
   source_state_file="${source_state_dir}/state.json"
 
-  if [ ! -d "${source_state_dir}" ] || [ -L "${source_state_dir}" ] \
-      || [ ! -f "${source_state_file}" ] || [ -L "${source_state_file}" ] \
-      || [ "$(private_file_mode "${source_state_file}" 2>/dev/null || true)" != 600 ] \
-      || [ "$(private_file_owner "${source_state_file}" 2>/dev/null || true)" != "$(id -u)" ]; then
-    emit_failure "dependency_source_state_unsafe" "${source_iid}"
+  source_state_safe=false
+  source_state_verified=false
+  if [ "${source_identity_source}" = gitlab_pr_label_branch ]; then
+    source_state_verified=true
+  elif [ -d "${source_state_dir}" ] && [ ! -L "${source_state_dir}" ] \
+      && [ -f "${source_state_file}" ] && [ ! -L "${source_state_file}" ] \
+      && [ "$(private_file_mode "${source_state_file}" 2>/dev/null || true)" = 600 ] \
+      && [ "$(private_file_owner "${source_state_file}" 2>/dev/null || true)" = "$(id -u)" ]; then
+    source_state_bytes="$(wc -c <"${source_state_file}" 2>/dev/null \
+      | tr -d '[:space:]' || true)"
+    if [[ "${source_state_bytes}" =~ ^[1-9][0-9]*$ ]] \
+        && [ "${source_state_bytes}" -le 65536 ]; then
+      source_state_safe=true
+      if jq -e \
+          --argjson iid "${source_iid}" \
+          --argjson execution_id "${source_execution_id}" \
+          --arg work_branch "${source_branch}" \
+          --arg commit_sha "${source_sha}" \
+          --arg work_branch_sha "${source_work_branch_sha}" \
+          --argjson mr_iid "${source_mr_iid}" \
+          --arg mr_url "${source_mr_url}" \
+          --arg target_branch "${DAG_TARGET_BRANCH}" '
+          type == "object"
+          and .iid == $iid
+          and .status == "done"
+          and .latest_execution_id == $execution_id
+          and .dependency_pinned_execution_id == $execution_id
+          and .work_branch == $work_branch
+          and .branch_members == [$iid]
+          and (.shared_branch_role // null) == null
+          and (
+            if $work_branch == ("issue/" + ($iid | tostring)) then
+              (.dependency_contract_version // null) == null
+              and (.dependency_plan_sha256 // null) == null
+            else
+              .dependency_contract_version == 2
+              and (.dependency_plan_sha256 | type == "string")
+              and (.dependency_plan_sha256 | test("^[0-9a-f]{64}$"))
+              and (.dependency_plan | type == "object")
+              and .dependency_plan.plan_sha256 == .dependency_plan_sha256
+              and .dependency_plan.consumer_iid == $iid
+              and .dependency_plan.target_branch == $target_branch
+              and .dependency_plan.work_branch == $work_branch
+              and $work_branch == (
+                "issue/" + ($iid | tostring) + "-dag-"
+                + .dependency_plan_sha256[0:16])
+            end
+          )
+          and .dependency_history_verified == true
+          and (.commit_sha | type == "string")
+          and ((.commit_sha | ascii_downcase) == ($commit_sha | ascii_downcase))
+          and (.work_branch_sha | type == "string")
+          and ((.work_branch_sha | ascii_downcase)
+            == ($work_branch_sha | ascii_downcase))
+          and .merge_request_url == $mr_url
+          and ($mr_url | test(
+            "/-/merge_requests/" + ($mr_iid | tostring) + "/?$"))
+        ' "${source_state_file}" >/dev/null 2>&1; then
+        source_state_verified=true
+      fi
+    fi
   fi
-  source_state_bytes="$(wc -c <"${source_state_file}" 2>/dev/null \
-    | tr -d '[:space:]' || true)"
-  if ! [[ "${source_state_bytes}" =~ ^[1-9][0-9]*$ ]] \
-      || [ "${source_state_bytes}" -gt 65536 ]; then
+  if [ "${source_state_verified}" != true ]; then
+    if [ "${source_state_safe}" = true ]; then
+      emit_failure "dependency_source_state_identity_mismatch" "${source_iid}"
+    fi
     emit_failure "dependency_source_state_unsafe" "${source_iid}"
-  fi
-  if ! jq -e \
-      --argjson iid "${source_iid}" \
-      --argjson execution_id "${source_execution_id}" \
-      --arg work_branch "${source_branch}" \
-      --arg commit_sha "${source_sha}" \
-      --arg work_branch_sha "${source_work_branch_sha}" \
-      --argjson mr_iid "${source_mr_iid}" \
-      --arg mr_url "${source_mr_url}" \
-      --arg target_branch "${DAG_TARGET_BRANCH}" '
-      type == "object"
-      and .iid == $iid
-      and .status == "done"
-      and .latest_execution_id == $execution_id
-      and .dependency_pinned_execution_id == $execution_id
-      and .work_branch == $work_branch
-      and .branch_members == [$iid]
-      and (.shared_branch_role // null) == null
-      and (
-        if $work_branch == ("issue/" + ($iid | tostring)) then
-          (.dependency_contract_version // null) == null
-          and (.dependency_plan_sha256 // null) == null
-        else
-          .dependency_contract_version == 2
-          and (.dependency_plan_sha256 | type == "string")
-          and (.dependency_plan_sha256 | test("^[0-9a-f]{64}$"))
-          and (.dependency_plan | type == "object")
-          and .dependency_plan.plan_sha256 == .dependency_plan_sha256
-          and .dependency_plan.consumer_iid == $iid
-          and .dependency_plan.target_branch == $target_branch
-          and .dependency_plan.work_branch == $work_branch
-          and $work_branch == (
-            "issue/" + ($iid | tostring) + "-dag-"
-            + .dependency_plan_sha256[0:16])
-        end
-      )
-      and .dependency_history_verified == true
-      and (.commit_sha | type == "string")
-      and ((.commit_sha | ascii_downcase) == ($commit_sha | ascii_downcase))
-      and (.work_branch_sha | type == "string")
-      and ((.work_branch_sha | ascii_downcase)
-        == ($work_branch_sha | ascii_downcase))
-      and .merge_request_url == $mr_url
-      and ($mr_url | test(
-        "/-/merge_requests/" + ($mr_iid | tostring) + "/?$"))
-    ' "${source_state_file}" >/dev/null 2>&1; then
-    emit_failure "dependency_source_state_identity_mismatch" "${source_iid}"
   fi
 
-  if [ "${source_work_branch_sha}" != "${source_sha}" ]; then
+  if [ "${source_identity_source}" = executor_state ] \
+      && [ "${source_work_branch_sha}" != "${source_sha}" ]; then
     if ! verify_terminal_log_child \
           "${source_sha}" "${source_work_branch_sha}" \
           "${source_iid}" "${source_execution_id}"; then
@@ -449,7 +493,21 @@ validate_frozen_dependency_plan() {
       def clean_string:
         type == "string" and length > 0
         and (explode | all(. >= 32 and . != 127));
-      def source_snapshot($target):
+      def label_branch_source:
+        . as $source
+        | type == "object"
+        and (keys | sort) == ([
+          "commit_sha","identity_source","iid","verified",
+          "work_branch","work_branch_sha"
+        ] | sort)
+        and .identity_source == "gitlab_pr_label_branch"
+        and (.iid | type == "number" and . == floor
+          and . > 0 and . <= 2147483647)
+        and .work_branch == ("issue/" + ($source.iid | tostring))
+        and (.commit_sha | full_oid)
+        and .commit_sha == .work_branch_sha
+        and .verified == true;
+      def executor_source($target):
         . as $source
         | type == "object"
         and (keys | sort) ==
@@ -492,6 +550,8 @@ validate_frozen_dependency_plan() {
             .mr.sha == .commit_sha or .mr.sha == .work_branch_sha
           end
         );
+      def source_snapshot($target):
+        label_branch_source or executor_source($target);
       . as $plan
       | ($plan.effective_inputs | map(.iid)) as $effective_iids
       | if type == "object"
@@ -580,7 +640,8 @@ CLOSURE_NODE_COUNT=0
 
 walk_frozen_source_snapshot() {
   local snapshot_json="$1" depth="$2" root_source_iid="$3"
-  local closure_iid closure_execution_id closure_branch closure_sha
+  local closure_iid closure_identity_source closure_execution_id
+  local closure_branch closure_sha
   local closure_work_branch_sha closure_mr_iid closure_mr_url closure_target
   local snapshot_identity state_dir state_file state_bytes remote_sha
   local plan_json child_snapshot
@@ -611,80 +672,89 @@ walk_frozen_source_snapshot() {
   [ "${CLOSURE_NODE_COUNT}" -le 200 ] \
     || emit_failure "dependency_source_plan_invalid" "${root_source_iid}"
 
+  closure_identity_source="$(printf '%s' "${snapshot_json}" \
+    | jq -r '.identity_source // "executor_state"')"
   closure_execution_id="$(printf '%s' "${snapshot_json}" \
-    | jq -r '.execution_id')"
+    | jq -r '.execution_id // empty')"
   closure_branch="$(printf '%s' "${snapshot_json}" | jq -r '.work_branch')"
   closure_sha="$(printf '%s' "${snapshot_json}" | jq -r '.commit_sha')"
   closure_work_branch_sha="$(printf '%s' "${snapshot_json}" \
     | jq -r '.work_branch_sha')"
-  closure_mr_iid="$(printf '%s' "${snapshot_json}" | jq -r '.mr.iid')"
-  closure_mr_url="$(printf '%s' "${snapshot_json}" | jq -r '.mr.url')"
-  closure_target="$(printf '%s' "${snapshot_json}" | jq -r '.mr.target_branch')"
+  closure_mr_iid="$(printf '%s' "${snapshot_json}" \
+    | jq -r '.mr.iid // empty')"
+  closure_mr_url="$(printf '%s' "${snapshot_json}" \
+    | jq -r '.mr.url // empty')"
+  closure_target="$(printf '%s' "${snapshot_json}" \
+    | jq -r '.mr.target_branch // empty')"
   state_dir="${ISSUES_ROOT}/issue-${closure_iid}"
   state_file="${state_dir}/state.json"
 
-  if [ ! -d "${state_dir}" ] || [ -L "${state_dir}" ] \
-      || [ ! -f "${state_file}" ] || [ -L "${state_file}" ] \
-      || [ "$(private_file_mode "${state_file}" 2>/dev/null || true)" != 600 ] \
-      || [ "$(private_file_owner "${state_file}" 2>/dev/null || true)" != "$(id -u)" ]; then
-    emit_failure "dependency_source_plan_invalid" "${root_source_iid}"
+  closure_state_verified=false
+  if [ "${closure_identity_source}" = gitlab_pr_label_branch ]; then
+    closure_state_verified=true
+  elif [ -d "${state_dir}" ] && [ ! -L "${state_dir}" ] \
+      && [ -f "${state_file}" ] && [ ! -L "${state_file}" ] \
+      && [ "$(private_file_mode "${state_file}" 2>/dev/null || true)" = 600 ] \
+      && [ "$(private_file_owner "${state_file}" 2>/dev/null || true)" = "$(id -u)" ]; then
+    state_bytes="$(wc -c <"${state_file}" 2>/dev/null \
+      | tr -d '[:space:]' || true)"
+    if [[ "${state_bytes}" =~ ^[1-9][0-9]*$ ]] \
+        && [ "${state_bytes}" -le 65536 ] \
+        && jq -e \
+          --argjson iid "${closure_iid}" \
+          --argjson execution_id "${closure_execution_id}" \
+          --arg branch "${closure_branch}" \
+          --arg sha "${closure_sha}" \
+          --arg work_branch_sha "${closure_work_branch_sha}" \
+          --argjson mr_iid "${closure_mr_iid}" \
+          --arg mr_url "${closure_mr_url}" \
+          --arg target "${closure_target}" '
+          type == "object"
+          and .iid == $iid
+          and .status == "done"
+          and .latest_execution_id == $execution_id
+          and .dependency_pinned_execution_id == $execution_id
+          and .work_branch == $branch
+          and .branch_members == [$iid]
+          and (.shared_branch_role // null) == null
+          and .dependency_history_verified == true
+          and ((.commit_sha | ascii_downcase) == ($sha | ascii_downcase))
+          and (.work_branch_sha | type == "string"
+            and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
+          and ((.work_branch_sha | ascii_downcase)
+            == ($work_branch_sha | ascii_downcase))
+          and .merge_request_url == $mr_url
+          and ($mr_url | test(
+            "/-/merge_requests/" + ($mr_iid | tostring) + "/?$"))
+          and (
+            if $branch == ("issue/" + ($iid | tostring)) then
+              (.dependency_contract_version // null) == null
+              and (.dependency_plan_sha256 // null) == null
+              and (.dependency_plan // null) == null
+            else
+              .dependency_contract_version == 2
+              and (.dependency_plan_sha256 | type == "string"
+                and test("^[0-9a-f]{64}$"))
+              and (.dependency_plan | type == "object")
+              and .dependency_plan.plan_sha256 == .dependency_plan_sha256
+              and .dependency_plan.consumer_iid == $iid
+              and .dependency_plan.target_branch == $target
+              and .dependency_plan.work_branch == $branch
+              and $branch == (
+                "issue/" + ($iid | tostring) + "-dag-"
+                + .dependency_plan_sha256[0:16])
+            end
+          )
+        ' "${state_file}" >/dev/null 2>&1; then
+      closure_state_verified=true
+    fi
   fi
-  state_bytes="$(wc -c <"${state_file}" 2>/dev/null \
-    | tr -d '[:space:]' || true)"
-  if ! [[ "${state_bytes}" =~ ^[1-9][0-9]*$ ]] \
-      || [ "${state_bytes}" -gt 65536 ]; then
-    emit_failure "dependency_source_plan_invalid" "${root_source_iid}"
-  fi
-  if ! jq -e \
-      --argjson iid "${closure_iid}" \
-      --argjson execution_id "${closure_execution_id}" \
-      --arg branch "${closure_branch}" \
-      --arg sha "${closure_sha}" \
-      --arg work_branch_sha "${closure_work_branch_sha}" \
-      --argjson mr_iid "${closure_mr_iid}" \
-      --arg mr_url "${closure_mr_url}" \
-      --arg target "${closure_target}" '
-      type == "object"
-      and .iid == $iid
-      and .status == "done"
-      and .latest_execution_id == $execution_id
-      and .dependency_pinned_execution_id == $execution_id
-      and .work_branch == $branch
-      and .branch_members == [$iid]
-      and (.shared_branch_role // null) == null
-      and .dependency_history_verified == true
-      and ((.commit_sha | ascii_downcase) == ($sha | ascii_downcase))
-      and (.work_branch_sha | type == "string"
-        and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$"))
-      and ((.work_branch_sha | ascii_downcase)
-        == ($work_branch_sha | ascii_downcase))
-      and .merge_request_url == $mr_url
-      and ($mr_url | test(
-        "/-/merge_requests/" + ($mr_iid | tostring) + "/?$"))
-      and (
-        if $branch == ("issue/" + ($iid | tostring)) then
-          (.dependency_contract_version // null) == null
-          and (.dependency_plan_sha256 // null) == null
-          and (.dependency_plan // null) == null
-        else
-          .dependency_contract_version == 2
-          and (.dependency_plan_sha256 | type == "string"
-            and test("^[0-9a-f]{64}$"))
-          and (.dependency_plan | type == "object")
-          and .dependency_plan.plan_sha256 == .dependency_plan_sha256
-          and .dependency_plan.consumer_iid == $iid
-          and .dependency_plan.target_branch == $target
-          and .dependency_plan.work_branch == $branch
-          and $branch == (
-            "issue/" + ($iid | tostring) + "-dag-"
-            + .dependency_plan_sha256[0:16])
-        end
-      )
-    ' "${state_file}" >/dev/null 2>&1; then
+  if [ "${closure_state_verified}" != true ]; then
     emit_failure "dependency_source_plan_invalid" "${root_source_iid}"
   fi
 
-  if [ "${closure_work_branch_sha}" != "${closure_sha}" ]; then
+  if [ "${closure_identity_source}" = executor_state ] \
+      && [ "${closure_work_branch_sha}" != "${closure_sha}" ]; then
     if ! verify_terminal_log_child \
           "${closure_sha}" "${closure_work_branch_sha}" \
           "${closure_iid}" "${closure_execution_id}"; then
@@ -702,7 +772,8 @@ walk_frozen_source_snapshot() {
   fi
 
   CLOSURE_ACTIVE["${closure_iid}"]=true
-  if [ "${closure_branch}" != "issue/${closure_iid}" ]; then
+  if [ "${closure_identity_source}" = executor_state ] \
+      && [ "${closure_branch}" != "issue/${closure_iid}" ]; then
     plan_json="$(jq -cS '.dependency_plan' "${state_file}")"
     validate_frozen_dependency_plan \
       "${plan_json}" "${closure_iid}" "${closure_branch}" \

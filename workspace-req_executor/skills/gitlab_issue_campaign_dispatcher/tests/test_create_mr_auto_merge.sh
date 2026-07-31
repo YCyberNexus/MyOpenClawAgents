@@ -168,19 +168,11 @@ dag_base_sha='89abcdef0123456789abcdef0123456789abcdef'
 dag_input="$(jq -cn \
   --arg base_sha "${dag_base_sha}" '{
     iid:9,
-    execution_id:1,
+    identity_source:"gitlab_pr_label_branch",
     work_branch:"issue/9",
     commit_sha:$base_sha,
     work_branch_sha:$base_sha,
-    verified:true,
-    mr:{
-      iid:6,
-      url:"https://gitlab.example.test/group/repo/-/merge_requests/6",
-      state:"opened",
-      source_branch:"issue/9",
-      target_branch:"release",
-      sha:$base_sha
-    }
+    verified:true
   }')"
 dag_plan_canonical="$(jq -cnS \
   --argjson input "${dag_input}" \

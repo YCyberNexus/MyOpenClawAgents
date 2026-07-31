@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-31.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-07-31.2] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -84,21 +84,30 @@ dependencies, an invalid target, and a self-dependency fail closed through the
 normal per-Issue dispatcher-blocked path.
 
 Dependency declarations form DAG v2. Every Issue keeps its own worktree, local
-branch, remote branch, private result, and MR. A predecessor artifact is an
-immutable, verified snapshot of one completed Issue: its IID, execution ID,
-exact work branch, business `commit_sha`, remote `work_branch_sha`, plus its
-exact MR identity, observed
+branch, remote branch, private result, and MR. GitLab live labels are
+authoritative for predecessor completion. For an ordinary historical
+predecessor, a stable live `pr` (or compatible `finish`) plus the fetched exact
+`issue/<iid>` branch is sufficient even when this req_executor has no batch,
+execution, or private Issue record for it. The planner freezes the current
+branch tip as both `commit_sha` and `work_branch_sha` with
+`identity_source:"gitlab_pr_label_branch"`.
+
+A content-addressed DAG predecessor without an `issue/<iid>` branch retains the
+richer executor-state proof: IID, execution ID, exact work branch, business
+`commit_sha`, remote `work_branch_sha`, and exact MR identity with observed
 `opened|merged` state, source, target, and SHA. Planning or executing a consumer
 never renames or deletes a
 predecessor branch, closes or supersedes its MR, or rewrites its private state.
 The same predecessor artifact may therefore feed multiple consumers (fan-out),
 and a completed consumer artifact may itself feed later levels.
 
-When the two SHAs differ, the remote tip must be exactly one direct,
-single-parent child of the business commit and every changed path must be under
-that execution's terminal log directory. The frozen plan binds both SHAs but
-ancestry reduction and aggregation use only the business commit, so executor
-logs never become the current node's downstream baseline.
+For this richer executor-state snapshot, when the two SHAs differ, the remote
+tip must be exactly one direct, single-parent child of the business commit and
+every changed path must be under that execution's terminal log directory. Its
+frozen plan binds both SHAs while ancestry reduction and aggregation use only
+the business commit. The ordinary GitLab-authoritative shape instead treats the
+current `issue/<iid>` tip as the baseline and therefore always records equal
+SHAs.
 
 For a consumer IID and frozen plan SHA-256, the DAG branch is:
 
@@ -112,11 +121,13 @@ its own MR from this branch. DAG v2 never reuses a predecessor MR as the
 consumer MR.
 
 Before allocation, the dispatcher resolves the complete reachable dependency
-graph, rejects cycles, and freezes each predecessor artifact from durable
-`status:"done"` state plus exact live ref/MR verification. A predecessor must
-have stable `pr` or `finish`, no conflicting workflow label, and no current
-campaign pending claim. A predecessor from an earlier campaign is allowed when
-the same private-state and live-identity proof succeeds. Lookup/parse
+graph and rejects cycles. A predecessor must have stable live `pr` or `finish`
+and no conflicting workflow label. When its exact `issue/<iid>` ref exists,
+that fetched ref SHA is the source artifact and private batch state is neither
+required nor consulted as an authority; a stale cached pending claim alone
+cannot override the live completion label. Same-tick reruns are fenced
+separately. Only content-addressed DAG predecessors that lack the ordinary ref
+fall back to the durable executor-state plus exact live-MR proof. Lookup/parse
 uncertainty uses bounded non-terminal dependency deferrals; deterministic
 invalid declarations, cycles, unsafe artifacts, changed frozen plans, and
 content conflicts take the normal dispatcher-blocked path and emit an exact

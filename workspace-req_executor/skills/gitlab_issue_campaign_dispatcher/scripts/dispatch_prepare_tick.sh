@@ -2891,37 +2891,30 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
             or . == "timeout" or . == "blocked" or startswith("blocked-")
             or . == "failed" or startswith("failed-"))] | length) == 0
       ')"
-      dag_source_settled="$(printf '%s' "${STATE_JSON}" | jq -r \
-        --argjson iid "${dag_source_iid}" '
-          ((.pending_subagents // {})[($iid | tostring)] // null) == null
-        ')"
-      if [ "${dag_source_completed}" != true ] \
-          || [ "${dag_source_settled}" != true ]; then
-        if [ "${dag_source_completed}" != true ]; then
-          detect_live_dependency_cycle "${candidate_iid}" "${dag_source_iid}"
-          case "${DEPENDENCY_CHAIN_STATUS}" in
-            cycle)
-              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_cycle"
-              ;;
-            too_deep)
-              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_too_deep"
-              ;;
-            chain_invalid)
-              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_invalid"
-              ;;
-            lookup_failed)
-              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_issue_lookup_failed"
-              ;;
-            parser_failed)
-              DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_parser_failed"
-              ;;
-            deferred_timeout|deferred_budget)
-              record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
-                "issue/${dag_source_iid}" "dependency_cycle_check_deferred"
-              dag_wait_recorded=true
-              ;;
-          esac
-        fi
+      if [ "${dag_source_completed}" != true ]; then
+        detect_live_dependency_cycle "${candidate_iid}" "${dag_source_iid}"
+        case "${DEPENDENCY_CHAIN_STATUS}" in
+          cycle)
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_cycle"
+            ;;
+          too_deep)
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_too_deep"
+            ;;
+          chain_invalid)
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_chain_invalid"
+            ;;
+          lookup_failed)
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_issue_lookup_failed"
+            ;;
+          parser_failed)
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_parser_failed"
+            ;;
+          deferred_timeout|deferred_budget)
+            record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+              "issue/${dag_source_iid}" "dependency_cycle_check_deferred"
+            dag_wait_recorded=true
+            ;;
+        esac
         if [ -z "${DEPENDENCY_ERROR_BY_IID[${candidate_iid}]:-}" ] \
             && [ "${dag_wait_recorded}" != true ]; then
           record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
@@ -2936,31 +2929,57 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
         # not ready. A back-edge may be present only in a later input.
         continue
       fi
-
-      if ! load_dependency_dag_source_identity "${dag_source_iid}"; then
-        if [ "${DAG_SOURCE_IDENTITY_REASON}" = dependency_source_state_pending ]; then
-          record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
-            "issue/${dag_source_iid}" "dependency_source_state_pending"
-          dag_wait_recorded=true
+      dag_source_branch="issue/${dag_source_iid}"
+      dag_source_branch_sha="$(GIT_NO_REPLACE_OBJECTS=1 \
+        git -C "${REPO_PATH}" rev-parse --verify \
+          "refs/remotes/origin/${dag_source_branch}^{commit}" \
+          2>/dev/null || true)"
+      if [[ "${dag_source_branch_sha}" =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]] \
+          && GIT_NO_REPLACE_OBJECTS=1 git -C "${REPO_PATH}" \
+            cat-file -e "${dag_source_branch_sha}^{commit}" 2>/dev/null; then
+        dag_source_branch_sha="${dag_source_branch_sha,,}"
+        DAG_SOURCE_SNAPSHOT="$(jq -nc \
+          --argjson iid "${dag_source_iid}" \
+          --arg work_branch "${dag_source_branch}" \
+          --arg sha "${dag_source_branch_sha}" '{
+            iid:$iid,
+            identity_source:"gitlab_pr_label_branch",
+            work_branch:$work_branch,
+            commit_sha:$sha,
+            work_branch_sha:$sha,
+            verified:true
+          }')"
+        wrapper_log prepare_tick \
+          "iid=${candidate_iid} dependency_iid=${dag_source_iid} source_identity=gitlab_pr_label_branch branch=${dag_source_branch} sha=${dag_source_branch_sha}"
+      else
+        # Content-addressed DAG predecessors do not have an issue/<iid> ref;
+        # retain their richer private-state + exact-MR proof. For an ordinary
+        # historical predecessor, however, the public contract is simply
+        # live `pr` plus the fetched issue/<iid> branch.
+        if ! load_dependency_dag_source_identity "${dag_source_iid}"; then
+          if [ "${DAG_SOURCE_IDENTITY_REASON}" = dependency_source_state_pending ]; then
+            record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+              "${dag_source_branch}" "dependency_source_branch_missing"
+            dag_wait_recorded=true
+          else
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="${DAG_SOURCE_IDENTITY_REASON}"
+          fi
           dag_sources_ready=false
-          continue
+          break
         fi
-        DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="${DAG_SOURCE_IDENTITY_REASON}"
-        dag_sources_ready=false
-        break
-      fi
-      if ! query_dependency_dag_source_snapshot \
-          "${DAG_SOURCE_IDENTITY}" "${candidate_merge_target}"; then
-        if [ "${DAG_SOURCE_MR_QUERY_OUTCOME}" = identity_mismatch ]; then
-          DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_source_mr_identity_mismatch"
-        else
-          record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
-            "$(jq -r '.work_branch' <<<"${DAG_SOURCE_IDENTITY}")" \
-            "dependency_source_mr_lookup_deferred"
-          dag_wait_recorded=true
+        if ! query_dependency_dag_source_snapshot \
+            "${DAG_SOURCE_IDENTITY}" "${candidate_merge_target}"; then
+          if [ "${DAG_SOURCE_MR_QUERY_OUTCOME}" = identity_mismatch ]; then
+            DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="dependency_source_mr_identity_mismatch"
+          else
+            record_dependency_wait "${candidate_iid}" "${dag_source_iid}" \
+              "$(jq -r '.work_branch' <<<"${DAG_SOURCE_IDENTITY}")" \
+              "dependency_source_mr_lookup_deferred"
+            dag_wait_recorded=true
+          fi
+          dag_sources_ready=false
+          break
         fi
-        dag_sources_ready=false
-        break
       fi
       dag_source_snapshots="$(jq -cn \
         --argjson current "${dag_source_snapshots}" \

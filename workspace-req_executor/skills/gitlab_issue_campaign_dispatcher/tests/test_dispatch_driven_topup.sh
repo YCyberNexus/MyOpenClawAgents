@@ -1232,9 +1232,45 @@ DAG_SOURCE_9_BUSINESS_SHA="$(printf 'unexpected business child\n' \
   | git -C "${PROJECT_REPO}" commit-tree "${DAG_SOURCE_9_BUSINESS_TREE}" \
     -p "${DAG_SOURCE_9_SHA}")"
 
-# A branch move cannot be reconciled merely because it is a direct child of
-# the reviewed business SHA. Non-log content fails closed and leaves the
-# durable B/B identity untouched.
+# A historical predecessor does not need any req_executor batch/private state.
+# Stable live `pr` plus the exact fetched issue/<iid> branch is sufficient.
+SOURCE_9_STATE_PATH="${PROJECT_REPO}/.req_executor/issues/issue-9/state.json"
+if [ -f "${SOURCE_9_STATE_PATH}" ] && [ ! -L "${SOURCE_9_STATE_PATH}" ]; then
+  mv "${SOURCE_9_STATE_PATH}" \
+    "${PROJECT_REPO}/.req_executor/issues/issue-9/state.before-gitlab-only.json"
+fi
+git -C "${PROJECT_REPO}" update-ref \
+  refs/remotes/origin/issue/9 "${DAG_SOURCE_9_SHA}"
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{"2":"依赖 Issue #9"}'
+export FAKE_ISSUE_LABELS_JSON='{"2":["blocked-dispatcher"],"9":["pr"]}'
+DAG_GITLAB_ONLY_READY="$(run_wrapper "${RACE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
+printf '%s' "${DAG_GITLAB_ONLY_READY}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [2]
+  and .dependency_waiting == []
+' >/dev/null || {
+  printf '%s\n' "${DAG_GITLAB_ONLY_READY}" >&2
+  fail "GitLab-completed predecessor without batch state was not released"
+}
+jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
+  .dependency_plan.declared_inputs == [{
+    iid:9,
+    identity_source:"gitlab_pr_label_branch",
+    work_branch:"issue/9",
+    commit_sha:$sha,
+    work_branch_sha:$sha,
+    verified:true
+  }]
+  and .dependency_plan.aggregate_base_sha == $sha
+' "${PROJECT_REPO}/.req_executor/issues/issue-2/state.json" >/dev/null \
+  || fail "GitLab label/branch source was not frozen into the DAG plan"
+[ ! -e "${SOURCE_9_STATE_PATH}" ] \
+  || fail "GitLab-only dependency fabricated a batch/private Issue state"
+
+# Live GitLab label + branch also wins over a stale private state snapshot.
+# The dispatcher freezes the current branch SHA without rewriting that cache.
 git -C "${PROJECT_REPO}" update-ref \
   refs/remotes/origin/issue/9 "${DAG_SOURCE_9_BUSINESS_SHA}"
 write_ordinary_dag_source_state 9 901 issue/9 "${DAG_SOURCE_9_SHA}" 16
@@ -1248,29 +1284,33 @@ export FAKE_DAG_MRS_JSON="$(jq -nc \
 write_terminal_race_state
 export FAKE_ISSUE_DESCRIPTIONS_JSON='{"2":"依赖 Issue #9"}'
 export FAKE_ISSUE_LABELS_JSON='{"2":["blocked-dispatcher"],"9":["pr"]}'
-DAG_BUSINESS_CHILD_BLOCK="$(run_wrapper "${RACE_REQUEST}")"
+DAG_BUSINESS_CHILD_READY="$(run_wrapper "${RACE_REQUEST}")"
 unset FAKE_ISSUE_DESCRIPTIONS_JSON FAKE_ISSUE_LABELS_JSON
-printf '%s' "${DAG_BUSINESS_CHILD_BLOCK}" | jq -e '
-  .status == "no_eligible_iids"
-  and .dispatch_entries == []
-  and .pending_iids == []
+printf '%s' "${DAG_BUSINESS_CHILD_READY}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [2]
   and .dependency_waiting == []
-  and .skipped_entries[0].reason ==
-    "dependency_source_state_identity_mismatch"
 ' >/dev/null || {
-  printf '%s\n' "${DAG_BUSINESS_CHILD_BLOCK}" >&2
-  fail "arbitrary business child was accepted as a terminal-log recovery"
+  printf '%s\n' "${DAG_BUSINESS_CHILD_READY}" >&2
+  fail "live GitLab branch did not override stale private source state"
 }
-[ "$(cat "${ALLOC_LOG}")" = 2 ] && [ ! -s "${PREP_LOG}" ] \
-  || fail "arbitrary source child reached worktree preparation"
+[ "$(cat "${ALLOC_LOG}")" = 2 ] \
+  && [ "$(cat "${PREP_LOG}")" = '2|main|fresh' ] \
+  || fail "live GitLab branch source did not reach worktree preparation"
+jq -e --arg sha "${DAG_SOURCE_9_BUSINESS_SHA}" '
+  .dependency_plan.declared_inputs[0].identity_source ==
+    "gitlab_pr_label_branch"
+  and .dependency_plan.declared_inputs[0].commit_sha == $sha
+  and .dependency_plan.aggregate_base_sha == $sha
+' "${PROJECT_REPO}/.req_executor/issues/issue-2/state.json" >/dev/null \
+  || fail "current GitLab branch SHA did not win over stale private state"
 jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
   .commit_sha == $sha and .work_branch_sha == $sha
 ' "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" >/dev/null \
-  || fail "rejected business child mutated the source B/B identity"
+  || fail "live branch proof mutated the stale private source cache"
 
-# A deterministic direct child containing only execution-901 log paths is the
-# one accepted crash-recovery shape. Use B/L for the same-tick gate below;
-# the next normal consumer resets state to B/B to exercise automatic CAS.
+# Use B/L for the same-tick gate below; the next normal consumer resets state
+# to B/B. The live ordinary branch remains the authoritative dependency tip.
 git -C "${PROJECT_REPO}" update-ref \
   refs/remotes/origin/issue/9 "${DAG_SOURCE_9_LOG_SHA}"
 export FAKE_DAG_MRS_JSON="$(printf '%s' "${FAKE_DAG_MRS_JSON}" | jq -c \
@@ -1341,9 +1381,8 @@ if grep -Fq '2|' "${LABEL_LOG}"; then
   fail "direct same-tick gate mutated consumer workflow labels"
 fi
 
-# Simulate the crash after L was pushed but before state moved from B/B to
-# B/L. The normal dependency read must CAS only work_branch_sha, then build a
-# plan whose declared input keeps both identities and whose aggregate is B.
+# Even if private state still says B/B after the branch advanced to L, the
+# current GitLab issue/<iid> branch is authoritative and becomes the baseline.
 write_ordinary_dag_source_state 9 901 issue/9 "${DAG_SOURCE_9_SHA}" 16
 : >"${MIGRATION_LOG}"
 write_terminal_race_state
@@ -1360,8 +1399,7 @@ DAG_TWO_STATE="${PROJECT_REPO}/.req_executor/issues/issue-2/state.json"
 DAG_TWO_WORK_BRANCH="$(jq -r '.dependency_plan.work_branch' "${DAG_TWO_STATE}")"
 DAG_TWO_PLAN_SHA256="$(jq -r \
   '.dependency_plan_sha256' "${DAG_TWO_STATE}")"
-jq -e --arg sha "${DAG_SOURCE_9_SHA}" \
-  --arg log_sha "${DAG_SOURCE_9_LOG_SHA}" '
+jq -e --arg log_sha "${DAG_SOURCE_9_LOG_SHA}" '
   .dependency_contract_version == 2
   and (.dependency_plan | keys | sort) == ([
     "aggregate_base_sha","consumer_iid","declared_inputs",
@@ -1370,13 +1408,15 @@ jq -e --arg sha "${DAG_SOURCE_9_SHA}" \
   and .dependency_plan.consumer_iid == 2
   and (.dependency_plan.declared_inputs | map(.iid)) == [9]
   and (.dependency_plan.effective_inputs | map(.iid)) == [9]
-  and .dependency_plan.declared_inputs[0].commit_sha == $sha
+  and .dependency_plan.declared_inputs[0].identity_source ==
+    "gitlab_pr_label_branch"
+  and .dependency_plan.declared_inputs[0].commit_sha == $log_sha
   and .dependency_plan.declared_inputs[0].work_branch_sha == $log_sha
-  and .dependency_plan.effective_inputs[0].commit_sha == $sha
+  and .dependency_plan.effective_inputs[0].commit_sha == $log_sha
   and .dependency_plan.effective_inputs[0].work_branch_sha == $log_sha
-  and .dependency_plan.aggregate_base_sha == $sha
+  and .dependency_plan.aggregate_base_sha == $log_sha
   and .proposed_dependency_plan == .dependency_plan
-  and .proposed_expected_commit_parent_sha == $sha
+  and .proposed_expected_commit_parent_sha == $log_sha
 ' "${DAG_TWO_STATE}" >/dev/null \
   || fail "single-input DAG plan was not frozen in Issue state"
 [[ "${DAG_TWO_WORK_BRANCH}" =~ ^issue/2-dag-[0-9a-f]{16}$ ]] \
@@ -1388,13 +1428,12 @@ jq -e --arg sha "${DAG_SOURCE_9_SHA}" \
   || fail "DAG consumer did not prepare from its independent target baseline"
 [ ! -s "${MIGRATION_LOG}" ] \
   || fail "DAG planning invoked a destructive legacy migration"
-jq -e --arg sha "${DAG_SOURCE_9_SHA}" \
-  --arg log_sha "${DAG_SOURCE_9_LOG_SHA}" '
+jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
   .commit_sha == $sha
-  and .work_branch_sha == $log_sha
-  and (.terminal_log_recovered_at | type == "string" and length > 0)
+  and .work_branch_sha == $sha
+  and (.terminal_log_recovered_at // null) == null
 ' "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json" >/dev/null \
-  || fail "terminal-log crash replay did not CAS source state from B/B to B/L"
+  || fail "GitLab branch proof rewrote the private predecessor cache"
 SOURCE_9_STATE_HASH="$(sha256_file \
   "${PROJECT_REPO}/.req_executor/issues/issue-9/state.json")"
 [ "$(git -C "${PROJECT_REPO}" rev-parse refs/remotes/origin/issue/9)" = \
@@ -1410,7 +1449,7 @@ grep -Fq 'DEPENDENCY_CONTRACT_VERSION=2' "${DAG_TWO_EXECUTOR_PAYLOAD}" \
 grep -Fq "DEPENDENCY_PLAN_SHA256=${DAG_TWO_PLAN_SHA256}" \
   "${DAG_TWO_EXECUTOR_PAYLOAD}" \
   || fail "DAG full plan identity was not rendered"
-grep -Fq "EXPECTED_COMMIT_PARENT_SHA=${DAG_SOURCE_9_SHA}" \
+grep -Fq "EXPECTED_COMMIT_PARENT_SHA=${DAG_SOURCE_9_LOG_SHA}" \
   "${DAG_TWO_EXECUTOR_PAYLOAD}" \
   || fail "DAG consumer did not freeze its exact commit parent"
 grep -Fq "WORK_BRANCH=${DAG_TWO_WORK_BRANCH}" \
@@ -1442,7 +1481,7 @@ DAG_THREE_WORK_BRANCH="$(jq -r '.dependency_plan.work_branch' \
   "${PROJECT_REPO}/.req_executor/issues/issue-3/state.json")"
 [ "${DAG_THREE_WORK_BRANCH}" != "${DAG_TWO_WORK_BRANCH}" ] \
   || fail "fan-out consumers were assigned the same work branch"
-jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
+jq -e --arg sha "${DAG_SOURCE_9_LOG_SHA}" '
   .dependency_plan.aggregate_base_sha == $sha
   and (.dependency_plan.declared_inputs | map(.iid)) == [9]
 ' "${PROJECT_REPO}/.req_executor/issues/issue-3/state.json" >/dev/null \
@@ -1456,7 +1495,7 @@ jq -e --arg sha "${DAG_SOURCE_9_SHA}" '
 # both its ancestor and itself. Transitive reduction must keep only Issue 2.
 DAG_TWO_COMMIT_SHA="$(printf 'DAG consumer 2 result\n' \
   | git -C "${PROJECT_REPO}" commit-tree HEAD^{tree} \
-    -p "${DAG_SOURCE_9_SHA}")"
+    -p "${DAG_SOURCE_9_LOG_SHA}")"
 git -C "${PROJECT_REPO}" update-ref \
   "refs/remotes/origin/${DAG_TWO_WORK_BRANCH}" "${DAG_TWO_COMMIT_SHA}"
 DAG_TWO_DONE_TMP="$(mktemp "${DAG_TWO_STATE}.done.XXXXXX")"

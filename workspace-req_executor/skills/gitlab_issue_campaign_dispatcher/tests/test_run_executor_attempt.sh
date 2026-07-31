@@ -310,19 +310,11 @@ DAG_BASE_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 DAG_INPUT_JSON="$(jq -cn \
   --arg commit_sha "${DAG_BASE_SHA}" '{
     iid:9,
-    execution_id:1,
+    identity_source:"gitlab_pr_label_branch",
     work_branch:"issue/9",
     commit_sha:$commit_sha,
     work_branch_sha:$commit_sha,
-    verified:true,
-    mr:{
-      iid:90,
-      url:"https://gitlab.example.test/group/repo/-/merge_requests/90",
-      state:"opened",
-      source_branch:"issue/9",
-      target_branch:"main",
-      sha:$commit_sha
-    }
+    verified:true
   }')"
 DAG_PLAN_CANONICAL="$(jq -cnS \
   --argjson input "${DAG_INPUT_JSON}" \

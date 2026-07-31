@@ -109,6 +109,21 @@ source_snapshot() {
         target_branch:"main",
         sha:$work_branch_sha
       }
+  }'
+}
+
+label_branch_snapshot() {
+  local iid="$1" branch="$2" sha="$3"
+  jq -nc \
+    --argjson iid "${iid}" \
+    --arg branch "${branch}" \
+    --arg sha "${sha}" '{
+      iid:$iid,
+      identity_source:"gitlab_pr_label_branch",
+      work_branch:$branch,
+      commit_sha:$sha,
+      work_branch_sha:$sha,
+      verified:true
     }'
 }
 
@@ -195,6 +210,28 @@ A_SHA="$(create_source_commit \
   "${A_BRANCH}" "${MAIN_SHA}" a.txt 'source A')"
 write_source_state 11 101 "${A_BRANCH}" "${A_SHA}" 111
 A_SNAPSHOT="$(source_snapshot 11 101 "${A_BRANCH}" "${A_SHA}" 111)"
+
+# A live-pr ordinary branch is independently sufficient: no private/batch
+# state is needed to resolve and freeze its exact current SHA.
+A_STATE_PATH="${ISSUES_ROOT}/issue-11/state.json"
+A_STATE_BACKUP="${ISSUES_ROOT}/issue-11/state.before-label-branch.json"
+mv "${A_STATE_PATH}" "${A_STATE_BACKUP}"
+A_LABEL_BRANCH_SNAPSHOT="$(label_branch_snapshot 11 "${A_BRANCH}" "${A_SHA}")"
+A_LABEL_BRANCH_OUTPUT="$(
+  run_resolver 90 "[$A_LABEL_BRANCH_SNAPSHOT]" \
+    2>"${TEST_ROOT}/label-branch.stderr"
+)"
+printf '%s' "${A_LABEL_BRANCH_OUTPUT}" | jq -e --arg sha "${A_SHA}" '
+  .status == "ready"
+  and .consumer_iid == 90
+  and .declared_inputs[0].identity_source ==
+    "gitlab_pr_label_branch"
+  and .aggregate_base_sha == $sha
+  and .closure_iids == [11]
+' >/dev/null || fail "label/branch-only predecessor was not resolved"
+[ ! -e "${A_STATE_PATH}" ] \
+  || fail "label/branch-only resolution fabricated private state"
+mv "${A_STATE_BACKUP}" "${A_STATE_PATH}"
 
 # B is itself a completed DAG-v2 consumer. Its immutable plan-derived source
 # branch proves that multi-level DAGs are accepted without reopening B's MR.

@@ -245,7 +245,22 @@ if [ "${DAG_BRANCH}" = true ]; then
         and test("^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$");
       def positive_integer:
         type == "number" and . == floor and . > 0;
-      def source_snapshot($target_branch):
+      def label_branch_source:
+        . as $input
+        | type == "object"
+        and ((keys | sort) == ([
+          "commit_sha","identity_source","iid","verified",
+          "work_branch","work_branch_sha"
+        ] | sort))
+        and $input.identity_source == "gitlab_pr_label_branch"
+        and ($input.iid | positive_integer and . <= 2147483647)
+        and $input.work_branch == ("issue/" + ($input.iid | tostring))
+        and ($input.commit_sha | full_oid)
+        and ($input.work_branch_sha | full_oid)
+        and (($input.commit_sha | ascii_downcase)
+          == ($input.work_branch_sha | ascii_downcase))
+        and $input.verified == true;
+      def executor_source($target_branch):
         . as $input
         | type == "object"
         and ((keys | sort) == ([
@@ -288,6 +303,8 @@ if [ "${DAG_BRANCH}" = true ]; then
               == ($input.work_branch_sha | ascii_downcase))
           end
         );
+      def source_snapshot($target_branch):
+        label_branch_source or executor_source($target_branch);
       .dependency_plan as $plan
       | ($plan.effective_inputs | map(.iid)) as $effective_iids
       |
