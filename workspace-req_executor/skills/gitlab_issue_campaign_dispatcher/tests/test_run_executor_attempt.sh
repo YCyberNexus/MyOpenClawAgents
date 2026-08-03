@@ -30,6 +30,17 @@ sha256_file() {
 
 [ -x "${WRAPPER}" ] || fail "run_executor_attempt.sh is missing or not executable"
 
+# GNU `stat -f` can print filesystem details for the real path while returning
+# nonzero for the BSD format operand. A direct probe leaks that output into the
+# helper result, so production helpers must capture the probe before falling
+# back to `stat -c`.
+for production_script in "${SKILL_DIR}"/scripts/*.sh; do
+  if grep -Eq "^[[:space:]]*if[[:space:]]+stat[[:space:]]+-f[[:space:]]+'%(Lp|u)'" \
+      "${production_script}"; then
+    fail "${production_script} contains a stdout-leaking BSD stat probe"
+  fi
+done
+
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/run-executor-attempt.XXXXXX")"
 FAKE_SCRIPTS="${TEST_ROOT}/scripts"
 FAKE_BIN="${TEST_ROOT}/bin"
@@ -99,6 +110,26 @@ case "$*" in
   *)
     echo "unexpected git invocation: $*" >&2
     exit 91
+    ;;
+esac
+EOF
+cat >"${FAKE_BIN}/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+case "${1:-}:${2:-}" in
+  -f:%Lp|-f:%u)
+    printf '%s\n' 'filesystem-noise-that-must-not-reach-the-caller'
+    exit 1
+    ;;
+  -c:%a)
+    printf '%s\n' 600
+    ;;
+  -c:%u)
+    id -u
+    ;;
+  *)
+    echo "unexpected stat invocation: $*" >&2
+    exit 92
     ;;
 esac
 EOF
@@ -249,7 +280,8 @@ printf 'LOG_WORK_BRANCH=%s\n' "${WORK_BRANCH}"
 printf 'LOG_PARENT_COMMIT=%s\n' "${parent_commit_sha}"
 printf 'LOG_COMMIT_SHA=%s\n' "${log_commit_sha}"
 EOF
-chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_SCRIPTS}"/*.sh
+chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_BIN}/stat" \
+  "${FAKE_SCRIPTS}"/*.sh
 
 # Invalid ordinary/shared branch identities must fail before env_paths.sh can
 # create even the per-Issue runtime tree.  Use a fresh repo path for every

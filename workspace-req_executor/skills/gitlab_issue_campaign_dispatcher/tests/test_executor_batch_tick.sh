@@ -21,9 +21,12 @@ test_sha256_file() {
 }
 
 test_file_mode() {
-  local path="$1"
-  stat -f '%Lp' "${path}" 2>/dev/null \
-    || stat -c '%a' "${path}" 2>/dev/null
+  local path="$1" mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "${path}" 2>/dev/null
+  fi
 }
 
 write_attempt_finalized_marker() {

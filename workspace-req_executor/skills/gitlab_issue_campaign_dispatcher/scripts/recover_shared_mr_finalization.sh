@@ -16,18 +16,18 @@ GIT_NETWORK_GUARD_CONTEXT=recover_shared_mr_finalization
   "${EXECUTION_STATE_FILE:?}" "${WORK_BRANCH:?}" "${WORKTREE_DIR:?}"
 
 private_file_mode() {
-  local path="$1"
-  if stat -f '%Lp' "${path}" 2>/dev/null; then
-    :
+  local path="$1" mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
   else
     stat -c '%a' "${path}" 2>/dev/null
   fi
 }
 
 private_file_owner() {
-  local path="$1"
-  if stat -f '%u' "${path}" 2>/dev/null; then
-    :
+  local path="$1" owner
+  if owner="$(stat -f '%u' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${owner}"
   else
     stat -c '%u' "${path}" 2>/dev/null
   fi

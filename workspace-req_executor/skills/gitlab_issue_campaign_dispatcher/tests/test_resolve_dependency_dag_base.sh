@@ -27,6 +27,15 @@ sha256_text() {
   fi
 }
 
+file_mode() {
+  local path="$1" mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "${path}" 2>/dev/null
+  fi
+}
+
 state_hashes() {
   local state_file
   for state_file in "${ISSUES_ROOT}"/issue-*/state.json; do
@@ -554,11 +563,9 @@ PARENTS="$(git -C "${REPO_PATH}" cat-file -p "${MERGE_SHA}" \
 [ "${PARENTS}" = "${B_SHA}
 ${C_SHA}" ] || fail "aggregate commit parent ordering is not [B,C]"
 assert_derived_work_branch "${MERGE_OUTPUT_ONE}" 22
-[ "$(stat -f '%Lp' "${TRUSTED_MERGE_GIT_DIR}" 2>/dev/null \
-    || stat -c '%a' "${TRUSTED_MERGE_GIT_DIR}")" = 700 ] \
+[ "$(file_mode "${TRUSTED_MERGE_GIT_DIR}")" = 700 ] \
   || fail "trusted merge directory was not normalized from 0755"
-[ "$(stat -f '%Lp' "${TRUSTED_MERGE_GIT_DIR}/config" 2>/dev/null \
-    || stat -c '%a' "${TRUSTED_MERGE_GIT_DIR}/config")" = 600 ] \
+[ "$(file_mode "${TRUSTED_MERGE_GIT_DIR}/config")" = 600 ] \
   || fail "trusted merge config was not normalized from 0644"
 
 # Exact core.attributesFile is forbidden in the persistent trusted Git dir;

@@ -92,16 +92,18 @@ fail_input() {
 }
 
 private_file_mode() {
-  if stat -f '%Lp' "$1" 2>/dev/null; then
-    :
+  local mode
+  if mode="$(stat -f '%Lp' "$1" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
   else
     stat -c '%a' "$1" 2>/dev/null
   fi
 }
 
 private_file_owner() {
-  if stat -f '%u' "$1" 2>/dev/null; then
-    :
+  local owner
+  if owner="$(stat -f '%u' "$1" 2>/dev/null)"; then
+    printf '%s\n' "${owner}"
   else
     stat -c '%u' "$1" 2>/dev/null
   fi

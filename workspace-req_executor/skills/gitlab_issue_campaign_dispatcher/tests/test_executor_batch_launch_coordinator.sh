@@ -13,6 +13,15 @@ fail() {
   exit 1
 }
 
+file_mode() {
+  local path="$1" mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s\n' "${mode}"
+  else
+    stat -c '%a' "${path}" 2>/dev/null
+  fi
+}
+
 TMP_PARENT="${TMPDIR:-/tmp}"
 TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-launch-coordinator.XXXXXX")"
@@ -348,7 +357,7 @@ assert_one_action_file() {
     -maxdepth 1 -type f -name '*.json' -print)
   [ "${#action_files[@]}" -eq 1 ] \
     || fail "expected one durable launch action, got ${#action_files[@]}"
-  [ "$(stat -f '%Lp' "${action_files[0]}" 2>/dev/null || stat -c '%a' "${action_files[0]}")" = 600 ] \
+  [ "$(file_mode "${action_files[0]}")" = 600 ] \
     || fail "launch action containing a private claim is not mode 600"
   jq -e --arg stage "${expected_stage}" '
     .stage == $stage
