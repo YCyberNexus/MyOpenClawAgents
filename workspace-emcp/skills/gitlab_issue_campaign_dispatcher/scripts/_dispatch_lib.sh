@@ -53,12 +53,24 @@ utc_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 # Parse an ISO-8601 UTC timestamp into epoch seconds. Echoes 0 when the
 # input is empty / null / unparseable so callers can branch on `-gt 0`.
 iso_to_epoch() {
-  local ts="$1"
+  local ts="$1" epoch
   if [ -z "${ts}" ] || [ "${ts}" = "null" ]; then
-    echo 0
+    printf '%s\n' 0
     return 0
   fi
-  date -u -d "${ts}" +%s 2>/dev/null || gdate -u -d "${ts}" +%s 2>/dev/null || echo 0
+  if epoch="$(date -u -d "${ts}" +%s 2>/dev/null)" \
+      && [[ "${epoch}" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "${epoch}"
+  elif epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "${ts}" +%s 2>/dev/null)" \
+      && [[ "${epoch}" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "${epoch}"
+  elif command -v gdate >/dev/null 2>&1 \
+      && epoch="$(gdate -u -d "${ts}" +%s 2>/dev/null)" \
+      && [[ "${epoch}" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "${epoch}"
+  else
+    printf '%s\n' 0
+  fi
 }
 
 atomic_write_json() {

@@ -4,6 +4,17 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    echo "test_scheduler_env.sh: sha256sum or shasum is required" >&2
+    return 127
+  fi
+}
+
 TMP_PARENT="${TMPDIR:-/tmp}"
 TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-scheduler-env.XXXXXX")"
@@ -110,7 +121,7 @@ jq -e 'has("launch_failed_receipts") | not' "${STATE_FILE}" >/dev/null \
   || { echo 'historical launch_failed receipts remained in hot scheduler state' >&2; exit 1; }
 [ "$(find "${SCHEDULER_ROOT}/launch_failed_receipts" -maxdepth 1 -type f -name '*.json' | wc -l | tr -d ' ')" = 105 ] \
   || { echo 'legacy launch_failed receipts were not migrated to cold storage' >&2; exit 1; }
-history_digest="$(printf '%s' 'history-104:snapshot-0' | shasum -a 256 | awk '{print $1}')"
+history_digest="$(printf '%s' 'history-104:snapshot-0' | test_sha256_text)"
 jq -e '.job_id == "history-104:snapshot-0" and .recorded_at == 104' \
   "${SCHEDULER_ROOT}/launch_failed_receipts/${history_digest}.json" >/dev/null \
   || { echo 'cold launch_failed receipt is not directly addressable by job digest' >&2; exit 1; }

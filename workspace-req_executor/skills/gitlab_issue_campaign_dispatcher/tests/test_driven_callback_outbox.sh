@@ -15,6 +15,16 @@ fail() {
   exit 1
 }
 
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
 [ -x "${IMPORT_HANDOFF}" ] || fail "import_driven_handoff.sh is missing or not executable"
 [ -x "${DRAIN_OUTBOX}" ] || fail "drain_driven_outbox.sh is missing or not executable"
 [ -x "${BIND_CLAIM}" ] || fail "bind_driven_claim.sh is missing or not executable"
@@ -1844,7 +1854,7 @@ exit 47
 EOF
 chmod +x "${FAKE_IMPORTER}"
 
-TIMEOUT_TOKEN_SHA="$(printf '%s' 'claim-token-42' | shasum -a 256 | awk '{print $1}')"
+TIMEOUT_TOKEN_SHA="$(printf '%s' 'claim-token-42' | test_sha256_text)"
 cp "${FOLLOWUP_ROOT}/campaign-state-baseline.json" "${FOLLOWUP_STATE}"
 cp "${FOLLOWUP_STATE}" "${FOLLOWUP_ROOT}/before-wrong-timeout-fence.json"
 wrong_timeout_out="$(printf '' | \

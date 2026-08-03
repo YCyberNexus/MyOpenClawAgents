@@ -12,6 +12,16 @@ fail() {
   exit 1
 }
 
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
 TMP_PARENT="${TMPDIR:-/tmp}"
 TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-terminal-counts.XXXXXX")"
@@ -598,7 +608,7 @@ jq -e '
 create_legacy_terminal_batch batch-moving 201
 write_terminal_evidence "${SCHEDULER_ROOT}/callback_outbox" batch-moving 201 done
 MOVING_EVENT_ID='batch-moving:snapshot-0:terminal-1'
-MOVING_LOCK_DIGEST="$(printf '%s' "${MOVING_EVENT_ID}" | shasum -a 256 | awk '{print $1}')"
+MOVING_LOCK_DIGEST="$(printf '%s' "${MOVING_EVENT_ID}" | test_sha256_text)"
 exec {MOVING_LOCK_FD}>"${SCHEDULER_ROOT}/callback_locks/${MOVING_LOCK_DIGEST}.lock"
 flock -x "${MOVING_LOCK_FD}"
 (
@@ -643,7 +653,7 @@ create_legacy_terminal_batch batch-concurrent-writer 204
 write_terminal_evidence "${SCHEDULER_ROOT}/callback_archive" \
   batch-concurrent-writer 204 done
 CONCURRENT_EVENT_ID='batch-concurrent-writer:snapshot-0:terminal-1'
-CONCURRENT_LOCK_DIGEST="$(printf '%s' "${CONCURRENT_EVENT_ID}" | shasum -a 256 | awk '{print $1}')"
+CONCURRENT_LOCK_DIGEST="$(printf '%s' "${CONCURRENT_EVENT_ID}" | test_sha256_text)"
 exec {CONCURRENT_LOCK_FD}>"${SCHEDULER_ROOT}/callback_locks/${CONCURRENT_LOCK_DIGEST}.lock"
 flock -x "${CONCURRENT_LOCK_FD}"
 (

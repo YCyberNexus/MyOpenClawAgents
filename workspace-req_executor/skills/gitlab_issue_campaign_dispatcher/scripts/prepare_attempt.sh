@@ -469,9 +469,11 @@ for stale in "${WORKTREE_DIR}.recreate-backup."*; do
   [ -d "${stale}" ] || continue
   # stat -c %Y (GNU) / stat -f %m (BSD) for mtime; pick the newest.
   mt=0
-  if ts="$(stat -c %Y "${stale}" 2>/dev/null)"; then
+  if ts="$(stat -c %Y "${stale}" 2>/dev/null)" \
+      && [[ "${ts}" =~ ^-?[0-9]+$ ]]; then
     mt="${ts}"
-  elif ts="$(stat -f %m "${stale}" 2>/dev/null)"; then
+  elif ts="$(stat -f %m "${stale}" 2>/dev/null)" \
+      && [[ "${ts}" =~ ^-?[0-9]+$ ]]; then
     mt="${ts}"
   fi
   if [ "${mt}" -gt "${stale_backup_mtime}" ]; then

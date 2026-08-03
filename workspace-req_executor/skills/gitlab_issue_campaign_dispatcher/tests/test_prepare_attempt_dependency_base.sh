@@ -11,10 +11,14 @@ fail() {
 
 file_mode() {
   local mode
-  if mode="$(stat -f '%Lp' "$1" 2>/dev/null)"; then
+  if mode="$(stat -c '%a' "$1" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "$1" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
     printf '%s\n' "${mode}"
   else
-    stat -c '%a' "$1"
+    return 1
   fi
 }
 

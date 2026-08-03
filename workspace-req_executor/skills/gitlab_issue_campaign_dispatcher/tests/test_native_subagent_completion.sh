@@ -9,6 +9,16 @@ fail() {
   exit 1
 }
 
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
 TEST_ROOT="$(mktemp -d)"
 REPO_PARENT_BASE="${TEST_ROOT}/repos"
 REPO_PARENT="${REPO_PARENT_BASE}/group"
@@ -307,7 +317,7 @@ reset_internal_evidence() {
 }
 
 ACTION_JOB_ID='local-batch:snapshot-0'
-ACTION_DIGEST="$(printf '%s' "${ACTION_JOB_ID}" | shasum -a 256 | awk '{print $1}')"
+ACTION_DIGEST="$(printf '%s' "${ACTION_JOB_ID}" | test_sha256_text)"
 write_launch_action() {
   local destination="$1"
   jq -cnS \
@@ -336,7 +346,7 @@ write_launch_action() {
 }
 
 INTERNAL_ACTION_JOB_ID='internal-batch:snapshot-0'
-INTERNAL_ACTION_DIGEST="$(printf '%s' "${INTERNAL_ACTION_JOB_ID}" | shasum -a 256 | awk '{print $1}')"
+INTERNAL_ACTION_DIGEST="$(printf '%s' "${INTERNAL_ACTION_JOB_ID}" | test_sha256_text)"
 write_internal_launch_action() {
   jq -cnS \
     --arg job_id "${INTERNAL_ACTION_JOB_ID}" \
@@ -367,7 +377,7 @@ write_internal_launch_action() {
 
 write_unrelated_pre_ack_action() {
   local job_id='other-batch:snapshot-0' digest
-  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' "${job_id}" | test_sha256_text)"
   jq -cnS --arg job_id "${job_id}" '{
     version:1,
     job_id:$job_id,
@@ -391,7 +401,7 @@ write_unrelated_pre_ack_action() {
 
 write_unrelated_launch_failed_action() {
   local job_id='failed-batch:snapshot-0' digest
-  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' "${job_id}" | test_sha256_text)"
   jq -cnS --arg job_id "${job_id}" '{
     version:1,
     job_id:$job_id,

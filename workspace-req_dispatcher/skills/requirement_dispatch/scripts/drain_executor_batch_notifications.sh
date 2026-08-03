@@ -53,9 +53,17 @@ notification_event_key() {
 }
 
 iso_from_epoch() {
-  local epoch="$1"
-  date -u -r "${epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
-    || date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ
+  local epoch="$1" iso
+  [[ "${epoch}" =~ ^[0-9]+$ ]] || return 1
+  if iso="$(date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+      && [[ "${iso}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    printf '%s\n' "${iso}"
+  elif iso="$(date -u -r "${epoch}" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)" \
+      && [[ "${iso}" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]; then
+    printf '%s\n' "${iso}"
+  else
+    return 1
+  fi
 }
 
 retry_delay_for_attempt() {

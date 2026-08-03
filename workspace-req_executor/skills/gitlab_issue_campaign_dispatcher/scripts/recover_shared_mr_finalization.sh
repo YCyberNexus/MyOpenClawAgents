@@ -17,19 +17,27 @@ GIT_NETWORK_GUARD_CONTEXT=recover_shared_mr_finalization
 
 private_file_mode() {
   local path="$1" mode
-  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+  if mode="$(stat -c '%a' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
     printf '%s\n' "${mode}"
   else
-    stat -c '%a' "${path}" 2>/dev/null
+    return 1
   fi
 }
 
 private_file_owner() {
   local path="$1" owner
-  if owner="$(stat -f '%u' "${path}" 2>/dev/null)"; then
+  if owner="$(stat -c '%u' "${path}" 2>/dev/null)" \
+      && [[ "${owner}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${owner}"
+  elif owner="$(stat -f '%u' "${path}" 2>/dev/null)" \
+      && [[ "${owner}" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "${owner}"
   else
-    stat -c '%u' "${path}" 2>/dev/null
+    return 1
   fi
 }
 

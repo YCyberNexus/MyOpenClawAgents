@@ -81,12 +81,24 @@ first_line() {
 # Parse an ISO-8601 UTC timestamp into epoch seconds. Echoes 0 when the
 # input is empty / null / unparseable so callers can branch on `-gt 0`.
 iso_to_epoch() {
-  local ts="$1"
+  local ts="$1" epoch
   if [ -z "${ts}" ] || [ "${ts}" = "null" ]; then
-    echo 0
+    printf '%s\n' 0
     return 0
   fi
-  date -u -d "${ts}" +%s 2>/dev/null || gdate -u -d "${ts}" +%s 2>/dev/null || echo 0
+  if epoch="$(date -u -d "${ts}" +%s 2>/dev/null)" \
+      && [[ "${epoch}" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "${epoch}"
+  elif epoch="$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "${ts}" +%s 2>/dev/null)" \
+      && [[ "${epoch}" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "${epoch}"
+  elif command -v gdate >/dev/null 2>&1 \
+      && epoch="$(gdate -u -d "${ts}" +%s 2>/dev/null)" \
+      && [[ "${epoch}" =~ ^-?[0-9]+$ ]]; then
+    printf '%s\n' "${epoch}"
+  else
+    printf '%s\n' 0
+  fi
 }
 
 atomic_write_json() {
@@ -1051,19 +1063,27 @@ phase6_normalize_reply() {
 # still fenced by execution_id.
 phase6_file_mode() {
   local path="$1" mode
-  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+  if mode="$(stat -c '%a' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
     printf '%s\n' "${mode}"
   else
-    stat -c '%a' "${path}" 2>/dev/null
+    return 1
   fi
 }
 
 phase6_file_owner() {
   local path="$1" owner
-  if owner="$(stat -f '%u' "${path}" 2>/dev/null)"; then
+  if owner="$(stat -c '%u' "${path}" 2>/dev/null)" \
+      && [[ "${owner}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${owner}"
+  elif owner="$(stat -f '%u' "${path}" 2>/dev/null)" \
+      && [[ "${owner}" =~ ^[0-9]+$ ]]; then
     printf '%s\n' "${owner}"
   else
-    stat -c '%u' "${path}" 2>/dev/null
+    return 1
   fi
 }
 

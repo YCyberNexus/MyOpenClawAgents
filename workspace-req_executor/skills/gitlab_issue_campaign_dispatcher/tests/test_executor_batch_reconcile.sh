@@ -10,6 +10,16 @@ fail() {
   exit 1
 }
 
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
 [ -x "${RECONCILE_SCRIPT}" ] || fail "fixed reconcile wrapper is missing or not executable"
 
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-executor-reconcile.XXXXXX")"
@@ -65,7 +75,7 @@ chmod a-x "${FAKE_BIN}/scheduler_env.sh" "${FAKE_BIN}/record_spawn.sh"
 
 action_path() {
   local digest
-  digest="$(printf '%s' 'A:snapshot-0' | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' 'A:snapshot-0' | test_sha256_text)"
   printf '%s\n' "${SCHEDULER_ROOT}/launch_actions/${digest}.json"
 }
 

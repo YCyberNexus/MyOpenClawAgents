@@ -117,8 +117,11 @@ mkdir -p "${OPENCLAW_SESSION_LOCK_ROOT}"
 chmod 700 "${OPENCLAW_SESSION_LOCK_ROOT}" 2>/dev/null || true
 if command -v sha256sum >/dev/null 2>&1; then
   SESSION_LOCK_DIGEST="$(printf '%s' "${RESOLVED_SESSION_KEY}" | sha256sum | awk '{print $1}')"
-else
+elif command -v shasum >/dev/null 2>&1; then
   SESSION_LOCK_DIGEST="$(printf '%s' "${RESOLVED_SESSION_KEY}" | shasum -a 256 | awk '{print $1}')"
+else
+  echo "openclaw_agent_transport: sha256sum or shasum is required" >&2
+  exit 69
 fi
 exec 9>"${OPENCLAW_SESSION_LOCK_ROOT}/${SESSION_LOCK_DIGEST}.lock"
 flock 9

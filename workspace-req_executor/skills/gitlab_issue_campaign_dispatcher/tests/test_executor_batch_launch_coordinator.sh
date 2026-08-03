@@ -15,10 +15,24 @@ fail() {
 
 file_mode() {
   local path="$1" mode
-  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+  if mode="$(stat -c '%a' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
     printf '%s\n' "${mode}"
   else
-    stat -c '%a' "${path}" 2>/dev/null
+    return 1
+  fi
+}
+
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
   fi
 }
 
@@ -207,7 +221,7 @@ write_fenced_scheduler_job() {
 
 write_emitted_action() {
   local job_id="$1" generation="$2" token="$3" attempt="$4" digest action_file
-  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' "${job_id}" | test_sha256_text)"
   mkdir -p "${SCHEDULER_ROOT}/launch_actions"
   action_file="${SCHEDULER_ROOT}/launch_actions/${digest}.json"
   jq -cnS \
@@ -230,7 +244,7 @@ write_emitted_action() {
 write_legacy_emitted_action() {
   local job_id="$1" generation="$2" token="$3" legacy_number="$4"
   local digest action_file
-  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' "${job_id}" | test_sha256_text)"
   mkdir -p "${SCHEDULER_ROOT}/launch_actions"
   action_file="${SCHEDULER_ROOT}/launch_actions/${digest}.json"
   jq -cnS \
@@ -252,7 +266,7 @@ write_legacy_emitted_action() {
 
 cold_launch_failed_receipt() {
   local root="$1" job_id="$2" digest
-  digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+  digest="$(printf '%s' "${job_id}" | test_sha256_text)"
   printf '%s/launch_failed_receipts/%s.json\n' "${root}" "${digest}"
 }
 
@@ -1024,7 +1038,7 @@ jq -e '
 # that late old-path lock before entering the action critical section.
 ROLLING_LAUNCH_ROOT="${TEST_ROOT}/scheduler-launch-lock-rolling"
 ROLLING_LAUNCH_JOB='rolling-lock:snapshot-0'
-ROLLING_LAUNCH_DIGEST="$(printf '%s' "${ROLLING_LAUNCH_JOB}" | shasum -a 256 | awk '{print $1}')"
+ROLLING_LAUNCH_DIGEST="$(printf '%s' "${ROLLING_LAUNCH_JOB}" | test_sha256_text)"
 ROLLING_LAUNCH_SCAN="${TEST_ROOT}/rolling-launch-scan"
 ROLLING_LAUNCH_OLD_READY="${TEST_ROOT}/rolling-launch-old-ready"
 ROLLING_LAUNCH_RELEASE="${TEST_ROOT}/rolling-launch-release"

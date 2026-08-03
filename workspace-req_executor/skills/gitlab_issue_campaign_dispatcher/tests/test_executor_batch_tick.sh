@@ -15,17 +15,33 @@ test_sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "${path}" | awk '{print $1}'
-  else
+  elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "${path}" | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
   fi
 }
 
 test_file_mode() {
   local path="$1" mode
-  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+  if mode="$(stat -c '%a' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
     printf '%s\n' "${mode}"
   else
-    stat -c '%a' "${path}" 2>/dev/null
+    return 1
   fi
 }
 
@@ -657,7 +673,7 @@ jq -e '
   and .job_id == "A:snapshot-2"
   and .expected_task_sha256 == "0000000000000000000000000000000000000000000000000000000000000044"
   and .expected_task_bytes == 44
-' "${SCHEDULER_ROOT}/launch_actions/$(printf '%s' 'A:snapshot-2' | shasum -a 256 | awk '{print $1}').json" >/dev/null \
+' "${SCHEDULER_ROOT}/launch_actions/$(printf '%s' 'A:snapshot-2' | test_sha256_text).json" >/dev/null \
   || fail "second coordinator action was not held before preparing"
 
 partial_reconcile_output="$(
@@ -993,8 +1009,11 @@ jq -cnS '{
 }' >"${RACE_RESULT_LOG_DIR}/acpx_terminal.json"
 if command -v sha256sum >/dev/null 2>&1; then
   result_sha256="\$(sha256sum "${RACE_RESULT_LOG_DIR}/worker_result.json" | awk '{print \$1}')"
-else
+elif command -v shasum >/dev/null 2>&1; then
   result_sha256="\$(shasum -a 256 "${RACE_RESULT_LOG_DIR}/worker_result.json" | awk '{print \$1}')"
+else
+  echo 'sha256sum or shasum is required' >&2
+  exit 127
 fi
 jq -cnS --arg result_sha256 "\${result_sha256}" '{
   version:1,iid:42,execution_id:7,work_branch:"issue/42",
@@ -1176,7 +1195,7 @@ cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
 {"version":1,"round_robin_cursor":null,"batch_order":["A"],"active_jobs":{}}
 EOF
 archive_job_id='archive-test:snapshot-0'
-archive_digest="$(printf '%s' "${archive_job_id}" | shasum -a 256 | awk '{print $1}')"
+archive_digest="$(printf '%s' "${archive_job_id}" | test_sha256_text)"
 mkdir -p "${SCHEDULER_ROOT}/launch_actions"
 jq -cnS --arg job_id "${archive_job_id}" '{
   version:1,job_id:$job_id,project:"group/repo",iid:42,

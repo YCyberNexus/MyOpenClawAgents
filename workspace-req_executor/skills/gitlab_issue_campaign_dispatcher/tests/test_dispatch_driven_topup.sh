@@ -20,10 +20,14 @@ sha256_file() {
 
 file_mode() {
   local mode
-  if mode="$(stat -f '%Lp' "$1" 2>/dev/null)"; then
+  if mode="$(stat -c '%a' "$1" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "$1" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
     printf '%s\n' "${mode}"
   else
-    stat -c '%a' "$1"
+    return 1
   fi
 }
 
@@ -58,13 +62,17 @@ cat >"${MODE_BIN}/stat" <<'EOF'
 set -euo pipefail
 case "${FAKE_STAT_STYLE:-}" in
   bsd)
+    if [ "${1:-}" = -c ]; then
+      printf 'gnu-probe-noise-that-must-stay-captured\n'
+      exit 1
+    fi
     [ "${1:-}" = -f ] && [ "${2:-}" = %Lp ] || exit 2
     printf '600\n'
     ;;
   gnu)
     if [ "${1:-}" = -f ]; then
-      printf 'filesystem-noise-that-must-stay-captured\n'
-      exit 1
+      printf 'filesystem-success-that-must-be-rejected\n'
+      exit 0
     fi
     [ "${1:-}" = -c ] && [ "${2:-}" = %a ] || exit 2
     printf '600\n'
@@ -698,7 +706,7 @@ for iid in 2 3 6; do
   [ "$(FAKE_STAT_STYLE=bsd PATH="${MODE_BIN}:${PATH}" mode_of "${PAYLOAD_PATH}")" = "600" ] \
     || fail "spawn bootstrap mode helper failed its BSD stat branch"
   [ "$(FAKE_STAT_STYLE=gnu PATH="${MODE_BIN}:${PATH}" mode_of "${PAYLOAD_PATH}")" = "600" ] \
-    || fail "spawn bootstrap mode helper leaked GNU stat probe output"
+    || fail "spawn bootstrap mode helper accepted GNU stat -f filesystem output"
   grep -Fq 'require its output to equal the literal string 600' "${PAYLOAD_PATH}" \
     || fail "spawn bootstrap for IID ${iid} leaves mode normalization ambiguous"
   if grep -Fq '%#Lp' "${PAYLOAD_PATH}"; then

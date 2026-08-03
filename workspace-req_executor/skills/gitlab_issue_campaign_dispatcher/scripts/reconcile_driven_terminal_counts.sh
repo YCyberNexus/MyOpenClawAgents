@@ -49,11 +49,14 @@ emit_result() {
 
 scheduler_state_identity() {
   local identity
-  if identity="$(stat -f '%d:%i:%z:%m' "${SCHEDULER_STATE_FILE}" 2>/dev/null)"; then
+  if identity="$(stat -c '%d:%i:%s:%Y' "${SCHEDULER_STATE_FILE}" 2>/dev/null)" \
+      && [[ "${identity}" =~ ^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+$ ]]; then
+    printf '%s\n' "${identity}"
+  elif identity="$(stat -f '%d:%i:%z:%m' "${SCHEDULER_STATE_FILE}" 2>/dev/null)" \
+      && [[ "${identity}" =~ ^[0-9]+:[0-9]+:[0-9]+:-?[0-9]+$ ]]; then
     printf '%s\n' "${identity}"
   else
-    stat -c '%d:%i:%s:%Y' "${SCHEDULER_STATE_FILE}" 2>/dev/null \
-      || reconcile_die "cannot stat scheduler state" 3
+    reconcile_die "cannot stat scheduler state" 3
   fi
 }
 

@@ -14,8 +14,10 @@ sha256_text() {
   local value="$1"
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "${value}" | sha256sum | awk '{print $1}'
-  else
+  elif command -v shasum >/dev/null 2>&1; then
     printf '%s' "${value}" | shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
   fi
 }
 
@@ -23,21 +25,35 @@ sha256_file() {
   local path="$1"
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "${path}" | awk '{print $1}'
-  else
+  elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "${path}" | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
+file_mode() {
+  local path="$1" mode
+  if mode="$(stat -c '%a' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "${path}" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  else
+    return 1
   fi
 }
 
 [ -x "${WRAPPER}" ] || fail "run_executor_attempt.sh is missing or not executable"
 
-# GNU `stat -f` can print filesystem details for the real path while returning
-# nonzero for the BSD format operand. A direct probe leaks that output into the
-# helper result, so production helpers must capture the probe before falling
-# back to `stat -c`.
+# GNU `stat -f` has filesystem semantics, not BSD format semantics. A failed
+# probe can leak stdout, and a format-looking filename can even make it return
+# success. Production helpers must capture and validate every probe.
 for production_script in "${SKILL_DIR}"/scripts/*.sh; do
-  if grep -Eq "^[[:space:]]*if[[:space:]]+stat[[:space:]]+-f[[:space:]]+'%(Lp|u)'" \
+  if grep -Eq "^[[:space:]]*if[^#]*stat[[:space:]]+-f([[:space:]]|$)" \
       "${production_script}"; then
-    fail "${production_script} contains a stdout-leaking BSD stat probe"
+    fail "${production_script} probes ambiguous GNU/BSD stat -f before stat -c"
   fi
 done
 
@@ -119,7 +135,7 @@ set -euo pipefail
 case "${1:-}:${2:-}" in
   -f:%Lp|-f:%u)
     printf '%s\n' 'filesystem-noise-that-must-not-reach-the-caller'
-    exit 1
+    exit 0
     ;;
   -c:%a)
     printf '%s\n' 600
@@ -514,11 +530,7 @@ wrapper_output="$(
     bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
 )" || fail "all-in-one wrapper failed"
 
-if execution_state_mode="$(stat -f '%Lp' "${NONSTANDARD_MODE_STATE_FILE}" 2>/dev/null)"; then
-  :
-else
-  execution_state_mode="$(stat -c '%a' "${NONSTANDARD_MODE_STATE_FILE}")"
-fi
+execution_state_mode="$(file_mode "${NONSTANDARD_MODE_STATE_FILE}")"
 [ "${execution_state_mode}" = 775 ] \
   || fail "execution-state metadata was unexpectedly normalized"
 
@@ -566,20 +578,12 @@ jq -e 'has("mr_finalization") | not' \
   "${REPO_PATH}/.req_executor/issues/issue-42/state.json" >/dev/null \
   || fail "ordinary branch unexpectedly wrote a shared MR pending checkpoint"
 
-if result_mode="$(stat -f '%Lp' "${result_file}" 2>/dev/null)"; then
-  :
-else
-  result_mode="$(stat -c '%a' "${result_file}")"
-fi
+result_mode="$(file_mode "${result_file}")"
 [ "${result_mode}" = 600 ] || fail "worker_result.json mode is ${result_mode}, expected 600"
 finalized_file="${REPO_PATH}/worktree/.req_executor/issue-42/log/execution-3/attempt_finalized.json"
 [ -f "${finalized_file}" ] && [ ! -L "${finalized_file}" ] \
   || fail "attempt_finalized.json was not written"
-if finalized_mode="$(stat -f '%Lp' "${finalized_file}" 2>/dev/null)"; then
-  :
-else
-  finalized_mode="$(stat -c '%a' "${finalized_file}")"
-fi
+finalized_mode="$(file_mode "${finalized_file}")"
 [ "${finalized_mode}" = 600 ] \
   || fail "attempt_finalized.json mode is ${finalized_mode}, expected 600"
 jq -e \

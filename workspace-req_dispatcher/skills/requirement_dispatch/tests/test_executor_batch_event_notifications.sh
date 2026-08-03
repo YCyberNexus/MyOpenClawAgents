@@ -837,6 +837,27 @@ fi
 BUDGET_ROOT="${TEST_ROOT}/notification-budget-state"
 BUDGET_NOTIFY="${TEST_ROOT}/notification-budget-notify.sh"
 BUDGET_NOTIFY_LOG="${TEST_ROOT}/notification-budget.calls"
+BUDGET_DATE_BIN="${TEST_ROOT}/notification-budget-date-bin"
+DATE_REFERENCE_MARKER="${TEST_ROOT}/notification-budget-date-r.called"
+mkdir -p "${BUDGET_DATE_BIN}"
+cat >"${BUDGET_DATE_BIN}/date" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${1:-}" = -u ] && [ "${2:-}" = '+%Y-%m-%dT%H:%M:%SZ' ]; then
+  printf '%s\n' '2026-08-03T00:00:00Z'
+elif [ "${1:-}" = -u ] && [ "${2:-}" = '+%s' ]; then
+  printf '%s\n' 100000
+elif [ "${1:-}" = -u ] && [ "${2:-}" = -d ]; then
+  printf '%s\n' '2030-01-01T00:00:00Z'
+elif [ "${1:-}" = -u ] && [ "${2:-}" = -r ]; then
+  : >"${DATE_REFERENCE_MARKER:?}"
+  printf '%s\n' '1999-01-01T00:00:00Z'
+else
+  printf 'unexpected date invocation: %s\n' "$*" >&2
+  exit 64
+fi
+FAKE
+chmod +x "${BUDGET_DATE_BIN}/date"
 cat >"${BUDGET_NOTIFY}" <<'FAKE'
 #!/usr/bin/env bash
 printf '%s\n' "${PROJECT}:${REASON}" >>"${BUDGET_NOTIFY_LOG:?}"
@@ -855,6 +876,8 @@ budget_drain() {
   STATE_ROOT="${BUDGET_ROOT}" \
   NOTIFY_USER_SCRIPT="${BUDGET_NOTIFY}" \
   BUDGET_NOTIFY_LOG="${BUDGET_NOTIFY_LOG}" \
+  DATE_REFERENCE_MARKER="${DATE_REFERENCE_MARKER}" \
+  PATH="${BUDGET_DATE_BIN}:${PATH}" \
     "${BASH}" "${SKILL_DIR}/scripts/drain_executor_batch_notifications.sh"
 }
 
@@ -870,10 +893,14 @@ if ! jq -e '.attempted == 3 and .failed == 3' <<<"${budget_first}" >/dev/null \
     and all(.notifications[];
       .attempts == 1
       and .delivered_at == null
-      and (.next_attempt_at | type == "string" and length > 0))
+      and .next_attempt_at == "2030-01-01T00:00:00Z")
   ' "${BUDGET_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null; then
   echo "notification budget or durable retry backoff contract was not enforced" >&2
   exit 1
 fi
+[ ! -e "${DATE_REFERENCE_MARKER}" ] || {
+  echo "GNU date path was misdetected as BSD date -r reference-file mode" >&2
+  exit 1
+}
 
 echo "ok executor batch events are deduplicated and notifications retry outside the lock"

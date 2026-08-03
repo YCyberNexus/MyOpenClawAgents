@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-08-03.1] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；未显式指定分支时保留空值供 executor 按 Issue 元数据解析。dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-08-03.2] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；未显式指定分支时保留空值供 executor 按 Issue 元数据解析。dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 

@@ -40,6 +40,62 @@ Codex must not run `rm` in this repository, including `rm -f`, `rm -r`, or
 needed, ask the user to do it manually or use a non-destructive archive/move
 workflow after explicit approval.
 
+## GNU/BSD Shell Portability
+
+Repository-maintained shell code must treat GNU/Linux and BSD/macOS command
+differences as a correctness boundary, not merely as a fallback-order issue.
+This applies to scripts, tests, documented command examples, and shell snippets
+embedded in prompts or generated bootstrap/executor payloads.
+
+Do not use a platform-specific probe as a naked `cmd_a || cmd_b` fallback when
+its stdout becomes data. A command can emit diagnostic or differently-shaped
+output before failing, and the same option can have unrelated semantics on the
+other platform. For example, BSD `stat -f FORMAT` formats file metadata, while
+GNU `stat -f` reports filesystem information; BSD `date -r EPOCH` formats an
+epoch, while GNU `date -r ARG` treats `ARG` as a reference file.
+
+For every cross-platform probe:
+
+- Capture each candidate command separately and suppress its stderr.
+- Accept a candidate only when both its exit status and its output format are
+  valid for the expected value. Never let failed-probe stdout flow into the
+  next command, a comparison, JSON, or a persisted result.
+- Prefer commands whose option semantics are unambiguous for the deployment
+  platform, then try the alternate-platform form only as a validated fallback.
+- Fail clearly when no supported implementation is available. For example,
+  explicitly test for `sha256sum` and then `shasum`; do not assume every system
+  lacking the first command has the second.
+
+A safe mode probe follows this shape:
+
+```bash
+portable_file_mode() {
+  local mode
+  if mode="$(stat -c '%a' "$1" 2>/dev/null)" \
+      && [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$mode"
+  elif mode="$(stat -f '%Lp' "$1" 2>/dev/null)" \
+      && [[ "$mode" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "$mode"
+  else
+    return 1
+  fi
+}
+```
+
+Apply the same capture-and-validate rule to time conversion: use GNU
+`date -d` and BSD `date -r`/`date -j -f` only in separate branches, and verify
+that the result has the required epoch or timestamp shape before accepting it.
+
+When touching shell code, audit nearby uses of portability-sensitive tools and
+options, including `stat`, `date`, `sed -i`, `readlink -f`, `grep -P`,
+`sort -V`, `xargs -r`, `base64`, and `find`. Verification must include
+`bash -n`, focused behavior tests, and adversarial fake-command tests that emit
+misleading stdout on both failure and apparent success. For affected production
+paths, verify against actual GNU coreutils and native BSD/macOS behavior; a pass
+on only one platform is insufficient. If a helper is duplicated in a generated
+prompt or payload, tests must extract and execute that generated copy as well.
+
 ## jq 1.5 Compatibility Baseline
 
 All repository-maintained shell scripts, jq filters, tests, and documented jq

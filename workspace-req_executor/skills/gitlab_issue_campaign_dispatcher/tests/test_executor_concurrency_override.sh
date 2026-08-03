@@ -20,8 +20,20 @@ sha256_canonical_json_file() {
   compact_json="$(jq -cS . "$1")"
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "${compact_json}" | sha256sum | awk '{print $1}'
-  else
+  elif command -v shasum >/dev/null 2>&1; then
     printf '%s' "${compact_json}" | shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
+  fi
+}
+
+test_sha256_text() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 | awk '{print $1}'
+  else
+    fail "sha256sum or shasum is required"
   fi
 }
 
@@ -298,7 +310,7 @@ GITLAB_API_PROTOCOL=https
 EOF
 
 job_id='override-batch:snapshot-0'
-job_digest="$(printf '%s' "${job_id}" | shasum -a 256 | awk '{print $1}')"
+job_digest="$(printf '%s' "${job_id}" | test_sha256_text)"
 mkdir -p "${OVERRIDE_ROOT}/launch_actions"
 jq -cnS --arg job_id "${job_id}" '{
   version:1,job_id:$job_id,project:"group/repo",iid:42,

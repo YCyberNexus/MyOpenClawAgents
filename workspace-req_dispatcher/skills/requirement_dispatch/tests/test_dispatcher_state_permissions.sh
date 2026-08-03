@@ -7,10 +7,15 @@ TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-permissions.XXXXXX")"
 STATE_DIR="${TEST_ROOT}/_dispatcher"
 
 mode_of() {
-  if stat -f '%Lp' "$1" >/dev/null 2>&1; then
-    stat -f '%Lp' "$1"
+  local mode
+  if mode="$(stat -c '%a' "$1" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
+  elif mode="$(stat -f '%Lp' "$1" 2>/dev/null)" \
+      && [[ "${mode}" =~ ^[0-7]{3,4}$ ]]; then
+    printf '%s\n' "${mode}"
   else
-    stat -c '%a' "$1"
+    return 1
   fi
 }
 
