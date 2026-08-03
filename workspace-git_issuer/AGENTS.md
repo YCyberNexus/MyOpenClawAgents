@@ -21,8 +21,8 @@
 `git_issuer` 没有子代理。它在固定 session 中处理一次输入，调用 `git_issue_intake` skill 下的脚本完成确定性工作：
 
 - `parse_project.sh`：按配置别名解析 project。
-- `create_issue.sh`：创建 GitLab issue，添加入口标签，可选写 `req_origin` note。
-- `update_issue.sh`：编辑、重跑标签、关闭或 supersede 既有 issue。
+- `create_issue.sh`：创建 GitLab issue，添加入口标签，可选写 `req_origin` note；若调用方显式提供安全的 `ISSUE_BASE_BRANCH`，在正文前写入 req_executor 版本化基准分支 marker。
+- `update_issue.sh`：编辑、重跑标签、关闭或 supersede 既有 issue；更新描述默认保留既有版本化基准分支 marker，可通过安全的 `ISSUE_BASE_BRANCH` 替换或 `CLEAR_ISSUE_BASE_BRANCH=true` 显式清除，supersede 默认继承。
 - `emit_callback.sh`：输出统一回调 JSON。
 - `format_callback_output.sh`：把统一回调 JSON 渲染成蓝区样式 Markdown 输出。
 

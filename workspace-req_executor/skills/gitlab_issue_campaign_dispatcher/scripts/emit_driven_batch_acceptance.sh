@@ -104,8 +104,6 @@ REQUEST_JSON="$(jq -ceS --arg batch_id "${BATCH_ID}" '
     and ((has("merge_target_branch") | not)
       or .merge_target_branch == null
       or (.merge_target_branch | printable))
-    and (((.auto_merge // false) == false)
-      or ((.merge_target_branch // null) | printable))
     and (.dispatcher_callback_target | printable)
     and (.executor_agent | type == "string"
       and test("^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"))

@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-07-30.1] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-08-03.1] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；未显式指定分支时保留空值供 executor 按 Issue 元数据解析。dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -154,7 +154,8 @@ repository/wiki/Issue URL 或既有确定性 locator；仓库根 URL 保留完�
 分支意图必须分开保存：`target_branch` 是处理 Issue 的基准分支，
 `merge_target_branch` 是 MR 的目标分支。只有明确的“执行完成后直接/自动 merge”语义才设置
 `auto_merge=true`。用户只指定基准分支而未指定合并目标时，合并目标回退到基准分支；两者都
-未指定时回退到 `master`。未明确要求自动合并的旧请求继续只创建 MR 并保留 `pr`。
+未指定时必须都保持空值，由 executor 逐个 Issue 按“Issue 基准分支声明 → 仓库默认分支”解析，
+并让 MR 目标跟随最终处理基准。未明确要求自动合并的旧请求继续只创建 MR 并保留 `pr`。
 输入中的 `branch`、`base_branch`、`source_branch` 与“基于某分支”表示处理基准；
 `target_branch`、`merge_target_branch` 与“目标分支”表示 MR 目标。只给出 MR 目标时，处理
 基准为保持兼容而回退到该目标，但不得因此启用自动合并。

@@ -30,7 +30,46 @@ emit_success() {
     bash "${SCRIPT_DIR}/emit_callback.sh"
 }
 
-write_description_file() {
+validate_branch_name() {
+  local branch="$1"
+  case "${branch}" in
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*'`'*|*"'"*|*'"'*|*'<'*|*'>'*|*'!'*|*" "*|*$'\t'*|*$'\r'*|*$'\n'*|*.lock|*.)
+      return 1
+      ;;
+  esac
+  [ "${branch}" != "@" ] || return 1
+  git check-ref-format --branch "${branch}" >/dev/null 2>&1
+}
+
+BASE_BRANCH_MARKER_PATTERN='^[[:space:]]*<!--[[:space:]]*req_executor_base_branch:v1[[:space:]]+branch=([^[:space:]]+)[[:space:]]*-->[[:space:]]*$'
+
+extract_base_branch_marker() {
+  local line=""
+  local branch=""
+  local resolved=""
+
+  while IFS= read -r line || [ -n "${line}" ]; do
+    line="${line%$'\r'}"
+    if [[ "${line}" =~ ${BASE_BRANCH_MARKER_PATTERN} ]]; then
+      branch="${BASH_REMATCH[1]}"
+      if ! validate_branch_name "${branch}"; then
+        printf 'existing Issue base branch marker is unsafe\n'
+        return 1
+      fi
+      if [ -n "${resolved}" ] && [ "${resolved}" != "${branch}" ]; then
+        printf 'existing Issue has conflicting base branch markers\n'
+        return 1
+      fi
+      resolved="${branch}"
+    elif [[ "${line}" == *req_executor_base_branch:v1* ]]; then
+      printf 'existing Issue has malformed base branch marker\n'
+      return 1
+    fi
+  done
+  printf '%s' "${resolved}"
+}
+
+write_description_source_file() {
   if [ -n "${ISSUE_DESCRIPTION_FILE:-}" ]; then
     if [ ! -f "${ISSUE_DESCRIPTION_FILE}" ]; then
       printf 'ISSUE_DESCRIPTION_FILE not found: %s\n' "${ISSUE_DESCRIPTION_FILE}"
@@ -49,6 +88,56 @@ write_description_file() {
   file="$(mktemp "${TMPDIR:-/tmp}/git-issuer-update-description.XXXXXX")"
   printf '%s\n' "${ISSUE_DESCRIPTION}" >"${file}"
   printf '%s' "${file}"
+}
+
+write_description_file() {
+  local source_file=""
+  local incoming_base_branch=""
+  local effective_base_branch=""
+  local effective_file=""
+  local line=""
+  local skip_marker_blank=false
+
+  if ! source_file="$(write_description_source_file)"; then
+    printf '%s\n' "${source_file}"
+    return 1
+  fi
+  if ! incoming_base_branch="$(extract_base_branch_marker <"${source_file}")"; then
+    printf '%s\n' "${incoming_base_branch}"
+    return 1
+  fi
+
+  if [ "${CLEAR_ISSUE_BASE_BRANCH}" = true ]; then
+    effective_base_branch=""
+  elif [ -n "${ISSUE_BASE_BRANCH:-}" ]; then
+    effective_base_branch="${ISSUE_BASE_BRANCH}"
+  elif [ -n "${incoming_base_branch}" ]; then
+    effective_base_branch="${incoming_base_branch}"
+  else
+    effective_base_branch="${CURRENT_BASE_BRANCH:-}"
+  fi
+
+  effective_file="$(mktemp "${TMPDIR:-/tmp}/git-issuer-update-description-with-branch.XXXXXX")"
+  if [ -n "${effective_base_branch}" ]; then
+    printf '<!-- req_executor_base_branch:v1 branch=%s -->\n\n' \
+      "${effective_base_branch}" >"${effective_file}"
+  else
+    : >"${effective_file}"
+  fi
+  while IFS= read -r line || [ -n "${line}" ]; do
+    if [[ "${line}" =~ ${BASE_BRANCH_MARKER_PATTERN} ]]; then
+      skip_marker_blank=true
+      continue
+    fi
+    if [ "${skip_marker_blank}" = true ] \
+        && [[ "${line}" =~ ^[[:space:]]*$ ]]; then
+      skip_marker_blank=false
+      continue
+    fi
+    skip_marker_blank=false
+    printf '%s\n' "${line}"
+  done <"${source_file}" >>"${effective_file}"
+  printf '%s' "${effective_file}"
 }
 
 write_note_file() {
@@ -80,6 +169,11 @@ fallback_issue_url() {
 load_gitlab_env
 CHANGE_ACTION="${CHANGE_ACTION:-update}"
 RERUN_LABEL="${RERUN_LABEL:-}"
+CLEAR_ISSUE_BASE_BRANCH="${CLEAR_ISSUE_BASE_BRANCH:-false}"
+BRANCH_METADATA_ACTION=false
+case "${CHANGE_ACTION}" in
+  update|change|supersede) BRANCH_METADATA_ACTION=true ;;
+esac
 
 if ! reason="$(require_value PROJECT_FULL)"; then
   emit_failure "${reason}"
@@ -96,6 +190,25 @@ case "${RERUN_LABEL}" in
     exit 2
     ;;
 esac
+case "${CLEAR_ISSUE_BASE_BRANCH}" in
+  true|false) ;;
+  *)
+    emit_failure "CLEAR_ISSUE_BASE_BRANCH must be true or false"
+    exit 2
+    ;;
+esac
+if [ "${BRANCH_METADATA_ACTION}" = true ] \
+    && [ "${CLEAR_ISSUE_BASE_BRANCH}" = true ] \
+    && [ -n "${ISSUE_BASE_BRANCH:-}" ]; then
+  emit_failure "ISSUE_BASE_BRANCH and CLEAR_ISSUE_BASE_BRANCH=true are mutually exclusive"
+  exit 2
+fi
+if [ "${BRANCH_METADATA_ACTION}" = true ] \
+    && [ -n "${ISSUE_BASE_BRANCH:-}" ] \
+    && ! validate_branch_name "${ISSUE_BASE_BRANCH}"; then
+  emit_failure "ISSUE_BASE_BRANCH must be a safe Git ref name"
+  exit 2
+fi
 if ! reason="$(ensure_glab_auth)"; then
   emit_failure "${reason}"
   exit 1
@@ -114,6 +227,15 @@ issue_url="$(fallback_issue_url "${ISSUE_IID}" "${issue_url}")"
 if [ "${issue_state}" != "opened" ]; then
   emit_failure "issue must be opened"
   exit 1
+fi
+CURRENT_BASE_BRANCH=""
+if [ "${BRANCH_METADATA_ACTION}" = true ]; then
+  if ! CURRENT_BASE_BRANCH="$(printf '%s' "${issue_json}" \
+      | jq -r '.description // ""' \
+      | extract_base_branch_marker)"; then
+    emit_failure "${CURRENT_BASE_BRANCH}"
+    exit 2
+  fi
 fi
 
 case "${CHANGE_ACTION}" in

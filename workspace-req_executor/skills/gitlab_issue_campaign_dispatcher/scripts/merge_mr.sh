@@ -13,6 +13,9 @@
 # Optional env vars:
 #   MERGE_MR_MODE          attempt (default) | verify
 #   AUTO_MERGE             true | false (default false; ignored by verify mode)
+#   MERGE_MR_READINESS_ATTEMPTS / MERGE_MR_READINESS_DELAY_SECONDS
+#                          bounded pre-PUT reads for transient GitLab
+#                          merge-readiness states (defaults 6 attempts / 1s)
 #   DEPENDENCY_BASE_SHA    legacy ordinary dependency identity. Shared
 #                          `issue/A+C` jobs are rejected before this helper and
 #                          never enter automatic merge. Kept for exact recovery
@@ -36,6 +39,8 @@ MERGE_MR_MODE="${MERGE_MR_MODE:-attempt}"
 AUTO_MERGE="${AUTO_MERGE:-false}"
 MERGE_TARGET_BRANCH="${MERGE_TARGET_BRANCH:-${BRANCH:-}}"
 DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
+MERGE_MR_READINESS_ATTEMPTS="${MERGE_MR_READINESS_ATTEMPTS:-6}"
+MERGE_MR_READINESS_DELAY_SECONDS="${MERGE_MR_READINESS_DELAY_SECONDS:-1}"
 
 : "${PROJECT_URI:?merge_mr.sh: PROJECT_URI must be set}" \
   "${MR_IID:?merge_mr.sh: MR_IID must be set}" \
@@ -58,6 +63,23 @@ case "${AUTO_MERGE}" in
     exit 2
     ;;
 esac
+case "${MERGE_MR_READINESS_ATTEMPTS}" in
+  *[!0-9]*|""|0)
+    echo "merge_mr: MERGE_MR_READINESS_ATTEMPTS must be a positive integer" >&2
+    exit 2
+    ;;
+esac
+case "${MERGE_MR_READINESS_DELAY_SECONDS}" in
+  *[!0-9]*|"")
+    echo "merge_mr: MERGE_MR_READINESS_DELAY_SECONDS must be a non-negative integer" >&2
+    exit 2
+    ;;
+esac
+if [ "${MERGE_MR_READINESS_ATTEMPTS}" -gt 30 ] \
+    || [ "${MERGE_MR_READINESS_DELAY_SECONDS}" -gt 10 ]; then
+  echo "merge_mr: merge readiness bounds are unsafe" >&2
+  exit 2
+fi
 if [[ "${WORK_BRANCH}" =~ ^issue/[1-9][0-9]*\+[1-9][0-9]*$ ]] \
     && [ "${MERGE_MR_MODE}" = attempt ] \
     && [ "${AUTO_MERGE}" = true ]; then
@@ -312,32 +334,68 @@ fi
 if [ "${MERGE_MR_MODE}" = attempt ] \
     && [ "${AUTO_MERGE}" = true ] \
     && [ "${OBSERVED_STATE}" = opened ]; then
-  MERGE_ATTEMPTED=true
-  set +e
-  glab api --method PUT "${MR_ENDPOINT}/merge" \
-    -f "sha=${COMMIT_SHA}" \
-    -f "should_remove_source_branch=false" >/dev/null
-  MERGE_API_RC=$?
-  set -e
-  [ "${MERGE_API_RC}" -ne 0 ] || MERGE_API_SUCCEEDED=true
-
-  # The PUT exit code is not completion evidence: a timed-out request might
-  # have merged, while a successful request might only have scheduled work.
-  # Re-read the exact MR and trust only its current server-side state.
-  if EXACT_MR_JSON="$(read_exact_mr)"; then
-    :
-  else
-    READ_RC=$?
-    if [ "${READ_RC}" -eq 2 ]; then
-      REASON="post_merge_identity_mismatch"
-    else
-      REASON="post_merge_read_failed"
+  MERGE_READINESS_ATTEMPT=1
+  MERGE_READINESS_EXHAUSTED=false
+  while [ "${OBSERVED_STATE}" = opened ]; do
+    MERGE_READINESS_STATUS="$(jq -r \
+      '.detailed_merge_status // .merge_status // ""' \
+      <<<"${EXACT_MR_JSON}")"
+    case "${MERGE_READINESS_STATUS}" in
+      checking|preparing|unchecked|approvals_syncing) ;;
+      *) break ;;
+    esac
+    if [ "${MERGE_READINESS_ATTEMPT}" -ge \
+        "${MERGE_MR_READINESS_ATTEMPTS}" ]; then
+      MERGE_READINESS_EXHAUSTED=true
+      break
     fi
-    emit_result unknown unknown false \
-      "${MERGE_ATTEMPTED}" "${MERGE_API_SUCCEEDED}" "${REASON}"
-    exit 0
+    if [ "${MERGE_MR_READINESS_DELAY_SECONDS}" -gt 0 ]; then
+      sleep "${MERGE_MR_READINESS_DELAY_SECONDS}"
+    fi
+    if EXACT_MR_JSON="$(read_exact_mr)"; then
+      OBSERVED_STATE="$(jq -r '.state' <<<"${EXACT_MR_JSON}")"
+    else
+      READ_RC=$?
+      if [ "${READ_RC}" -eq 2 ]; then
+        REASON="merge_readiness_identity_mismatch"
+      else
+        REASON="merge_readiness_read_failed"
+      fi
+      emit_result unknown unknown false false false "${REASON}"
+      exit 0
+    fi
+    MERGE_READINESS_ATTEMPT=$((MERGE_READINESS_ATTEMPT + 1))
+  done
+
+  if [ "${OBSERVED_STATE}" = opened ] \
+      && [ "${MERGE_READINESS_EXHAUSTED}" = false ]; then
+    MERGE_ATTEMPTED=true
+    set +e
+    glab api --method PUT "${MR_ENDPOINT}/merge" \
+      -f "sha=${COMMIT_SHA}" \
+      -f "should_remove_source_branch=false" >/dev/null
+    MERGE_API_RC=$?
+    set -e
+    [ "${MERGE_API_RC}" -ne 0 ] || MERGE_API_SUCCEEDED=true
+
+    # The PUT exit code is not completion evidence: a timed-out request might
+    # have merged, while a successful request might only have scheduled work.
+    # Re-read the exact MR and trust only its current server-side state.
+    if EXACT_MR_JSON="$(read_exact_mr)"; then
+      :
+    else
+      READ_RC=$?
+      if [ "${READ_RC}" -eq 2 ]; then
+        REASON="post_merge_identity_mismatch"
+      else
+        REASON="post_merge_read_failed"
+      fi
+      emit_result unknown unknown false \
+        "${MERGE_ATTEMPTED}" "${MERGE_API_SUCCEEDED}" "${REASON}"
+      exit 0
+    fi
+    OBSERVED_STATE="$(jq -r '.state' <<<"${EXACT_MR_JSON}")"
   fi
-  OBSERVED_STATE="$(jq -r '.state' <<<"${EXACT_MR_JSON}")"
 fi
 
 case "${OBSERVED_STATE}" in
@@ -347,7 +405,9 @@ case "${OBSERVED_STATE}" in
     ;;
   opened)
     OUTCOME=opened
-    if [ "${MERGE_MR_MODE}" = verify ]; then
+    if [ "${MERGE_READINESS_EXHAUSTED:-false}" = true ]; then
+      REASON=merge_readiness_timeout
+    elif [ "${MERGE_MR_MODE}" = verify ]; then
       REASON=verified_opened
     elif [ "${AUTO_MERGE}" != true ]; then
       REASON=auto_merge_disabled

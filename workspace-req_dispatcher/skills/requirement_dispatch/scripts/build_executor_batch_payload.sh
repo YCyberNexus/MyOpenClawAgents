@@ -112,11 +112,6 @@ if [ -n "${MERGE_TARGET_BRANCH}" ] && ! validate_branch_name "${MERGE_TARGET_BRA
   echo "merge target branch must be a safe Git ref name, got: ${MERGE_TARGET_BRANCH}" >&2
   exit 2
 fi
-if [ "${AUTO_MERGE}" = true ] && [ -z "${MERGE_TARGET_BRANCH}" ]; then
-  echo "MERGE_TARGET_BRANCH is required when AUTO_MERGE=true" >&2
-  exit 2
-fi
-
 if ! SELECTOR_TYPE="$(
   jq -er '
     if type != "object" then

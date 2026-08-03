@@ -26,24 +26,50 @@ emit_success() {
 }
 
 write_description_file() {
+  local source_file=""
+  local effective_file=""
+
   if [ -n "${ISSUE_DESCRIPTION_FILE:-}" ]; then
     if [ ! -f "${ISSUE_DESCRIPTION_FILE}" ]; then
       printf 'ISSUE_DESCRIPTION_FILE not found: %s\n' "${ISSUE_DESCRIPTION_FILE}"
       return 1
     fi
-    printf '%s' "${ISSUE_DESCRIPTION_FILE}"
-    return 0
+    source_file="${ISSUE_DESCRIPTION_FILE}"
+  elif [ -z "${ISSUE_DESCRIPTION:-}" ]; then
+    printf 'ISSUE_DESCRIPTION or ISSUE_DESCRIPTION_FILE is required\n'
+    return 1
+  else
+    source_file="$(mktemp "${TMPDIR:-/tmp}/git-issuer-description.XXXXXX")"
+    printf '%s\n' "${ISSUE_DESCRIPTION}" >"${source_file}"
   fi
 
-  if [ -z "${ISSUE_DESCRIPTION:-}" ]; then
-    printf 'ISSUE_DESCRIPTION or ISSUE_DESCRIPTION_FILE is required\n'
+  if [ -z "${ISSUE_BASE_BRANCH:-}" ]; then
+    printf '%s' "${source_file}"
+    return 0
+  fi
+  if ! validate_branch_name "${ISSUE_BASE_BRANCH}"; then
+    printf 'ISSUE_BASE_BRANCH must be a safe Git ref name\n'
     return 1
   fi
 
-  local file
-  file="$(mktemp "${TMPDIR:-/tmp}/git-issuer-description.XXXXXX")"
-  printf '%s\n' "${ISSUE_DESCRIPTION}" >"${file}"
-  printf '%s' "${file}"
+  effective_file="$(mktemp "${TMPDIR:-/tmp}/git-issuer-description-with-branch.XXXXXX")"
+  printf '<!-- req_executor_base_branch:v1 branch=%s -->\n\n' \
+    "${ISSUE_BASE_BRANCH}" >"${effective_file}"
+  while IFS= read -r description_line || [ -n "${description_line}" ]; do
+    printf '%s\n' "${description_line}"
+  done <"${source_file}" >>"${effective_file}"
+  printf '%s' "${effective_file}"
+}
+
+validate_branch_name() {
+  local branch="$1"
+  case "${branch}" in
+    ""|-*|/*|*/|*//*|*..*|*@{*|*\\*|*~*|*^*|*:*|*\?*|*\**|*\[*|*\]*|*";"*|*"；"*|*\&*|*\|*|*\$*|*'`'*|*"'"*|*'"'*|*'<'*|*'>'*|*'!'*|*" "*|*$'\t'*|*$'\r'*|*$'\n'*|*.lock|*.)
+      return 1
+      ;;
+  esac
+  [ "${branch}" != "@" ] || return 1
+  git check-ref-format --branch "${branch}" >/dev/null 2>&1
 }
 
 write_origin_note_file() {

@@ -1014,14 +1014,32 @@ if ! jq -e '
   exit 1
 fi
 
-if run_branch_validation_case missing-auto-merge-target develop true '' \
-    >"${TEST_ROOT}/missing-auto-merge-target.out" \
-    2>"${TEST_ROOT}/missing-auto-merge-target.err"; then
-  echo "expected automatic merge without an exact target to fail closed at executor intake" >&2
+deferred_auto_merge_out="$(
+  run_branch_validation_case missing-auto-merge-target '' true ''
+)"
+if ! jq -e '
+    .status == "success"
+    and .batch_id == "missing-auto-merge-target"
+    and .matched_count == 1
+  ' <<<"${deferred_auto_merge_out}" >/dev/null \
+  || ! jq -e '
+    .branch == null
+    and .auto_merge == true
+    and .merge_target_branch == null
+  ' "${BATCH_ROOT}/missing-auto-merge-target/request.json" >/dev/null; then
+  echo "expected executor intake to defer automatic-merge branch resolution to the Issue" >&2
   exit 1
 fi
-[ ! -e "${BATCH_ROOT}/missing-auto-merge-target" ] \
-  || { echo "missing automatic merge target created batch state" >&2; exit 1; }
+deferred_auto_merge_acceptance="$(emit_acceptance missing-auto-merge-target)"
+if ! jq -e '
+    .status == "success"
+    and .batch_id == "missing-auto-merge-target"
+    and .matched_count == 1
+    and .scheduler_status == "queued"
+  ' <<<"${deferred_auto_merge_acceptance}" >/dev/null; then
+  echo "acceptance emitter rejected deferred per-Issue branch resolution" >&2
+  exit 1
+fi
 
 if run_branch_validation_case unsafe-base-backtick 'feature/`id`' false '' \
     >"${TEST_ROOT}/unsafe-base-backtick.out" \
@@ -1163,7 +1181,7 @@ if printf '%s\n' "${single_out}" | grep -q 'callback_nonce\|executor_agent'; the
 fi
 
 jq -e '
-  .batch_order == ["unfinished","label","range","single","iid-list","boundary-stable","valid-auto-merge"]
+  .batch_order == ["unfinished","label","range","single","iid-list","boundary-stable","valid-auto-merge","missing-auto-merge-target"]
   and (.batch_order | length) == (.batch_order | unique | length)
 ' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null
 

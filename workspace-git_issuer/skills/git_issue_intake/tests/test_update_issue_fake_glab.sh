@@ -15,6 +15,19 @@ set -euo pipefail
 
 printf '%s\n' "$*" >>"${FAKE_GLAB_LOG}"
 
+if [ -n "${FAKE_DESCRIPTION_CAPTURE:-}" ]; then
+  for arg in "$@"; do
+    case "${arg}" in
+      description=@*)
+        description_path="${arg#description=@}"
+        while IFS= read -r line || [ -n "${line}" ]; do
+          printf '%s\n' "${line}"
+        done <"${description_path}" >"${FAKE_DESCRIPTION_CAPTURE}"
+        ;;
+    esac
+  done
+fi
+
 case "$*" in
   "auth login --hostname gitlab-b.pxsemic.tech:30000 --token fake-token --api-protocol http")
     exit 0
@@ -23,23 +36,23 @@ case "$*" in
     exit 0
     ;;
   "api projects/claw_gitlab%2Fpx_ifp_hulat_test/issues/312")
-    printf '{"iid":312,"state":"opened","labels":["todo"],"web_url":"http://example/312"}\n'
+    printf '{"iid":312,"state":"opened","labels":["todo"],"description":"<!-- req_executor_base_branch:v1 branch=release/original -->\\n\\nold body","web_url":"http://example/312"}\n'
     exit 0
     ;;
   "api projects/claw_gitlab%2Fpx_ifp_hulat_test/issues/313")
-    printf '{"iid":313,"state":"opened","labels":["doing"],"web_url":"http://example/313"}\n'
+    printf '{"iid":313,"state":"opened","labels":["doing"],"description":"<!-- req_executor_base_branch:v1 branch=release/old -->\\n\\nold body","web_url":"http://example/313"}\n'
     exit 0
     ;;
   "api projects/claw_gitlab%2Fpx_ifp_hulat_test/issues/314")
-    printf '{"iid":314,"state":"opened","labels":["pr"],"web_url":"http://example/314"}\n'
+    printf '{"iid":314,"state":"opened","labels":["pr"],"description":"<!-- req_executor_base_branch:v1 branch=release/clear-me -->\\n\\nold body","web_url":"http://example/314"}\n'
     exit 0
     ;;
   "api projects/claw_gitlab%2Fpx_ifp_hulat_test/issues/315")
-    printf '{"iid":315,"state":"opened","labels":["todo"],"web_url":"http://example/315"}\n'
+    printf '{"iid":315,"state":"opened","labels":["todo"],"description":"<!-- req_executor_base_branch:v1 malformed -->","web_url":"http://example/315"}\n'
     exit 0
     ;;
   "api projects/claw_gitlab%2Fpx_ifp_hulat_test/issues/316")
-    printf '{"iid":316,"state":"opened","labels":["doing"],"web_url":"http://example/316"}\n'
+    printf '{"iid":316,"state":"opened","labels":["doing"],"description":"<!-- req_executor_base_branch:v1 branch=Release/Supersede -->\\n\\nold body","web_url":"http://example/316"}\n'
     exit 0
     ;;
   "api --method PUT projects/claw_gitlab%2Fpx_ifp_hulat_test/issues/"*"-F description=@"*)
@@ -84,9 +97,12 @@ run_update() {
   local change_action="$2"
   local rerun_label="${3:-}"
   local title="${4:-}"
+  local base_branch="${5:-}"
+  local clear_base_branch="${6:-false}"
 
   PATH="${FAKE_BIN}:${PATH}" \
     FAKE_GLAB_LOG="${LOG_FILE}" \
+    FAKE_DESCRIPTION_CAPTURE="${TEST_ROOT}/submitted-description.txt" \
     GITLAB_HOST="gitlab-b.pxsemic.tech:30000" \
     GITLAB_API_PROTOCOL="http" \
     GITLAB_TOKEN="fake-token" \
@@ -97,6 +113,8 @@ run_update() {
     RERUN_LABEL="${rerun_label}" \
     ISSUE_TITLE="${title}" \
     ISSUE_DESCRIPTION_FILE="${DESC_FILE}" \
+    ISSUE_BASE_BRANCH="${base_branch}" \
+    CLEAR_ISSUE_BASE_BRANCH="${clear_base_branch}" \
     CHANGE_NOTE="测试变更说明" \
     bash "${SKILL_DIR}/scripts/update_issue.sh"
 }
@@ -130,16 +148,38 @@ assert_json_field "${out}" '.action' 'updated'
 assert_json_field "${out}" '.issue_iid' '312'
 assert_json_field "${out}" '.issue_url' 'http://example/312'
 assert_json_field "${out}" '.entry_label' 'null'
+if [ "$(sed -n '1p' "${TEST_ROOT}/submitted-description.txt")" != \
+    '<!-- req_executor_base_branch:v1 branch=release/original -->' ]; then
+  echo "ordinary Issue update did not preserve its base branch marker" >&2
+  sed -n '1,20p' "${TEST_ROOT}/submitted-description.txt" >&2
+  exit 1
+fi
+[ "$(grep -Fc 'req_executor_base_branch:v1' \
+    "${TEST_ROOT}/submitted-description.txt")" -eq 1 ] \
+  || { echo "ordinary Issue update duplicated its base branch marker" >&2; exit 1; }
+grep -Fq '更新后的需求描述' "${TEST_ROOT}/submitted-description.txt" \
+  || { echo "ordinary Issue update lost the new description" >&2; exit 1; }
 
-out="$(run_update 313 update retry)"
+out="$(run_update 313 update retry '' 'Release/New')"
 assert_json_field "${out}" '.status' 'success'
 assert_json_field "${out}" '.action' 'updated+relabeled'
 assert_json_field "${out}" '.entry_label' 'retry'
+if [ "$(sed -n '1p' "${TEST_ROOT}/submitted-description.txt")" != \
+    '<!-- req_executor_base_branch:v1 branch=Release/New -->' ]; then
+  echo "explicit Issue base branch update did not replace the old marker" >&2
+  sed -n '1,20p' "${TEST_ROOT}/submitted-description.txt" >&2
+  exit 1
+fi
 
-out="$(run_update 314 update continue)"
+out="$(run_update 314 update continue '' '' true)"
 assert_json_field "${out}" '.status' 'success'
 assert_json_field "${out}" '.action' 'updated+relabeled'
 assert_json_field "${out}" '.entry_label' 'continue'
+if grep -Fq 'req_executor_base_branch:v1' \
+    "${TEST_ROOT}/submitted-description.txt"; then
+  echo "explicit Issue base branch clear retained the old marker" >&2
+  exit 1
+fi
 
 out="$(run_update 315 cancel)"
 assert_json_field "${out}" '.status' 'success'
@@ -152,6 +192,24 @@ assert_json_field "${out}" '.action' 'superseded'
 assert_json_field "${out}" '.issue_iid' '316'
 assert_json_field "${out}" '.superseded_by' '401'
 assert_json_field "${out}" '.entry_label' 'todo'
+if [ "$(sed -n '1p' "${TEST_ROOT}/submitted-description.txt")" != \
+    '<!-- req_executor_base_branch:v1 branch=Release/Supersede -->' ]; then
+  echo "superseding an Issue did not inherit its base branch marker" >&2
+  sed -n '1,20p' "${TEST_ROOT}/submitted-description.txt" >&2
+  exit 1
+fi
+
+set +e
+invalid_branch_out="$(run_update 312 update '' '' '../unsafe')"
+invalid_branch_code=$?
+set -e
+if [ "${invalid_branch_code}" -eq 0 ]; then
+  echo "expected invalid updated base branch to fail" >&2
+  exit 1
+fi
+assert_json_field "${invalid_branch_out}" '.status' 'failed'
+assert_json_field "${invalid_branch_out}" '.reason' \
+  'ISSUE_BASE_BRANCH must be a safe Git ref name'
 
 set +e
 invalid_out="$(run_update 312 update doing)"

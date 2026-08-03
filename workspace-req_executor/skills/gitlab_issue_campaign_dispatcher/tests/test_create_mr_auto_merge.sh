@@ -75,11 +75,19 @@ case "${1:-} ${2:-}" in
     api_count=$((api_count + 1))
     printf '%s\n' "${api_count}" >"${API_COUNT_FILE}"
     state=opened
+    readiness=mergeable
     if [ "${GLAB_SCENARIO}" = merged ] && [ "${api_count}" -gt 1 ]; then
+      state=merged
+    elif [ "${GLAB_SCENARIO}" = transient ] \
+        && [ "${api_count}" -eq 1 ]; then
+      readiness=checking
+    elif [ "${GLAB_SCENARIO}" = transient ] \
+        && [ "${api_count}" -gt 2 ]; then
       state=merged
     fi
     jq -cn \
       --arg state "${state}" \
+      --arg readiness "${readiness}" \
       --arg source_branch "${EXPECTED_SOURCE_BRANCH:-issue/42}" \
       --arg target_branch "${EXPECTED_TARGET_BRANCH:-release}" \
       --arg sha \
@@ -89,7 +97,8 @@ case "${1:-} ${2:-}" in
       source_branch:$source_branch,
       target_branch:$target_branch,
       sha:$sha,
-      state:$state
+      state:$state,
+      detailed_merge_status:$readiness
     }'
     ;;
   *) exit 90 ;;
@@ -148,6 +157,18 @@ grep -Fq -- '--target-branch release' "${merged_root}/glab.log" \
 grep -Fq -- '--method PUT projects/group%2Frepo/merge_requests/7/merge' \
   "${merged_root}/glab.log" \
   || fail "auto-merge did not call the exact MR REST endpoint"
+
+transient_out="$(MERGE_MR_READINESS_DELAY_SECONDS=0 \
+  run_create transient true)" \
+  || fail "transient GitLab merge-readiness recovery failed"
+[ "$(printf '%s\n' "${transient_out}" | tail -n 1)" = merged ] \
+  || fail "transient merge readiness did not reach verified merged state"
+transient_root="${TEST_ROOT}/transient-true"
+[ "$(grep -Fc -- '--method PUT projects/group%2Frepo/merge_requests/7/merge' \
+    "${transient_root}/glab.log")" -eq 1 ] \
+  || fail "readiness polling issued more than one merge mutation"
+[ "$(cat "${transient_root}/api.count")" -eq 3 ] \
+  || fail "readiness polling did not perform the bounded exact MR reads"
 
 opened_out="$(run_create opened false)" || fail "ordinary MR creation failed"
 [ "$(printf '%s\n' "${opened_out}" | tail -n 1)" = opened ] \

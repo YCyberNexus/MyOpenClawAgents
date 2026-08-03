@@ -325,11 +325,24 @@ WORKER_RESULT_JSON="$(
     def object_from_json: try (fromjson | select(type == "object")) catch empty;
     def compact_line_objects:
       [split("\n")[] | trim | select(test("^\\{.*\\}$")) | object_from_json];
+    def fenced_bodies:
+      reduce (split("\n")[]) as $line
+        ({inside: false, body: "", bodies: []};
+          ($line | trim) as $trimmed
+          | if ($trimmed | startswith("```")) then
+              if .inside then
+                .bodies += [.body] | .inside = false | .body = ""
+              else
+                .inside = true | .body = ""
+              end
+            elif .inside then
+              .body += (if .body == "" then "" else "\n" end) + $line
+            else
+              .
+            end)
+      | .bodies;
     def fenced_objects:
-      [
-        match("(?ms)(^|\\n)[[:space:]]*```[^\\n]*\\n(?<body>.*?)\\n[[:space:]]*```"; "g")
-        | .captures[] | select(.name == "body") | .string | object_from_json
-      ];
+      [fenced_bodies[] | object_from_json];
     ((compact_line_objects + fenced_objects) | unique_by(tojson)) as $objects
     | if ($objects | length) == 1 then $objects[0] else null end
   '

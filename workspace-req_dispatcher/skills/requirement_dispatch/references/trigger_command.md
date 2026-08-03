@@ -215,7 +215,7 @@ auto_merge=true|false
 dispatcher_callback_target=<非空回调目标>
 callback_nonce=<dispatcher 生成的 64 个小写 hex>
 branch=<可选安全 Git ref；处理基准分支>
-merge_target_branch=<可选安全 Git ref；MR 目标分支；auto_merge=true 时必填>
+merge_target_branch=<可选安全 Git ref；MR 目标分支；可留空由 executor 按 Issue 逐条解析>
 ```
 
 五类 selector 只允许各自字段：
@@ -247,8 +247,9 @@ I1 字段固定为上表，不携带任何 IID snapshot。
 不得重新生成。
 
 `auto_merge=true` 只能来自用户明确的“完成后直接/自动 merge”语义，否定表达不得启用。
-`branch` 与 `merge_target_branch` 分别表示处理基准和 MR 目标：未指定 MR 目标时回退到处理基准，
-两者都未指定时使用 `master`。仅给出普通 MR 目标但没有完成后合并动作时，保持
+`branch` 与 `merge_target_branch` 分别表示处理基准和 MR 目标：未指定 MR 目标时回退到处理基准；
+两者都未指定时保留空值，由 executor 逐个 Issue 按“Issue 基准分支声明 → 仓库默认分支”解析，
+MR 目标跟随最终处理基准。仅给出普通 MR 目标但没有完成后合并动作时，保持
 `auto_merge=false`，MR 创建后停留在 `pr`。
 自然语言及用户输入字段中，`branch`、`base_branch`、`source_branch` 与“基于某分支”映射到
 处理基准；`target_branch`、`merge_target_branch` 与“目标分支”映射到 MR 目标。只给出后者

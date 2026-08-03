@@ -314,8 +314,7 @@ if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
             and (.entry_mode == "auto" or .entry_mode == "fresh" or .entry_mode == "continue")
             and (.force_rerun_pr | type == "boolean")
             and (.auto_merge | type == "boolean")
-            and (.merge_target_branch == null or (.merge_target_branch | clean_string))
-            and (.auto_merge == false or (.merge_target_branch | clean_string))) | not)
+            and (.merge_target_branch == null or (.merge_target_branch | clean_string))) | not)
        or ([.grants[] | [.project,.iid]] | group_by(.) | any(length > 1))
        or ([.grants[].job_id] | group_by(.) | any(length > 1))
        or ([.grants[] | [.batch_id,.snapshot_index]] | group_by(.) | any(length > 1))
@@ -1209,6 +1208,8 @@ fi
 # failure, and must not consume retry/attempt budget or add blocked labels.
 declare -A ISSUE_JSON_CACHE DEPENDENCY_IID_BY_IID DEPENDENCY_BRANCH_BY_IID
 declare -A DEPENDENCY_BASE_SHA_BY_IID
+declare -A EFFECTIVE_BRANCH_BY_IID EFFECTIVE_MERGE_TARGET_BRANCH_BY_IID
+declare -A ISSUE_BRANCH_SOURCE_BY_IID ISSUE_BRANCH_ERROR_BY_IID
 declare -A DEPENDENCY_CONTRACT_VERSION_BY_IID DEPENDENCY_PLAN_SHA256_BY_IID
 declare -A DEPENDENCY_PLAN_JSON_BY_IID EXPECTED_COMMIT_PARENT_SHA_BY_IID
 declare -A DEPENDENCY_CLOSURE_IIDS_JSON_BY_IID
@@ -2267,7 +2268,9 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
   candidate_entry_mode="auto"
   candidate_force_rerun_pr="false"
   candidate_auto_merge="false"
-  candidate_merge_target="${T[branch]}"
+  candidate_request_branch="${T[branch]}"
+  candidate_request_merge_target=""
+  candidate_grant_json=""
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     candidate_grant_json="$(printf '%s' "${DRIVEN_EXECUTABLE_GRANTS_JSON}" \
       | jq -c --argjson iid "${candidate_iid}" \
@@ -2278,36 +2281,94 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
       | jq -r '.force_rerun_pr')"
     candidate_auto_merge="$(printf '%s' "${candidate_grant_json}" \
       | jq -r '.auto_merge')"
-    candidate_merge_target="$(printf '%s' "${candidate_grant_json}" \
-      | jq -r --arg default_branch "${T[branch]}" \
-        '.merge_target_branch // .branch // $default_branch')"
+    candidate_request_branch="$(printf '%s' "${candidate_grant_json}" \
+      | jq -r '.branch // ""')"
+    candidate_request_merge_target="$(printf '%s' "${candidate_grant_json}" \
+      | jq -r '.merge_target_branch // ""')"
   fi
-  candidate_has_desired_shared_pair=false
-  if [ -n "${LATE_SHARED_HEAD_BY_TAIL[${candidate_iid}]:-}" ]; then
-    candidate_has_desired_shared_pair=true
-  fi
-  if [ -n "${SHARED_BRANCH_ROLE_BY_IID[${candidate_iid}]:-}" ] \
-      || [ "${candidate_has_desired_shared_pair}" = true ]; then
-    if [ "${candidate_auto_merge}" = true ]; then
-      mark_shared_dependency_error "${candidate_iid}" \
-        "shared_branch_auto_merge_unsupported"
+
+  # A driven request may deliberately omit its branch so each Issue can carry
+  # its own creation baseline. Explicit request fields always win; otherwise a
+  # strict Issue marker/directive wins over the repository default. The MR
+  # target follows the resolved processing baseline unless separately named.
+  candidate_effective_branch="${T[branch]}"
+  candidate_branch_source="repository_default"
+  if [ -n "${candidate_request_branch}" ]; then
+    candidate_effective_branch="${candidate_request_branch}"
+    candidate_branch_source="request"
+  else
+    set +e
+    candidate_issue_branch_json="$(printf '%s' "${candidate_description}" \
+      | bash "${SCRIPT_DIR}/parse_issue_base_branch.sh" 2>/dev/null)"
+    candidate_issue_branch_rc=$?
+    set -e
+    if [ "${candidate_issue_branch_rc}" -ne 0 ] \
+        || ! candidate_issue_branch_json="$(printf '%s' \
+          "${candidate_issue_branch_json}" | jq -ce '
+          if type == "object"
+            and (keys | sort) == ["branch","reason","status"]
+            and (.status == "none" or .status == "resolved"
+              or .status == "invalid" or .status == "conflict")
+            and ((.branch == null) or (.branch | type == "string" and length > 0))
+            and ((.reason == null) or (.reason | type == "string" and length > 0))
+            and (if .status == "resolved" then .branch != null and .reason == null
+                 elif .status == "none" then .branch == null and .reason == null
+                 else .branch == null and .reason != null end)
+          then . else error("invalid Issue branch parser result") end
+        ' 2>/dev/null)"; then
+      ISSUE_BRANCH_ERROR_BY_IID["${candidate_iid}"]="issue_branch_parser_failed"
+    else
+      candidate_issue_branch_status="$(printf '%s' \
+        "${candidate_issue_branch_json}" | jq -r '.status')"
+      case "${candidate_issue_branch_status}" in
+        resolved)
+          candidate_effective_branch="$(printf '%s' \
+            "${candidate_issue_branch_json}" | jq -r '.branch')"
+          candidate_branch_source="issue"
+          ;;
+        none) ;;
+        invalid|conflict)
+          ISSUE_BRANCH_ERROR_BY_IID["${candidate_iid}"]="$(printf '%s' \
+            "${candidate_issue_branch_json}" | jq -r '.reason')"
+          ;;
+      esac
     fi
   fi
-  if [ -n "${SHARED_BRANCH_ROLE_BY_IID[${candidate_iid}]:-}" ]; then
-    shared_candidate_branch="${WORK_BRANCH_BY_IID[${candidate_iid}]}"
-    persisted_shared_target="$(printf '%s' "${STATE_JSON}" | jq -r \
-      --arg branch "${shared_candidate_branch}" \
-      '.shared_branch_groups[$branch].merge_target_branch // ""')"
-    if [ -n "${persisted_shared_target}" ] \
-        && [ "${persisted_shared_target}" != "${candidate_merge_target}" ]; then
-      mark_shared_dependency_error "${candidate_iid}" \
-        "shared_branch_merge_target_changed"
-    elif [ -z "${persisted_shared_target}" ]; then
-      STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+  candidate_merge_target="${candidate_request_merge_target:-${candidate_effective_branch}}"
+  EFFECTIVE_BRANCH_BY_IID["${candidate_iid}"]="${candidate_effective_branch}"
+  EFFECTIVE_MERGE_TARGET_BRANCH_BY_IID["${candidate_iid}"]="${candidate_merge_target}"
+  ISSUE_BRANCH_SOURCE_BY_IID["${candidate_iid}"]="${candidate_branch_source}"
+  wrapper_log prepare_tick \
+    "iid=${candidate_iid} branch_resolved source=${candidate_branch_source} branch=${candidate_effective_branch} merge_target=${candidate_merge_target}"
+
+  candidate_has_desired_shared_pair=false
+  if [ -z "${ISSUE_BRANCH_ERROR_BY_IID[${candidate_iid}]:-}" ]; then
+    if [ -n "${LATE_SHARED_HEAD_BY_TAIL[${candidate_iid}]:-}" ]; then
+      candidate_has_desired_shared_pair=true
+    fi
+    if [ -n "${SHARED_BRANCH_ROLE_BY_IID[${candidate_iid}]:-}" ] \
+        || [ "${candidate_has_desired_shared_pair}" = true ]; then
+      if [ "${candidate_auto_merge}" = true ]; then
+        mark_shared_dependency_error "${candidate_iid}" \
+          "shared_branch_auto_merge_unsupported"
+      fi
+    fi
+    if [ -n "${SHARED_BRANCH_ROLE_BY_IID[${candidate_iid}]:-}" ]; then
+      shared_candidate_branch="${WORK_BRANCH_BY_IID[${candidate_iid}]}"
+      persisted_shared_target="$(printf '%s' "${STATE_JSON}" | jq -r \
         --arg branch "${shared_candidate_branch}" \
-        --arg target "${candidate_merge_target}" \
-        '.shared_branch_groups[$branch].merge_target_branch = $target')"
-      persist_state "${STATE_JSON}"
+        '.shared_branch_groups[$branch].merge_target_branch // ""')"
+      if [ -n "${persisted_shared_target}" ] \
+          && [ "${persisted_shared_target}" != "${candidate_merge_target}" ]; then
+        mark_shared_dependency_error "${candidate_iid}" \
+          "shared_branch_merge_target_changed"
+      elif [ -z "${persisted_shared_target}" ]; then
+        STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
+          --arg branch "${shared_candidate_branch}" \
+          --arg target "${candidate_merge_target}" \
+          '.shared_branch_groups[$branch].merge_target_branch = $target')"
+        persist_state "${STATE_JSON}"
+      fi
     fi
   fi
   candidate_live_continue="$(printf '%s' "${candidate_issue_json}" | jq -r '
@@ -2372,6 +2433,10 @@ for candidate_iid in "${DEPENDENCY_CANDIDATE_IIDS[@]:-}"; do
   fi
   if [ -n "${FAN_IN_AUXILIARY_GROUP_BY_IID[${candidate_iid}]:-}" ]; then
     DEPENDENCY_ERROR_BY_IID["${candidate_iid}"]="shared_branch_source_rerun_unsupported"
+    append_batch_iid "${candidate_iid}"
+    continue
+  fi
+  if [ -n "${ISSUE_BRANCH_ERROR_BY_IID[${candidate_iid}]:-}" ]; then
     append_batch_iid "${candidate_iid}"
     continue
   fi
@@ -3965,11 +4030,15 @@ fi
 for iid in "${BATCH_IIDS[@]}"; do
   STATE_JSON="$(printf '%s' "${STATE_JSON}" | jq -c \
     --arg iid "${iid}" \
+    --arg branch "${EFFECTIVE_BRANCH_BY_IID[${iid}]:-${T[branch]}}" \
+    --arg merge_target_branch "${EFFECTIVE_MERGE_TARGET_BRANCH_BY_IID[${iid}]:-${EFFECTIVE_BRANCH_BY_IID[${iid}]:-${T[branch]}}}" \
     --arg work_branch "${WORK_BRANCH_BY_IID[${iid}]:-issue/${iid}}" \
     --argjson branch_members "${BRANCH_MEMBERS_JSON_BY_IID[${iid}]:-[${iid}]}" \
     --arg shared_branch_role "${SHARED_BRANCH_ROLE_BY_IID[${iid}]:-}" \
     --arg expected_work_branch_sha "${EXPECTED_WORK_BRANCH_SHA_BY_IID[${iid}]:-}" '
     .pending_subagents[$iid] += {
+      branch:$branch,
+      merge_target_branch:$merge_target_branch,
       work_branch:$work_branch,
       branch_members:$branch_members,
       shared_branch_role:(if $shared_branch_role == "" then null else $shared_branch_role end),
@@ -4016,11 +4085,11 @@ for iid in "${BATCH_IIDS[@]}"; do
   LOCAL_ISSUE_BRANCH=""
   ISSUE_TITLE=""
   ISSUE_LABELS=""
-  IID_BRANCH="${T[branch]}"
+  IID_BRANCH="${EFFECTIVE_BRANCH_BY_IID[${iid}]:-${T[branch]}}"
   GRANT_ENTRY_MODE="auto"
   IID_FORCE_RERUN_PR="false"
   IID_AUTO_MERGE="false"
-  IID_MERGE_TARGET_BRANCH="${T[branch]}"
+  IID_MERGE_TARGET_BRANCH="${EFFECTIVE_MERGE_TARGET_BRANCH_BY_IID[${iid}]:-${IID_BRANCH}}"
   IID_DEPENDENCY_IID="${DEPENDENCY_IID_BY_IID[${iid}]:-}"
   IID_DEPENDENCY_BRANCH="${DEPENDENCY_BRANCH_BY_IID[${iid}]:-}"
   IID_DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA_BY_IID[${iid}]:-}"
@@ -4038,13 +4107,9 @@ for iid in "${BATCH_IIDS[@]}"; do
   if [ "${DISPATCH_MODE}" = "driven_topup" ]; then
     IID_GRANT_JSON="$(printf '%s' "${DRIVEN_EXECUTABLE_GRANTS_JSON}" \
       | jq -c --argjson iid "${iid}" '.[] | select(.iid == $iid)')"
-    IID_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" \
-      | jq -r --arg default_branch "${T[branch]}" '.branch // $default_branch')"
     GRANT_ENTRY_MODE="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.entry_mode')"
     IID_FORCE_RERUN_PR="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.force_rerun_pr')"
     IID_AUTO_MERGE="$(printf '%s' "${IID_GRANT_JSON}" | jq -r '.auto_merge')"
-    IID_MERGE_TARGET_BRANCH="$(printf '%s' "${IID_GRANT_JSON}" \
-      | jq -r --arg default_branch "${IID_BRANCH}" '.merge_target_branch // $default_branch')"
   fi
   IID_CONFIG_BRANCH="${IID_BRANCH}"
 
@@ -4204,6 +4269,12 @@ for iid in "${BATCH_IIDS[@]}"; do
     dependency_error_reason="${DEPENDENCY_ERROR_BY_IID[${iid}]}"
     prep_blocked "issue_dependency_invalid: ${dependency_error_reason}"
     append_driven_scheduler_skip "${dependency_error_reason}"
+    continue
+  fi
+  if [ -n "${ISSUE_BRANCH_ERROR_BY_IID[${iid}]:-}" ]; then
+    issue_branch_error_reason="${ISSUE_BRANCH_ERROR_BY_IID[${iid}]}"
+    prep_blocked "issue_branch_invalid: ${issue_branch_error_reason}"
+    append_driven_scheduler_skip "${issue_branch_error_reason}"
     continue
   fi
 

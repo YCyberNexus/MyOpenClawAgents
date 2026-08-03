@@ -156,10 +156,6 @@ fi
 if [ -n "${MERGE_TARGET_BRANCH}" ] && ! validate_branch_name "${MERGE_TARGET_BRANCH}"; then
   batch_die "merge_target_branch must be a safe Git ref name"
 fi
-if [ "${AUTO_MERGE}" = true ] && [ -z "${MERGE_TARGET_BRANCH}" ]; then
-  batch_die "merge_target_branch is required when auto_merge=true"
-fi
-
 case "${SELECTOR_TYPE}" in
   single)
     require_field iid

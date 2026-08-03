@@ -159,9 +159,6 @@ migrate_legacy_scheduler_state() {
         and ((.value | has("merge_target_branch") | not)
           or .value.merge_target_branch == null
           or (.value.merge_target_branch | type == "string" and length > 0))
-        and (((.value.auto_merge // false) == false)
-          or ((.value.merge_target_branch // null)
-            | type == "string" and length > 0))
         and (.value.status == "reserved"
           or .value.status == "preparing"
           or .value.status == "running")
@@ -498,8 +495,6 @@ SCHEDULER_STATE="$(jq -ce '
       and (.value.auto_merge | type == "boolean")
       and ((.value.merge_target_branch == null)
         or (.value.merge_target_branch | type == "string" and length > 0))
-      and ((.value.auto_merge == false)
-        or (.value.merge_target_branch | type == "string" and length > 0))
       and (.value.status == "reserved" or .value.status == "preparing" or .value.status == "running")
       and (.value.reservation_seq | type == "number" and . == floor and . > 0)
       and (.value.reserved_at | type == "number" and . == floor and . >= 0)
@@ -611,9 +606,6 @@ load_batch() {
       and ((has("merge_target_branch") | not)
         or .merge_target_branch == null
         or (.merge_target_branch | type == "string" and length > 0))
-      and (((.auto_merge // false) == false)
-        or ((.merge_target_branch // null)
-          | type == "string" and length > 0))
       and ((has("entry_mode") | not)
         or .entry_mode == "auto"
         or .entry_mode == "fresh"

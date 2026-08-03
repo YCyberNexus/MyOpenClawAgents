@@ -84,7 +84,7 @@ mkdir -p "${STATE_DIR}"
 
 for name in dispatch_driven_topup.sh dispatch_prepare_tick.sh _dispatch_lib.sh \
   branch_utils.sh env_paths.sh git_network_guard.sh glab_auth.sh \
-  gitlab_env_resolver.sh parse_issue_dependency.sh \
+  gitlab_env_resolver.sh parse_issue_base_branch.sh parse_issue_dependency.sh \
   resolve_dependency_dag_base.sh resolve_driven_repo_path.sh; do
   cp "${SKILL_DIR}/scripts/${name}" "${FIXTURE_SCRIPTS}/${name}"
 done
@@ -653,7 +653,10 @@ printf '%s' "${OUTPUT}" | jq -e '
     and (.snapshot_index | type == "number")
     and .project == "group/project"))
   and .scope_evicted_iids == []
-' >/dev/null || fail "driven topup did not separate executable grants from stable skipped entries"
+' >/dev/null || {
+  printf '%s\n' "${OUTPUT}" >&2
+  fail "driven topup did not separate executable grants from stable skipped entries"
+}
 
 for iid in 2 3 6; do
   EXECUTION_STATE_PATH="${PROJECT_REPO}/.req_executor/issues/issue-${iid}/executions/execution-1.json"
@@ -764,7 +767,8 @@ jq -e '
   and .pending_subagents["3"].auto_merge == true
   and .pending_subagents["3"].merge_target_branch == "release/merge"
   and .pending_subagents["2"].auto_merge == false
-  and .pending_subagents["2"].merge_target_branch == null
+  and .pending_subagents["2"].branch == "main"
+  and .pending_subagents["2"].merge_target_branch == "main"
   and .issue_iids_whitelist == [1,2,3,4,5,6]
   and .dispatch_owner == (.dispatch_owner | select(.mode == "driven" and .owner_id == "owner-A"))
 ' "${STATE_FILE}" >/dev/null || fail "driven topup pending state froze skips or omitted scheduler membership source"
@@ -856,6 +860,66 @@ write_terminal_race_state() {
 
 RACE_REQUEST="$(printf '%s' "${VALID_REQUEST}" | jq -c \
   '.grants |= map(select(.iid == 2))')"
+
+# With no branch in the driven request, a branch recorded when the Issue was
+# created becomes both the worktree baseline and the MR/automatic-merge target.
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{
+  "2":"<!-- req_executor_base_branch:v1 branch=release/from-issue -->\nbody"
+}'
+INHERITED_BRANCH_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0].branch=null
+  | .grants[0].auto_merge=true
+  | .grants[0].merge_target_branch=null
+')"
+INHERITED_BRANCH_OUTPUT="$(run_wrapper "${INHERITED_BRANCH_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON
+printf '%s' "${INHERITED_BRANCH_OUTPUT}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [2]
+' >/dev/null || fail "Issue-declared branch did not produce a runnable grant"
+[ "$(cat "${PREP_LOG}")" = '2|release/from-issue|fresh' ] \
+  || fail "Issue-declared branch did not select the worktree baseline"
+INHERITED_BOOTSTRAP="$(printf '%s' "${INHERITED_BRANCH_OUTPUT}" \
+  | jq -r '.dispatch_entries[0].payload_path')"
+INHERITED_MANIFEST="$(sed -n 's/^manifest_path=//p' "${INHERITED_BOOTSTRAP}")"
+INHERITED_EXECUTOR_PAYLOAD="$(jq -r '.executor_payload_path' \
+  "${INHERITED_MANIFEST}")"
+grep -Fq "ISSUE_MODE=fresh BRANCH='release/from-issue' \\" \
+  "${INHERITED_EXECUTOR_PAYLOAD}" \
+  || fail "Issue branch was not rendered into the executor command"
+grep -Fq "AUTO_MERGE=true MERGE_TARGET_BRANCH='release/from-issue' \\" \
+  "${INHERITED_EXECUTOR_PAYLOAD}" \
+  || fail "Issue branch was not inherited as the automatic-merge target"
+jq -e '
+  .pending_subagents["2"].branch == "release/from-issue"
+  and .pending_subagents["2"].merge_target_branch == "release/from-issue"
+  and .pending_subagents["2"].auto_merge == true
+' "${STATE_FILE}" >/dev/null \
+  || fail "resolved Issue branch was not frozen in pending state"
+
+# An explicit execution branch is authoritative and bypasses even malformed
+# Issue metadata; its MR target still follows that explicit branch by default.
+write_terminal_race_state
+export FAKE_ISSUE_DESCRIPTIONS_JSON='{"2":"base_branch=../stale-unsafe"}'
+EXPLICIT_OVERRIDE_REQUEST="$(printf '%s' "${RACE_REQUEST}" | jq -c '
+  .grants[0].branch="release/explicit-override"
+  | .grants[0].auto_merge=false
+  | .grants[0].merge_target_branch=null
+')"
+EXPLICIT_OVERRIDE_OUTPUT="$(run_wrapper "${EXPLICIT_OVERRIDE_REQUEST}")"
+unset FAKE_ISSUE_DESCRIPTIONS_JSON
+printf '%s' "${EXPLICIT_OVERRIDE_OUTPUT}" | jq -e '
+  .status == "ready"
+  and [.dispatch_entries[].iid] == [2]
+' >/dev/null || fail "explicit branch did not override Issue metadata"
+[ "$(cat "${PREP_LOG}")" = '2|release/explicit-override|fresh' ] \
+  || fail "explicit branch did not select the worktree baseline"
+jq -e '
+  .pending_subagents["2"].branch == "release/explicit-override"
+  and .pending_subagents["2"].merge_target_branch == "release/explicit-override"
+' "${STATE_FILE}" >/dev/null \
+  || fail "explicit branch override was not frozen as the MR target"
 
 # Persisted shared-group identity is an authorization boundary. The branch key
 # must encode the same ordered members, one IID may belong to only one group,

@@ -1321,18 +1321,18 @@ if ! jq -e '
   exit 1
 fi
 
-master_fallback_auto_merge_json="$(
+deferred_issue_branch_auto_merge_json="$(
   MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，执行完成后直接 merge。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
 )"
 if ! jq -e '
   .status == "success"
-  and .target_branch == "master"
+  and .target_branch == null
   and .auto_merge == true
-  and .merge_target_branch == "master"
-' <<<"${master_fallback_auto_merge_json}" >/dev/null; then
-  echo "expected automatic merge without either branch to default to master" >&2
-  printf '%s\n' "${master_fallback_auto_merge_json}" >&2
+  and .merge_target_branch == null
+' <<<"${deferred_issue_branch_auto_merge_json}" >/dev/null; then
+  echo "expected automatic merge without either branch to defer per-Issue branch resolution" >&2
+  printf '%s\n' "${deferred_issue_branch_auto_merge_json}" >&2
   exit 1
 fi
 

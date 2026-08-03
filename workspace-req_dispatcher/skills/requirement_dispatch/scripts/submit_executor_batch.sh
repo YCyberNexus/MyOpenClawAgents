@@ -66,8 +66,6 @@ if ! PREPARED_REQUEST_JSON="$(jq -ce '
     and (.auto_merge | type == "boolean")
     and (.target_branch | nullable_string)
     and (.merge_target_branch | nullable_string)
-    and (.auto_merge == false
-      or (.merge_target_branch | type == "string" and length > 0))
     and (.issue_url | nullable_string)
     and (.request_text | nullable_string)
     and .reason == null

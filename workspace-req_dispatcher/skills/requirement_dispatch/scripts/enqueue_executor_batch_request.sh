@@ -31,8 +31,6 @@ ORIGIN_JSON="$(printf '%s' "${ORIGIN_JSON}" | normalize_executor_batch_origin 2>
 
 case "${FORCE_RERUN_PR}" in true|false) ;; *) executor_batch_outbox_die "FORCE_RERUN_PR must be true or false" ;; esac
 case "${AUTO_MERGE}" in true|false) ;; *) executor_batch_outbox_die "AUTO_MERGE must be true or false" ;; esac
-[ "${AUTO_MERGE}" != true ] || [ -n "${MERGE_TARGET_BRANCH}" ] \
-  || executor_batch_outbox_die "MERGE_TARGET_BRANCH is required when AUTO_MERGE=true"
 validate_executor_callback_nonce "${CALLBACK_NONCE}" \
   || executor_batch_outbox_die "CALLBACK_NONCE must be 64 lowercase hexadecimal characters"
 if ! grep -Fqx "executor_agent=${EXECUTOR_AGENT}" <<<"${PAYLOAD}" \

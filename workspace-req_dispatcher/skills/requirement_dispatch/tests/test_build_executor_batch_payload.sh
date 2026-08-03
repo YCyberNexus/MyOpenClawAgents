@@ -79,8 +79,13 @@ do
   fi
 done
 
-if build_payload '{"type":"single","iid":312}' false develop '' true '' >/dev/null 2>&1; then
-  echo "expected automatic merge without a merge target to fail" >&2
+deferred_auto_merge_payload="$(
+  build_payload '{"type":"single","iid":312}' false '' '' true ''
+)"
+if ! grep -qx 'auto_merge=true' <<<"${deferred_auto_merge_payload}" || \
+   grep -Eq '^(branch|merge_target_branch)=' <<<"${deferred_auto_merge_payload}"; then
+  echo "expected automatic merge without branch fields to defer per-Issue resolution" >&2
+  printf '%s\n' "${deferred_auto_merge_payload}" >&2
   exit 1
 fi
 

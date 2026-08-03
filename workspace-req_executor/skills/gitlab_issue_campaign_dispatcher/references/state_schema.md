@@ -104,7 +104,8 @@ Scheduler-driven pending entries freeze `auto_merge:boolean`,
 `expected_commit_parent_sha` from the exact active job.
 `expected_work_branch_sha` is the old remote tip used only by the push lease;
 `expected_commit_parent_sha` is the required sole parent of the new business
-commit. Ordinary automatic requests require a non-empty merge target. DAG v2
+commit. A driven request may enter I1 with a null merge target, but an ordinary
+automatic job freezes a non-empty resolved target before launch. DAG v2
 and legacy shared-pair requests require `auto_merge:false`. Phase 6 reads only
 this trusted pending configuration, not callback-authored labels.
 
@@ -380,8 +381,11 @@ pending on the next scheduler pass. The runtime values are written only by
 batch sessions. A `pending_transaction.scheduler_state` carries the same
 values so transaction recovery cannot roll back a concurrent runtime update.
 
-Each active job stores the processing `branch`, `auto_merge`, and
-`merge_target_branch` as part of its physical intent. Deduplication attaches a
+Each active job initially stores the request-level processing `branch`,
+`auto_merge`, and `merge_target_branch` as part of its physical intent; either
+branch field may still be null before project preflight. The project topup
+resolves and freezes both concrete branches per Issue before worktree creation.
+Deduplication attaches a
 second batch membership only when all three values, `entry_mode`, and
 `force_rerun_pr` match; a conflicting merge policy remains pending behind the
 current physical job.

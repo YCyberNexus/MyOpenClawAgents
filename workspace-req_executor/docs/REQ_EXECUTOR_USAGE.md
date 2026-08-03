@@ -43,15 +43,17 @@ callback_nonce=<64 个小写 hex>
 force_rerun_pr=true|false
 auto_merge=true|false
 branch=<可选处理基准分支>
-merge_target_branch=<auto_merge=true 时必填的 MR 目标分支>
+merge_target_branch=<可选 MR 目标分支>
 ```
 
 根据 selector 类型再提供 `iid`、`iids`、`iid_min/iid_max` 或 `label`，可选处理基准分支
-`branch`；启用 `auto_merge=true` 时必须同时提供非空的 `merge_target_branch`。dispatcher 在
-生成 I1 前完成目标回退：明确的合并目标优先；未指定合并目标时回退到 `branch`；两者都未指定时
-使用 `master`。executor 不从自由文本重新推断该策略，并会拒绝缺少目标分支的自动合并 I1。
+`branch`。明确的请求分支优先；请求未指定时，executor 逐个读取 Issue 描述中的版本化基准分支
+marker 或唯一严格分支声明，再回退到仓库 `origin/HEAD`。明确的合并目标优先；未指定时，MR 目标
+跟随最终处理基准。因此 `auto_merge=true` 的 I1 可以暂时不带 `merge_target_branch`，但 executor
+必须在工作树准备前解析并冻结具体目标；非法或互相冲突的 Issue 声明会 fail closed。
 `auto_merge=false` 时，MR 创建成功后以 `pr` 作为稳定完成态。`auto_merge=true` 时，固定外层
-执行器先执行精确 MR GET、带预期 SHA 的 PUT 和精确 GET；只有后一次 GET 观察到匹配 MR 的
+执行器先执行精确 MR GET，对 GitLab 的临时 merge-readiness 状态做有界只读复核，再执行带预期
+SHA 的唯一 PUT 和精确 GET；只有后一次 GET 观察到匹配 MR 的
 `state=merged`，才原子写入 `finish`。Phase 6 不延后这次首次标签写入，但会在提交 durable
 终态和发送成功回调前，再次独立、有界地核验相同 MR 身份、分支和 SHA。单凭
 `mr_result.json` marker 或回调字段永远不能授权 `finish` 或成功终态。

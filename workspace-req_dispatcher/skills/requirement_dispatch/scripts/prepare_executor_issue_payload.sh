@@ -1186,16 +1186,17 @@ if has_explicit_auto_merge_action "${AUTO_MERGE_SOURCE}" \
 fi
 
 # A merge destination is also the safest processing baseline when the user did
-# not name a separate base branch. For an automatic merge with neither branch
-# stated, the public contract deliberately uses master rather than origin/HEAD.
+# not name a separate base branch. If neither branch is stated, keep both fields
+# unset: req_executor resolves each Issue's declared creation baseline and only
+# then falls back to the repository default branch.
 if [ -z "${TARGET_BRANCH}" ] && [ -n "${MERGE_TARGET_BRANCH}" ]; then
   TARGET_BRANCH="${MERGE_TARGET_BRANCH}"
 fi
 if [ "${AUTO_MERGE}" = true ]; then
-  if [ -z "${MERGE_TARGET_BRANCH}" ]; then
-    MERGE_TARGET_BRANCH="${TARGET_BRANCH:-master}"
+  if [ -z "${MERGE_TARGET_BRANCH}" ] && [ -n "${TARGET_BRANCH}" ]; then
+    MERGE_TARGET_BRANCH="${TARGET_BRANCH}"
   fi
-  if [ -z "${TARGET_BRANCH}" ]; then
+  if [ -z "${TARGET_BRANCH}" ] && [ -n "${MERGE_TARGET_BRANCH}" ]; then
     TARGET_BRANCH="${MERGE_TARGET_BRANCH}"
   fi
 fi

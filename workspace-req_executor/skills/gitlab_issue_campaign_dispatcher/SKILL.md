@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-07-31.2] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-08-03.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -433,6 +433,16 @@ The intake wrapper defers callback-outbox network delivery during its embedded
 tick. The caller is `req_dispatcher`'s occupied main session, so synchronously
 delivering I3 from inside I1 would create a circular wait. Ordinary executor
 heartbeats drain the durable callback outbox immediately after I1 acceptance.
+
+For each driven Issue, branch resolution is deterministic and happens before
+worktree preparation: an explicit I1 `branch` wins; otherwise the executor
+parses the Issue description for the versioned marker
+`<!-- req_executor_base_branch:v1 branch=<safe-ref> -->` or one unambiguous
+strict base/source-branch declaration; otherwise it uses `origin/HEAD`.
+An explicit `merge_target_branch` wins, while an omitted MR target follows the
+resolved processing base. Invalid or conflicting Issue declarations fail
+closed. The resolved concrete branch and MR target are frozen into the pending
+job and execution state; child output cannot change them.
 
 The wrapper owns GitLab GraphQL cursor pagination, rejects repeated IIDs,
 non-advancing/unsafe cursors and bounded-scan overflow, requires two consecutive

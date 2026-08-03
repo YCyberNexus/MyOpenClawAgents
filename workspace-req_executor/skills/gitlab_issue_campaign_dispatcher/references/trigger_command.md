@@ -195,7 +195,7 @@ auto_merge=true|false
 dispatcher_callback_target=<non-empty req_dispatcher target>
 callback_nonce=<64 lowercase hexadecimal characters>
 branch=<optional processing base branch>
-merge_target_branch=<optional MR target branch; required when auto_merge=true>
+merge_target_branch=<optional MR target branch; resolved per Issue when omitted>
 ```
 
 Exactly one selector shape is allowed. `iid_list` selects the exact canonical
@@ -210,8 +210,11 @@ cursors, and freezes the matching IID snapshot only after two consecutive full
 scans normalize to the same result. Persistent movement fails closed, and later
 matching issues are not added.
 
-`auto_merge=true` is accepted only with an exact `merge_target_branch`. The
-scheduler persists and compares both fields as part of physical-job intent, so
+`auto_merge=true` may enter I1 without a target. An explicit request `branch`
+wins; otherwise the executor resolves the base from the Issue marker or one
+unambiguous strict declaration, then falls back to `origin/HEAD`. An explicit
+MR target wins, while an omitted target follows that resolved base. The
+scheduler freezes and compares the concrete values before execution, so
 conflicting merge policies cannot attach to the same running Issue. Legacy
 requests and scheduler records missing the fields normalize to `false/null`.
 This intake validation does not override dependency planning: if an Issue is

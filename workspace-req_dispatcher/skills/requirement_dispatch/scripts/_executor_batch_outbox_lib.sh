@@ -143,7 +143,6 @@ load_executor_batch_outbox_locked() {
         and (.auto_merge | type == "boolean")
         and (.target_branch | nullable_printable)
         and (.merge_target_branch | nullable_printable)
-        and (.auto_merge == false or (.merge_target_branch | printable))
         and (.executor_agent | printable)
         and ((has("callback_nonce") | not)
           or (.callback_nonce | type == "string" and test("^[0-9a-f]{64}$")))
