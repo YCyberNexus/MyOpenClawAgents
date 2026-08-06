@@ -22,6 +22,7 @@ BIND_CLAIM_CMD="${BIND_CLAIM_CMD:-${SCRIPT_DIR}/bind_driven_claim.sh}"
 RESUME_SPAWN_CMD="${RESUME_SPAWN_CMD:-${SCRIPT_DIR}/record_executor_batch_spawn.sh}"
 EXPIRE_RUNNING_CMD="${EXPIRE_RUNNING_CMD:-${SCRIPT_DIR}/dispatch_followup.sh}"
 RECOVER_SHARED_MR_CMD="${RECOVER_SHARED_MR_CMD:-${SCRIPT_DIR}/recover_shared_mr_finalization.sh}"
+RECONCILE_NATIVE_TERMINAL_CMD="${RECONCILE_NATIVE_TERMINAL_CMD:-${SCRIPT_DIR}/reconcile_native_subagent_terminal.sh}"
 DEFER_DRIVEN_CALLBACK_DELIVERY="${DEFER_DRIVEN_CALLBACK_DELIVERY:-0}"
 
 tick_die() {
@@ -60,6 +61,7 @@ do
 done
 validate_bash_script EXPIRE_RUNNING_CMD "${EXPIRE_RUNNING_CMD}"
 validate_bash_script RECOVER_SHARED_MR_CMD "${RECOVER_SHARED_MR_CMD}"
+validate_bash_script RECONCILE_NATIVE_TERMINAL_CMD "${RECONCILE_NATIVE_TERMINAL_CMD}"
 case "${DEFER_DRIVEN_CALLBACK_DELIVERY}" in
   0|1) ;;
   *) tick_die "DEFER_DRIVEN_CALLBACK_DELIVERY must be 0 or 1" ;;
@@ -860,6 +862,7 @@ while IFS= read -r post_job; do
   post_attempt="$(jq -r '.execution_id' <<<"${post_pending}")"
   post_run_id="$(jq -r '.run_id' <<<"${post_pending}")"
   post_child_session_key="$(jq -r '.child_session_key' <<<"${post_pending}")"
+  post_child_label="$(jq -r '.child_label // ""' <<<"${post_pending}")"
   post_work_branch="$(jq -r --argjson iid "${post_iid}" \
     '.work_branch // ("issue/" + ($iid | tostring))' <<<"${post_pending}")"
   if ! git check-ref-format --branch "${post_work_branch}" >/dev/null 2>&1; then
@@ -1096,6 +1099,124 @@ while IFS= read -r post_job; do
     continue
   fi
 
+  # OpenClaw's native completion announcement is best-effort and can be lost
+  # across a gateway restart. `subagents list` is scoped to the current
+  # requester session, so a main-session heartbeat cannot reliably see a
+  # child spawned by an intake/batch session. Reconcile the already-recorded
+  # exact child identity against OpenClaw's authoritative global registry
+  # instead. The fixed runtime wrapper mutates nothing for active/missing
+  # children and delegates terminal entries to the authenticated ingester;
+  # that ingester still owns transcript, launch-action, and pending-claim
+  # validation before missing-result Phase 6 can release the slot.
+  post_runtime_terminal_observed=false
+  if [[ "${post_child_session_key}" =~ ^agent:req_executor:subagent:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]] \
+      && [[ "${post_child_label}" =~ ^reqx-iid[1-9][0-9]*-gen[1-9][0-9]*-[0-9a-f]{40}$ ]]; then
+    post_runtime_input="$(jq -cn \
+      --arg job_id "${post_job_id}" \
+      --argjson claim_generation "${post_generation}" \
+      --argjson iid "${post_iid}" \
+      --argjson execution_id "${post_attempt}" \
+      --arg run_id "${post_run_id}" \
+      --arg child_session_key "${post_child_session_key}" \
+      --arg child_label "${post_child_label}" '{
+      job_id:$job_id,
+      claim_generation:$claim_generation,
+      iid:$iid,
+      execution_id:$execution_id,
+      run_id:$run_id,
+      child_session_key:$child_session_key,
+      child_label:$child_label
+    }')"
+    set +e
+    post_runtime_output="$(printf '%s' "${post_runtime_input}" | \
+      env -u PROJECT -u GROUP -u PROJECT_FULL -u PROJECT_URI -u REPO_PATH \
+        bash "${RECONCILE_NATIVE_TERMINAL_CMD}" 2>/dev/null)"
+    post_runtime_rc=$?
+    set -e
+    if [ "${post_runtime_rc}" -eq 0 ] \
+        && post_runtime_json="$(jq -ce \
+          --arg job_id "${post_job_id}" \
+          --argjson claim_generation "${post_generation}" \
+          --argjson iid "${post_iid}" \
+          --argjson execution_id "${post_attempt}" '
+          def safe_string($max):
+            type == "string" and length <= $max
+            and (explode | all(. >= 32 and . != 127));
+          def clean_string($max):
+            safe_string($max) and length > 0;
+          if type == "object"
+            and (keys | sort) == [
+              "callback_status","claim_generation","cleanup",
+              "execution_id","iid","job_id","status","terminal_status"
+            ]
+            and .job_id == $job_id
+            and .claim_generation == $claim_generation
+            and .iid == $iid and .execution_id == $execution_id
+            and (.status as $status | [
+              "runtime_active","runtime_not_found","runtime_unavailable",
+              "runtime_terminal_reconciled"
+            ] | index($status)) != null
+            and (.callback_status | safe_string(128))
+            and (.terminal_status | safe_string(128))
+            and (.cleanup | type == "object")
+            and ((.cleanup.action == "kill"
+              and (.cleanup.target | clean_string(512))
+              and (.cleanup.reason | clean_string(512)))
+              or (.cleanup.action == "skip"
+                and (.cleanup.target | safe_string(512))
+                and (.cleanup.reason | clean_string(512))))
+            and (if .status == "runtime_terminal_reconciled" then
+              (.callback_status | length) > 0
+            else
+              .callback_status == "" and .terminal_status == ""
+              and .cleanup.action == "skip"
+            end)
+          then . else error("invalid native runtime reconcile envelope") end
+        ' <<<"${post_runtime_output}" 2>/dev/null)"; then
+      post_runtime_status="$(jq -r '.status' <<<"${post_runtime_json}")"
+      post_runtime_callback_status="$(jq -r '.callback_status' \
+        <<<"${post_runtime_json}")"
+      [ "${post_runtime_status}" != runtime_terminal_reconciled ] \
+        || post_runtime_terminal_observed=true
+      append_operation "$(jq -cn \
+        --arg job_id "${post_job_id}" \
+        --arg status "${post_runtime_status}" \
+        --arg callback_status "${post_runtime_callback_status}" '{
+        operation:"native_runtime_reconcile",
+        job_id:$job_id,
+        status:$status
+      } + (if $callback_status == "" then {}
+           else {callback_status:$callback_status} end)')"
+      if [ "$(jq -r '.cleanup.action' <<<"${post_runtime_json}")" = kill ]; then
+        CLEANUP_ACTIONS="$(jq -c \
+          --argjson cleanup "$(jq -c '.cleanup' <<<"${post_runtime_json}")" \
+          --arg job_id "${post_job_id}" \
+          --argjson iid "${post_iid}" \
+          --argjson execution_id "${post_attempt}" \
+          --argjson claim_generation "${post_generation}" '
+          . + [$cleanup + {
+            job_id:$job_id,
+            iid:$iid,
+            execution_id:$execution_id,
+            claim_generation:$claim_generation
+          }]
+        ' <<<"${CLEANUP_ACTIONS}")"
+      fi
+    else
+      append_operation "$(jq -cn --arg job_id "${post_job_id}" '{
+        operation:"native_runtime_reconcile",
+        job_id:$job_id,
+        status:"failed"
+      }')"
+      HAD_FAILURE=true
+    fi
+  fi
+  if [ "${post_runtime_terminal_observed}" = true ]; then
+    # The authenticated completion path either handled this exact terminal or
+    # observed a concurrent/stale delivery. Do not run marker-only recovery
+    # from the pre-ingest scheduler snapshot in the same tick.
+    continue
+  fi
   if [ -z "${post_marker_json}" ]; then
     continue
   fi

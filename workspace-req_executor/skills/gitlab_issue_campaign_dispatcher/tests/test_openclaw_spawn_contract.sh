@@ -43,6 +43,13 @@ if grep -Fq -- '-u REPO_PARENT_PATH' "${SKILL_DIR}/SKILL.md"; then
 fi
 grep -Fq 'openclaw_4_9_terminal_reference' "${SKILL_DIR}/SKILL.md" \
   || fail "4.9 native completion must use the terminal reference selector"
+grep -Fq 'reconcile_native_subagent_terminal.sh' \
+  "${SKILL_DIR}/scripts/run_executor_batch_tick.sh" \
+  || fail "heartbeat must invoke fixed native terminal reconciliation"
+grep -Fq "authoritative global session registry" "${SKILL_DIR}/SKILL.md" \
+  || fail "callback-loss recovery must not depend on requester-scoped runtime listing"
+grep -Fq 'global OpenClaw session registry' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "workspace rules do not preserve automatic callback-loss recovery"
 grep -Fq 'priority than every command first-line route' "${SKILL_DIR}/SKILL.md" \
   || fail "protected native completion must outrank command routing"
 grep -Fq 'Any embedded' "${SKILL_DIR}/SKILL.md" \

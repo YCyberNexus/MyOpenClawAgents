@@ -515,6 +515,44 @@ jq -cn \
   }"
 '
 
+write_fake reconcile_native_subagent_terminal.sh '
+input="$(cat)"
+jq -e "
+  (keys | sort) == [
+    \"child_label\",\"child_session_key\",\"claim_generation\",
+    \"execution_id\",\"iid\",\"job_id\",\"run_id\"
+  ]
+  and .job_id == \"A:snapshot-0\"
+  and .claim_generation == 9
+  and .iid == 42 and .execution_id == 9
+  and .run_id == \"runtime-run-42\"
+  and .child_session_key == \"agent:req_executor:subagent:11111111-1111-4111-8111-111111111111\"
+  and .child_label == \"reqx-iid42-gen9-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"
+" <<<"${input}" >/dev/null
+printf "native-runtime:%s:%s\n" \
+  "$(jq -r .job_id <<<"${input}")" \
+  "$(jq -r .claim_generation <<<"${input}")" >>"${ORDER_LOG}"
+if [ "${RUNTIME_TERMINAL_TEST:-0}" = 1 ]; then
+  jq -cn "{
+    status:\"runtime_terminal_reconciled\",
+    job_id:\"A:snapshot-0\",claim_generation:9,iid:42,execution_id:9,
+    callback_status:\"handled\",terminal_status:\"blocked\",
+    cleanup:{
+      action:\"kill\",
+      target:\"agent:req_executor:subagent:11111111-1111-4111-8111-111111111111\",
+      reason:\"fixture terminal cleanup\"
+    }
+  }"
+else
+  jq -cn "{
+    status:\"runtime_active\",
+    job_id:\"A:snapshot-0\",claim_generation:9,iid:42,execution_id:9,
+    callback_status:\"\",terminal_status:\"\",
+    cleanup:{action:\"skip\",target:\"\",reason:\"fixture child active\"}
+  }"
+fi
+'
+
 # Deployment artifact copies can preserve readable shell content while losing
 # executable mode bits. Every helper below is sourced or passed explicitly to
 # Bash, so the heartbeat and post-spawn recorder must accept this safe shape.
@@ -547,6 +585,7 @@ run_tick() {
   REAP_PLACEHOLDERS_CMD="${FAKE_BIN}/reap_driven_orphan_placeholders.sh" \
   EXPIRE_RUNNING_CMD="${FAKE_BIN}/expire_running.sh" \
   RECOVER_SHARED_MR_CMD="${TEST_RECOVER_SHARED_MR_CMD:-${FAKE_BIN}/recover_shared_mr_finalization.sh}" \
+  RECONCILE_NATIVE_TERMINAL_CMD="${TEST_RECONCILE_NATIVE_TERMINAL_CMD:-${FAKE_BIN}/reconcile_native_subagent_terminal.sh}" \
   RESERVE_CMD="${TEST_RESERVE_CMD:-${FAKE_BIN}/reserve_driven_batch_items.sh}" \
   TOPUP_CMD="${FAKE_BIN}/dispatch_driven_topup.sh" \
   IMPORT_SKIP_CMD="${FAKE_BIN}/import_driven_skipped.sh" \
@@ -566,6 +605,18 @@ set -e
     <<<"${invalid_recovery_command_output}" \
   || fail "relative shared MR recovery command was not rejected"
 
+set +e
+invalid_native_reconcile_output="$(
+  TEST_RECONCILE_NATIVE_TERMINAL_CMD=relative/native-runtime-reconcile \
+    run_tick 2>&1
+)"
+invalid_native_reconcile_rc=$?
+set -e
+[ "${invalid_native_reconcile_rc}" -eq 2 ] \
+  && grep -q 'RECONCILE_NATIVE_TERMINAL_CMD must be absolute' \
+    <<<"${invalid_native_reconcile_output}" \
+  || fail "relative native runtime reconcile command was not rejected"
+
 archive_launch_actions() {
   local label="$1"
   if [ -d "${SCHEDULER_ROOT}/launch_actions" ]; then
@@ -583,7 +634,7 @@ sleep 30
 '
 hanging_started_at="$(date +%s)"
 hanging_reserve_output="$(
-  EXECUTOR_TOPUP_PHASE_SECONDS=1 \
+  EXECUTOR_TOPUP_PHASE_SECONDS=2 \
   TEST_RESERVE_CMD="${FAKE_BIN}/hanging_reserve.sh" run_tick
 )" || fail "hung reserve boundary tick crashed"
 hanging_elapsed=$(( $(date +%s) - hanging_started_at ))
@@ -1363,6 +1414,59 @@ actual_record_order="$(grep '^record-order:' "${ORDER_LOG}" | sed 's/^record-ord
 expected_record_order='A:snapshot-0'
 [ "${actual_record_order}" = "${expected_record_order}" ] \
   || fail "serial preparing/bind did not preserve the first scheduler grant: ${actual_record_order}"
+
+# A native child can finish while its best-effort OpenClaw completion announce
+# is lost across a gateway restart. The heartbeat must reconcile the exact
+# already-recorded runtime identity before the six-hour running lease, without
+# depending on current-session `subagents list` visibility or exposing the
+# scheduler claim token.
+cat >"${SCHEDULER_ROOT}/batches/A/request.json" <<'EOF'
+{"version":1,"batch_id":"A","project":"group/repo","dispatcher_callback_target":"agent:req_dispatcher:main"}
+EOF
+cat >"${SCHEDULER_ROOT}/scheduler_state.json" <<'EOF'
+{"version":1,"round_robin_cursor":"A","batch_order":["A"],"active_jobs":{
+  "A:snapshot-0":{
+    "job_id":"A:snapshot-0","physical_key":"group/repo#42",
+    "project":"group/repo","iid":42,"status":"running",
+    "reservation_seq":1,"updated_at":100,"claim_generation":9,
+    "claim_token":"native-runtime-private-claim","finalization":null,
+    "owner":{"batch_id":"A","snapshot_index":0}
+  }
+}}
+EOF
+PROJECT_RUNTIME="${TEST_ROOT}/repos/group/repo/.req_executor"
+CAMPAIGN_DIR="${PROJECT_RUNTIME}/_dispatcher"
+mkdir -p "${CAMPAIGN_DIR}"
+cat >"${CAMPAIGN_DIR}/campaign_state.json" <<'EOF'
+{"pending_subagents":{"42":{
+  "job_id":"A:snapshot-0","claim_generation":9,"execution_id":9,
+  "run_id":"runtime-run-42",
+  "child_session_key":"agent:req_executor:subagent:11111111-1111-4111-8111-111111111111",
+  "child_label":"reqx-iid42-gen9-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+}}}
+EOF
+native_runtime_output="$(
+  RUNTIME_TERMINAL_TEST=1 run_tick
+)" || fail "callback-lost native runtime reconciliation tick failed"
+grep -qx 'native-runtime:A:snapshot-0:9' "${ORDER_LOG}" \
+  || fail "heartbeat did not submit the exact persisted child identity"
+jq -e '
+  .status == "cleanup_required"
+  and .spawn_grants == [] and .reconcile_actions == []
+  and (.cleanup_actions | length) == 1
+  and .cleanup_actions[0].action == "kill"
+  and .cleanup_actions[0].target
+    == "agent:req_executor:subagent:11111111-1111-4111-8111-111111111111"
+  and .cleanup_actions[0].job_id == "A:snapshot-0"
+  and .cleanup_actions[0].claim_generation == 9
+  and ([.operation_results[] | select(
+    .operation == "native_runtime_reconcile"
+    and .job_id == "A:snapshot-0"
+    and .status == "runtime_terminal_reconciled"
+    and .callback_status == "handled")] | length) == 1
+  and (tostring | contains("native-runtime-private-claim") | not)
+' <<<"${native_runtime_output}" >/dev/null \
+  || fail "terminal runtime reconciliation did not return a safe cleanup envelope"
 
 # The all-in-one executor wrapper persists worker_result.json before its Bash
 # tool call returns. If OpenClaw never schedules the outer model's final turn,

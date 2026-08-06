@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-08-06.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-08-06.2] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -380,11 +380,15 @@ ambiguous evidence. The legacy
 explicitly marked `completion_auth:"legacy"`; it is not the runtime contract
 for newly spawned children.
 
-If a 4.9 native announcement was lost across a process restart, perform one
-on-demand `subagents list` check for the already recorded child. Only when one
-exact recorded child session is terminal, submit the same
-`openclaw_4_9_terminal_reference`; the ingester reads the authoritative local
-registry and transcript. Never poll and never infer a result.
+If a 4.9 native announcement is lost across a process restart, the periodic
+Path D wrapper reconciles the already-recorded child directly from OpenClaw's
+authoritative global session registry. This is intentionally inside fixed
+shell: `subagents list` is scoped to the current requester session and cannot
+reliably see a child spawned by another intake/batch session. The wrapper does
+nothing for an active, missing, or unavailable runtime entry. Only an exact
+terminal registry identity is passed as the same minimal
+`openclaw_4_9_terminal_reference` to the ingester, which still authenticates
+the transcript, durable launch action, and pending claim. Never infer a result.
 
 Path B allows exactly one ingester call, followed only by the optional cleanup
 kill explicitly returned by that call. If it rejects the input, print its
@@ -493,7 +497,10 @@ input only and is rejected by req_dispatcher as a public receipt.
    # This is the complete command. Do not Read any config or *.env file and do
    # not prefix the command with PROJECT, GROUP, GITLAB_TOKEN, paths, scheduler
    # settings, host settings, or any other env assignment. The wrapper loads
-   # deployment pins and ignored local overrides privately by itself.
+   # deployment pins and ignored local overrides privately by itself. It also
+   # privately reconciles callback-lost terminal children from the global
+   # OpenClaw registry before computing new capacity; no runtime tool action is
+   # required for that recovery.
 2. for each action in envelope.cleanup_actions (STRICT ARRAY ORDER):
      require action.action == "kill"
      try: subagents kill --target action.target

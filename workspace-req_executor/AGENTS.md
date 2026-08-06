@@ -36,6 +36,11 @@ Core contract:
 - The orchestrator calls wrapper scripts under `skills/gitlab_issue_campaign_dispatcher/scripts/`.
 - `RUN_EXECUTOR_BATCH_TICK` runs the exact bare Path D wrapper command. Never read config or `*.env` files and never inject credentials, paths, hosts, or
   scheduler settings into that command; the wrapper resolves them privately.
+  The fixed tick also checks every exact persisted child identity against the
+  global OpenClaw session registry. It delegates only terminal entries to the
+  authenticated completion ingester, so a callback lost across a gateway
+  restart cannot leave `waiting_for_callbacks` permanently active. The model
+  must not replace this with current-session `subagents list` polling.
 - `/slot` changes scheduler capacity only through `set_executor_slots.sh`;
   it limits parallel repositories. `/repo-slot` changes per-repository Issue
   capacity only through `set_executor_repo_slots.sh`; its default is `1`.

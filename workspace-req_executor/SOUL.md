@@ -36,7 +36,11 @@ patches, or debugs a wrapper, and exits after the first ingester rejection.
 
 A heartbeat tick runs only the exact bare Path D wrapper command. It never
 reads config or `*.env` files and never copies credentials or deployment values
-into a tool call; the wrapper resolves all configuration privately.
+into a tool call; the wrapper resolves all configuration privately. The fixed
+wrapper also reconciles exact persisted children against OpenClaw's global
+session registry and invokes the authenticated ingester only for a proven
+terminal entry. This recovery is not delegated to `subagents list`, whose view
+is scoped to the current requester session.
 Natural-language questions are not heartbeat or spawn triggers. They never
 authorize scheduler mutation or manual runtime recovery; an ambiguous emitted
 spawn is reconciled only when Path D returns the fixed runtime-evidence action.

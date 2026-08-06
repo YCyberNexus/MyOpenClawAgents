@@ -24,7 +24,7 @@ LLM 修改配置文件或 scheduler JSON。
 2. The orchestrator calls `sessions_spawn` with the rendered outer executor prompt.
 3. The outer subagent makes one long call to `scripts/run_executor_attempt.sh`.
 4. That wrapper calls `run_acpx_attempt.sh`, which changes directory to `${WORKTREE_DIR}` and runs `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"`; the same wrapper then stages, pushes, creates/updates the MR, summarizes, atomically writes `${LOG_DIR}/worker_result.json`, completes log/state persistence, and finally publishes the private hash-bound `${LOG_DIR}/attempt_finalized.json`.
-5. The outer subagent echoes the wrapper's final compact JSON. If OpenClaw does not schedule that final model turn, the periodic heartbeat processes the result only after the finalization marker matches the exact bytes and scheduler claim, then reclaims the native child slot.
+5. The outer subagent echoes the wrapper's final compact JSON. If OpenClaw does not schedule that final model turn, the periodic heartbeat processes the result only after the finalization marker matches the exact bytes and scheduler claim, then reclaims the native child slot. If the native completion announcement itself is lost, the same heartbeat checks the exact persisted child against OpenClaw's global session registry and sends only a proven terminal entry through the authenticated ingester; active or missing runtime entries remain unchanged.
 6. `dispatch_followup.sh` validates the compact JSON, updates state and labels, and reports terminal driven results to `req_dispatcher` when applicable.
 
 Ordinary native terminal callbacks preserve child sessions for diagnosis. The
