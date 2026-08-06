@@ -151,7 +151,10 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
   synchronous Bash call so OpenClaw does not need another model turn between
   acpx completion and post-acpx finalization.
 - `run_acpx_attempt.sh` remains the only owner of the exact
-  `acpx --auth-policy skip claude exec -f` invocation.
+  `acpx --auth-policy skip claude exec -f` invocation, defaults
+  `CLAUDE_CODE_EXECUTABLE` to `/home/claw/.local/bin/claude`, forces
+  `CLAUDE_CODE_FORK_SUBAGENT=1`, and defaults
+  `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` for the inner Claude Code process.
 - The wrapper applies bounded timeouts to every post-acpx Git/GitLab step.
   Staging-time execution logs are committed with the business changes on the
   Issue branch. After atomically writing `{LOG_DIR}/worker_result.json`, it

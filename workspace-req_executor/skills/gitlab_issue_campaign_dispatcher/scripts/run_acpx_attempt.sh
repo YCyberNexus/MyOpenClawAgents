@@ -138,7 +138,8 @@ sanitize_runtime_path() {
 : "${EXECUTION_ID:?run_acpx_attempt.sh: EXECUTION_ID must be set}"
 DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
 CLAUDE_CODE_SAFE_MODE_EFFECTIVE="${CLAUDE_CODE_SAFE_MODE:-}"
-CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-}"
+CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-/home/claw/.local/bin/claude}"
+CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE=1
 CLAUDE_AGENT_ACP_ROOT_EFFECTIVE="${CLAUDE_AGENT_ACP_ROOT:-}"
 CLAUDE_AGENT_ACP_PINNED_VERSION=0.37.0
 CLAUDE_AGENT_ACP_EXECUTABLE=""
@@ -167,6 +168,17 @@ if ! ACPX_EXECUTABLE="$(
   echo "run_acpx_attempt.sh: acpx is required but missing on trusted PATH" >&2
   exit 2
 fi
+if [[ "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" != /* ]] \
+    || [ ! -x "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ]; then
+  echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE must be an absolute executable (default: /home/claw/.local/bin/claude)" >&2
+  exit 2
+fi
+if ! CLAUDE_CODE_EXECUTABLE_CANONICAL="$(
+    canonicalize_executable "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
+  )"; then
+  echo "run_acpx_attempt.sh: unable to canonicalize CLAUDE_CODE_EXECUTABLE" >&2
+  exit 2
+fi
 for runtime_executable in "${TIMEOUT_EXECUTABLE}" "${ACPX_EXECUTABLE}"; do
   case "${runtime_executable}/" in
     "${canonical_repo_path}/"*)
@@ -175,6 +187,12 @@ for runtime_executable in "${TIMEOUT_EXECUTABLE}" "${ACPX_EXECUTABLE}"; do
       ;;
   esac
 done
+case "${CLAUDE_CODE_EXECUTABLE_CANONICAL}/" in
+  "${canonical_repo_path}/"*)
+    echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE must be outside REPO_PATH" >&2
+    exit 2
+    ;;
+esac
 
 if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
   # A dependency commit is business input, not a project policy source. Claude
@@ -185,31 +203,10 @@ if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
   CLAUDE_CODE_SAFE_MODE_EFFECTIVE=1
 
   # acpx's Claude ACP adapter may bundle an older Claude Code binary that
-  # silently ignores CLAUDE_CODE_SAFE_MODE. Bind the adapter to a separately
-  # installed executable and verify the actual capability before any model
-  # process starts. A missing or incompatible executable fails closed for
-  # dependency-based attempts instead of trusting a version assumption.
-  if [ -z "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ]; then
-    CLAUDE_CODE_EXECUTABLE_EFFECTIVE="$(command -v claude 2>/dev/null || true)"
-  fi
-  if [ -z "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ] \
-      || [[ "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" != /* ]] \
-      || [ ! -x "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" ]; then
-    echo "run_acpx_attempt.sh: dependency attempts require an absolute executable CLAUDE_CODE_EXECUTABLE" >&2
-    exit 2
-  fi
-  if ! CLAUDE_CODE_EXECUTABLE_EFFECTIVE="$(
-      canonicalize_executable "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
-    )"; then
-    echo "run_acpx_attempt.sh: unable to canonicalize CLAUDE_CODE_EXECUTABLE" >&2
-    exit 2
-  fi
-  case "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}/" in
-    "${canonical_repo_path}/"*)
-      echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE must be outside REPO_PATH" >&2
-      exit 2
-      ;;
-  esac
+  # silently ignores CLAUDE_CODE_SAFE_MODE. Both ordinary and dependency runs
+  # bind the adapter to /home/claw/.local/bin/claude by default; dependency
+  # attempts additionally verify the selected executable's actual safe-mode
+  # capability before any model process starts.
   set +e
   claude_help="$(env \
     -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
@@ -220,7 +217,8 @@ if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
   claude_help_rc=$?
   set -e
   if [ "${claude_help_rc}" -ne 0 ] \
-      || [[ "${claude_help}" != *"--safe-mode"* ]]; then
+      || ! grep -Eq '(^|[[:space:]])--safe-mode([=,[:space:]]|$)' \
+        <<<"${claude_help}"; then
     echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE does not support --safe-mode" >&2
     exit 2
   fi
@@ -322,21 +320,26 @@ done
   printf 'cwd=%s\n' "${WORKTREE_DIR}"
   printf 'TASK_OUTPUT_DIR=%s\n' "${OUTPUT_DIR}"
   printf 'PATH_PREFIX=%s\n' "${safety_bin}"
+  printf 'CLAUDE_CODE_EXECUTABLE=%s\n' "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
+  printf 'CLAUDE_CODE_FORK_SUBAGENT=%s\n' "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}"
   printf 'ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s\n' "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
   printf 'CLAUDE_CODE_SAFE_MODE=%s\n' "${CLAUDE_CODE_SAFE_MODE_EFFECTIVE}"
   if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-    printf 'CLAUDE_CODE_EXECUTABLE=%s\n' "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
     printf 'CLAUDE_AGENT_ACP_EXECUTABLE=%s\n' "${CLAUDE_AGENT_ACP_EXECUTABLE}"
   fi
   printf 'timeout=%ss (kill-after=30s)\n' "${ACPX_TIMEOUT_SECONDS}"
   if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-    printf 'command=ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --agent %s --mcp-config %s --approve-all --non-interactive-permissions deny --auth-policy skip exec -f %s\n' \
+    printf 'command=CLAUDE_CODE_EXECUTABLE=%s CLAUDE_CODE_FORK_SUBAGENT=%s ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --agent %s --mcp-config %s --approve-all --non-interactive-permissions deny --auth-policy skip exec -f %s\n' \
+      "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" \
+      "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}" \
       "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
       "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
       "${ACPX_EXECUTABLE}" "${CLAUDE_AGENT_ACP_EXECUTABLE}" \
       "${ACPX_EMPTY_MCP_CONFIG}" "${prompt_file}"
   else
-    printf 'command=ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --auth-policy skip claude exec -f %s\n' \
+    printf 'command=CLAUDE_CODE_EXECUTABLE=%s CLAUDE_CODE_FORK_SUBAGENT=%s ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --auth-policy skip claude exec -f %s\n' \
+      "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" \
+      "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}" \
       "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
       "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
       "${ACPX_EXECUTABLE}" "${prompt_file}"
@@ -402,13 +405,12 @@ cleanup() {
 set +e
 set -m
 acpx_runtime_env=(
+  "CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
+  "CLAUDE_CODE_FORK_SUBAGENT=${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}"
   "ACPX_CLAUDE_INCLUDE_USER_SETTINGS=${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
   "CLAUDE_CODE_SAFE_MODE=${CLAUDE_CODE_SAFE_MODE_EFFECTIVE}"
 )
 if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-  acpx_runtime_env+=(
-    "CLAUDE_CODE_EXECUTABLE=${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}"
-  )
   acpx_command=(
     "${ACPX_EXECUTABLE}" --agent "${CLAUDE_AGENT_ACP_EXECUTABLE}"
     --mcp-config "${ACPX_EMPTY_MCP_CONFIG}"

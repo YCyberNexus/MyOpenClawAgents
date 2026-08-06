@@ -117,6 +117,12 @@ done
 grep -Fq '"${ACPX_EXECUTABLE}" --auth-policy skip claude exec -f "${prompt_file}"' \
   "${RUN_SCRIPT}" \
   || fail "run_acpx_attempt.sh no longer uses its pinned acpx executable"
+grep -Fq 'CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-/home/claw/.local/bin/claude}"' \
+  "${RUN_SCRIPT}" \
+  || fail "run_acpx_attempt.sh no longer defaults to the pinned Claude Code executable"
+grep -Fq '"CLAUDE_CODE_FORK_SUBAGENT=${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}"' \
+  "${RUN_SCRIPT}" \
+  || fail "run_acpx_attempt.sh no longer enables Claude Code fork subagents"
 grep -Fq '"${TIMEOUT_EXECUTABLE}" --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s"' \
   "${RUN_SCRIPT}" \
   || fail "run_acpx_attempt.sh no longer uses its pinned timeout executable"

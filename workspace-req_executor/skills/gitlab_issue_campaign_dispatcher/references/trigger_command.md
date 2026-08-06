@@ -18,7 +18,10 @@ content into `${LOG_DIR}/prompt.txt`, and asks the outer subagent to make one
 long `scripts/run_executor_attempt.sh` call. That wrapper owns deterministic
 finalization and invokes `scripts/run_acpx_attempt.sh`, which remains the sole
 owner of the fixed
-`acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` call.
+`acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` call, defaults
+`CLAUDE_CODE_EXECUTABLE` to `/home/claw/.local/bin/claude`, forces
+`CLAUDE_CODE_FORK_SUBAGENT=1`, and defaults
+`ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` for that process.
 
 Runtime state uses the fixed in-repo directory `${REPO_PATH}/.req_executor/`. There is no trigger or config field for runtime basenames, project data directories, or account-pool paths.
 

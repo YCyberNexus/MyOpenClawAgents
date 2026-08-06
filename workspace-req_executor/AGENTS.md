@@ -98,8 +98,11 @@ Core contract:
   `${LOG_DIR}/attempt_finalized.json` as its final local write.
 - Only `scripts/run_executor_attempt.sh` may invoke
   `scripts/run_acpx_attempt.sh`; the latter owns the fixed
-  `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` invocation
-  and writes `${LOG_DIR}/acpx_terminal.json` immediately after acpx exits.
+  `acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"` invocation,
+  defaults `CLAUDE_CODE_EXECUTABLE` to `/home/claw/.local/bin/claude`, forces
+  `CLAUDE_CODE_FORK_SUBAGENT=1`, defaults
+  `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`, and writes
+  `${LOG_DIR}/acpx_terminal.json` immediately after acpx exits.
 - A heartbeat may claim-fence and process a finalized durable worker result,
   or emit one
   `cleanup_actions[]` kill after the post-acpx watchdog expires. This is the

@@ -150,15 +150,18 @@ clean/smudge/process 命令的 `filter` attributes。固定 wrapper 的 fetch �
 `refs/heads/*:refs/remotes/origin/*` 或单分支 refspec 并清空 refmap；提交图、祖先和物化校验还设置
 `GIT_NO_REPLACE_OBJECTS=1`，避免仓库配置的 fetch 映射或 `refs/replace` 改写 A/C 父链判断。
 
-依赖 attempt 还要求 executor 进程提供两个工作站/服务器本地值：
-`CLAUDE_CODE_EXECUTABLE` 必须是仓库外的绝对可执行路径，且实际 `--help` 支持
-`--safe-mode`；`CLAUDE_AGENT_ACP_ROOT` 必须是仓库外预安装的
+所有 attempt 都把 `CLAUDE_CODE_EXECUTABLE` 默认固定为服务器路径
+`/home/claw/.local/bin/claude`，并强制设置 `CLAUDE_CODE_FORK_SUBAGENT=1` 和
+`ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`。本地测试如需替换 Claude Code 路径，只能通过进程环境或
+ignored `*.local.env` 覆盖，不能修改 tracked 蓝区默认值。依赖 attempt 还要求该可执行文件的实际
+`--help` 支持 `--safe-mode`，并要求 executor 进程提供
+`CLAUDE_AGENT_ACP_ROOT`，指向仓库外预安装的
 `@agentclientprotocol/claude-agent-acp` `0.37.0` 包根目录。wrapper 会显式使用固定 adapter、空 MCP
 配置、`CLAUDE_CODE_SAFE_MODE=1`、`--approve-all` 与
 `--non-interactive-permissions deny`，从而不让依赖提交中的 `.acpxrc.json`、`.npmrc`、Claude
 memory、hook、MCP 或 plugin 改写模型启动链。任一能力或固定包校验失败时，依赖 attempt 在 acpx
-启动前失败关闭。这两个值只能放入 executor 进程环境或 ignored 本地 env，不能写入 tracked
-蓝区配置。executor 的 `PATH` 还必须只包含绝对目录；wrapper 会在加载路径/鉴权 bootstrap 前拒绝
+启动前失败关闭。`CLAUDE_AGENT_ACP_ROOT` 和本地测试的 Claude Code 路径覆盖只能放入 executor
+进程环境或 ignored 本地 env，不能写入 tracked 蓝区配置。executor 的 `PATH` 还必须只包含绝对目录；wrapper 会在加载路径/鉴权 bootstrap 前拒绝
 相对项、目标仓库或 worktree 内目录，随后从剩余的仓库外路径固定解析实际 `timeout` 与 `acpx`
 可执行文件。
 
@@ -300,6 +303,10 @@ completes archive/state persistence, and publishes
 Inside it, `run_acpx_attempt.sh` runs from `${WORKTREE_DIR}` and invokes:
 
 ```bash
+CLAUDE_CODE_EXECUTABLE="/home/claw/.local/bin/claude" \
+CLAUDE_CODE_FORK_SUBAGENT=1 \
+ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1 \
+timeout --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s" \
 acpx --auth-policy skip claude exec -f "${LOG_DIR}/prompt.txt"
 ```
 

@@ -51,9 +51,10 @@ printf '只输出 OK\n' >"${LOG_DIR}/prompt.txt"
   printf '  echo "missing ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1" >&2\n'
   printf '  exit 42\n'
   printf 'fi\n'
+  printf '[ "${CLAUDE_CODE_EXECUTABLE:-}" = "${ACPX_EXPECT_CLAUDE_EXECUTABLE:-}" ] || { echo "run did not pin the requested Claude executable" >&2; exit 46; }\n'
+  printf '[ "${CLAUDE_CODE_FORK_SUBAGENT:-}" = 1 ] || { echo "run missing CLAUDE_CODE_FORK_SUBAGENT=1" >&2; exit 52; }\n'
   printf 'if [ "${ACPX_EXPECT_SAFE_MODE:-0}" = 1 ]; then\n'
   printf '  [ "${CLAUDE_CODE_SAFE_MODE:-}" = 1 ] || { echo "dependency run missing Claude safe mode" >&2; exit 45; }\n'
-  printf '  [ "${CLAUDE_CODE_EXECUTABLE:-}" = "${ACPX_EXPECT_CLAUDE_EXECUTABLE:-}" ] || { echo "dependency run did not pin the verified Claude executable" >&2; exit 46; }\n'
   printf '  expected_adapter="${ACPX_EXPECT_ADAPTER_EXECUTABLE:-}"\n'
   printf '  saw_agent=false; saw_mcp=false; saw_approve_all=false; saw_noninteractive_deny=false; saw_builtin_claude=false\n'
   printf '  while [ "$#" -gt 0 ]; do\n'
@@ -106,12 +107,20 @@ printf '只输出 OK\n' >"${LOG_DIR}/prompt.txt"
 {
   printf '#!/usr/bin/env bash\n'
   printf 'set -euo pipefail\n'
-  printf 'if [ "${1:-}" = --help ]; then printf "Usage: legacy-claude\\n"; exit 0; fi\n'
+  printf 'if [ "${1:-}" = --help ]; then printf "Usage: legacy-claude\\n  --safe-mode-compatible  Not the safe-mode flag\\n"; exit 0; fi\n'
   printf 'exit 2\n'
 } >"${BIN_DIR}/legacy-claude"
 
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -euo pipefail\n'
+  printf 'if [ "${1:-}" = --help ]; then printf "Usage: misleading-claude\\n  --safe-mode  Pretend support\\n"; exit 9; fi\n'
+  printf 'exit 2\n'
+} >"${BIN_DIR}/misleading-claude"
+
 chmod +x "${BIN_DIR}/timeout" "${BIN_DIR}/acpx" "${BIN_DIR}/glab" \
-  "${BIN_DIR}/claude" "${BIN_DIR}/legacy-claude"
+  "${BIN_DIR}/claude" "${BIN_DIR}/legacy-claude" \
+  "${BIN_DIR}/misleading-claude"
 CLAUDE_EXECUTABLE_CANONICAL="$(
   cd "$(dirname "${BIN_DIR}/claude")" && pwd -P
 )/claude"
@@ -132,6 +141,9 @@ WIKI_GITLAB_TOKEN="test-wiki-token" \
 ISSUE_IID=9 \
 EXECUTION_ID=1 \
 ACPX_TIMEOUT_SECONDS=60 \
+CLAUDE_CODE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
+CLAUDE_CODE_FORK_SUBAGENT=0 \
+ACPX_EXPECT_CLAUDE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
 REPO_PARENT_PATH="${REPO_PARENT}" \
   bash "${RUN_SCRIPT}" >"${TEST_ROOT}/stdout"
 
@@ -147,6 +159,13 @@ jq -e '
   and .exit_code == 0
   and (.completed_at_epoch | type == "number" and . > 0)
 ' "${LOG_DIR}/acpx_terminal.json" >/dev/null
+grep -Fq "CLAUDE_CODE_EXECUTABLE=${CLAUDE_EXECUTABLE_CANONICAL}" \
+  "${LOG_DIR}/acpx_command.txt"
+grep -q '^CLAUDE_CODE_FORK_SUBAGENT=1$' "${LOG_DIR}/acpx_command.txt"
+grep -Fq "command=CLAUDE_CODE_EXECUTABLE=${CLAUDE_EXECUTABLE_CANONICAL} CLAUDE_CODE_FORK_SUBAGENT=1 ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1 " \
+  "${LOG_DIR}/acpx_command.txt"
+grep -Fq 'CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-/home/claw/.local/bin/claude}"' \
+  "${RUN_SCRIPT}"
 
 # PATH is consumed during env_paths bootstrap, before the actual acpx command.
 # Reject relative entries and dependency-owned worktree directories before a
@@ -200,6 +219,7 @@ PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
 ISSUE_IID=9 EXECUTION_ID=3 ACPX_TIMEOUT_SECONDS=60 \
 DEPENDENCY_BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
 REPO_PARENT_PATH="${REPO_PARENT}" ACPX_EXPECT_SAFE_MODE=1 \
+CLAUDE_CODE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
 ACPX_EXPECT_CLAUDE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
 CLAUDE_AGENT_ACP_ROOT="${TRUSTED_ADAPTER_ROOT}" \
 ACPX_EXPECT_ADAPTER_EXECUTABLE="${TRUSTED_ADAPTER_CANONICAL}/dist/index.js" \
@@ -209,6 +229,9 @@ grep -q '^CLAUDE_CODE_SAFE_MODE=1$' "${SAFE_LOG_DIR}/acpx_command.txt"
 grep -Fq "CLAUDE_CODE_EXECUTABLE=${CLAUDE_EXECUTABLE_CANONICAL}" \
   "${SAFE_LOG_DIR}/acpx_command.txt"
 grep -Fq "CLAUDE_AGENT_ACP_EXECUTABLE=${TRUSTED_ADAPTER_CANONICAL}/dist/index.js" \
+  "${SAFE_LOG_DIR}/acpx_command.txt"
+grep -q '^CLAUDE_CODE_FORK_SUBAGENT=1$' "${SAFE_LOG_DIR}/acpx_command.txt"
+grep -Fq "command=CLAUDE_CODE_EXECUTABLE=${CLAUDE_EXECUTABLE_CANONICAL} CLAUDE_CODE_FORK_SUBAGENT=1 ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1 " \
   "${SAFE_LOG_DIR}/acpx_command.txt"
 
 # The ACP adapter's bundled executable is not a sufficient guarantee: a
@@ -235,6 +258,26 @@ grep -Fq 'CLAUDE_CODE_EXECUTABLE does not support --safe-mode' \
   "${TEST_ROOT}/legacy-stderr"
 [ ! -s "${LEGACY_LOG_DIR}/acpx_terminal.json" ]
 
+# A failing capability probe cannot become trusted merely by printing the
+# expected flag before returning non-zero.
+MISLEADING_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-7"
+mkdir -p "${MISLEADING_LOG_DIR}"
+printf '只输出 OK\n' >"${MISLEADING_LOG_DIR}/prompt.txt"
+set +e
+PATH="${BIN_DIR}:${PATH}" \
+PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
+ISSUE_IID=9 EXECUTION_ID=7 ACPX_TIMEOUT_SECONDS=60 \
+DEPENDENCY_BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
+CLAUDE_CODE_EXECUTABLE="${BIN_DIR}/misleading-claude" \
+REPO_PARENT_PATH="${REPO_PARENT}" \
+  bash "${RUN_SCRIPT}" >"${TEST_ROOT}/misleading-stdout" \
+    2>"${TEST_ROOT}/misleading-stderr"
+misleading_rc=$?
+set -e
+[ "${misleading_rc}" -eq 2 ]
+grep -Fq 'CLAUDE_CODE_EXECUTABLE does not support --safe-mode' \
+  "${TEST_ROOT}/misleading-stderr"
+
 # A tool-side SIGTERM must kill the inner process group and still leave a
 # terminal marker before the wrapper exits 124. The all-in-one outer wrapper
 # can then persist a timeout result that the heartbeat safely recognizes.
@@ -245,6 +288,8 @@ PATH="${BIN_DIR}:${PATH}" \
 PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
 ISSUE_IID=9 EXECUTION_ID=2 ACPX_TIMEOUT_SECONDS=60 \
 REPO_PARENT_PATH="${REPO_PARENT}" ACPX_TEST_SLEEP=1 \
+CLAUDE_CODE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
+ACPX_EXPECT_CLAUDE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
   bash "${RUN_SCRIPT}" >"${TEST_ROOT}/signal-stdout" 2>"${TEST_ROOT}/signal-stderr" &
 signal_runner_pid=$!
 sleep 1
