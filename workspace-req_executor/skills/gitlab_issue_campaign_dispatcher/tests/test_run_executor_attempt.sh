@@ -154,6 +154,15 @@ cat >"${FAKE_SCRIPTS}/run_acpx_attempt.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 printf '%s\n' acpx >>"${ORDER_LOG}"
+if [ "${ACPX_TEST_NO_EXIT_MARKER:-false}" = true ]; then
+  if [ -n "${ACPX_TEST_STDOUT:-}" ]; then
+    printf '%s\n' "${ACPX_TEST_STDOUT}"
+  fi
+  if [ -n "${ACPX_TEST_STDERR:-}" ]; then
+    printf '%s\n' "${ACPX_TEST_STDERR}" >&2
+  fi
+  exit "${ACPX_TEST_EXIT:-2}"
+fi
 printf 'ACPX_EXIT=%s\n' "${ACPX_TEST_EXIT:-0}"
 EOF
 cat >"${FAKE_SCRIPTS}/stage_and_guard.sh" <<'EOF'
@@ -298,6 +307,51 @@ printf 'LOG_COMMIT_SHA=%s\n' "${log_commit_sha}"
 EOF
 chmod +x "${FAKE_BIN}/timeout" "${FAKE_BIN}/git" "${FAKE_BIN}/stat" \
   "${FAKE_SCRIPTS}"/*.sh
+
+expect_missing_acpx_receipt_blocked() {
+  local name="$1" execution_id="$2" acpx_rc="$3"
+  local fake_stdout="$4" fake_stderr="$5" expected_reason="$6"
+  local case_repo="${TEST_ROOT}/missing-receipt-${name}/repo"
+  local case_order="${TEST_ROOT}/missing-receipt-${name}.order"
+  local wrapper_output
+
+  wrapper_output="$(
+    PATH="${FAKE_BIN}:${PATH}" ORDER_LOG="${case_order}" \
+    ACPX_TEST_NO_EXIT_MARKER=true ACPX_TEST_EXIT="${acpx_rc}" \
+    ACPX_TEST_STDOUT="${fake_stdout}" ACPX_TEST_STDERR="${fake_stderr}" \
+    PROJECT=repo GROUP=group ISSUE_IID=42 EXECUTION_ID="${execution_id}" \
+    REPO_PATH="${case_repo}" ISSUE_TITLE='ACPX preflight classification' \
+    ISSUE_MODE=fresh BRANCH=main WORK_BRANCH=issue/42 \
+    ACPX_TIMEOUT_SECONDS=60 AUTO_MERGE=false \
+      bash "${FAKE_SCRIPTS}/run_executor_attempt.sh"
+  )" || fail "missing ACPX receipt case ${name} did not finalize"
+
+  printf '%s\n' "${wrapper_output}" | tail -n 1 | jq -e \
+    --arg expected_reason "${expected_reason}" '
+      .status == "blocked"
+      and (.block_reason | contains($expected_reason))
+      and (.labels_added | index("blocked-cc") != null)
+      and (.labels_added | index("timeout") == null)
+    ' >/dev/null || fail "missing ACPX receipt case ${name} was not blocked"
+  grep -Fxq 'label:add:blocked-cc' "${case_order}" \
+    || fail "missing ACPX receipt case ${name} did not add blocked-cc"
+  if grep -Fxq 'label:add:timeout' "${case_order}"; then
+    fail "missing ACPX receipt case ${name} was misclassified as timeout"
+  fi
+  if grep -Fxq stage "${case_order}"; then
+    fail "missing ACPX receipt case ${name} attempted partial-work salvage"
+  fi
+}
+
+# A startup failure without ACPX_EXIT is blocked, not timed out. A zero exit
+# without the receipt is also a protocol failure rather than a successful run.
+expect_missing_acpx_receipt_blocked failure 31 2 \
+  'preflight diagnostic without a receipt' \
+  'simulated dependency capability preflight failure' \
+  'acpx preflight failed (exit 2): simulated dependency capability preflight failure'
+expect_missing_acpx_receipt_blocked apparent-success 32 0 \
+  'preflight claimed success without a receipt' '' \
+  'acpx wrapper returned without ACPX_EXIT'
 
 # Invalid ordinary/shared branch identities must fail before env_paths.sh can
 # create even the per-Issue runtime tree.  Use a fresh repo path for every

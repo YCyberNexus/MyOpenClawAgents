@@ -154,7 +154,8 @@ clean/smudge/process 命令的 `filter` attributes。固定 wrapper 的 fetch �
 `/home/claw/.local/bin/claude`，并强制设置 `CLAUDE_CODE_FORK_SUBAGENT=1` 和
 `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`。本地测试如需替换 Claude Code 路径，只能通过进程环境或
 ignored `*.local.env` 覆盖，不能修改 tracked 蓝区默认值。依赖 attempt 还要求该可执行文件的实际
-`--help` 支持 `--safe-mode`，并要求 executor 进程提供
+`--help` 支持 `--safe-mode`；该能力探针固定从 `/dev/null` 读取 stdin，并有独立 15 秒上限，避免
+PTY 后台进程组收到 `SIGTTIN` 或把启动检查拖到整个 ACPX 上限。依赖 attempt 同时要求 executor 进程提供
 `CLAUDE_AGENT_ACP_ROOT`，指向仓库外预安装的
 `@agentclientprotocol/claude-agent-acp` `0.37.0` 包根目录。wrapper 会显式使用固定 adapter、空 MCP
 配置、`CLAUDE_CODE_SAFE_MODE=1`、`--approve-all` 与

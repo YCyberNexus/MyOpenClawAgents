@@ -4,6 +4,18 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 RUN_SCRIPT="${SKILL_DIR}/scripts/run_acpx_attempt.sh"
+SYSTEM_TIMEOUT=""
+if system_timeout_candidate="$(command -v timeout 2>/dev/null)" \
+    && [[ "${system_timeout_candidate}" = /* ]] \
+    && [ -x "${system_timeout_candidate}" ]; then
+  SYSTEM_TIMEOUT="${system_timeout_candidate}"
+fi
+PYTHON3_EXECUTABLE=""
+if python3_candidate="$(command -v python3 2>/dev/null)" \
+    && [[ "${python3_candidate}" = /* ]] \
+    && [ -x "${python3_candidate}" ]; then
+  PYTHON3_EXECUTABLE="${python3_candidate}"
+fi
 
 TEST_ROOT="${TMPDIR:-/tmp}/run-acpx-attempt-env-test.$$"
 BIN_DIR="${TEST_ROOT}/bin"
@@ -14,9 +26,10 @@ WORKTREE_DIR="${REPO_PATH}/.req_executor/.worktrees/issue-9"
 LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-1"
 OUTPUT_DIR="${WORKTREE_DIR}/.req_executor/issue-9/output"
 TRUSTED_ADAPTER_ROOT="${TEST_ROOT}/trusted-adapter"
+PTY_BIN_DIR="${TEST_ROOT}/pty-bin"
 
 mkdir -p "${BIN_DIR}" "${REPO_PATH}" "${LOG_DIR}" "${OUTPUT_DIR}" \
-  "${TRUSTED_ADAPTER_ROOT}/dist"
+  "${TRUSTED_ADAPTER_ROOT}/dist" "${PTY_BIN_DIR}"
 git -C "${REPO_PATH}" init -q
 
 jq -n '{
@@ -33,6 +46,12 @@ printf '只输出 OK\n' >"${LOG_DIR}/prompt.txt"
 {
   printf '#!/usr/bin/env bash\n'
   printf 'set -euo pipefail\n'
+  printf 'if [ "${TIMEOUT_TEST_FORCE_124:-0}" = 1 ]; then\n'
+  printf '  [ "${1:-}" = --kill-after=2s ] || exit 61\n'
+  printf '  [ "${2:-}" = 15s ] || exit 62\n'
+  printf '  printf "  --safe-mode  misleading output from timed-out probe\\n"\n'
+  printf '  exit 124\n'
+  printf 'fi\n'
   printf 'while [ "$#" -gt 0 ]; do\n'
   printf '  case "$1" in\n'
   printf '    --kill-after=*) shift ;;\n'
@@ -118,9 +137,20 @@ printf '只输出 OK\n' >"${LOG_DIR}/prompt.txt"
   printf 'exit 2\n'
 } >"${BIN_DIR}/misleading-claude"
 
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'set -euo pipefail\n'
+  printf 'if [ "${1:-}" = --help ]; then\n'
+  printf '  IFS= read -r ignored || true\n'
+  printf '  printf "Usage: pty-claude [options]\\n  --safe-mode  Start without customizations\\n"\n'
+  printf '  exit 0\n'
+  printf 'fi\n'
+  printf 'exit 2\n'
+} >"${BIN_DIR}/pty-claude"
+
 chmod +x "${BIN_DIR}/timeout" "${BIN_DIR}/acpx" "${BIN_DIR}/glab" \
   "${BIN_DIR}/claude" "${BIN_DIR}/legacy-claude" \
-  "${BIN_DIR}/misleading-claude"
+  "${BIN_DIR}/misleading-claude" "${BIN_DIR}/pty-claude"
 CLAUDE_EXECUTABLE_CANONICAL="$(
   cd "$(dirname "${BIN_DIR}/claude")" && pwd -P
 )/claude"
@@ -277,6 +307,116 @@ set -e
 [ "${misleading_rc}" -eq 2 ]
 grep -Fq 'CLAUDE_CODE_EXECUTABLE does not support --safe-mode' \
   "${TEST_ROOT}/misleading-stderr"
+
+# A timed-out capability probe must stay a startup failure even if the failed
+# timeout command emits text that looks like valid --safe-mode help.
+PROBE_TIMEOUT_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-9"
+mkdir -p "${PROBE_TIMEOUT_LOG_DIR}"
+printf '只输出 OK\n' >"${PROBE_TIMEOUT_LOG_DIR}/prompt.txt"
+set +e
+PATH="${BIN_DIR}:${PATH}" \
+PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
+ISSUE_IID=9 EXECUTION_ID=9 ACPX_TIMEOUT_SECONDS=60 \
+DEPENDENCY_BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
+CLAUDE_CODE_EXECUTABLE="${CLAUDE_EXECUTABLE_CANONICAL}" \
+CLAUDE_AGENT_ACP_ROOT="${TRUSTED_ADAPTER_ROOT}" \
+TIMEOUT_TEST_FORCE_124=1 REPO_PARENT_PATH="${REPO_PARENT}" \
+  bash "${RUN_SCRIPT}" >"${TEST_ROOT}/probe-timeout-stdout" \
+    2>"${TEST_ROOT}/probe-timeout-stderr"
+probe_timeout_rc=$?
+set -e
+[ "${probe_timeout_rc}" -eq 2 ]
+grep -Fq 'CLAUDE_CODE_EXECUTABLE --help capability probe exceeded 15s' \
+  "${TEST_ROOT}/probe-timeout-stderr"
+[ ! -e "${PROBE_TIMEOUT_LOG_DIR}/acpx_command.txt" ]
+
+# Reproduce the production topology: a non-interactive Bash owns the PTY's
+# foreground process group while GNU timeout launches run_acpx_attempt.sh in a
+# separate group. The fake Claude help command deliberately reads stdin. It
+# must receive EOF from /dev/null instead of being stopped by SIGTTIN.
+if [ -z "${SYSTEM_TIMEOUT}" ] \
+    || ! timeout_version="$("${SYSTEM_TIMEOUT}" --version 2>/dev/null)" \
+    || [[ "${timeout_version}" != *"GNU coreutils"* ]]; then
+  echo "run_acpx_attempt_env_test.sh: GNU timeout is required for PTY regression" >&2
+  exit 1
+fi
+if [ -z "${PYTHON3_EXECUTABLE}" ] || [ ! -x "${PYTHON3_EXECUTABLE}" ]; then
+  echo "run_acpx_attempt_env_test.sh: python3 is required for PTY regression" >&2
+  exit 1
+fi
+ln -s "${SYSTEM_TIMEOUT}" "${PTY_BIN_DIR}/timeout"
+PTY_CLAUDE_CANONICAL="$(
+  cd "$(dirname "${BIN_DIR}/pty-claude")" && pwd -P
+)/pty-claude"
+PTY_LOG_DIR="${WORKTREE_DIR}/.req_executor/issue-9/log/execution-8"
+mkdir -p "${PTY_LOG_DIR}"
+printf '只输出 OK\n' >"${PTY_LOG_DIR}/prompt.txt"
+PATH="${PTY_BIN_DIR}:${BIN_DIR}:${PATH}" \
+PROJECT="${PROJECT_NAME}" GROUP="claw_gitlab" GITLAB_TOKEN="test-token" \
+ISSUE_IID=9 EXECUTION_ID=8 ACPX_TIMEOUT_SECONDS=60 \
+DEPENDENCY_BASE_SHA=0123456789abcdef0123456789abcdef01234567 \
+REPO_PARENT_PATH="${REPO_PARENT}" ACPX_EXPECT_SAFE_MODE=1 \
+CLAUDE_CODE_EXECUTABLE="${PTY_CLAUDE_CANONICAL}" \
+ACPX_EXPECT_CLAUDE_EXECUTABLE="${PTY_CLAUDE_CANONICAL}" \
+CLAUDE_AGENT_ACP_ROOT="${TRUSTED_ADAPTER_ROOT}" \
+ACPX_EXPECT_ADAPTER_EXECUTABLE="${TRUSTED_ADAPTER_CANONICAL}/dist/index.js" \
+PTY_TIMEOUT_EXECUTABLE="${PTY_BIN_DIR}/timeout" \
+PTY_RUN_SCRIPT="${RUN_SCRIPT}" \
+  "${PYTHON3_EXECUTABLE}" - <<'PYEOF'
+import errno
+import os
+import pty
+import select
+import signal
+import sys
+import time
+
+pid, master_fd = pty.fork()
+if pid == 0:
+    os.execve(
+        "/bin/bash",
+        [
+            "bash",
+            "-c",
+            '"$PTY_TIMEOUT_EXECUTABLE" --kill-after=1s 6s '
+            'bash "$PTY_RUN_SCRIPT"',
+        ],
+        os.environ,
+    )
+
+deadline = time.monotonic() + 10
+output = bytearray()
+status = None
+while time.monotonic() < deadline:
+    ready, _, _ = select.select([master_fd], [], [], 0.1)
+    if ready:
+        try:
+            chunk = os.read(master_fd, 65536)
+            if chunk:
+                output.extend(chunk)
+        except OSError as exc:
+            if exc.errno != errno.EIO:
+                raise
+    waited_pid, waited_status = os.waitpid(pid, os.WNOHANG)
+    if waited_pid == pid:
+        status = waited_status
+        break
+
+if status is None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    _, status = os.waitpid(pid, 0)
+
+os.close(master_fd)
+if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+    sys.stderr.buffer.write(output)
+    raise SystemExit(1)
+PYEOF
+grep -q '^OK$' "${PTY_LOG_DIR}/claude_result.txt"
+jq -e '.exit_code == 0 and .execution_id == 8' \
+  "${PTY_LOG_DIR}/acpx_terminal.json" >/dev/null
 
 # A tool-side SIGTERM must kill the inner process group and still leave a
 # terminal marker before the wrapper exits 124. The all-in-one outer wrapper

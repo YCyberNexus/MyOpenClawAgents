@@ -1137,6 +1137,8 @@ fi
 # Keep acpx and every following deterministic step inside this same Bash tool
 # call. The command writes acpx_terminal.json before returning, which lets the
 # heartbeat distinguish a post-acpx stall from a still-running inner session.
+# A preflight failure returns without ACPX_EXIT and is blocked unless the
+# bounded step itself reports the timeout statuses 124/137.
 run_bounded_step acpx "$((ACPX_TIMEOUT_SECONDS + 120))" env \
   ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS}" \
   bash "${SCRIPT_DIR}/run_acpx_attempt.sh"
@@ -1145,15 +1147,27 @@ printf '%s\n' "${STEP_STDOUT}"
 ACPX_EXIT="$(printf '%s\n' "${STEP_STDOUT}" \
   | awk -F= '/^ACPX_EXIT=[0-9]+$/ { value=$2 } END { print value }')"
 if [ -z "${ACPX_EXIT}" ]; then
-  BLOCK_REASON="acpx exec exceeded ${ACPX_TIMEOUT_SECONDS}s wall-clock cap"
-  if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -ne 2 ] \
-      && stage_partial_work && commit_partial_work; then
-    if verify_partial_work; then
-      persist_pushed_branch_identity \
-        || append_reason "pushed branch dependency identity could not be persisted"
-    fi
-  fi
-  finish_timeout
+  case "${STEP_RC}" in
+    124|137)
+      BLOCK_REASON="acpx exec exceeded ${ACPX_TIMEOUT_SECONDS}s wall-clock cap"
+      if [ "$(jq -r 'length' <<<"${BRANCH_MEMBERS_JSON}")" -ne 2 ] \
+          && stage_partial_work && commit_partial_work; then
+        if verify_partial_work; then
+          persist_pushed_branch_identity \
+            || append_reason "pushed branch dependency identity could not be persisted"
+        fi
+      fi
+      finish_timeout
+      ;;
+    0)
+      BLOCK_REASON="acpx wrapper returned without ACPX_EXIT; see ${LOG_DIR}/outer-acpx.stderr.log"
+      finish_blocked
+      ;;
+    *)
+      BLOCK_REASON="acpx preflight failed (exit ${STEP_RC}): $(last_error_line "${STEP_STDERR}" "missing ACPX_EXIT marker")"
+      finish_blocked
+      ;;
+  esac
 fi
 
 case "${ACPX_EXIT}" in

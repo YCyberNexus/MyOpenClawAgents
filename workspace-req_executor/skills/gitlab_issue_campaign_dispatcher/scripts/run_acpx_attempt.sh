@@ -21,9 +21,9 @@
 # command-timeout (which may kill only our direct child) from orphaning a
 # still-running acpx that would keep mutating the shared per-issue worktree
 # after the subagent already classified the attempt. SIGKILL of this script
-# cannot be trapped, so this is best-effort; the executor prompt pairs it with
-# a routing rule that treats any return without a clean `ACPX_EXIT=` line as
-# `timeout`, never `blocked`.
+# cannot be trapped, so this is best-effort. The outer wrapper combines a
+# missing `ACPX_EXIT=` receipt with this script's exit status: 124/137 is a
+# timeout, while an earlier capability/configuration failure is blocked.
 
 set -euo pipefail
 
@@ -140,6 +140,7 @@ DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
 CLAUDE_CODE_SAFE_MODE_EFFECTIVE="${CLAUDE_CODE_SAFE_MODE:-}"
 CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-/home/claw/.local/bin/claude}"
 CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE=1
+CLAUDE_CAPABILITY_PROBE_TIMEOUT_SECONDS=15
 CLAUDE_AGENT_ACP_ROOT_EFFECTIVE="${CLAUDE_AGENT_ACP_ROOT:-}"
 CLAUDE_AGENT_ACP_PINNED_VERSION=0.37.0
 CLAUDE_AGENT_ACP_EXECUTABLE=""
@@ -206,16 +207,25 @@ if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
   # silently ignores CLAUDE_CODE_SAFE_MODE. Both ordinary and dependency runs
   # bind the adapter to /home/claw/.local/bin/claude by default; dependency
   # attempts additionally verify the selected executable's actual safe-mode
-  # capability before any model process starts.
+  # capability before any model process starts. The outer executor runs under
+  # a PTY while GNU timeout owns a separate process group. Keep this
+  # non-interactive probe off that PTY's stdin so it cannot receive SIGTTIN,
+  # and bound it independently so startup can never consume the full acpx cap.
   set +e
   claude_help="$(env \
     -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
     -u GLAB_TOKEN -u GITLAB_PRIVATE_TOKEN -u PRIVATE_TOKEN \
     -u OAUTH_TOKEN -u CI_JOB_TOKEN -u JOB_TOKEN -u WIKI_GITLAB_TOKEN \
     CLAUDE_CODE_SAFE_MODE=1 \
-    "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" --help 2>&1)"
+    "${TIMEOUT_EXECUTABLE}" --kill-after=2s \
+      "${CLAUDE_CAPABILITY_PROBE_TIMEOUT_SECONDS}s" \
+      "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" --help </dev/null 2>&1)"
   claude_help_rc=$?
   set -e
+  if [ "${claude_help_rc}" -eq 124 ] || [ "${claude_help_rc}" -eq 137 ]; then
+    echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE --help capability probe exceeded ${CLAUDE_CAPABILITY_PROBE_TIMEOUT_SECONDS}s" >&2
+    exit 2
+  fi
   if [ "${claude_help_rc}" -ne 0 ] \
       || ! grep -Eq '(^|[[:space:]])--safe-mode([=,[:space:]]|$)' \
         <<<"${claude_help}"; then
@@ -365,9 +375,9 @@ cd "${WORKTREE_DIR}"
 # trap can fire promptly: a foreground external command holds the shell until
 # it returns, deferring any trap until after acpx is already gone. A SIGKILL
 # of this script cannot be trapped, so this is best-effort and covers the
-# common SIGTERM/SIGINT/SIGHUP-first shutdown path. The companion defense is
-# the executor prompt's routing rule: any return WITHOUT a clean `ACPX_EXIT=`
-# line is classified as `timeout`, never `blocked`.
+# common SIGTERM/SIGINT/SIGHUP-first shutdown path. The outer wrapper uses the
+# missing receipt together with the 124 exit status to distinguish this abort
+# from a blocked preflight failure.
 acpx_pgid=""
 write_terminal_marker() {
   local exit_code="$1" completed_at_epoch terminal_marker_tmp
@@ -394,11 +404,9 @@ cleanup() {
     echo "run_acpx_attempt.sh: warning: unable to persist ${terminal_marker}" >&2
   fi
   # Signalled abort: the script exits HERE, before the `ACPX_EXIT=<n>`
-  # print below ever runs, so the subagent sees NO `ACPX_EXIT=` line. That
-  # missing line — not this exit code — is what routes the attempt to the
-  # timeout flow (executor_prompt.md "NO `ACPX_EXIT=<n>` line → timeout").
-  # We still exit 124 (rather than the inherited signal code) so that on the
-  # off chance the code IS read it maps to timeout, never blocked.
+  # print below ever runs. The outer wrapper requires both that missing receipt
+  # and this 124 exit status before routing the attempt to the timeout flow;
+  # ordinary preflight failures return a different status and become blocked.
   exit 124
 }
 
