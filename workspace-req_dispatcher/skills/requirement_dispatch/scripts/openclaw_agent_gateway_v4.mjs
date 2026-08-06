@@ -5,6 +5,10 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  captureSessionCursor,
+  waitForLastExecToolJson,
+} from "./openclaw_strict_json_receipt.mjs";
 
 const PROTOCOL_VERSION = 4;
 const CLIENT_ID = "cli";
@@ -437,6 +441,7 @@ export function validateAdapterRequest(request) {
     "openclaw_state_dir",
     "run_id",
     "session_key",
+    "strict_json_receipt",
     "target_agent",
     "timeout_seconds",
   ];
@@ -454,6 +459,9 @@ export function validateAdapterRequest(request) {
   }
   if (!Number.isSafeInteger(request.timeout_seconds) || request.timeout_seconds <= 0) {
     fail("request timeout is invalid", 64);
+  }
+  if (typeof request.strict_json_receipt !== "boolean") {
+    fail("request strict JSON receipt flag is invalid", 64);
   }
   const sessionPrefix = `agent:${request.target_agent}:`;
   if (!request.session_key.startsWith(sessionPrefix)
@@ -502,8 +510,26 @@ export async function main() {
   }
   const url = validateGatewayUrl(rawUrl, process.env.OPENCLAW_ALLOW_INSECURE_PRIVATE_WS);
   const identity = loadOpenClawDeviceIdentity(request.openclaw_state_dir);
+  const receiptCursor = request.strict_json_receipt
+    ? captureSessionCursor({
+      stateDir: request.openclaw_state_dir,
+      targetAgent: request.target_agent,
+      sessionKey: request.session_key,
+    })
+    : null;
   const response = await callAgentViaGatewayV4({ url, token, identity, request });
-  process.stdout.write(renderResponse(response));
+  if (request.strict_json_receipt) {
+    const receipt = await waitForLastExecToolJson({
+      stateDir: request.openclaw_state_dir,
+      targetAgent: request.target_agent,
+      sessionKey: request.session_key,
+      cursor: receiptCursor,
+    });
+    if (receipt === null) fail("strict JSON receipt was not emitted by an exec tool", 70);
+    process.stdout.write(receipt);
+  } else {
+    process.stdout.write(renderResponse(response));
+  }
 }
 
 const isMain = process.argv[1]

@@ -66,6 +66,15 @@ grep -Fq 'Exact `RUN_DRIVEN_ISSUE_BATCH` → Path C' "${SKILL_DIR}/SKILL.md" \
   || fail "executor skill must route batch intake before heartbeat tick"
 grep -Fq '`RUN_DRIVEN_ISSUE_BATCH` is never a heartbeat tick' "${WORKSPACE_DIR}/AGENTS.md" \
   || fail "executor bootstrap rules must distinguish batch intake from tick"
+for mission_stop_contract in \
+  "${SKILL_DIR}/SKILL.md" \
+  "${WORKSPACE_DIR}/AGENTS.md" \
+  "${WORKSPACE_DIR}/CLAUDE.md" \
+  "${WORKSPACE_DIR}/SOUL.md"
+do
+  grep -Fq 'emit_mission_stop_receipt.sh' "${mission_stop_contract}" \
+    || fail "mission-stop strict receipt emitter is missing from ${mission_stop_contract}"
+done
 
 PATH_C_SECTION="$(sed -n '/^### Path C /,/^### Path D /p' "${SKILL_DIR}/SKILL.md")"
 PATH_D_SECTION="$(sed -n '/^### Path D /,/^### Path E /p' "${SKILL_DIR}/SKILL.md")"

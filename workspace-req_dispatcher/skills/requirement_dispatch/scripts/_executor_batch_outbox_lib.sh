@@ -7,12 +7,19 @@ executor_batch_outbox_die() {
 }
 
 executor_batch_sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
+  local value output
+  value="$(cat)" \
+    || executor_batch_outbox_die "could not read SHA-256 input"
+  if command -v sha256sum >/dev/null 2>&1 \
+      && output="$(printf '%s' "${value}" | sha256sum 2>/dev/null)" \
+      && [[ "${output}" =~ ^([0-9a-f]{64})[[:space:]]+\*?-$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif command -v shasum >/dev/null 2>&1 \
+      && output="$(printf '%s' "${value}" | shasum -a 256 2>/dev/null)" \
+      && [[ "${output}" =~ ^([0-9a-f]{64})[[:space:]]+\*?-$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
   else
-    executor_batch_outbox_die "no SHA-256 command is available"
+    executor_batch_outbox_die "no valid SHA-256 implementation is available"
   fi
 }
 

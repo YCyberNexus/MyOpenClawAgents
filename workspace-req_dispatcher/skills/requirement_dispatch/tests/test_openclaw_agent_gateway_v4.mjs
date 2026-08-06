@@ -258,6 +258,7 @@ async function runHelper(url) {
     session_key: "agent:zhujiaye:main",
     message: MESSAGE,
     run_id: "notify-v4-idempotency-1",
+    strict_json_receipt: false,
     timeout_seconds: 2,
   }));
   const watchdog = setTimeout(() => child.kill("SIGKILL"), 5_000);
@@ -387,6 +388,7 @@ async function testAcceptedIsNotFinal() {
     session_key: "agent:zhujiaye:main",
     message: MESSAGE,
     run_id: "notify-v4-timeout-1",
+    strict_json_receipt: false,
     timeout_seconds: 2,
   };
   const gateway = await startGateway((frame, connection) => {

@@ -46,7 +46,9 @@ Core contract:
   OpenClaw global timeout remains unchanged.
 - `/mission-stop` changes durable scheduler/project state only through
   `stop_repository_mission.sh`. Perform only the exact runtime kills returned
-  by the wrapper, then return its `public_result`; never reconstruct batch IDs.
+  by the wrapper, then pass the exact `public_result.stop_id` to
+  `emit_mission_stop_receipt.sh` and return that emitter's sole compact JSON;
+  never reconstruct batch IDs or summarize the receipt.
 - A native completion turn calls its prescribed ingester once and exits on
   rejection; it never summarizes the untrusted child Result, runs a heartbeat
   first, reads worker-result fields into prose, or debugs wrapper scripts. It

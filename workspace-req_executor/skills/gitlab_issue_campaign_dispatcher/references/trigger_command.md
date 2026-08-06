@@ -88,8 +88,9 @@ Exact form:
 
 Call `scripts/stop_repository_mission.sh` with the complete message. Execute
 only the exact runtime cleanup targets in its private envelope, using one
-bounded child listing for exact `runtime_labels` matches, then return only
-`public_result`. The wrapper archives and removes the repository's active
+bounded child listing for exact `runtime_labels` matches. Then pass the exact
+`public_result.stop_id` as `STOP_ID` to `scripts/emit_mission_stop_receipt.sh`
+and return only that emitter's compact JSON object. The wrapper archives and removes the repository's active
 scheduler jobs, non-terminal batch chain, hot launch actions, undelivered I3
 callbacks, and project pending state so a later submission starts cleanly.
 

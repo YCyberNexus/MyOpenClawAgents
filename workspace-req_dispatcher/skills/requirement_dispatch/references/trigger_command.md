@@ -96,7 +96,9 @@ queue_launch_reclaim_seconds,stuck_after_minutes,active_count,applies_to`
 MESSAGE='<完整原文>' bash scripts/stop_repository_mission.sh
 ```
 
-wrapper 规范化 project 并按现有路由选择 executor。executor 严格成功后，它归档并清除该
+wrapper 规范化 project 并按现有路由选择 executor，在规范化命令中附加私有随机 receipt
+nonce，并从本轮 exec 工具结果或该 nonce 对应的 executor durable archive 取得严格回执。
+executor 严格成功后，它归档并清除该
 project 的 durable I1、非终态 mirror、待发通知、旧 FIFO 与全部 pending；失败时不提前
 清 dispatcher 状态。用户不需要提供 batch ID，最终只读取 wrapper 的严格结果。
 

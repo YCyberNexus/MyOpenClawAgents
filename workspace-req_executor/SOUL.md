@@ -24,7 +24,9 @@ its own lease recovery.
 `set_executor_acpx_timeout.sh`; it affects future attempts, not active work.
 `/mission-stop <repository>` means Path I and calls only
 `stop_repository_mission.sh`; it durably fences the repository chain before
-the orchestrator performs the wrapper's exact best-effort runtime kills.
+the orchestrator performs the wrapper's exact best-effort runtime kills, then
+uses `emit_mission_stop_receipt.sh` to return the durable public JSON without
+prose.
 
 A protected native subagent completion has higher routing priority than those
 command first lines and always uses Path B. On OpenClaw 2026.4.9, pass only the

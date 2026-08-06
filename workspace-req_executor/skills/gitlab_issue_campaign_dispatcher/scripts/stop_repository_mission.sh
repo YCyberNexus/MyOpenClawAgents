@@ -16,12 +16,18 @@ stop_failure() {
 }
 
 sha256_text() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum | awk '{print $1}'
-  elif command -v shasum >/dev/null 2>&1; then
-    shasum -a 256 | awk '{print $1}'
+  local value output
+  value="$(cat)" || return 1
+  if command -v sha256sum >/dev/null 2>&1 \
+      && output="$(printf '%s' "${value}" | sha256sum 2>/dev/null)" \
+      && [[ "${output}" =~ ^([0-9a-f]{64})[[:space:]]+\*?-$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
+  elif command -v shasum >/dev/null 2>&1 \
+      && output="$(printf '%s' "${value}" | shasum -a 256 2>/dev/null)" \
+      && [[ "${output}" =~ ^([0-9a-f]{64})[[:space:]]+\*?-$ ]]; then
+    printf '%s\n' "${BASH_REMATCH[1]}"
   else
-    stop_failure "no SHA-256 command is available"
+    return 1
   fi
 }
 
@@ -78,6 +84,15 @@ if [[ ! "${COMMAND_TEXT}" =~ ^/mission-stop[[:blank:]]+([^[:blank:]]+)[[:blank:]
   stop_failure "usage: /mission-stop <gitlab-repository-url|group/project>"
 fi
 TARGET_TEXT="${BASH_REMATCH[1]}"
+RECEIPT_NONCE=""
+if [[ "${TARGET_TEXT}" == *"?receipt_nonce="* ]]; then
+  if [[ "${TARGET_TEXT}" =~ ^(.+)\?receipt_nonce=([0-9a-f]{64})$ ]]; then
+    TARGET_TEXT="${BASH_REMATCH[1]}"
+    RECEIPT_NONCE="${BASH_REMATCH[2]}"
+  else
+    stop_failure "mission stop receipt nonce is invalid"
+  fi
+fi
 
 # Resolve deployment pins without exposing them to the orchestrator.
 REPO_PARENT_PROCESS_SET="${REPO_PARENT_PATH+x}"
@@ -106,10 +121,65 @@ STOPPED_AT_EPOCH="${NOW_EPOCH:-$(date +%s)}"
 case "${STOPPED_AT_EPOCH}" in
   ''|*[!0-9]*) stop_failure "NOW_EPOCH must be a non-negative integer" ;;
 esac
-STOP_ENTROPY="${PROJECT_FULL}:${STOPPED_AT_EPOCH}:$$:${RANDOM}"
-STOP_ID="mission-stop-${STOPPED_AT_EPOCH}-$(printf '%s' "${STOP_ENTROPY}" | sha256_text | cut -c1-16)"
+if [ -n "${RECEIPT_NONCE}" ]; then
+  STOP_DIGEST="$(printf '%s' "${RECEIPT_NONCE}" | sha256_text)" \
+    || stop_failure "no valid SHA-256 implementation is available"
+  STOP_ID="mission-stop-receipt-${STOP_DIGEST}"
+else
+  STOP_ENTROPY="${PROJECT_FULL}:${STOPPED_AT_EPOCH}:$$:${RANDOM}"
+  STOP_DIGEST="$(printf '%s' "${STOP_ENTROPY}" | sha256_text)" \
+    || stop_failure "no valid SHA-256 implementation is available"
+  STOP_ID="mission-stop-${STOPPED_AT_EPOCH}-${STOP_DIGEST:0:16}"
+fi
 STOP_ARCHIVE_ROOT="${EXECUTOR_SCHEDULER_ROOT}/mission_stop_archive"
 STOP_ARCHIVE_DIR="${STOP_ARCHIVE_ROOT}/${STOP_ID}"
+if [ -e "${STOP_ARCHIVE_DIR}" ] || [ -L "${STOP_ARCHIVE_DIR}" ]; then
+  REPLAY_ENVELOPE="${STOP_ARCHIVE_DIR}/envelope.json"
+  if [ -L "${STOP_ARCHIVE_DIR}" ] || [ ! -d "${STOP_ARCHIVE_DIR}" ] \
+      || [ -L "${REPLAY_ENVELOPE}" ] || [ ! -f "${REPLAY_ENVELOPE}" ] \
+      || [ ! -r "${REPLAY_ENVELOPE}" ]; then
+    stop_failure "mission stop receipt archive already exists but is incomplete"
+  fi
+  REPLAY_JSON="$(jq -ceS --arg project "${PROJECT_FULL}" --arg stop_id "${STOP_ID}" '
+    if type == "object"
+      and (keys | sort) == ["cleanup_actions","public_result","runtime_labels","status"]
+      and .status == "success"
+      and (.cleanup_actions | type == "array"
+        and all(.[];
+          type == "object" and keys == ["action","target"]
+          and .action == "kill"
+          and (.target | type == "string" and length > 0)))
+      and (.runtime_labels | type == "array"
+        and all(.[]; type == "string" and length > 0))
+      and (.public_result | type == "object"
+        and (keys | sort) == [
+          "cleanup_requested_count","project","status","stop_id",
+          "stopped_batch_ids","stopped_issue_iids","stopped_job_count"
+        ]
+        and .status == "success" and .project == $project and .stop_id == $stop_id
+        and (.stopped_batch_ids | type == "array"
+          and all(.[]; type == "string"))
+        and (.stopped_issue_iids | type == "array"
+          and all(.[]; type == "number" and . == floor and . > 0))
+        and (.stopped_job_count | type == "number" and . == floor and . >= 0)
+        and (.cleanup_requested_count | type == "number" and . == floor and . >= 0))
+    then . else error("invalid replay envelope") end
+  ' "${REPLAY_ENVELOPE}" 2>/dev/null)" \
+    || stop_failure "mission stop receipt archive is invalid"
+  REPLAY_RESULT_FILE="${STOP_ARCHIVE_DIR}/result.json"
+  REPLAY_RESULT="$(jq -cS '.public_result' <<<"${REPLAY_JSON}")"
+  if [ -e "${REPLAY_RESULT_FILE}" ] || [ -L "${REPLAY_RESULT_FILE}" ]; then
+    if [ -L "${REPLAY_RESULT_FILE}" ] || [ ! -f "${REPLAY_RESULT_FILE}" ] \
+        || [ ! -r "${REPLAY_RESULT_FILE}" ] \
+        || [ "$(jq -ceS . "${REPLAY_RESULT_FILE}" 2>/dev/null || true)" != "${REPLAY_RESULT}" ]; then
+      stop_failure "mission stop durable result conflicts with its envelope"
+    fi
+  else
+    scheduler_atomic_write_json "${REPLAY_RESULT_FILE}" "${REPLAY_RESULT}"
+  fi
+  printf '%s\n' "${REPLAY_JSON}"
+  exit 0
+fi
 mkdir -p "${STOP_ARCHIVE_DIR}/launch_actions"
 chmod 700 "${STOP_ARCHIVE_ROOT}" "${STOP_ARCHIVE_DIR}" \
   "${STOP_ARCHIVE_DIR}/launch_actions"
@@ -152,7 +222,8 @@ if [ "${#TARGET_ACTION_JOB_IDS[@]}" -gt 0 ]; then
   unset IFS
 fi
 for action_job_id in "${TARGET_ACTION_JOB_IDS[@]}"; do
-  action_digest="$(printf '%s' "${action_job_id}" | sha256_text)"
+  action_digest="$(printf '%s' "${action_job_id}" | sha256_text)" \
+    || stop_failure "no valid SHA-256 implementation is available"
   if [ "${LEGACY_LOCK_COMPAT_ACTIVE:-false}" = true ]; then
     exec {action_lock_fd}>"${LAUNCH_ACTION_ROOT}/.${action_digest}.lock"
     flock -x "${action_lock_fd}"
@@ -438,9 +509,7 @@ PUBLIC_RESULT="$(jq -cnS \
     stopped_issue_iids:$stopped_issue_iids,
     cleanup_requested_count:$cleanup_requested_count
   }')"
-scheduler_atomic_write_json "${STOP_ARCHIVE_DIR}/result.json" "${PUBLIC_RESULT}"
-
-jq -cn \
+PRIVATE_ENVELOPE="$(jq -cn \
   --argjson public_result "${PUBLIC_RESULT}" \
   --argjson cleanup_actions "${CLEANUP_ACTIONS}" \
   --argjson runtime_labels "${RUNTIME_LABELS}" '{
@@ -448,4 +517,7 @@ jq -cn \
   public_result:$public_result,
   cleanup_actions:$cleanup_actions,
   runtime_labels:$runtime_labels
-}'
+}')"
+scheduler_atomic_write_json "${STOP_ARCHIVE_DIR}/envelope.json" "${PRIVATE_ENVELOPE}"
+scheduler_atomic_write_json "${STOP_ARCHIVE_DIR}/result.json" "${PUBLIC_RESULT}"
+printf '%s\n' "${PRIVATE_ENVELOPE}"

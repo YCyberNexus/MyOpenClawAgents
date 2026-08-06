@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-callback-auth.XXXXXX")"
 export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>\n  --session-id <id>\n  --message-file <path>'
+export RUN_AGENT_TURN_STRICT_JSON_RECEIPT=0
 POISON_MESSAGE_FILE="${TEST_ROOT}/poison-message.txt"
 printf '%s\n' 'poison-from-message-file' >"${POISON_MESSAGE_FILE}"
 

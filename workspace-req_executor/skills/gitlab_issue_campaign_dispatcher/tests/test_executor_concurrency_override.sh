@@ -469,6 +469,7 @@ auth_drain="$(CONFIG_DIR="${CONFIG_DIR}" EXECUTOR_SCHEDULER_ROOT="${AUTH_ROOT}" 
   EXECUTOR_AGENT=custom_executor \
   DISPATCHER_CALLBACK_TARGET=agent:req_dispatcher:custom-session \
   OPENCLAW_AGENT_HELP_OVERRIDE=$'  --session-key <key>\n  --message-file <path>' \
+  OPENCLAW_STRICT_JSON_RECEIPT=0 \
   OPENCLAW_BIN="${AUTH_OPENCLAW}" AUTH_NONCE="${AUTH_NONCE}" \
   NOW_EPOCH=2000000000 bash "${DRAIN_SCRIPT}")"
 jq -e '.attempted == 1 and .delivered == 1 and .failed == 0' \

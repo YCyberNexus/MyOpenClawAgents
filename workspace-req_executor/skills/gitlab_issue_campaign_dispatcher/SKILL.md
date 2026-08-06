@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-08-03.3] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-08-06.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -752,15 +752,21 @@ by req_dispatcher on later calls. It never changes OpenClaw global
 3. If `runtime_labels[]` is non-empty, call `subagents list` once, select only
    children whose label exactly equals one listed label, and best-effort kill
    those exact child targets. Do not use prefix or substring matching.
-4. Return `envelope.public_result` as the sole compact JSON object without
-   prose or Markdown, even when a best-effort runtime kill reports not found.
+4. Read the exact `envelope.public_result.stop_id`, then run:
+   `cd "${SKILL_DIR}" && STOP_ID='<exact stop_id>' bash scripts/emit_mission_stop_receipt.sh`
+   and treat its sole compact JSON object as `receipt`.
+5. Return `receipt` as the sole compact JSON object without prose or Markdown,
+   even when a best-effort runtime kill reports not found.
 ```
 
 The wrapper accepts the configured GitLab repository URL (including an Issue
 URL) or a safe multi-segment `group/project` path. Under scheduler and campaign
 locks it removes the repository's active jobs and runnable batches, marks batch
 state failed, archives hot launch actions, clears project pending state, and
-returns only exact runtime cleanup identities. It never deletes audit evidence.
+returns only exact runtime cleanup identities. A dispatcher-supplied private
+receipt nonce makes the stop ID directly addressable, and the final emitter
+rebuilds the public reply from the durable archived result. It never deletes
+audit evidence.
 
 Driven Phase 6 completion is durable: project-side completion writes a handoff;
 the next tick imports it, releases that Issue's repository-local capacity (and

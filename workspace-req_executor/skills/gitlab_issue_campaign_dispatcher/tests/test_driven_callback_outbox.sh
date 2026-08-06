@@ -9,6 +9,7 @@ BIND_CLAIM="${SKILL_DIR}/scripts/bind_driven_claim.sh"
 RECORD_LAUNCH="${SKILL_DIR}/scripts/record_driven_batch_launch.sh"
 RESERVE_ITEMS="${SKILL_DIR}/scripts/reserve_driven_batch_items.sh"
 export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>\n  --session-id <id>\n  --message-file <path>'
+export OPENCLAW_STRICT_JSON_RECEIPT=0
 
 fail() {
   echo "test_driven_callback_outbox.sh: $*" >&2

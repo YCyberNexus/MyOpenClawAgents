@@ -214,8 +214,9 @@ ack_instruction=只调用 handle_executor_batch_event.sh；不得写任何临时
 ```
 
 dispatcher 对同一 `event_id` 返回 `accepted` 或 `duplicate` 都表示该 I3 已确认；executor 只有收到匹配 event ID 的 ack 才把对应 outbox item 标记为 delivered。发送失败保留相同 event ID 重试，不重复生成 Issue 结果。
-ack stdout 必须整体是唯一严格 JSON，或整体恰为单个 `json`/无语言 Markdown 围栏且 body 为
-唯一严格 JSON。围栏外字符、中文总结、解释、双围栏、前后缀或多个 JSON 都按
+callback transport 在目标 session 锁内记录调用前 transcript 游标，并只读取本轮新增的成功
+`exec` toolResult；其中必须只有一个 compact JSON 或单个 fence JSON object。模型最终中文总结、
+解释或 Markdown 不参与 ack。找不到唯一工具回执、双 JSON 或 malformed 输出都按
 `malformed_or_ambiguous_ack` 保留 outbox 并重试。dispatcher 仍接受旧
 `RUN_DRIVEN_BATCH_RESULT` 输入 marker，但新 outbox 不再发送它。新 marker 缺失、伪造或追加
 第三行也会在 durable apply 前失败关闭。

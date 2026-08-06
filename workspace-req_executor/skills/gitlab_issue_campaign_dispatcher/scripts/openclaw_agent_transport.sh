@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Capability-based, secret-safe OpenClaw agent transport.
-# Keep behavior aligned with the req_dispatcher transport copy.
+# Keep behavior aligned with the req_dispatcher transport copy. Strict callback
+# acknowledgements are recovered from the current transcript delta rather than
+# from the model-authored final response.
 set -euo pipefail
 umask 077
 
@@ -13,12 +15,17 @@ OPENCLAW_TARGET_SESSION_KEY="${OPENCLAW_TARGET_SESSION_KEY:-}"
 OPENCLAW_TARGET_SESSION_ID="${OPENCLAW_TARGET_SESSION_ID:-}"
 OPENCLAW_RUN_ID="${OPENCLAW_RUN_ID:-req-agent-$(date -u +%s)-$$}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${HOME}/.openclaw}"
+OPENCLAW_STRICT_JSON_RECEIPT="${OPENCLAW_STRICT_JSON_RECEIPT:-0}"
 
 case "${OPENCLAW_TARGET_AGENT}" in
   *[!A-Za-z0-9_-]*|"") echo "openclaw_agent_transport: invalid target agent" >&2; exit 64 ;;
 esac
 case "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" in
   *[!0-9]*|""|0) echo "openclaw_agent_transport: timeout must be a positive integer" >&2; exit 64 ;;
+esac
+case "${OPENCLAW_STRICT_JSON_RECEIPT}" in
+  0|1) ;;
+  *) echo "openclaw_agent_transport: OPENCLAW_STRICT_JSON_RECEIPT must be 0 or 1" >&2; exit 64 ;;
 esac
 if [ -n "${OPENCLAW_TARGET_SESSION_KEY}" ] && [ -n "${OPENCLAW_TARGET_SESSION_ID}" ]; then
   echo "openclaw_agent_transport: session key and session id are mutually exclusive" >&2
@@ -82,7 +89,9 @@ fi
 exec 9>"${OPENCLAW_SESSION_LOCK_ROOT}/${SESSION_LOCK_DIGEST}.lock"
 flock 9
 
-if [ -n "${OPENCLAW_AGENT_HELP_OVERRIDE:-}" ]; then
+if [ "${OPENCLAW_STRICT_JSON_RECEIPT}" -eq 1 ]; then
+  AGENT_HELP=""
+elif [ -n "${OPENCLAW_AGENT_HELP_OVERRIDE:-}" ]; then
   AGENT_HELP="${OPENCLAW_AGENT_HELP_OVERRIDE}"
 else
   set +e
@@ -101,7 +110,8 @@ has_option --session-key && HAS_SESSION_KEY=1
 has_option --session-id && HAS_SESSION_ID=1
 
 USE_SAFE_CLI=0
-if [ "${HAS_MESSAGE_FILE}" -eq 1 ]; then
+if [ "${OPENCLAW_STRICT_JSON_RECEIPT}" -eq 0 ] \
+    && [ "${HAS_MESSAGE_FILE}" -eq 1 ]; then
   if [ -n "${OPENCLAW_TARGET_SESSION_KEY}" ] && [ "${HAS_SESSION_KEY}" -eq 1 ]; then
     USE_SAFE_CLI=1
   elif [ -n "${OPENCLAW_TARGET_SESSION_ID}" ] && [ "${HAS_SESSION_ID}" -eq 1 ]; then
@@ -130,10 +140,12 @@ if [[ "${OPENCLAW_BIN}" == */* ]]; then OPENCLAW_BIN_PATH="${OPENCLAW_BIN}"; els
 if [ -z "${OPENCLAW_BIN_PATH}" ]; then echo "openclaw_agent_transport: openclaw executable not found" >&2; exit 67; fi
 jq -nc \
   --arg openclaw_bin_path "${OPENCLAW_BIN_PATH}" \
+  --arg openclaw_state_dir "${OPENCLAW_STATE_DIR}" \
   --arg target_agent "${OPENCLAW_TARGET_AGENT}" \
   --arg session_key "${RESOLVED_SESSION_KEY}" \
   --arg message "${MESSAGE}" \
   --arg run_id "${OPENCLAW_RUN_ID}" \
+  --argjson strict_json_receipt "${OPENCLAW_STRICT_JSON_RECEIPT}" \
   --argjson timeout_seconds "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" \
-  '{openclaw_bin_path:$openclaw_bin_path,target_agent:$target_agent,session_key:$session_key,message:$message,run_id:$run_id,timeout_seconds:$timeout_seconds}' \
+  '{openclaw_bin_path:$openclaw_bin_path,openclaw_state_dir:$openclaw_state_dir,target_agent:$target_agent,session_key:$session_key,message:$message,run_id:$run_id,strict_json_receipt:($strict_json_receipt == 1),timeout_seconds:$timeout_seconds}' \
   | "${helper_cmd[@]}"

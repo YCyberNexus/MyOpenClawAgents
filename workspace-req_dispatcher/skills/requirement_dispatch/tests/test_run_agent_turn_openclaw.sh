@@ -10,6 +10,7 @@ OPENCLAW_LOG="${TEST_ROOT}/openclaw.args"
 OPENCLAW_STDIN_LOG="${TEST_ROOT}/openclaw.stdin"
 SECRET_NONCE='aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
 export OPENCLAW_AGENT_HELP_OVERRIDE=$'Options:\n  --session-key <key>  exact key\n  --session-id <id>  exact id\n  --message-file <path>  stdin-safe message'
+export RUN_AGENT_TURN_STRICT_JSON_RECEIPT=0
 export OPENCLAW_STATE_DIR="${TEST_ROOT}/state"
 mkdir -p "${OPENCLAW_STATE_DIR}/agents/git_issuer/sessions"
 cat >"${OPENCLAW_STATE_DIR}/agents/git_issuer/sessions/sessions.json" <<'EOF'

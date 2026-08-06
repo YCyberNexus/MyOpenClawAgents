@@ -15,7 +15,8 @@ LLM 修改配置文件或 scheduler JSON。
 
 `/mission-stop <GitLab 仓库 URL|group/project>` 只调用
 `stop_repository_mission.sh`。先由 wrapper 原子清理 scheduler、batch、launch action 与
-项目 pending 状态，再按其私有 envelope 精确 kill 运行时 child，最终只返回 `public_result`。
+项目 pending 状态，再按其私有 envelope 精确 kill 运行时 child；最后把精确
+`public_result.stop_id` 传给 `emit_mission_stop_receipt.sh`，并只返回 emitter 的唯一紧凑 JSON。
 
 ## Wrapper Flow
 

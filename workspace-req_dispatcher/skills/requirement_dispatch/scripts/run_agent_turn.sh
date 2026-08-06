@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # run_agent_turn.sh — 明确的 req_dispatcher → 下游 OpenClaw agent 调用包装。
 #
-# 本脚本把跨 agent 调用固定到 capability-based 的本机 Gateway transport：
-# 新版 CLI 使用 --session-key/--session-id + --message-file；旧版 CLI 缺少
-# 安全 stdin 能力时由 openclaw_agent_transport.sh 直接调用本机 Gateway。
+# 本脚本把需要结构化结果的跨 agent 调用固定到本机 Gateway transport。
+# transport 在目标 session 锁内记录调用前 transcript 游标，并只从本轮新增
+# 的成功 exec toolResult 中提取 wrapper 产生的唯一 JSON；模型最终散文不参与回执。
 #
 # TARGET_SESSION_KEY 与 TARGET_SESSION_ID 保持各自真实语义。历史部署若把
 # 完整 agent:* key 放在 TARGET_SESSION_ID 中，仍作为兼容 alias 接受。
@@ -14,8 +14,8 @@
 # 在 batch outbox 中持久化，因此同一批重试保持同一 session；即使新的 STATE_ROOT
 # 重新从 reqd-batch-1 计数，也不会复用历史 executor batch session。
 #
-# 目标 agent 的最后一行若是紧凑 JSON，本脚本会把它解析到 worker_result_json。
-# 若输出把 pretty JSON 放在 markdown 代码块里，也会兜底提取最后一个合法 JSON object。
+# transport 的严格 stdout 会被解析到 worker_result_json。显式关闭严格模式的
+# 兼容测试仍支持 whole-line compact JSON 或单个 Markdown JSON fence。
 # openclaw 调用失败不会让本脚本非零退出；它返回 status=failed 的结构化信封，
 # 由 orchestrator 按“同 payload 最多 3 次、2s 退避”处理。入参形态错误才 exit 2。
 set -euo pipefail
@@ -299,6 +299,7 @@ trap cleanup_auto_temp_files EXIT
         OPENCLAW_TARGET_SESSION_ID="${TARGET_SESSION_ID_EFFECTIVE}" \
         OPENCLAW_AGENT_TIMEOUT_SECONDS="${AGENT_TIMEOUT_SECONDS}" \
         OPENCLAW_RUN_ID="${RUN_ID}" \
+        OPENCLAW_STRICT_JSON_RECEIPT="${RUN_AGENT_TURN_STRICT_JSON_RECEIPT:-1}" \
         "${OPENCLAW_AGENT_TRANSPORT}" >"${RAW_OUTPUT_FILE}" 2>&1
   printf '%s\n' "$?" >"${STATUS_FILE}"
 ) &

@@ -8,7 +8,10 @@
 # wrapper calls the selected Gateway through a helper while still reading the
 # request from stdin. Native calls load the installed OpenClaw package. The
 # explicit protocol-4 branch uses a self-contained adapter for a 2026.6.1
-# remote Gateway without changing the installed 2026.4.9 runtime.
+# remote Gateway without changing the installed 2026.4.9 runtime. Structured
+# callers set OPENCLAW_STRICT_JSON_RECEIPT=1; that mode always uses a helper so
+# cursor capture, the Gateway turn, and transcript extraction stay under the
+# same per-session lock.
 set -euo pipefail
 umask 077
 
@@ -23,6 +26,7 @@ OPENCLAW_RUN_ID="${OPENCLAW_RUN_ID:-req-agent-$(date -u +%s)-$$}"
 OPENCLAW_STATE_DIR="${OPENCLAW_STATE_DIR:-${HOME}/.openclaw}"
 OPENCLAW_FORCE_GATEWAY_HELPER="${OPENCLAW_FORCE_GATEWAY_HELPER:-0}"
 OPENCLAW_GATEWAY_PROTOCOL="${OPENCLAW_GATEWAY_PROTOCOL:-native}"
+OPENCLAW_STRICT_JSON_RECEIPT="${OPENCLAW_STRICT_JSON_RECEIPT:-0}"
 
 case "${OPENCLAW_TARGET_AGENT}" in
   *[!A-Za-z0-9_-]*|"")
@@ -47,6 +51,13 @@ case "${OPENCLAW_GATEWAY_PROTOCOL}" in
   native|4) ;;
   *)
     echo "openclaw_agent_transport: OPENCLAW_GATEWAY_PROTOCOL must be native or 4" >&2
+    exit 64
+    ;;
+esac
+case "${OPENCLAW_STRICT_JSON_RECEIPT}" in
+  0|1) ;;
+  *)
+    echo "openclaw_agent_transport: OPENCLAW_STRICT_JSON_RECEIPT must be 0 or 1" >&2
     exit 64
     ;;
 esac
@@ -126,7 +137,8 @@ fi
 exec 9>"${OPENCLAW_SESSION_LOCK_ROOT}/${SESSION_LOCK_DIGEST}.lock"
 flock 9
 
-if [ "${OPENCLAW_FORCE_GATEWAY_HELPER}" -eq 1 ]; then
+if [ "${OPENCLAW_FORCE_GATEWAY_HELPER}" -eq 1 ] \
+    || [ "${OPENCLAW_STRICT_JSON_RECEIPT}" -eq 1 ]; then
   AGENT_HELP=""
 elif [ -n "${OPENCLAW_AGENT_HELP_OVERRIDE:-}" ]; then
   AGENT_HELP="${OPENCLAW_AGENT_HELP_OVERRIDE}"
@@ -157,7 +169,8 @@ has_option --session-id && HAS_SESSION_ID=1
 # selector's actual semantics. An explicit session id is invoked without
 # --agent; otherwise old/new resolvers can silently force the agent main key.
 USE_SAFE_CLI=0
-if [ "${HAS_MESSAGE_FILE}" -eq 1 ]; then
+if [ "${OPENCLAW_STRICT_JSON_RECEIPT}" -eq 0 ] \
+    && [ "${HAS_MESSAGE_FILE}" -eq 1 ]; then
   if [ -n "${OPENCLAW_TARGET_SESSION_KEY}" ] && [ "${HAS_SESSION_KEY}" -eq 1 ]; then
     USE_SAFE_CLI=1
   elif [ -n "${OPENCLAW_TARGET_SESSION_ID}" ] && [ "${HAS_SESSION_ID}" -eq 1 ]; then
@@ -200,12 +213,14 @@ if [ "${OPENCLAW_GATEWAY_PROTOCOL}" = 4 ]; then
       --arg target_agent "${OPENCLAW_TARGET_AGENT}" \
       --arg session_key "${RESOLVED_SESSION_KEY}" \
       --arg run_id "${OPENCLAW_RUN_ID}" \
+      --argjson strict_json_receipt "${OPENCLAW_STRICT_JSON_RECEIPT}" \
       --argjson timeout_seconds "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" '{
         openclaw_state_dir:$openclaw_state_dir,
         target_agent:$target_agent,
         session_key:$session_key,
         message:.,
         run_id:$run_id,
+        strict_json_receipt:($strict_json_receipt == 1),
         timeout_seconds:$timeout_seconds
       }'
   )
@@ -224,15 +239,19 @@ fi
 exec "${helper_cmd[@]}" < <(
   printf '%s' "${MESSAGE}" | jq -Rsc \
     --arg openclaw_bin_path "${OPENCLAW_BIN_PATH}" \
+    --arg openclaw_state_dir "${OPENCLAW_STATE_DIR}" \
     --arg target_agent "${OPENCLAW_TARGET_AGENT}" \
     --arg session_key "${RESOLVED_SESSION_KEY}" \
     --arg run_id "${OPENCLAW_RUN_ID}" \
+    --argjson strict_json_receipt "${OPENCLAW_STRICT_JSON_RECEIPT}" \
     --argjson timeout_seconds "${OPENCLAW_AGENT_TIMEOUT_SECONDS}" '{
       openclaw_bin_path:$openclaw_bin_path,
+      openclaw_state_dir:$openclaw_state_dir,
       target_agent:$target_agent,
       session_key:$session_key,
       message:.,
       run_id:$run_id,
+      strict_json_receipt:($strict_json_receipt == 1),
       timeout_seconds:$timeout_seconds
     }'
 )

@@ -4,12 +4,21 @@ set -euo pipefail
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILL_DIR="$(cd "${TEST_DIR}/.." && pwd)"
 STOP_CMD="${SKILL_DIR}/scripts/stop_repository_mission.sh"
+EMIT_CMD="${SKILL_DIR}/scripts/emit_mission_stop_receipt.sh"
 TMP_PARENT="${TMPDIR:-/tmp}"
 TMP_PARENT="${TMP_PARENT%/}"
 TEST_ROOT="$(mktemp -d "${TMP_PARENT}/req-executor-mission-stop.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 SCHEDULER_ROOT="${TEST_ROOT}/scheduler"
 REPO_ROOT="${TEST_ROOT}/repos"
+RECEIPT_NONCE="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+if command -v sha256sum >/dev/null 2>&1; then
+  RECEIPT_DIGEST="$(printf '%s' "${RECEIPT_NONCE}" | sha256sum | awk '{print $1}')"
+else
+  RECEIPT_DIGEST="$(printf '%s' "${RECEIPT_NONCE}" | shasum -a 256 | awk '{print $1}')"
+fi
+[[ "${RECEIPT_DIGEST}" =~ ^[0-9a-f]{64}$ ]]
+EXPECTED_STOP_ID="mission-stop-receipt-${RECEIPT_DIGEST}"
 mkdir -p "${CONFIG_DIR}" "${SCHEDULER_ROOT}/batches/batch-target" \
   "${SCHEDULER_ROOT}/batches/batch-completed-target" \
   "${SCHEDULER_ROOT}/batches/batch-other" "${SCHEDULER_ROOT}/launch_actions" \
@@ -77,7 +86,8 @@ cat >"${REPO_ROOT}/group/project/.req_executor/_dispatcher/campaign_state.json" 
 {"campaign_status":"running","pending_subagents":{"12":{"child_session_key":"agent:req_executor:child-12"},"13":{"child_session_key":"agent:req_executor:child-13"}},"active_issue_iids":[12,13],"active_issue_sessions":["a","b"],"driven_handoff_intents":{"12":{"status":"prepared"}}}
 EOF
 
-output="$(printf '/mission-stop https://gitlab.example.test/group/project/-/issues/12\n' |
+output="$(printf '/mission-stop https://gitlab.example.test/group/project/-/issues/12?receipt_nonce=%s\n' \
+  "${RECEIPT_NONCE}" |
   CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=100 RESERVE_CMD="${TEST_ROOT}/reserve.sh" \
   RESOLVE_REPO_CMD="${TEST_ROOT}/resolve.sh" bash "${STOP_CMD}")"
 jq -e '
@@ -89,6 +99,7 @@ jq -e '
   and [.cleanup_actions[].target] == ["agent:req_executor:child-12","agent:req_executor:child-13"]
   and .runtime_labels == ["issue-group-project-12"]
 ' <<<"${output}" >/dev/null
+[ "$(jq -r '.public_result.stop_id' <<<"${output}")" = "${EXPECTED_STOP_ID}" ]
 jq -e '
   .batch_order == ["batch-other"] and .round_robin_cursor == null
   and (.active_jobs | keys) == ["other-job"]
@@ -108,6 +119,24 @@ jq -e '
 [ -f "${SCHEDULER_ROOT}/mission_stop_archive/$(jq -r '.public_result.stop_id' <<<"${output}")/launch_actions/target.json" ]
 [ -f "${SCHEDULER_ROOT}/mission_stop_archive/$(jq -r '.public_result.stop_id' <<<"${output}")/callback_outbox/target-event.json" ]
 [ -f "${SCHEDULER_ROOT}/callback_outbox/other-event.json" ]
+[ -f "${SCHEDULER_ROOT}/mission_stop_archive/${EXPECTED_STOP_ID}/envelope.json" ]
+
+receipt="$(CONFIG_DIR="${CONFIG_DIR}" STOP_ID="${EXPECTED_STOP_ID}" \
+  bash "${EMIT_CMD}")"
+[ "$(jq -cS . <<<"${receipt}")" = "$(jq -cS '.public_result' <<<"${output}")" ]
+
+# Replaying the same private nonce returns the durable envelope so the
+# orchestrator can safely repeat best-effort runtime cleanup.
+replay="$(printf '/mission-stop group/project?receipt_nonce=%s\n' "${RECEIPT_NONCE}" |
+  CONFIG_DIR="${CONFIG_DIR}" NOW_EPOCH=999 RESERVE_CMD="${TEST_ROOT}/reserve.sh" \
+  RESOLVE_REPO_CMD="${TEST_ROOT}/resolve.sh" bash "${STOP_CMD}")"
+[ "$(jq -cS . <<<"${replay}")" = "$(jq -cS . <<<"${output}")" ]
+
+invalid_nonce="$(printf '/mission-stop group/project?receipt_nonce=bad\n' |
+  CONFIG_DIR="${CONFIG_DIR}" RESERVE_CMD="${TEST_ROOT}/reserve.sh" \
+  RESOLVE_REPO_CMD="${TEST_ROOT}/resolve.sh" bash "${STOP_CMD}")"
+jq -e '.status == "failed" and (.reason | contains("nonce"))' \
+  <<<"${invalid_nonce}" >/dev/null
 
 # The path form is accepted and a repeat is a successful no-op.
 repeat="$(printf '/mission-stop group/project\n' |

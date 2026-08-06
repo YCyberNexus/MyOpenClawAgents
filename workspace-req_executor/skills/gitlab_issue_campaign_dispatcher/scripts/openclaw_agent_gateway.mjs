@@ -1,6 +1,10 @@
 import fs from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import {
+  captureSessionCursor,
+  waitForLastExecToolJson,
+} from "./openclaw_strict_json_receipt.mjs";
 
 function fail(message, code = 1) { process.stderr.write(`openclaw_agent_gateway: ${message}\n`); process.exit(code); }
 async function readStdin() { const chunks = []; for await (const chunk of process.stdin) chunks.push(chunk); return Buffer.concat(chunks).toString("utf8"); }
@@ -36,12 +40,17 @@ async function loadCallGateway(packageRoot) {
 }
 let request;
 try { request = JSON.parse(await readStdin()); } catch { fail("request must be one JSON object", 64); }
-const expectedKeys = ["message", "openclaw_bin_path", "run_id", "session_key", "target_agent", "timeout_seconds"];
+const expectedKeys = ["message", "openclaw_bin_path", "openclaw_state_dir", "run_id", "session_key", "strict_json_receipt", "target_agent", "timeout_seconds"];
 if (!request || typeof request !== "object" || Array.isArray(request) || JSON.stringify(Object.keys(request).sort()) !== JSON.stringify(expectedKeys)) fail("request has an invalid shape", 64);
-for (const key of ["message", "openclaw_bin_path", "run_id", "session_key", "target_agent"]) if (typeof request[key] !== "string" || request[key].length === 0) fail(`request field ${key} is invalid`, 64);
+for (const key of ["message", "openclaw_bin_path", "openclaw_state_dir", "run_id", "session_key", "target_agent"]) if (typeof request[key] !== "string" || request[key].length === 0) fail(`request field ${key} is invalid`, 64);
+if (!path.isAbsolute(request.openclaw_state_dir)) fail("request OpenClaw state directory must be absolute", 64);
+if (typeof request.strict_json_receipt !== "boolean") fail("request strict JSON receipt flag is invalid", 64);
 if (!Number.isSafeInteger(request.timeout_seconds) || request.timeout_seconds <= 0) fail("request timeout is invalid", 64);
 if (!request.session_key.startsWith(`agent:${request.target_agent}:`)) fail("session key does not belong to target agent", 65);
 const callGateway = await loadCallGateway(findPackageRoot(request.openclaw_bin_path));
+const receiptCursor = request.strict_json_receipt
+  ? captureSessionCursor({stateDir:request.openclaw_state_dir,targetAgent:request.target_agent,sessionKey:request.session_key})
+  : null;
 let response;
 try {
   response = await callGateway({method:"agent",params:{message:request.message,agentId:request.target_agent,sessionKey:request.session_key,timeout:request.timeout_seconds,idempotencyKey:request.run_id},expectFinal:true,timeoutMs:Math.max(10000,(request.timeout_seconds+30)*1000),clientName:"cli",mode:"cli"});
@@ -49,13 +58,19 @@ try {
   const kind = error && typeof error === "object" && error.constructor?.name ? error.constructor.name : "GatewayError";
   fail(`local Gateway request failed (${kind})`, 69);
 }
-const payloads = response?.result?.payloads;
-if (Array.isArray(payloads) && payloads.length > 0) {
+function renderResponse(value) {
+  const payloads = value?.result?.payloads;
+  if (!Array.isArray(payloads) || payloads.length === 0) return typeof value?.summary === "string" ? value.summary : "";
   const lines = [];
   for (const payload of payloads) {
     if (typeof payload?.text === "string" && payload.text.length > 0) lines.push(payload.text.trimEnd());
     const media = Array.isArray(payload?.mediaUrls) ? payload.mediaUrls : (typeof payload?.mediaUrl === "string" ? [payload.mediaUrl] : []);
     for (const item of media) lines.push(`MEDIA:${item}`);
   }
-  process.stdout.write(lines.join("\n"));
-} else if (typeof response?.summary === "string") process.stdout.write(response.summary);
+  return lines.join("\n");
+}
+if (request.strict_json_receipt) {
+  const receipt = await waitForLastExecToolJson({stateDir:request.openclaw_state_dir,targetAgent:request.target_agent,sessionKey:request.session_key,cursor:receiptCursor});
+  if (receipt === null) fail("strict JSON receipt was not emitted by an exec tool", 70);
+  process.stdout.write(receipt);
+} else process.stdout.write(renderResponse(response));

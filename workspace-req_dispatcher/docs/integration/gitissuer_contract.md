@@ -1,6 +1,6 @@
 # git_issuer I/O 契约
 
-> 状态：**req_dispatcher 侧最小依赖已定**。蓝区 `git_issuer` 是 104 OpenClaw 上的 agent（"根据需求构建 GitLab issue"）。本机 `workspace-git_issuer` 仅作测试工件，不作为蓝区行为依据。req_dispatcher 通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer`，并只依赖它最后一行输出的紧凑 JSON。
+> 状态：**req_dispatcher 侧最小依赖已定**。蓝区 `git_issuer` 是 104 OpenClaw 上的 agent（"根据需求构建 GitLab issue"）。本机 `workspace-git_issuer` 仅作测试工件，不作为蓝区行为依据。req_dispatcher 通过 `scripts/run_agent_turn.sh` 调用蓝区 `git_issuer`，并只依赖本轮成功 `exec` toolResult 中固定 formatter 产生的唯一 JSON；不再依赖模型最终回复是否逐字照抄。
 >
 > prompt 路由模式下，req_dispatcher **不依赖 git_issuer 写 `req_origin` 标记 note，也不依赖 git_issuer 通知用户**。origin 由 req_dispatcher 在接入路径自己 capture 并全程随 pending 携带，建 issue 成功/失败由 req_dispatcher 推回用户。req_dispatcher 会先把 114/WebUI 文本整理成带 `repo=<group/project>` 的 `git_issuer_payload`，但只复用 `git_issuer` 最后一行 JSON 里的 `project` / `issue_iid`(=iid) / `issue_url` 作为 issue 事实。只有用户明确要求执行时，req_dispatcher 才据此 route 到 req_executor 并调用 `RUN_SINGLE_ISSUE {project, iid, ...}`。
 >
@@ -13,7 +13,7 @@ req_dispatcher 对蓝区 git_issuer 的硬依赖是：
 1. **接受一段自由文本需求**作为输入。req_dispatcher 通过 `run_agent_turn.sh` 的安全 stdin 传输层发送需求原文；正文不会进入 `openclaw agent` 的命令行参数。
 2. **从 req_dispatcher 准备后的文本解析并校验目标 project/group**。新 payload 会显式包含 `repo=<group/project>`；git_issuer 仍应按自身配置校验项目，不能因为 req_dispatcher 提供了 repo 行就绕过项目白名单。
 3. **建好 GitLab issue 后，不应让只建单请求被 executor cron 自动捞起**。若 git_issuer 仍按旧配置添加执行器入口标签（如 `todo`/`new`），部署侧必须确保 req_executor cron 不会绕过 req_dispatcher 的新动作判定；显式执行由 req_dispatcher 的 `RUN_SINGLE_ISSUE` driven 路径负责。
-4. **最后一行输出终态 JSON**：成功/失败，成功时带 `project`、issue IID 与 URL，失败时带原因。
+4. **固定 formatter 输出终态 JSON**：成功/失败，成功时带 `project`、issue IID 与 URL，失败时带原因。该 formatter 必须是本轮最后一个产生有效唯一 JSON 的成功 `exec` 工具调用。
 
 ## 蓝区 git_issuer 输出清单
 
@@ -25,7 +25,7 @@ req_dispatcher 对蓝区 git_issuer 的硬依赖是：
 
 ## 回传消息模板（git_issuer 完成回调的终态输出）
 
-git_issuer 建完 issue 后，在它**最后一轮的最后一行**只输出**一行紧凑 JSON**（无散文、无代码围栏、无日志）。`run_agent_turn.sh` 会解析目标 agent 输出中的最后一行 JSON，并把它放进 envelope 的 `worker_result_json` 字段。
+git_issuer 建完 issue 后必须调用固定 formatter。`run_agent_turn.sh` 在目标 session 锁内读取本轮新增 transcript，只接受成功 `exec` toolResult 中唯一的 compact 或单围栏 JSON object，并把它放进 envelope 的 `worker_result_json` 字段。模型随后即使输出中文总结，也不能覆盖这份回执。
 
 **成功**（实际就输出这一行）：
 
@@ -54,7 +54,7 @@ git_issuer 建完 issue 后，在它**最后一轮的最后一行**只输出**�
 ### 两条约定
 
 1. **匹配不靠这个 JSON**：req_dispatcher 用 `run_agent_turn.sh` envelope 的 `run_id` 做审计键。本 JSON 只承载"issue 事实"；git_issuer **不需要知道也不需要回显 `run_id`**。
-2. **只输出最后一行那一条**：运行过程的日志/散文随意，但最后一轮的最后一行必须只有这一行紧凑 JSON，`run_agent_turn.sh` 才能干净捕获。
+2. **固定 formatter 只产生一条 JSON**：同一个 toolResult 内不得出现两个不同 JSON object；否则该工具结果不具备唯一回执资格，调用失败关闭。
 
 ## 不依赖项（明确）
 

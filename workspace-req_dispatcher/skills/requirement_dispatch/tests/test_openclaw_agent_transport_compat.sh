@@ -106,6 +106,33 @@ if [ "$(cat "${MODERN_STDIN}")" != "$(printf 'modern message\n%s' "${NONCE}")" ]
   exit 1
 fi
 
+# Structured calls must bypass even a safe modern CLI so the helper can hold
+# the session lock across transcript cursor capture and deterministic receipt
+# extraction.
+: >"${MODERN_ARGS}"
+strict_output="$(
+  printf 'strict message\n%s' "${NONCE}" | env \
+    OPENCLAW_BIN="${MODERN_BIN}" \
+    MODERN_ARGS="${MODERN_ARGS}" \
+    OPENCLAW_GATEWAY_HELPER_BIN="${HELPER_BIN}" \
+    HELPER_REQUEST="${HELPER_REQUEST}" \
+    HELPER_COUNT="${HELPER_COUNT}" \
+    OPENCLAW_STATE_DIR="${STATE_DIR}" \
+    OPENCLAW_STRICT_JSON_RECEIPT=1 \
+    OPENCLAW_TARGET_AGENT=req_executor \
+    OPENCLAW_TARGET_SESSION_KEY=agent:req_executor:main \
+    OPENCLAW_AGENT_TIMEOUT_SECONDS=45 \
+    OPENCLAW_RUN_ID=strict-1 \
+    "${TRANSPORT}"
+)"
+if [ "${strict_output}" != '{"status":"accepted"}' ] \
+    || [ -s "${MODERN_ARGS}" ] \
+    || [ "$(jq -r '.strict_json_receipt' "${HELPER_REQUEST}")" != true ] \
+    || [ "$(jq -r '.openclaw_state_dir' "${HELPER_REQUEST}")" != "${STATE_DIR}" ]; then
+  echo "strict transport did not force the transcript-aware Gateway helper" >&2
+  exit 1
+fi
+
 # A remote-only target must bypass even a modern local CLI. Otherwise the CLI
 # may reject the agent against its local registry or fall back to embedded mode.
 : >"${MODERN_ARGS}"
@@ -152,6 +179,7 @@ v4_output="$(
 )"
 if [ "${v4_output}" != '{"status":"accepted"}' ] \
     || [ "$(jq -r '.openclaw_state_dir' "${HELPER_REQUEST}")" != "${STATE_DIR}" ] \
+    || [ "$(jq -r '.strict_json_receipt' "${HELPER_REQUEST}")" != false ] \
     || jq -e 'has("openclaw_bin_path")' "${HELPER_REQUEST}" >/dev/null \
     || [ "$(jq -r '.target_agent' "${HELPER_REQUEST}")" != zhujiaye ] \
     || [ "$(jq -r '.run_id' "${HELPER_REQUEST}")" != forced-v4-1 ] \

@@ -7,18 +7,17 @@ WRAPPER="${SKILL_DIR}/scripts/stop_repository_mission.sh"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/req-dispatcher-mission-stop.XXXXXX")"
 CONFIG_DIR="${TEST_ROOT}/config"
 STATE_ROOT="${TEST_ROOT}/state"
+EXECUTOR_ROOT="${TEST_ROOT}/executor-scheduler"
 CAPTURE="${TEST_ROOT}/capture.json"
 FAKE_TURN="${TEST_ROOT}/run-agent-turn.sh"
-mkdir -p "${CONFIG_DIR}" "${STATE_ROOT}/_dispatcher"
+mkdir -p "${CONFIG_DIR}" "${STATE_ROOT}/_dispatcher" "${EXECUTOR_ROOT}"
 
 cat >"${CONFIG_DIR}/dispatcher.env" <<EOF
 STATE_ROOT=${STATE_ROOT}
 DEFAULT_EXECUTOR_AGENT=req_executor
 ROUTING_FILE=
-GITLAB_HOST=gitlab.example.test
-GITLAB_API_PROTOCOL=https
-GITLAB_TOKEN=test-token
-WIKI_GITLAB_HOST=wiki.example.test
+EXECUTOR_SCHEDULER_STATE_FILE=${EXECUTOR_ROOT}/scheduler_state.json
+WIKI_GITLAB_HOST=gitlab.example.test
 WIKI_GITLAB_API_PROTOCOL=https
 WIKI_GITLAB_TOKEN=wiki-token
 EOF
@@ -28,14 +27,42 @@ set -euo pipefail
 jq -cn --arg target_agent "${TARGET_AGENT:-}" \
   --arg message "${MESSAGE:-}" \
   '{target_agent:$target_agent,message:$message}' >"${CAPTURE}"
-jq -cn '{
-  status:"success",exit_code:0,
-  worker_result_json:{
-    status:"success",project:"group/project",stop_id:"mission-stop-100-abc",
-    stopped_batch_ids:["batch-executor"],stopped_job_count:2,
-    stopped_issue_iids:[12,13],cleanup_requested_count:2
-  }
-}'
+nonce="${MESSAGE##*receipt_nonce=}"
+[[ "${nonce}" =~ ^[0-9a-f]{64}$ ]]
+if command -v sha256sum >/dev/null 2>&1; then
+  nonce_digest="$(printf '%s' "${nonce}" | sha256sum | awk '{print $1}')"
+else
+  nonce_digest="$(printf '%s' "${nonce}" | shasum -a 256 | awk '{print $1}')"
+fi
+[[ "${nonce_digest}" =~ ^[0-9a-f]{64}$ ]]
+stop_id="mission-stop-receipt-${nonce_digest}"
+result="$(jq -cnS --arg stop_id "${stop_id}" '{
+  status:"success",project:"group/project",stop_id:$stop_id,
+  stopped_batch_ids:["batch-executor"],stopped_job_count:2,
+  stopped_issue_iids:[12,13],cleanup_requested_count:2
+}')"
+case "${FAKE_TURN_MODE:-durable_prose}" in
+  durable_prose)
+    receipt_dir="${EXECUTOR_SCHEDULER_STATE_FILE%/*}/mission_stop_archive/${stop_id}"
+    mkdir -p "${receipt_dir}"
+    printf '%s\n' "${result}" >"${receipt_dir}/result.json"
+    jq -cn '{status:"failed",exit_code:70,worker_result_json:null,raw_output:"执行成功，但模型返回了中文总结"}'
+    ;;
+  conflict)
+    receipt_dir="${EXECUTOR_SCHEDULER_STATE_FILE%/*}/mission_stop_archive/${stop_id}"
+    mkdir -p "${receipt_dir}"
+    printf '%s\n' "${result}" >"${receipt_dir}/result.json"
+    jq -cn --argjson result "${result}" '{
+      status:"success",exit_code:0,
+      worker_result_json:($result | .cleanup_requested_count = 3)
+    }'
+    ;;
+  direct)
+    jq -cn --argjson result "${result}" \
+      '{status:"success",exit_code:0,worker_result_json:$result}'
+    ;;
+  *) exit 91 ;;
+esac
 EOF
 chmod +x "${FAKE_TURN}"
 
@@ -67,8 +94,21 @@ jq -e '
   and .cleared_pending_count == 2
   and .cleared_notification_count == 1
 ' <<<"${output}" >/dev/null
-jq -e '.target_agent == "req_executor" and .message == "/mission-stop group/project"' \
-  "${CAPTURE}" >/dev/null
+if jq -e '.target_agent == "req_executor" and .message == "/mission-stop group/project"' \
+    "${CAPTURE}" >/dev/null 2>&1; then
+  echo "dispatcher omitted the private mission stop receipt nonce" >&2
+  exit 1
+fi
+captured_message="$(jq -r '.message' "${CAPTURE}")"
+[[ "${captured_message}" =~ ^/mission-stop\ group/project\?receipt_nonce=([0-9a-f]{64})$ ]]
+receipt_nonce="${BASH_REMATCH[1]}"
+if command -v sha256sum >/dev/null 2>&1; then
+  receipt_digest="$(printf '%s' "${receipt_nonce}" | sha256sum | awk '{print $1}')"
+else
+  receipt_digest="$(printf '%s' "${receipt_nonce}" | shasum -a 256 | awk '{print $1}')"
+fi
+[[ "${receipt_digest}" =~ ^[0-9a-f]{64}$ ]]
+[ "$(jq -r '.stop_id' <<<"${output}")" = "mission-stop-receipt-${receipt_digest}" ]
 jq -e '.requests == []' "${STATE_ROOT}/_dispatcher/executor_batch_outbox.json" >/dev/null
 jq -e '.batches["batch-outbox"].status == "failed" and .batches["batch-other"].status == "running"' \
   "${STATE_ROOT}/_dispatcher/executor_batches.json" >/dev/null
@@ -78,7 +118,13 @@ jq -e '(.pending | keys | sort) == ["run-other"]' \
   "${STATE_ROOT}/_dispatcher/pending.json" >/dev/null
 jq -e '[.notifications[].event_id] == ["keep"]' \
   "${STATE_ROOT}/_dispatcher/executor_batch_notifications.json" >/dev/null
-[ -f "${STATE_ROOT}/_dispatcher/mission_stop_archive/mission-stop-100-abc.json" ]
+[ -f "${STATE_ROOT}/_dispatcher/mission_stop_archive/mission-stop-receipt-${receipt_digest}.json" ]
+
+conflict="$(MESSAGE='/mission-stop group/project' \
+  DISPATCHER_CONFIG_DIR="${CONFIG_DIR}" RUN_AGENT_TURN_CMD="${FAKE_TURN}" \
+  FAKE_TURN_MODE=conflict CAPTURE="${CAPTURE}" bash "${WRAPPER}")"
+jq -e '.status == "failed" and (.reason | contains("direct and durable"))' \
+  <<<"${conflict}" >/dev/null
 
 capture_before="$(jq -cS . "${CAPTURE}")"
 invalid="$(MESSAGE='/mission-stop https://evil.example/group/project' \
