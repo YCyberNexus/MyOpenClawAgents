@@ -127,6 +127,25 @@ grep -Fq '"${TIMEOUT_EXECUTABLE}" --kill-after=30s "${ACPX_TIMEOUT_SECONDS}s"' \
   "${RUN_SCRIPT}" \
   || fail "run_acpx_attempt.sh no longer uses its pinned timeout executable"
 
+for dependency_launch_gate in \
+  'DEPENDENCY_BASE_SHA' \
+  'CLAUDE_AGENT_ACP' \
+  'CLAUDE_CAPABILITY_PROBE' \
+  'ACPX_EMPTY_MCP' \
+  ' --help' \
+  ' --agent' \
+  '--mcp-config' \
+  '--approve-all' \
+  '--non-interactive-permissions'
+do
+  if grep -Fq -- "${dependency_launch_gate}" "${RUN_SCRIPT}"; then
+    fail "dependency-only Claude launch gate remains: ${dependency_launch_gate}"
+  fi
+done
+if [ "$(grep -Fc 'acpx_command=(' "${RUN_SCRIPT}")" -ne 1 ]; then
+  fail "run_acpx_attempt.sh must construct exactly one ACPX launch command"
+fi
+
 for old_inner_term in \
   "Hu""lat materials" \
   "Knowledge base:" \

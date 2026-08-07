@@ -155,6 +155,9 @@ ACPX_TIMEOUT_SECONDS={ACPX_TIMEOUT_SECONDS}
   `CLAUDE_CODE_EXECUTABLE` to `/home/claw/.local/bin/claude`, forces
   `CLAUDE_CODE_FORK_SUBAGENT=1`, and defaults
   `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` for the inner Claude Code process.
+  Ordinary and dependency attempts use this same launch path; dependency
+  correctness is enforced by the frozen Git base/parent/lease contract, not by
+  a second Claude capability or adapter preflight.
 - The wrapper applies bounded timeouts to every post-acpx Git/GitLab step.
   Staging-time execution logs are committed with the business changes on the
   Issue branch. After atomically writing `{LOG_DIR}/worker_result.json`, it

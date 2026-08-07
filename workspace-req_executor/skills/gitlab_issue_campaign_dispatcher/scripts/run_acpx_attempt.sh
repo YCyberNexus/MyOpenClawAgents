@@ -136,15 +136,9 @@ sanitize_runtime_path() {
 
 : "${ISSUE_IID:?run_acpx_attempt.sh: ISSUE_IID must be set}"
 : "${EXECUTION_ID:?run_acpx_attempt.sh: EXECUTION_ID must be set}"
-DEPENDENCY_BASE_SHA="${DEPENDENCY_BASE_SHA:-}"
 CLAUDE_CODE_SAFE_MODE_EFFECTIVE="${CLAUDE_CODE_SAFE_MODE:-}"
 CLAUDE_CODE_EXECUTABLE_EFFECTIVE="${CLAUDE_CODE_EXECUTABLE:-/home/claw/.local/bin/claude}"
 CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE=1
-CLAUDE_CAPABILITY_PROBE_TIMEOUT_SECONDS=15
-CLAUDE_AGENT_ACP_ROOT_EFFECTIVE="${CLAUDE_AGENT_ACP_ROOT:-}"
-CLAUDE_AGENT_ACP_PINNED_VERSION=0.37.0
-CLAUDE_AGENT_ACP_EXECUTABLE=""
-ACPX_EMPTY_MCP_CONFIG="${SCRIPT_DIR}/../references/acpx_empty_mcp.json"
 
 if [ ! -d "${REPO_PATH}/.git" ]; then
   echo "run_acpx_attempt.sh: REPO_PATH is not a git checkout: ${REPO_PATH}" >&2
@@ -194,87 +188,6 @@ case "${CLAUDE_CODE_EXECUTABLE_CANONICAL}/" in
     exit 2
     ;;
 esac
-
-if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-  # A dependency commit is business input, not a project policy source. Claude
-  # safe mode disables project/local CLAUDE memory, hooks, MCP, plugins and
-  # related customizations, including transitive commands referenced by an
-  # otherwise trusted settings file. Authentication and model selection remain
-  # available, so user-provider credentials still work through acpx.
-  CLAUDE_CODE_SAFE_MODE_EFFECTIVE=1
-
-  # acpx's Claude ACP adapter may bundle an older Claude Code binary that
-  # silently ignores CLAUDE_CODE_SAFE_MODE. Both ordinary and dependency runs
-  # bind the adapter to /home/claw/.local/bin/claude by default; dependency
-  # attempts additionally verify the selected executable's actual safe-mode
-  # capability before any model process starts. The outer executor runs under
-  # a PTY while GNU timeout owns a separate process group. Keep this
-  # non-interactive probe off that PTY's stdin so it cannot receive SIGTTIN,
-  # and bound it independently so startup can never consume the full acpx cap.
-  set +e
-  claude_help="$(env \
-    -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
-    -u GLAB_TOKEN -u GITLAB_PRIVATE_TOKEN -u PRIVATE_TOKEN \
-    -u OAUTH_TOKEN -u CI_JOB_TOKEN -u JOB_TOKEN -u WIKI_GITLAB_TOKEN \
-    CLAUDE_CODE_SAFE_MODE=1 \
-    "${TIMEOUT_EXECUTABLE}" --kill-after=2s \
-      "${CLAUDE_CAPABILITY_PROBE_TIMEOUT_SECONDS}s" \
-      "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" --help </dev/null 2>&1)"
-  claude_help_rc=$?
-  set -e
-  if [ "${claude_help_rc}" -eq 124 ] || [ "${claude_help_rc}" -eq 137 ]; then
-    echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE --help capability probe exceeded ${CLAUDE_CAPABILITY_PROBE_TIMEOUT_SECONDS}s" >&2
-    exit 2
-  fi
-  if [ "${claude_help_rc}" -ne 0 ] \
-      || ! grep -Eq '(^|[[:space:]])--safe-mode([=,[:space:]]|$)' \
-        <<<"${claude_help}"; then
-    echo "run_acpx_attempt.sh: CLAUDE_CODE_EXECUTABLE does not support --safe-mode" >&2
-    exit 2
-  fi
-
-  # Never let acpx resolve its Claude adapter through the dependency checkout.
-  # Otherwise a dependency-owned .acpxrc.json can replace the command and a
-  # dependency-owned .npmrc can steer acpx's npm-exec fallback. Require one
-  # exact preinstalled package outside the repository and pass its executable
-  # through acpx's CLI override, which wins over project configuration.
-  if [ -z "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" ] \
-      || [[ "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" != /* ]] \
-      || [ ! -d "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" ]; then
-    echo "run_acpx_attempt.sh: dependency attempts require an absolute preinstalled CLAUDE_AGENT_ACP_ROOT" >&2
-    exit 2
-  fi
-  CLAUDE_AGENT_ACP_ROOT_EFFECTIVE="$(
-    cd "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}" && pwd -P
-  )"
-  case "${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}/" in
-    "${canonical_repo_path}/"*)
-      echo "run_acpx_attempt.sh: CLAUDE_AGENT_ACP_ROOT must be outside REPO_PATH" >&2
-      exit 2
-      ;;
-  esac
-  adapter_manifest="${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}/package.json"
-  CLAUDE_AGENT_ACP_EXECUTABLE="${CLAUDE_AGENT_ACP_ROOT_EFFECTIVE}/dist/index.js"
-  if [ ! -f "${adapter_manifest}" ] || [ -L "${adapter_manifest}" ] \
-      || [ ! -f "${CLAUDE_AGENT_ACP_EXECUTABLE}" ] \
-      || [ -L "${CLAUDE_AGENT_ACP_EXECUTABLE}" ] \
-      || [ ! -x "${CLAUDE_AGENT_ACP_EXECUTABLE}" ] \
-      || ! jq -e --arg version "${CLAUDE_AGENT_ACP_PINNED_VERSION}" '
-        .name == "@agentclientprotocol/claude-agent-acp"
-        and .version == $version
-        and .bin["claude-agent-acp"] == "dist/index.js"
-      ' "${adapter_manifest}" >/dev/null 2>&1; then
-    echo "run_acpx_attempt.sh: CLAUDE_AGENT_ACP_ROOT is not the pinned claude-agent-acp package" >&2
-    exit 2
-  fi
-  if [ ! -f "${ACPX_EMPTY_MCP_CONFIG}" ] \
-      || [ -L "${ACPX_EMPTY_MCP_CONFIG}" ] \
-      || ! jq -e 'keys == ["mcpServers"] and .mcpServers == []' \
-        "${ACPX_EMPTY_MCP_CONFIG}" >/dev/null 2>&1; then
-    echo "run_acpx_attempt.sh: trusted empty ACPx MCP configuration is unavailable" >&2
-    exit 2
-  fi
-fi
 
 # Wall-clock cap; defaults to 3600s (1h) to match acpx_timeout_seconds.
 ACPX_TIMEOUT_SECONDS="${ACPX_TIMEOUT_SECONDS:-3600}"
@@ -334,26 +247,13 @@ done
   printf 'CLAUDE_CODE_FORK_SUBAGENT=%s\n' "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}"
   printf 'ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s\n' "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
   printf 'CLAUDE_CODE_SAFE_MODE=%s\n' "${CLAUDE_CODE_SAFE_MODE_EFFECTIVE}"
-  if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-    printf 'CLAUDE_AGENT_ACP_EXECUTABLE=%s\n' "${CLAUDE_AGENT_ACP_EXECUTABLE}"
-  fi
   printf 'timeout=%ss (kill-after=30s)\n' "${ACPX_TIMEOUT_SECONDS}"
-  if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-    printf 'command=CLAUDE_CODE_EXECUTABLE=%s CLAUDE_CODE_FORK_SUBAGENT=%s ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --agent %s --mcp-config %s --approve-all --non-interactive-permissions deny --auth-policy skip exec -f %s\n' \
-      "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" \
-      "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}" \
-      "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
-      "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
-      "${ACPX_EXECUTABLE}" "${CLAUDE_AGENT_ACP_EXECUTABLE}" \
-      "${ACPX_EMPTY_MCP_CONFIG}" "${prompt_file}"
-  else
-    printf 'command=CLAUDE_CODE_EXECUTABLE=%s CLAUDE_CODE_FORK_SUBAGENT=%s ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --auth-policy skip claude exec -f %s\n' \
-      "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" \
-      "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}" \
-      "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
-      "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
-      "${ACPX_EXECUTABLE}" "${prompt_file}"
-  fi
+  printf 'command=CLAUDE_CODE_EXECUTABLE=%s CLAUDE_CODE_FORK_SUBAGENT=%s ACPX_CLAUDE_INCLUDE_USER_SETTINGS=%s %s --kill-after=30s %ss %s --auth-policy skip claude exec -f %s\n' \
+    "${CLAUDE_CODE_EXECUTABLE_EFFECTIVE}" \
+    "${CLAUDE_CODE_FORK_SUBAGENT_EFFECTIVE}" \
+    "${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}" \
+    "${TIMEOUT_EXECUTABLE}" "${ACPX_TIMEOUT_SECONDS}" \
+    "${ACPX_EXECUTABLE}" "${prompt_file}"
 } > "${LOG_DIR}/acpx_command.txt"
 
 cd "${WORKTREE_DIR}"
@@ -418,18 +318,9 @@ acpx_runtime_env=(
   "ACPX_CLAUDE_INCLUDE_USER_SETTINGS=${ACPX_CLAUDE_INCLUDE_USER_SETTINGS}"
   "CLAUDE_CODE_SAFE_MODE=${CLAUDE_CODE_SAFE_MODE_EFFECTIVE}"
 )
-if [ -n "${DEPENDENCY_BASE_SHA}" ]; then
-  acpx_command=(
-    "${ACPX_EXECUTABLE}" --agent "${CLAUDE_AGENT_ACP_EXECUTABLE}"
-    --mcp-config "${ACPX_EMPTY_MCP_CONFIG}"
-    --approve-all --non-interactive-permissions deny
-    --auth-policy skip exec -f "${prompt_file}"
-  )
-else
-  acpx_command=(
-    "${ACPX_EXECUTABLE}" --auth-policy skip claude exec -f "${prompt_file}"
-  )
-fi
+acpx_command=(
+  "${ACPX_EXECUTABLE}" --auth-policy skip claude exec -f "${prompt_file}"
+)
 env -u GITLAB_TOKEN -u GITLAB_ACCESS_TOKEN -u GITLAB_OAUTH_TOKEN \
   -u GLAB_TOKEN -u GITLAB_PRIVATE_TOKEN -u PRIVATE_TOKEN \
   -u OAUTH_TOKEN -u CI_JOB_TOKEN -u JOB_TOKEN -u WIKI_GITLAB_TOKEN \

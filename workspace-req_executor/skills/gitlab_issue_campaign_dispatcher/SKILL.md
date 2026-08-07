@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-08-06.4] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-08-07.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -180,13 +180,13 @@ filter attributes. Fetches use explicit full refspecs with an empty refmap, and
 commit/tree/ancestry/materialization reads disable Git replace objects. Every
 acpx run defaults `CLAUDE_CODE_EXECUTABLE` to the repository-external
 `/home/claw/.local/bin/claude` and forces `CLAUDE_CODE_FORK_SUBAGENT=1` plus
-`ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`. Dependency attempts additionally require
-that selected Claude Code executable to support `--safe-mode`; the capability
-probe has null stdin and a fixed 15-second cap. They also require the exact external
-`@agentclientprotocol/claude-agent-acp` 0.37.0 package at
-`CLAUDE_AGENT_ACP_ROOT`. The fixed adapter, empty MCP config, safe mode, and
-permission flags narrow the launch path but do not create an OS sandbox;
-ordinary business scripts still run with the executor UID's authority.
+`ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`. Ordinary and dependency attempts use
+the exact same `acpx --auth-policy skip claude exec -f` launch path. A dependency
+never adds a Claude `--help` probe, a separately pinned ACP adapter, an empty MCP
+file, or dependency-only ACPX permission flags. Dependency correctness remains
+at the Git contract boundary: frozen prerequisite SHA, exact materialized base,
+single expected commit parent, branch identity, and push lease. Business scripts
+still run with the executor UID's authority; this is not an OS sandbox.
 
 `continue` may resume only an exact remote DAG/legacy tip or IID-local attempt
 ref whose SHA and complete persisted contract identity match durable state.

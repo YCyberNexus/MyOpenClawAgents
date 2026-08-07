@@ -153,22 +153,16 @@ clean/smudge/process 命令的 `filter` attributes。固定 wrapper 的 fetch �
 所有 attempt 都把 `CLAUDE_CODE_EXECUTABLE` 默认固定为服务器路径
 `/home/claw/.local/bin/claude`，并强制设置 `CLAUDE_CODE_FORK_SUBAGENT=1` 和
 `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1`。本地测试如需替换 Claude Code 路径，只能通过进程环境或
-ignored `*.local.env` 覆盖，不能修改 tracked 蓝区默认值。依赖 attempt 还要求该可执行文件的实际
-`--help` 支持 `--safe-mode`；该能力探针固定从 `/dev/null` 读取 stdin，并有独立 15 秒上限，避免
-PTY 后台进程组收到 `SIGTTIN` 或把启动检查拖到整个 ACPX 上限。依赖 attempt 同时要求 executor 进程提供
-`CLAUDE_AGENT_ACP_ROOT`，指向仓库外预安装的
-`@agentclientprotocol/claude-agent-acp` `0.37.0` 包根目录。wrapper 会显式使用固定 adapter、空 MCP
-配置、`CLAUDE_CODE_SAFE_MODE=1`、`--approve-all` 与
-`--non-interactive-permissions deny`，从而不让依赖提交中的 `.acpxrc.json`、`.npmrc`、Claude
-memory、hook、MCP 或 plugin 改写模型启动链。任一能力或固定包校验失败时，依赖 attempt 在 acpx
-启动前失败关闭。`CLAUDE_AGENT_ACP_ROOT` 和本地测试的 Claude Code 路径覆盖只能放入 executor
-进程环境或 ignored 本地 env，不能写入 tracked 蓝区配置。executor 的 `PATH` 还必须只包含绝对目录；wrapper 会在加载路径/鉴权 bootstrap 前拒绝
+ignored `*.local.env` 覆盖，不能修改 tracked 蓝区默认值。普通 Issue 与依赖 Issue 使用完全相同的
+`acpx --auth-policy skip claude exec -f` 启动路径；依赖执行不再增加 `claude --help` 能力探针、专用
+ACP adapter、空 MCP 配置或依赖专属权限参数。依赖关系只在 Git 合同边界执行：固定前置 SHA、精确
+物化基线、唯一预期父提交、工作分支身份与 push lease。executor 的 `PATH` 仍必须只包含绝对目录；wrapper 会在加载路径/鉴权 bootstrap 前拒绝
 相对项、目标仓库或 worktree 内目录，随后从剩余的仓库外路径固定解析实际 `timeout` 与 `acpx`
 可执行文件。
 
 该功能沿用 req_executor 现有的同 UID 仓库执行信任模型，并不把依赖业务代码变成安全沙箱。也就是
-说，固定 adapter、安全模式和空 MCP 配置会收窄模型启动入口，但不能阻止同一系统用户有权执行的
-业务脚本访问该用户本来就能访问的文件或进程。仅应在同一信任域内使用依赖 DAG。
+说，固定可执行文件与 PATH 约束不能阻止同一系统用户有权执行的业务脚本访问该用户本来就能访问
+的文件或进程。仅应在同一信任域内使用依赖 DAG。
 
 `iid_list` 的 `iids` 必须是至少两个升序去重的逗号分隔正整数，例如 `1,4,5`。I1 字段用于
 项目、selector、处理及合并策略与回调路由；executor 按进程环境优先、tracked

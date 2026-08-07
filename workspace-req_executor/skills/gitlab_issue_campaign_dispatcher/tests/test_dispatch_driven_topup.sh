@@ -755,6 +755,9 @@ for iid in 2 3 6; do
   grep -Fq "REPO_PARENT_PATH= REPO_PATH=${PROJECT_REPO} \\" \
     "${EXECUTOR_PAYLOAD_PATH}" \
     || fail "private executor payload for IID ${iid} did not bind the namespaced repo path"
+  if grep -Fq 'CLAUDE_AGENT_ACP_ROOT=' "${EXECUTOR_PAYLOAD_PATH}"; then
+    fail "private executor payload for IID ${iid} still contains a dependency-only adapter pin"
+  fi
   if [ "${iid}" -eq 3 ]; then
     grep -Fq 'AUTO_MERGE=true' "${EXECUTOR_PAYLOAD_PATH}" \
       || fail "automatic merge intent was not rendered for IID 3"
