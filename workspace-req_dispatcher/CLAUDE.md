@@ -27,7 +27,8 @@ dispatcher 是 prompt 路由器和 batch 控制面：
   `stop_repository_mission.sh`；由它路由对应 executor 并清理双方 durable 任务链。
 
 它不建 Issue、不改 GitLab、不跑 Issue、不查询 GitLab Issue、不展开 IID snapshot、不管理
-worktree/campaign/仓库级并发。wiki 是唯一只读 GitLab 入口。
+worktree/campaign/仓库级并发。只读 GitLab 入口只有 wiki 拉取，以及对 prompt 中显式数字
+project ID 执行一次固定的项目身份解析。
 
 iid_list 支持同一仓库中排序去重后的离散 IID；single/iid_list/range/open_unfinished/open_label
 都只处理 intake 时为 OPEN 的 Issue；snapshot 查询、过滤
@@ -39,6 +40,7 @@ LLM 不得拆开执行下面的内部链：
 
 ```text
 prepare_executor_issue_payload.sh
+  -> resolve_gitlab_project_id.sh（仅当原文含显式数字 project ID）
   -> route_project.sh
   -> build_executor_batch_payload.sh
   -> enqueue_executor_batch_request.sh

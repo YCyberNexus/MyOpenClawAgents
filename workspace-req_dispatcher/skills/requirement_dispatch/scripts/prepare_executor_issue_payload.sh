@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Prepare an existing GitLab issue execution request for req_executor.
 #
-# This helper does not call req_executor. It only strips transport wrappers,
-# extracts project/iid/branch from explicit issue locators, and returns the
-# normalized facts the orchestrator should route and enqueue.
+# This helper does not call req_executor. It strips transport wrappers,
+# resolves an explicit numeric project ID through one read-only GitLab identity
+# lookup when needed, and returns the normalized facts to route and enqueue.
 set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # POSIX awk may report byte offsets under the C locale while substr() applies
 # character offsets. Select an installed UTF-8 locale before parsing Chinese
@@ -147,6 +149,143 @@ is_trusted_gitlab_host() {
     [ "${host_lc}" = "${configured_lc}" ] && return 0
   done
   return 1
+}
+
+canonicalize_project_locator_host() {
+  local host="$1"
+  local port=""
+
+  host="${host#http://}"
+  host="${host#https://}"
+  while [ -n "${host}" ]; do
+    case "${host: -1}" in
+      "."|","|";"|"，"|"。"|"；") host="${host%?}" ;;
+      *) break ;;
+    esac
+  done
+  case "${host}" in
+    ""|*/*|*\?*|*\#*|*@*|*[[:space:]]*) return 1 ;;
+  esac
+  [[ "${host}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*(:[0-9]{1,5})?$ ]] || return 1
+  if [[ "${host}" == *:* ]]; then
+    port="${host##*:}"
+    if [ "${port}" -lt 1 ] || [ "${port}" -gt 65535 ]; then
+      return 1
+    fi
+  fi
+  printf '%s\n' "${host}" | tr '[:upper:]' '[:lower:]'
+}
+
+extract_project_ids() {
+  local text="$1"
+
+  printf '%s\n' "${text}" | awk '
+    function emit_id(value) {
+      sub(/^[^0-9]*/, "", value)
+      sub(/[^0-9].*$/, "", value)
+      if (value != "") print value
+    }
+    {
+      line = $0
+      while (match(line, /项目[[:space:]_-]*([Ii][Dd]|编号)[[:space:]]*[:=：#]?[[:space:]]*[0-9]+/)) {
+        emit_id(substr(line, RSTART, RLENGTH))
+        line = substr(line, RSTART + RLENGTH)
+      }
+      line = $0
+      while (match(line, /(([Gg][Ii][Tt][Ll][Aa][Bb][[:space:]_-]*)?[Pp][Rr][Oo][Jj][Ee][Cc][Tt][[:space:]_-]*[Ii][Dd])[[:space:]]*[:=：#]?[[:space:]]*[0-9]+/)) {
+        emit_id(substr(line, RSTART, RLENGTH))
+        line = substr(line, RSTART + RLENGTH)
+      }
+    }
+  ' | awk 'NF && !seen[$0]++'
+}
+
+extract_project_id_host_candidates() {
+  local text="$1"
+  local raw=""
+  local host=""
+  local host_lc=""
+  local explicitly_bound=false
+
+  while IFS= read -r raw; do
+    [ -n "${raw}" ] || continue
+    explicitly_bound=false
+    case "${raw}" in
+      __PROJECT_ID_HOST__*)
+        explicitly_bound=true
+        raw="${raw#__PROJECT_ID_HOST__}"
+        ;;
+    esac
+    if ! host="$(canonicalize_project_locator_host "${raw}")"; then
+      continue
+    fi
+    host_lc="$(printf '%s' "${host}" | tr '[:upper:]' '[:lower:]')"
+    if { [ "${explicitly_bound}" = true ] \
+          && [[ "${host_lc}" == *.* || "${host_lc}" == *:* ]]; } \
+        || is_trusted_gitlab_host "${host}" \
+        || [[ "${host_lc}" == *gitlab* \
+          && ( "${host_lc}" == *.* || "${host_lc}" == *:* ) ]] \
+        || [[ "${host_lc}" =~ ^[0-9]+(\.[0-9]+){3}(:[0-9]+)?$ ]] \
+        || [[ "${host_lc}" == localhost:* ]]; then
+      printf '%s\n' "${host}"
+    fi
+  done < <(
+    # These host scans are intentionally byte-oriented: matched host tokens and
+    # the normalized PROJECT_ID marker are ASCII, and C locale keeps
+    # match()/substr() offsets aligned when Chinese text precedes the locator.
+    printf '%s\n' "${text}" | LC_ALL=C awk '
+      {
+        line = $0
+        while (match(line, /[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/)) {
+          print substr(line, RSTART, RLENGTH)
+          line = substr(line, RSTART + RLENGTH)
+        }
+      }
+    '
+    printf '%s\n' "${text}" | LC_ALL=C awk '
+      {
+        normalized = $0
+        gsub(/项目[[:space:]_-]*([Ii][Dd]|编号)/, " PROJECT_ID ", normalized)
+        gsub(/(([Gg][Ii][Tt][Ll][Aa][Bb][[:space:]_-]*)?[Pp][Rr][Oo][Jj][Ee][Cc][Tt][[:space:]_-]*[Ii][Dd])/, " PROJECT_ID ", normalized)
+        gsub(/，/, ",", normalized)
+        gsub(/；/, ";", normalized)
+        gsub(/：/, ":", normalized)
+        line = normalized
+        while (match(line, /[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?[[:space:],;:]+PROJECT_ID/)) {
+          next_start = RSTART + RLENGTH
+          value = substr(line, RSTART, RLENGTH)
+          if (match(value, /^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/)) {
+            print "__PROJECT_ID_HOST__" substr(value, RSTART, RLENGTH)
+          }
+          line = substr(line, next_start)
+        }
+        line = normalized
+        while (match(line, /PROJECT_ID[[:space:]:=#]*[0-9]+[[:space:],;:@]+[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/)) {
+          next_start = RSTART + RLENGTH
+          value = substr(line, RSTART, RLENGTH)
+          sub(/^PROJECT_ID[[:space:]:=#]*[0-9]+[[:space:],;:@]+/, "", value)
+          print "__PROJECT_ID_HOST__" value
+          line = substr(line, next_start)
+        }
+      }
+    '
+    printf '%s\n' "${text}" | LC_ALL=C awk '
+      {
+        normalized = $0
+        gsub(/[Gg][Ii][Tt][Ll][Aa][Bb][[:space:]_-]*[Hh][Oo][Ss][Tt]/, " GITLAB_HOST ", normalized)
+        gsub(/[Gg][Ii][Tt][Ll][Aa][Bb][[:space:]_-]*(实例|地址|服务)/, " GITLAB_HOST ", normalized)
+        gsub(/：/, ":", normalized)
+        line = normalized
+        while (match(line, /GITLAB_HOST[[:space:]:=]+[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]+)?/)) {
+          next_start = RSTART + RLENGTH
+          value = substr(line, RSTART, RLENGTH)
+          sub(/^GITLAB_HOST[[:space:]:=]+/, "", value)
+          print "__PROJECT_ID_HOST__" value
+          line = substr(line, next_start)
+        }
+      }
+    '
+  )
 }
 
 normalize_project_candidate() {
@@ -1245,6 +1384,23 @@ PROJECT_CANDIDATE_COUNT="$(
   printf '%s\n' "${PROJECT_CANDIDATES}" | awk 'NF { count++ } END { print count + 0 }'
 )"
 PROJECT="$(printf '%s\n' "${PROJECT_CANDIDATES}" | sed -n '1p')"
+PROJECT_ID_ROWS="$(extract_project_ids "${PROJECT_SOURCE}")"
+PROJECT_ID_COUNT="$(
+  printf '%s\n' "${PROJECT_ID_ROWS}" | awk 'NF { count++ } END { print count + 0 }'
+)"
+PROJECT_ID="$(printf '%s\n' "${PROJECT_ID_ROWS}" | sed -n '1p')"
+PROJECT_HOST_ROWS=""
+PROJECT_HOST_COUNT=0
+PROJECT_HOST=""
+if [ "${PROJECT_ID_COUNT}" -gt 0 ]; then
+  PROJECT_HOST_ROWS="$(
+    extract_project_id_host_candidates "${PROJECT_SOURCE}" | awk 'NF && !seen[$0]++'
+  )"
+  PROJECT_HOST_COUNT="$(
+    printf '%s\n' "${PROJECT_HOST_ROWS}" | awk 'NF { count++ } END { print count + 0 }'
+  )"
+  PROJECT_HOST="$(printf '%s\n' "${PROJECT_HOST_ROWS}" | sed -n '1p')"
+fi
 
 SELECTOR_EVIDENCE_JSON="$({
   collect_selector_evidence "${PROJECT_SOURCE}" "${PARSED_IID}"
@@ -1294,8 +1450,74 @@ if [ "${PROJECT_CANDIDATE_COUNT}" -gt 1 ]; then
   exit 0
 fi
 
+if [ "${PROJECT_ID_COUNT}" -gt 1 ]; then
+  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "检测到多个不同 GitLab project ID，请只保留一个项目定位条件" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+  exit 0
+fi
+
+if [ "${PROJECT_HOST_COUNT}" -gt 1 ]; then
+  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "检测到多个 GitLab host；project ID 必须对应唯一 GitLab 实例" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+  exit 0
+fi
+
+if [ "${PROJECT_ID_COUNT}" -eq 1 ]; then
+  if ! [[ "${PROJECT_ID}" =~ ^[1-9][0-9]*$ ]]; then
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project ID 必须是正整数" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+    exit 0
+  fi
+
+  PROJECT_ID_RESOLUTION_JSON=""
+  if PROJECT_ID_RESOLUTION_JSON="$(
+    PROJECT_ID="${PROJECT_ID}" \
+    PROJECT_HOST="${PROJECT_HOST}" \
+      "${BASH}" "${SCRIPT_DIR}/resolve_gitlab_project_id.sh"
+  )"; then
+    :
+  else
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project ID 解析器执行失败" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+    exit 0
+  fi
+
+  if ! jq -e --argjson expected_id "${PROJECT_ID}" '
+    (type == "object")
+    and ((keys | sort) == ["gitlab_host","project","project_id","reason","status"])
+    and (
+      (.status == "success"
+        and .project_id == $expected_id
+        and (.project | type == "string")
+        and (.gitlab_host | type == "string")
+        and .reason == null)
+      or (.status == "failed"
+        and (.project_id == null or .project_id == $expected_id)
+        and .project == null
+        and .gitlab_host == null
+        and (.reason | type == "string" and length > 0))
+    )
+  ' <<<"${PROJECT_ID_RESOLUTION_JSON}" >/dev/null 2>&1; then
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project ID 解析器返回了无效结果" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+    exit 0
+  fi
+
+  if [ "$(jq -r '.status' <<<"${PROJECT_ID_RESOLUTION_JSON}")" != success ]; then
+    PROJECT_ID_REASON="$(jq -r '.reason' <<<"${PROJECT_ID_RESOLUTION_JSON}")"
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "${PROJECT_ID_REASON}" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+    exit 0
+  fi
+
+  RESOLVED_PROJECT="$(jq -r '.project' <<<"${PROJECT_ID_RESOLUTION_JSON}")"
+  if ! validate_project_path "${RESOLVED_PROJECT}"; then
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "GitLab project ID 解析结果包含不安全的 path_with_namespace" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+    exit 0
+  fi
+  if [ -n "${PROJECT}" ] && [ "${PROJECT}" != "${RESOLVED_PROJECT}" ]; then
+    emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "显式 GitLab project 与 project ID 解析结果不一致，已拒绝执行" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+    exit 0
+  fi
+  PROJECT="${RESOLVED_PROJECT}"
+fi
+
 if [ -z "${PROJECT}" ]; then
-  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 GitLab project（格式 group/project）或具体 GitLab issue URL" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
+  emit_json failed "" "${IID}" "${TARGET_BRANCH}" "${PARSED_ISSUE_URL}" "${NORMALIZED}" "处理 issue 需要明确 GitLab project（group/project）、GitLab host + project ID 或具体 GitLab issue URL" "${SELECTOR_JSON}" "${FORCE_RERUN_PR}"
   exit 0
 fi
 

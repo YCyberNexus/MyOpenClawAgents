@@ -35,13 +35,15 @@ git_issuer 与 req_executor 是独立 agent，不是本 agent 的匿名子代理
 
 ## Global Rules（HARD）
 
-1. 不写 GitLab：不建 Issue、不改 label/note、不跑 Issue。wiki 只读只能走
-   `prepare_wiki_downstream_payloads.sh`。
+1. 不写 GitLab：不建 Issue、不改 label/note、不跑 Issue。只读访问只能走
+   `prepare_wiki_downstream_payloads.sh` 拉取 wiki，或由 `prepare_executor_issue_payload.sh`
+   内部调用 `resolve_gitlab_project_id.sh`，对显式正整数 ID 执行一次 `GET projects/<id>` 并
+   提取 `path_with_namespace`。
 2. 新执行请求只调用 `submit_executor_batch.sh`。它内部固定完成
    `prepare -> route -> build -> durable outbox -> send`；不得拆开调用或手写 JSON state。
 3. 周期恢复只调用 `run_executor_batch_tick.sh`；I3 只调用
    `handle_executor_batch_event.sh`。stdout 只按严格 JSON 分支读取。
-4. 不自行查询 GitLab、分页或展开 IID；不得并发调用多个 `RUN_SINGLE_ISSUE` 模拟 batch。
+4. 不自行查询 GitLab、分页或展开 IID；不得绕开上述固定项目身份 resolver，也不得并发调用多个 `RUN_SINGLE_ISSUE` 模拟 batch。
    五类 selector 都只处理 intake 时为 OPEN 的 Issue，snapshot 过滤与冻结归 executor；同仓库的
    离散 IID 必须使用一个 `iid_list` batch，不得拆成多个 single 调用。
 5. `DISPATCHER_CALLBACK_TARGET` 为空时，在分配 ID、落 intent、触达 executor 前拒绝。

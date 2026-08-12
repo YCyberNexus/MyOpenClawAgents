@@ -1,6 +1,6 @@
 ---
 name: requirement_dispatch
-description: "[SKILL_VERSION=2026-08-12.1] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；未显式指定分支时保留空值供 executor 按 Issue 元数据解析。dispatcher 从 executor scheduler state 派生后续外层 timeout，只持久化 durable I1 intent、紧凑批次镜像与通知待办，不查询 GitLab、不展开 IID 快照、不手写调度状态。"
+description: "[SKILL_VERSION=2026-08-12.2] 在 104 侧把按 origin 三元组哈希隔离 session 的智伴需求及 WebUI 需求路由到固定的建单、受驱动批次执行、仓库级 /mission-stop 中断、运行时 /slot 并行仓库数、/repo-slot 每仓库 Issue 并发数与 /timeout-executor 控制、恢复 tick 或结果回调 wrapper。执行请求支持单 IID、离散 IID 列表、IID 闭区间、OPEN 未完成 Issue、OPEN 指定标签 Issue，以及用户明确要求的完成后自动合并；未显式指定分支时保留空值供 executor 按 Issue 元数据解析。dispatcher 从 executor scheduler state 派生后续外层 timeout，只在显式数字 project ID 定位时读取一次项目身份，不查询 GitLab Issue、不展开 IID 快照、不手写调度状态。"
 allowed-tools: Bash, Read
 ---
 
@@ -13,9 +13,11 @@ wrapper，并读取严格 JSON 分支；所有解析、路由、ID、持久状�
 ## 硬边界
 
 - dispatcher 不建 Issue、不改 label/note、不执行 Issue，也不调用 GitLab Issue API。
-- `WIKI_GITLAB_*` 只允许 `prepare_wiki_downstream_payloads.sh` 读取 wiki；该访问不得用于建
-  Issue、修改 label/note 或 executor 操作。
-- 不得自行查询 GitLab、分页、展开 IID、拼 100+ 个 `RUN_SINGLE_ISSUE`，也不得写
+- `WIKI_GITLAB_*` 只允许 `prepare_wiki_downstream_payloads.sh` 读取 wiki，或由
+  `resolve_gitlab_project_id.sh` 对显式正整数 ID 调用一次只读 `GET projects/<id>` 并提取
+  `path_with_namespace`；这些访问不得用于建 Issue、修改 label/note 或 executor 操作。
+- LLM 不得自行查询 GitLab、分页、展开 IID、拼 100+ 个 `RUN_SINGLE_ISSUE`；除上述两个固定
+  wrapper 的窄只读入口外不得增加 GitLab 访问，也不得写
   `executor_batch_outbox.json`、mirror、event ledger、notification queue 或旧 FIFO。
 - 五类 selector 都只处理 batch intake 时为 OPEN 的 Issue；OPEN snapshot 的查询、过滤与冻结
   全部由 executor 完成，dispatcher 不补查 CLOSED Issue。
@@ -141,7 +143,10 @@ MESSAGE="<需求原文>" bash scripts/capture_origin.sh
 - `clarify_or_reject`：无法确定 project，或执行选择器不完整。
 
 project 必须来自显式多段 namespace path（例如 `group/subgroup/project`）、可信 GitLab
-repository/wiki/Issue URL 或既有确定性 locator；仓库根 URL 保留完整 path，带 `/-/` 的 URL
+repository/wiki/Issue URL、`GitLab host + 正整数 project ID` 或既有确定性 locator。数字 ID
+由固定 resolver 在已配置实例上只读解析为 `path_with_namespace`；若只配置一个实例可省略 host，
+配置多个实例时 host 必填。显式路径与 ID 解析结果必须完全一致，否则失败关闭。仓库根 URL
+保留完整 path，带 `/-/` 的 URL
 保留其前全部 path。Issue URL、普通仓库 URL、`projects/...` 与裸路径产生的候选必须统一解码、
 规范化和去重；出现多个不同 project 时必须澄清，不得静默选任一来源，也不得把 label/branch 值
 当 project。
@@ -197,7 +202,7 @@ queue_launch_reclaim_seconds,stuck_after_minutes`，且 `status=success`。不�
 cd "<SKILL_DIR 绝对路径>" && \
 source scripts/source_dispatcher_env.sh && \
 source scripts/source_executor_timeout_budget.sh && \
-MESSAGE="<包含明确 project 与 selector 的原文>" \
+MESSAGE="<包含明确 project path 或 GitLab host + project ID，以及 selector 的原文>" \
 ORIGIN_JSON='<capture_origin 输出；无则 null>' \
 bash scripts/submit_executor_batch.sh
 ```
@@ -226,6 +231,7 @@ wrapper 内部固定执行：
 
 ```text
 prepare_executor_issue_payload.sh
+  -> resolve_gitlab_project_id.sh（仅当原文含显式数字 project ID）
   -> route_project.sh
   -> build_executor_batch_payload.sh
   -> enqueue_executor_batch_request.sh

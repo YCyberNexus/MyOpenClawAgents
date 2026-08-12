@@ -15,8 +15,10 @@ WebUI/智伴 prompt 的动作路由器和受驱动 batch 控制面。
   `DEFAULT_EXECUTOR_AGENT=req_executor`
 - 唯一 SKILL：[`skills/requirement_dispatch/SKILL.md`](skills/requirement_dispatch/SKILL.md)
 
-dispatcher 不建 Issue、不写 GitLab、不跑 Issue。wiki 读取是唯一允许的 GitLab 访问，且只
-能通过 `prepare_wiki_downstream_payloads.sh` 使用 `WIKI_GITLAB_*` 只读 pin。
+dispatcher 不建 Issue、不写 GitLab、不跑 Issue。GitLab 访问只允许两个固定的只读入口：
+`prepare_wiki_downstream_payloads.sh` 读取 wiki；`resolve_gitlab_project_id.sh` 对 prompt 中
+显式正整数 project ID 调用一次 `GET projects/<id>` 并提取 `path_with_namespace`。两者都只
+使用已配置的只读 GitLab pin，不得查询 Issue 列表或执行任何写操作。
 
 ## Execution Model
 
@@ -96,9 +98,10 @@ receipt immutable 字段为 `executor_agent,matched_count,snapshot_digest`；冲
 Issue。`open_unfinished` 的终态标签排除、`open_label` 精确匹配及 `pr` 重跑覆盖均由 executor
 按冻结 snapshot 与实时预检执行。
 
-project locator 支持 `group/subgroup/.../project`；可信 GitLab 仓库根 URL 使用完整 path，带
-`/-/` 的 URL 使用其前全部 path。Issue URL、仓库 URL、`projects/...` 与裸路径候选统一规范化去重，
-出现多个不同 project 必须澄清。重跑动作词可位于 Issue 宾语之后，但“不要、无需、不需要、不得”等否定
+project locator 支持 `group/subgroup/.../project`、可信 GitLab URL，以及 host + 正整数 project ID；
+数字 ID 通过固定只读 resolver 规范化为 `path_with_namespace`，路径与 ID 并存时必须完全一致。
+可信 GitLab 仓库根 URL 使用完整 path，带 `/-/` 的 URL 使用其前全部 path。Issue URL、仓库 URL、
+`projects/...` 与裸路径候选统一规范化去重，出现多个不同 project/ID/host 必须澄清。重跑动作词可位于 Issue 宾语之后，但“不要、无需、不需要、不得”等否定
 窗口及 label/branch 值不能触发 `force_rerun_pr`。
 
 ## Legacy single shim bridge

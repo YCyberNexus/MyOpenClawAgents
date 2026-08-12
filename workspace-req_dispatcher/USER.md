@@ -54,9 +54,12 @@ stuck 驱逐会按新值自动派生；旧 FIFO active/pending 保留创建时�
 也可粘贴该仓库的 Issue URL。命令不要求知道 batch ID；它会中断并归档该仓库在 executor
 与 dispatcher 两侧的待执行/运行中链路，随后可重新提交同一 Issue 或 batch。
 
-执行请求必须给出完整 `group/project` 或 GitLab Issue/repository URL，并使用以下一种 selector：
+执行请求必须给出完整 `group/project`、GitLab Issue/repository URL，或正整数 GitLab project ID，
+并使用以下一种 selector。project ID 在只配置一个 GitLab 实例时可单独使用；配置多个实例时
+必须同时给出 host。若路径和 ID 同时出现，两者必须指向同一项目：
 
 - 单 Issue：`处理 group/project 的 #42`；
+- project ID：`处理 gitlab.example:30000 上 project ID 55 的 #42`；
 - 离散 IID 列表：`处理 group/project 的 #1、#4、#5`；
 - IID 闭区间：`处理 group/project 的 #100 到 #250`；
 - OPEN 未完成：`处理 group/project 中未完成的 Issue`；
@@ -129,7 +132,9 @@ dispatcher 不查询 GitLab Issue、不展开 IID、不自行跑 Issue。GitLab 
 worktree、MR、显式请求的精确 SHA 自动合并和 retry 均由 req_executor 管理。
 
 GitLab project 支持多层 subgroup path。多个裸路径候选会要求澄清；重跑动作允许放在 Issue
-宾语之后，但否定措辞及 label/branch 值不会触发重跑。
+宾语之后，但否定措辞及 label/branch 值不会触发重跑。数字 project ID 会通过固定只读查询
+规范化为 `path_with_namespace`；多个 ID/host、未受信实例、路径冲突或身份响应不一致都会在
+触达 executor 前失败。
 
 配置见 [`config/dispatcher.env`](config/dispatcher.env) 与
 [`config/README.md`](config/README.md)。关键部署项包括

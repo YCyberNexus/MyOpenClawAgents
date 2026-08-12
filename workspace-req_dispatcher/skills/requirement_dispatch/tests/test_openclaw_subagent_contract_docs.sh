@@ -49,8 +49,20 @@ grep -Fq '`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`' "${WORKSPACE_DIR}/config/README
 if grep -Fq '或裸 agent 名' "${WORKSPACE_DIR}/config/README.md"; then
   fail "deployment docs must not advertise an unpinned bare callback agent"
 fi
-grep -Fq 'SKILL_VERSION=2026-08-12.1' "${SKILL_DIR}/SKILL.md" \
+grep -Fq 'SKILL_VERSION=2026-08-12.2' "${SKILL_DIR}/SKILL.md" \
   || fail "req_dispatcher skill version must match the current release version"
+grep -Fq '`resolve_gitlab_project_id.sh` 对显式正整数 ID 调用一次只读 `GET projects/<id>`' \
+  "${SKILL_DIR}/SKILL.md" \
+  || fail "dispatcher skill must constrain numeric project ID resolution to one read-only lookup"
+grep -Fq '`resolve_gitlab_project_id.sh` 对 prompt 中' "${WORKSPACE_DIR}/AGENTS.md" \
+  || fail "dispatcher agent rules must allow only the fixed project identity resolver"
+grep -Fq '正整数 GitLab project ID' "${WORKSPACE_DIR}/USER.md" \
+  || fail "dispatcher user contract must accept numeric GitLab project IDs"
+grep -Fq '`resolve_gitlab_project_id.sh`' "${WORKSPACE_DIR}/SOUL.md" \
+  || fail "dispatcher soul must permit only the fixed project identity resolver"
+if grep -Fq 'wiki 是唯一只读 GitLab 入口' "${WORKSPACE_DIR}/CLAUDE.md"; then
+  fail "dispatcher deployment rules must not reject the fixed project identity lookup"
+fi
 grep -Fq 'agent:req_dispatcher:intake-<origin_sha256>' "${SKILL_DIR}/SKILL.md" \
   || fail "dispatcher skill must document origin-scoped intake sessions"
 grep -Fq '`reply_agent + conversation + user` 三元组取 SHA-256' \

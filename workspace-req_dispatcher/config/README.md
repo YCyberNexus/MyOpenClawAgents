@@ -32,10 +32,10 @@
 | `EXECUTOR_QUEUE_SPAWN_RETRY_SLEEP_SECONDS` | 否 | 同一 drain 内相邻启动尝试之间的固定退避秒数，默认 `2`。 |
 | `RUN_AGENT_TURN_HEARTBEAT_SECONDS` | 否 | `scripts/run_agent_turn.sh` 等待下游 agent 时向 stderr 输出 heartbeat 的间隔，默认 `30`；stdout 仍只输出最终 JSON envelope。 |
 | `ROUTING_FILE` | 否 | project 覆盖路由表文件路径（见下「`routing.env`」）。git_issuer 返回 project 后，先查本表；未命中则使用 `DEFAULT_EXECUTOR_AGENT`。消费方 `scripts/route_project.sh`。默认相对 SKILL_DIR 的 `../../config/routing.env`，也可改绝对路径。 |
-| `WIKI_GITLAB_HOST` | wiki 入口必填 | 只读拉取 GitLab wiki 的 host（含端口则写端口）。仅由 `prepare_wiki_downstream_payloads.sh` 的 `FETCH_WIKI=1` 路径使用。 |
-| `WIKI_GITLAB_API_PROTOCOL` | wiki 入口必填 | `http` 或 `https`，与 wiki 所在 GitLab 服务一致。 |
-| `WIKI_GITLAB_TOKEN` | wiki 入口必填 | 只读 wiki token。当前部署按要求明文写入 tracked `dispatcher.env`，用于 `glab api projects/<project>/wikis/<slug>` 拉取 wiki 内容；不得用于建 issue、打标签、写 note 或 executor 操作。 |
-| `WIKI_GLAB_BIN` | 否 | `glab` 可执行文件路径，默认 `glab`。本机 fake glab 测试可覆盖。 |
+| `WIKI_GITLAB_HOST` | GitLab 只读入口必填 | GitLab host（含端口则写端口）。供 `prepare_wiki_downstream_payloads.sh` 读取 wiki，也供 `resolve_gitlab_project_id.sh` 在显式数字 ID 出现时读取单个项目身份。 |
+| `WIKI_GITLAB_API_PROTOCOL` | GitLab 只读入口必填 | `http` 或 `https`，与目标 GitLab 服务一致。 |
+| `WIKI_GITLAB_TOKEN` | GitLab 只读入口必填 | 只读 token。当前部署按要求明文写入 tracked `dispatcher.env`，只允许 `glab api projects/<project>/wikis/<slug>` 拉取 wiki，或 `glab api projects/<numeric-id>` 获取 `id,path_with_namespace`；不得用于查询 Issue 列表、建 issue、打标签、写 note 或 executor 操作。 |
+| `WIKI_GLAB_BIN` | 否 | 上述两个只读入口使用的 `glab` 可执行文件路径，默认 `glab`。本机 fake glab 测试可覆盖。 |
 | `REPLY_GATEWAY_URL` | 否 | 114 OpenClaw 网关 WebSocket URL。用户结果推送由 104 的独立协议 4 适配器反向调用 114 的 `2026.6.1` Gateway；104 主 OpenClaw 仍保持 `2026.4.9`，本机调用仍走原生协议 3。适配器复用并只读 104 的 `OPENCLAW_STATE_DIR/identity/device.json`，首次连接需在 114 批准该设备的 `operator.write` 请求。为空时兼容回落到旧 `ZHIBAN_GATEWAY_URL`。私网非回环地址优先使用 `wss://`；若蓝区部署确认必须使用明文 `ws://`，只在忽略的 `dispatcher.local.env` 或进程环境中显式设置 `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`，脚本不会自动放宽。网关、token、目标 agent 都无法解析时，`scripts/notify_user.sh` no-op（仅记 ledger 留痕、不静默丢）。 |
 | `REPLY_GATEWAY_TOKEN` | 否 | 114 OpenClaw 网关 token。仅由 `notify_user.sh` 通过标准 `OPENCLAW_GATEWAY_TOKEN` 环境变量交给 stdin-safe Gateway transport；为空时兼容回落到旧 `ZHIBAN_GATEWAY_TOKEN`。token 不进入命令参数或日志。 |
 | `DEFAULT_REPLY_AGENT` | 否 | 114 上接收结果信封的默认 agent 名。`notify_user.sh` 只有在 `ORIGIN_JSON` 是合法 object 时才允许出站推送；目标 agent 优先使用 `origin.reply_agent`，该字段只在合法 origin 未提供 `reply_agent` 时兜底。`ORIGIN_JSON` 为空/null/非 object 时视为手动入口，不使用该兜底值；为空时兼容回落到旧 `ZHIBAN_AGENT`。接收 agent 负责根据信封里的 `origin` 完成企微最后一跳。 |
@@ -101,7 +101,7 @@ openclaw config validate
 
 `req_dispatcher` 是**全公司共用**的需求接入链路。不同员工/团队的需求会落到不同的 GitLab project。把 project 写死在 config 里会让这个 agent 变成单租户、违背"共用接入点"的目标。
 
-因此：**114/WebUI 发送的 prompt 决定目标 project 和动作**。建单入口从 wiki URL 的 `<group>/<project>/-/wikis/<slug>` 或自由文本里的 `group/project`、GitLab 仓库/Wiki URL、`glab api projects/<encoded-group%2Fproject>/...` 片段确定 project，并生成带 `repo=<group/project>` 的 `git_issuer_payload`；既有 issue 执行入口统一收集 GitLab Issue URL、可信 GitLab 仓库根 URL、`projects/...` locator 与显式多段 project path，规范化去重后再结合 selector 提取。多个不同 project 必须在调用下游前歧义失败。`req_dispatcher` 仍不写 GitLab，建单事实仍以 git_issuer 返回 JSON 为准。
+因此：**114/WebUI 发送的 prompt 决定目标 project 和动作**。建单入口从 wiki URL 的 `<group>/<project>/-/wikis/<slug>` 或自由文本里的 `group/project`、GitLab 仓库/Wiki URL、`glab api projects/<encoded-group%2Fproject>/...` 片段确定 project，并生成带 `repo=<group/project>` 的 `git_issuer_payload`；既有 issue 执行入口统一收集 GitLab Issue URL、可信 GitLab 仓库根 URL、`projects/...` locator、显式多段 project path，以及 `GitLab host + 正整数 project ID`。数字 ID 只通过已配置实例的 `GET projects/<id>` 解析为 `path_with_namespace`；仅配置一个实例时 host 可省略，配置多个实例时必须明确 host。显式路径和 ID 解析结果不一致、多个 host/ID、实例不受信或 API 身份不匹配时都在调用下游前失败关闭。`req_dispatcher` 仍不写 GitLab，也不查询 Issue 列表；建单事实仍以 git_issuer 返回 JSON 为准。
 
 ## 受驱动批次部署、迁移与回滚
 
@@ -118,7 +118,7 @@ openclaw config validate
 
 1. `STATE_ROOT` 指向的目录在 runner 上存在且 agent 可写。
 2. `GIT_ISSUER_AGENT` 指向的下游 agent 已在同一 OpenClaw 上线，可被 `run_agent_turn.sh` 通过 `openclaw agent` 调用。
-3. wiki 入口部署时，`WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` 可读目标蓝区 GitLab wiki；该 token 权限保持只读。
+3. GitLab 只读入口部署时，`WIKI_GITLAB_HOST` / `WIKI_GITLAB_API_PROTOCOL` / `WIKI_GITLAB_TOKEN` 可读取目标蓝区 GitLab wiki 和单个 `projects/<numeric-id>` 项目身份；该 token 权限保持只读且不得授予写权限。
 4. 跨 agent 调用原语的连接参数已按对齐结果填好（见 `references/trigger_command.md`）。
 5. `DEFAULT_EXECUTOR_AGENT` 指向的 req_executor 已在同一 OpenClaw 上线，且具备处理蓝区目标 GitLab project 的 token。只有执行动作会用到它；只建单动作不会入队。`ROUTING_FILE` 若配置则必须存在且可读；表里只写专属覆盖项，未命中默认执行器。执行分支由用户 prompt 明确指定后作为 executor `branch=` 下发，未指定时由 executor 解析远端默认分支。
 6. `REPLY_GATEWAY_URL` / `REPLY_GATEWAY_TOKEN` 按 114 网关部署值填好；104→114 回推固定使用协议 4 适配器，不改变 104 的 `2026.4.9` 或 114 的 `2026.6.1` 服务版本。首次发起一次通知后，在 114 执行 `openclaw devices list`，核对请求的设备、`operator` 角色和仅 `operator.write` scope，再执行 `openclaw devices approve <requestId>`；随后以同一 104 `OPENCLAW_STATE_DIR` 重试。114 调用方在 origin 里带 `reply_agent`，或在本文件填默认 `DEFAULT_REPLY_AGENT` 兜底。该兜底只对合法 origin object 生效；手动 WebUI 入口没有 origin 时只留 ledger/log，不推 114/企微。旧部署里的 `ZHIBAN_GATEWAY_URL` / `ZHIBAN_GATEWAY_TOKEN` / `ZHIBAN_AGENT` / `ZHIBAN_NOTIFY_TIMEOUT_SECONDS` 仍被 `notify_user.sh` 兼容读取，但新部署应迁移到 `REPLY_*`。缺少网关 pin 或目标 agent 时 `notify_user.sh` 只留痕、不推送用户结果。`REPLY_NOTIFY_TIMEOUT_SECONDS` 保持默认 `30` 或按网关预期延迟调整为正整数；`REPLY_NOTIFY_WATCHDOG_GRACE_SECONDS` 默认 `35` 且不得小于 `31`，用于握手与收尾，不计入114 agent 的业务执行时间。持久通知 drain 会把同一 `event_id` 哈希为固定 idempotencyKey，使 114 Gateway 在其幂等缓存有效窗口内合并短期恢复重试；超过缓存窗口的长时间停机恢复仍可能重新启动个人 agent。

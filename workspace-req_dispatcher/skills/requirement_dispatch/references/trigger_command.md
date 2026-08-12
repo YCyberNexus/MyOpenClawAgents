@@ -124,6 +124,7 @@ bash scripts/submit_executor_batch.sh
 
 ```text
 prepare_executor_issue_payload.sh
+  -> resolve_gitlab_project_id.sh（仅当原文含显式数字 project ID）
   -> route_project.sh
   -> build_executor_batch_payload.sh
   -> enqueue_executor_batch_request.sh
