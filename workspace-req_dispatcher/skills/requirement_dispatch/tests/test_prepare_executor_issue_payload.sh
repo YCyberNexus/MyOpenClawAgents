@@ -159,6 +159,21 @@ if [ "$(jq -r '.target_branch' <<<"${natural_base_branch}")" != "sex" ]; then
   exit 1
 fi
 
+execution_branch_role_text_json="$(
+  MESSAGE='请处理 GitLab ai-infra/veqp_server_v3 issue #312，并将执行分支 状态写入结果。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == null
+  and .merge_target_branch == null
+  and .auto_merge == false
+' <<<"${execution_branch_role_text_json}" >/dev/null; then
+  echo "expected the role noun 执行分支 not to become a processing-branch declaration" >&2
+  printf '%s\n' "${execution_branch_role_text_json}" >&2
+  exit 1
+fi
+
 project_hash_input="$(
   MESSAGE='[来自114] 用户wuyun请求：请执行 GitLab ai-infra/veqp_server_v3 issue #312。' \
   bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
@@ -1257,6 +1272,59 @@ if ! jq -e '
   printf '%s\n' "${explicit_auto_merge_json}" >&2
   exit 1
 fi
+
+execution_branch_cross_clause_auto_merge_json="$(
+  MESSAGE='执行仓库 ai-infra/one_stop_ui_testing 中的 Issue #3，标题：一站式业务ui自动化测试。执行完成后，结果保存在 one-stop-result 目录下以 job-ID 命名的子目录中，并且将执行分支合并到 master 分支。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .project == "ai-infra/one_stop_ui_testing"
+  and .selector == {type:"single",iid:3}
+  and .target_branch == "master"
+  and .merge_target_branch == "master"
+  and .auto_merge == true
+' <<<"${execution_branch_cross_clause_auto_merge_json}" >/dev/null; then
+  echo "expected a completion-scoped execution-branch merge to target master" >&2
+  printf '%s\n' "${execution_branch_cross_clause_auto_merge_json}" >&2
+  exit 1
+fi
+
+negated_execution_branch_cross_clause_json="$(
+  MESSAGE='请处理 GitLab ai-infra/one_stop_ui_testing issue #3。执行完成后，结果归档，并且不要将执行分支合并到 master 分支。' \
+  bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+)"
+if ! jq -e '
+  .status == "success"
+  and .target_branch == "master"
+  and .merge_target_branch == "master"
+  and .auto_merge == false
+' <<<"${negated_execution_branch_cross_clause_json}" >/dev/null; then
+  echo "expected a negated execution-branch merge to remain review-only" >&2
+  printf '%s\n' "${negated_execution_branch_cross_clause_json}" >&2
+  exit 1
+fi
+
+for cross_clause_merge_feature_discussion in \
+  '请处理 GitLab ai-infra/one_stop_ui_testing issue #3。执行完成后，检查将执行分支合并功能是否正常。' \
+  '请处理 GitLab ai-infra/one_stop_ui_testing issue #3。执行完成后，记录结果，并且合并策略写入文档。' \
+  '请处理 GitLab ai-infra/one_stop_ui_testing issue #3。执行完成后，记录合并请求状态。'
+do
+  cross_clause_merge_feature_discussion_json="$(
+    MESSAGE="${cross_clause_merge_feature_discussion}" \
+    bash "${SKILL_DIR}/scripts/prepare_executor_issue_payload.sh"
+  )"
+  if ! jq -e '
+    .status == "success"
+    and .target_branch == null
+    and .merge_target_branch == null
+    and .auto_merge == false
+  ' <<<"${cross_clause_merge_feature_discussion_json}" >/dev/null; then
+    echo "expected a cross-clause merge feature discussion not to enable automatic merge: ${cross_clause_merge_feature_discussion}" >&2
+    printf '%s\n' "${cross_clause_merge_feature_discussion_json}" >&2
+    exit 1
+  fi
+done
 
 create_and_execute_auto_merge_json="$(
   GITLAB_HOST=gitlab.example.test \

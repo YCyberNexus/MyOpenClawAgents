@@ -691,93 +691,6 @@ validate_branch_name() {
   return 0
 }
 
-extract_base_branch() {
-  local text="$1"
-  printf '%s\n' "${text}" | awk '
-    function emit(value) {
-      gsub(/^[[:space:]"'\''`“”‘’]+/, "", value)
-      gsub(/[[:space:]"'\''`“”‘’)，,。;；]+$/, "", value)
-      print value
-    }
-    function emit_explicit(rest, candidate, tail, trimmed_tail) {
-      gsub(/^[[:space:]"'\''`“”‘’]+/, "", rest)
-      if (match(rest, /^[A-Za-z0-9._\/-]+/)) {
-        candidate = substr(rest, RSTART, RLENGTH)
-        tail = substr(rest, RLENGTH + 1)
-        trimmed_tail = tail
-        gsub(/^[[:space:]"'\''`“”‘’]+/, "", trimmed_tail)
-        if (trimmed_tail ~ /^(分支|[Bb][Rr][Aa][Nn][Cc][Hh])([[:space:]]*[，,。)）]|[[:space:]]*$)/) {
-          candidate = candidate
-        } else if (trimmed_tail != "" && trimmed_tail !~ /^[，,。)）]/) {
-          candidate = candidate tail
-        }
-      } else {
-        candidate = rest
-      }
-      emit(candidate)
-    }
-    {
-      line = $0
-      if (match(line, /(^|[^A-Za-z0-9_-])(base[_ -]?branch|source[_ -]?branch|branch)[[:space:]]*[:=][[:space:]]*/)) {
-        emit_explicit(substr(line, RSTART + RLENGTH))
-        exit
-      }
-      if (match(line, /(^|[^目标])分支([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)/)) {
-        emit_explicit(substr(line, RSTART + RLENGTH))
-        exit
-      }
-      if (match(line, /(基于|从|以)[[:space:]]*["'\''`“”‘’]?[^[:space:]"'\''`“”‘’，,。;；]+["'\''`“”‘’]?[[:space:]]*(分支|branch)/)) {
-        value = substr(line, RSTART, RLENGTH)
-        sub(/^(基于|从|以)[[:space:]]*["'\''`“”‘’]?/, "", value)
-        sub(/["'\''`“”‘’]?[[:space:]]*(分支|branch).*$/, "", value)
-        emit(value)
-        exit
-      }
-    }'
-}
-
-extract_merge_target_branch() {
-  local text="$1"
-  printf '%s\n' "${text}" | awk '
-    function emit(value) {
-      gsub(/^[[:space:]"'\''`“”‘’]+/, "", value)
-      gsub(/[[:space:]"'\''`“”‘’)，,。;；]+$/, "", value)
-      print value
-    }
-    function emit_explicit(rest, candidate, tail, trimmed_tail) {
-      gsub(/^[[:space:]"'\''`“”‘’]+/, "", rest)
-      if (match(rest, /^[A-Za-z0-9._\/-]+/)) {
-        candidate = substr(rest, RSTART, RLENGTH)
-        tail = substr(rest, RLENGTH + 1)
-        trimmed_tail = tail
-        gsub(/^[[:space:]"'\''`“”‘’]+/, "", trimmed_tail)
-        if (trimmed_tail ~ /^(分支|[Bb][Rr][Aa][Nn][Cc][Hh])([[:space:]]*[，,。)）]|[[:space:]]*$)/) {
-          candidate = candidate
-        } else if (trimmed_tail != "" && trimmed_tail !~ /^[，,。)）]/) {
-          candidate = candidate tail
-        }
-      } else {
-        candidate = rest
-      }
-      emit(candidate)
-    }
-    {
-      line = $0
-      if (match(line, /(merge[_ -]?target[_ -]?branch|mr[_ -]?target[_ -]?branch|pr[_ -]?target[_ -]?branch|target[_ -]?branch)[[:space:]]*[:=][[:space:]]*/)) {
-        emit_explicit(substr(line, RSTART + RLENGTH))
-        exit
-      }
-      if (match(line, /(合并目标分支|[Mm][Rr][[:space:]]*目标分支|[Pp][Rr][[:space:]]*目标分支|目标分支)([[:space:]]*[：:=][[:space:]]*|[[:space:]]+)/)) {
-        emit_explicit(substr(line, RSTART + RLENGTH))
-        exit
-      }
-      if (match(line, /(合并到|合到|[Mm][Ee][Rr][Gg][Ee][[:space:]]*(到|[Tt][Oo]|[Ii][Nn][Tt][Oo]))[[:space:]]*/)) {
-        emit_explicit(substr(line, RSTART + RLENGTH))
-        exit
-      }
-    }'
-}
-
 # Emit every explicitly named merge destination. Automatic merge is a
 # destructive action, so two different destinations must never be resolved by
 # "first match wins" (for example: an old release target followed by "改为
@@ -832,9 +745,9 @@ semicolon_tail_starts_next_directive() {
     || branch_tail_starts_next_directive "${remainder}"
 }
 
-# Emit every explicitly named processing/base branch.  Automatic merge falls
-# back to this branch when no merge destination is named, so a correction must
-# not be lost to the legacy first-match parser.
+# Emit every explicitly named processing/base branch. Automatic merge falls
+# back to this branch when no merge destination is named, so distinct values
+# must be reported as a conflict instead of resolving them by first match.
 collect_base_branches() {
   local text="$1"
   local line="${text}" pattern matched candidate tail trimmed_tail
@@ -1038,14 +951,15 @@ has_explicit_auto_merge_action() {
       lower = tolower(prefix)
       return prefix ~ /(不要|无需|无须|不用|不必|不能|不可|不得|别|莫|不允许|禁止|严禁|避免|不需要|不是要|不是让|暂不|暂时不|并非|并不是|不建议|不打算)/ \
         || prefix ~ /不[[:space:]]*$/ \
+        || prefix ~ /不[[:space:]]*(自动|直接|将|把)[^，,。;；:：!！?？]*$/ \
         || lower ~ /(^|[^a-z])(do[[:space:]]+not|don'\''t|never|without)([^a-z]|$)/
     }
     function has_nominal_suffix(suffix, lower) {
       suffix = trim(suffix)
       gsub(/^[[:space:]"'\''`“”‘’]+/, "", suffix)
       lower = tolower(suffix)
-      return suffix ~ /^(功能|按钮|逻辑|流程|能力|代码|配置|解析|失败|失效|问题|异常|示例|文档)/ \
-        || lower ~ /^(feature|button|logic|flow|code|config|parser|failure|error|bug|example|document)([^a-z]|$)/
+      return suffix ~ /^(功能|按钮|逻辑|流程|能力|代码|配置|解析|失败|失效|问题|异常|示例|文档|策略|规则|方案|请求|说明|状态|记录|历史|测试|用例|需求|选项|提示|操作|检查|验证)/ \
+        || lower ~ /^(feature|button|logic|flow|code|config|parser|failure|error|bug|example|document|strategy|rule|policy|plan|request|description|status|record|history|test|case|requirement|option|prompt|operation|check|validation)([^a-z]|$)/
     }
     function is_positive_action(segment, remaining, prefix, suffix) {
       remaining = trim(segment)
@@ -1057,16 +971,69 @@ has_explicit_auto_merge_action() {
       }
       return 0
     }
+    function has_completion_marker(segment, lower) {
+      lower = tolower(segment)
+      return segment ~ /((执行|处理|开发|实现|修改|修复|运行|跑)?[[:space:]]*(完成|完毕|结束|跑完|做完|处理完|执行完)[[:space:]]*(后|以后|之后))/ \
+        || lower ~ /after[^。；;!！?？]*(complete|completed|done|finish|finished)/
+    }
+    function strip_followup_prefix(value) {
+      value = trim(value)
+      while (sub(/^(并且|而且|然后|随后|同时|接着|并|且|再)[[:space:]]*/, "", value)) {
+        value = trim(value)
+      }
+      return value
+    }
+    function has_non_action_suffix(suffix) {
+      return has_nominal_suffix(suffix) || suffix ~ /^[-_A-Za-z0-9]/
+    }
+    function is_followup_merge_action(segment, remaining, suffix) {
+      remaining = strip_followup_prefix(segment)
+      if (remaining ~ /^(如果|若|假如|视情况|必要时|可以考虑)/) return 0
+
+      # Once a preceding clause has established "完成后", a later clause is
+      # still an explicit merge action when it starts with the merge command.
+      # This covers "完成后，保存结果，并且合并到 main" without treating
+      # "完成后，检查合并功能" as a destructive instruction.
+      if (match(remaining, /^((请|务必|需要|需|应|要|必须)[[:space:]]*)*(自动|直接)?[[:space:]]*(合并|合到|[Mm][Ee][Rr][Gg][Ee])/)) {
+        suffix = substr(remaining, RSTART + RLENGTH)
+        return !has_non_action_suffix(suffix)
+      }
+
+      # The source branch may be stated as a role rather than a ref name.  It
+      # is the object of the action here and must never be parsed as a base
+      # branch declaration.
+      if (match(remaining, /^((请|务必|需要|需|应|要|必须)[[:space:]]*)*((将|把)[[:space:]]*)?((本次|当前|该|这个|此|工作|执行|处理|任务|源)[[:space:]]*)*分支[[:space:]]*(需要|需|应|要|必须)?[[:space:]]*(自动|直接)?[[:space:]]*(合并|合到|[Mm][Ee][Rr][Gg][Ee])/)) {
+        suffix = substr(remaining, RSTART + RLENGTH)
+        return !has_non_action_suffix(suffix)
+      }
+      return 0
+    }
     {
-      segment_count = split($0, segments, /[，,。；;：:！!？?]/)
-      for (segment_index = 1; segment_index <= segment_count; segment_index++) {
-        if (is_positive_action(segments[segment_index])) {
-          found = 1
-          exit
+      if (text != "") text = text "，"
+      text = text $0
+    }
+    END {
+      sentence_count = split(text, sentences, /[。；;！!？?]/)
+      for (sentence_index = 1; sentence_index <= sentence_count && !found; sentence_index++) {
+        completion_seen = 0
+        clause_count = split(sentences[sentence_index], clauses, /[，,：:]|并且|而且|然后|随后|接着/)
+        for (clause_index = 1; clause_index <= clause_count; clause_index++) {
+          clause = trim(clauses[clause_index])
+          if (clause == "") continue
+          if (is_positive_action(clause)) {
+            found = 1
+            break
+          }
+          if (has_completion_marker(clause)) {
+            completion_seen = 1
+          } else if (completion_seen && is_followup_merge_action(clause)) {
+            found = 1
+            break
+          }
         }
       }
-    }
-    END { exit(found ? 0 : 1) }'
+      exit(found ? 0 : 1)
+    }'
 }
 
 # Return true when any sentence explicitly negates automatic/direct merge.
@@ -1088,7 +1055,15 @@ has_explicit_auto_merge_negation() {
       lower = tolower(prefix)
       return prefix ~ /(不要|无需|无须|不用|不必|不能|不可|不得|别|莫|不允许|禁止|严禁|避免|不需要|不是要|不是让|暂不|暂时不|并非|并不是|不建议|不打算)/ \
         || prefix ~ /不[[:space:]]*$/ \
+        || prefix ~ /不[[:space:]]*(自动|直接|将|把)[^，,。;；:：!！?？]*$/ \
         || lower ~ /(^|[^a-z])(do[[:space:]]+not|don'\''t|never|without)([^a-z]|$)/
+    }
+    function has_nominal_suffix(suffix, lower) {
+      suffix = trim(suffix)
+      gsub(/^[[:space:]"'\''`“”‘’]+/, "", suffix)
+      lower = tolower(suffix)
+      return suffix ~ /^(功能|按钮|逻辑|流程|能力|代码|配置|解析|失败|失效|问题|异常|示例|文档|策略|规则|方案|请求|说明|状态|记录|历史|测试|用例|需求|选项|提示|操作|检查|验证)/ \
+        || lower ~ /^(feature|button|logic|flow|code|config|parser|failure|error|bug|example|document|strategy|rule|policy|plan|request|description|status|record|history|test|case|requirement|option|prompt|operation|check|validation)([^a-z]|$)/
     }
     function has_negated_action(segment, remaining, prefix) {
       remaining = trim(segment)
@@ -1096,6 +1071,22 @@ has_explicit_auto_merge_negation() {
         prefix = substr(remaining, 1, RSTART - 1)
         if (has_negation(prefix)) return 1
         remaining = substr(remaining, RSTART + RLENGTH)
+      }
+      return 0
+    }
+    function has_negated_merge_token(segment, remaining, consumed, prefix, suffix, token) {
+      remaining = trim(segment)
+      consumed = ""
+      while (match(remaining, /(合并|合到|[Mm][Ee][Rr][Gg][Ee])/)) {
+        prefix = consumed substr(remaining, 1, RSTART - 1)
+        token = substr(remaining, RSTART, RLENGTH)
+        suffix = substr(remaining, RSTART + RLENGTH)
+        if ((token !~ /^[Mm]/ || (prefix !~ /[-_A-Za-z0-9]$/ && suffix !~ /^[-_A-Za-z0-9]/)) \
+            && has_negation(prefix) && !has_nominal_suffix(suffix)) {
+          return 1
+        }
+        consumed = prefix token
+        remaining = suffix
       }
       return 0
     }
@@ -1107,7 +1098,8 @@ has_explicit_auto_merge_negation() {
       }
       segment_count = split($0, segments, /[，,。；;：:！!？?]/)
       for (segment_index = 1; segment_index <= segment_count; segment_index++) {
-        if (has_negated_action(segments[segment_index])) {
+        if (has_negated_action(segments[segment_index]) \
+            || has_negated_merge_token(segments[segment_index])) {
           found = 1
           exit
         }
@@ -1148,8 +1140,12 @@ if [ -z "${NORMALIZED}" ]; then
 fi
 
 BRANCH_PARSE_SOURCE="$(strip_label_values_preserving_delimiters "${NORMALIZED}")"
-BASE_BRANCH_SOURCE="$(strip_merge_target_directive "${BRANCH_PARSE_SOURCE}")"
-BASE_BRANCHES_JSON="$(collect_base_branches "${BASE_BRANCH_SOURCE}" | jq -Rsc '
+# Parse processing and merge branches independently from the same untouched
+# source.  In particular, never remove `合并到 <name>` before looking for a
+# processing branch: removing only that span from `执行分支合并到 master 分支`
+# used to leave `执行分支 分支`, which the legacy fallback misread as a branch
+# literally named `分支`.
+BASE_BRANCHES_JSON="$(collect_base_branches "${BRANCH_PARSE_SOURCE}" | jq -Rsc '
   split("\n") | map(select(length > 0)) | unique
 ')"
 BASE_BRANCH_COUNT="$(jq -r 'length' <<<"${BASE_BRANCHES_JSON}")"
@@ -1160,7 +1156,7 @@ if [ "${BASE_BRANCH_COUNT}" -gt 1 ]; then
 elif [ "${BASE_BRANCH_COUNT}" -eq 1 ]; then
   TARGET_BRANCH="$(jq -r '.[0]' <<<"${BASE_BRANCHES_JSON}")"
 else
-  TARGET_BRANCH="$(extract_base_branch "${BASE_BRANCH_SOURCE}")"
+  TARGET_BRANCH=""
 fi
 MERGE_TARGET_BRANCHES_JSON="$(collect_merge_target_branches \
   "${BRANCH_PARSE_SOURCE}" | jq -Rsc '
@@ -1175,7 +1171,7 @@ if [ "${MERGE_TARGET_BRANCH_COUNT}" -gt 1 ]; then
 elif [ "${MERGE_TARGET_BRANCH_COUNT}" -eq 1 ]; then
   MERGE_TARGET_BRANCH="$(jq -r '.[0]' <<<"${MERGE_TARGET_BRANCHES_JSON}")"
 else
-  MERGE_TARGET_BRANCH="$(extract_merge_target_branch "${BRANCH_PARSE_SOURCE}")"
+  MERGE_TARGET_BRANCH=""
 fi
 AUTO_MERGE_SOURCE="$(strip_merge_target_value_for_action "${BRANCH_PARSE_SOURCE}")"
 AUTO_MERGE_SOURCE="$(strip_base_branch_directive "${AUTO_MERGE_SOURCE}")"
