@@ -400,10 +400,10 @@ jq -e '
   and .scheduler_status == "queued"
 ' <<<"${single_acceptance}" >/dev/null
 
-# The intake tick is global and persists action_emitted before exposing its
-# spawn grant. Even when that grant belongs to an older batch, a model that
-# skips sessions_spawn/the fixed recorder must not be able to return the new
-# batch's five-field success receipt.
+# An unacknowledged action from another batch is isolated to its own job and
+# must not suppress this batch's public receipt. The same state owned by this
+# batch still proves that its intake skipped the mandatory runtime boundary and
+# must be rejected.
 LAUNCH_ACTIONS_ROOT="${SCHEDULER_ROOT}/launch_actions"
 LAUNCH_ACTION_ARCHIVE_ROOT="${SCHEDULER_ROOT}/launch_action_archive"
 UNACKNOWLEDGED_ACTION="${LAUNCH_ACTIONS_ROOT}/single-unacknowledged.json"
@@ -411,9 +411,20 @@ mkdir -p "${LAUNCH_ACTIONS_ROOT}" "${LAUNCH_ACTION_ARCHIVE_ROOT}"
 printf '%s\n' \
   '{"version":1,"job_id":"older:snapshot-0","batch_id":"older-batch","stage":"action_emitted","outcome":null,"ack":null}' \
   >"${UNACKNOWLEDGED_ACTION}"
+unrelated_unacknowledged_acceptance="$(emit_acceptance single)"
+jq -e '
+  .status == "success"
+  and .batch_id == "single"
+  and .scheduler_status == "queued"
+' <<<"${unrelated_unacknowledged_acceptance}" >/dev/null \
+  || { echo "another batch's unacknowledged spawn suppressed acceptance" >&2; exit 1; }
+
+printf '%s\n' \
+  '{"version":1,"job_id":"single:snapshot-0","batch_id":"single","stage":"action_emitted","outcome":null,"ack":null}' \
+  >"${UNACKNOWLEDGED_ACTION}"
 if emit_acceptance single >"${TEST_ROOT}/unacknowledged-acceptance.out" \
     2>"${TEST_ROOT}/unacknowledged-acceptance.err"; then
-  echo "unacknowledged spawn action produced a public success receipt" >&2
+  echo "same-batch unacknowledged spawn produced a public success receipt" >&2
   exit 1
 fi
 grep -Fq 'executor spawn acknowledgement is still pending while acknowledging single' \
@@ -422,7 +433,7 @@ grep -Fq 'executor spawn acknowledgement is still pending while acknowledging si
   exit 1
 }
 printf '%s\n' \
-  '{"version":1,"job_id":"older:snapshot-0","batch_id":"older-batch","stage":"ack_received","outcome":"spawned","ack":{"run_id":"run-1","child_session_key":"agent:req_executor:subagent:1"}}' \
+  '{"version":1,"job_id":"single:snapshot-0","batch_id":"single","stage":"ack_received","outcome":"spawned","ack":{"run_id":"run-1","child_session_key":"agent:req_executor:subagent:1"}}' \
   >"${UNACKNOWLEDGED_ACTION}"
 single_acknowledged_acceptance="$(emit_acceptance single)"
 jq -e '

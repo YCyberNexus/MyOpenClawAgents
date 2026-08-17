@@ -7,15 +7,15 @@ Path C and starts with `run_driven_issue_batch.sh`; `RUN_EXECUTOR_BATCH_TICK`
 alone means Path D and starts with `run_executor_batch_tick.sh`. Never replace
 the Path C intake wrapper with the tick wrapper.
 Path C may return its public acceptance only after every emitted runtime action
-has been resolved and recorded. Its embedded tick is global, so any live
-`action_emitted` record with no spawn ack is a hard acceptance failure even if
-the action belongs to an older batch; it is not permission to describe success
-or to manually reconstruct the skipped spawn from scheduler files.
+owned by that batch has been resolved and recorded. A live `action_emitted`
+record owned by another batch is isolated to its physical job and does not
+block this batch's acceptance; it is never permission to reconstruct the
+ambiguous spawn manually from scheduler files.
 After its dedicated spawn-ack lease expires, the heartbeat must let the
 canonical reservation transition fence only that exact preparing claim to
-tokenless `reserved`, then require explicit runtime enumeration before any new
-spawn. The global launch gate must not return early forever and thereby prevent
-its own lease recovery.
+tokenless `reserved`, then require explicit runtime enumeration before that job
+may spawn again. Unrelated repositories continue through reservation and
+top-up while the ambiguous job remains fenced.
 `/slot <positive-integer>` means Path F and calls only
 `set_executor_slots.sh`; the model never edits scheduler state directly.
 `/repo-slot <positive-integer>` means Path G and calls only
@@ -44,6 +44,8 @@ is scoped to the current requester session.
 Natural-language questions are not heartbeat or spawn triggers. They never
 authorize scheduler mutation or manual runtime recovery; an ambiguous emitted
 spawn is reconciled only when Path D returns the fixed runtime-evidence action.
+Ambiguous or incomplete runtime enumeration leaves that exact job fenced but
+does not suppress an independent repository's spawn grant.
 
 The executor-wide repository-slot ceiling is runtime state shared by every
 batch session under one `EXECUTOR_SCHEDULER_ROOT`. A second shared runtime value

@@ -199,15 +199,10 @@ fi
 # `run_executor_batch_tick.sh` durably writes action_emitted before returning a
 # spawn grant to the runtime. The runtime must then call sessions_spawn and
 # immediately feed its acknowledgement (or exhausted launch failure) to the
-# fixed recorder. Do not let a model skip that runtime boundary and still
-# publish a successful I1 receipt: that would leave the batch in preparing,
-# close the global launch gate, and make every later tick report spawn_ack
-# pending until lease recovery.
-#
-# The embedded tick is executor-global, so its one returned grant may belong to
-# an older batch. Reject any hot action_emitted item, not only one whose owner
-# matches BATCH_ID; otherwise this turn could skip an older grant, acknowledge
-# the new batch, and leave the same global launch gate stuck.
+# fixed recorder. Reject an unacknowledged action owned by this batch so the
+# current intake cannot skip its own runtime boundary. An action owned by a
+# different batch is job-locally isolated by the scheduler and must not prevent
+# this batch from publishing its independent acceptance.
 #
 # Launch-action writes and live-to-archive moves are atomic renames, but the
 # coordinator uses its own lock domain rather than the scheduler lock held
@@ -222,15 +217,16 @@ if [ -d "${LAUNCH_ACTIONS_ROOT}" ]; then
   shopt -u nullglob
   for launch_action_file in "${LAUNCH_ACTION_FILES[@]}"; do
     set +e
-    jq -e '
+    jq -e --arg batch_id "${BATCH_ID}" '
       if type == "object"
         and .version == 1
         and (.job_id | type == "string" and length > 0)
+        and (.batch_id | type == "string" and length > 0)
         and (.stage == "topup_prepared" or .stage == "preparing_claimed"
           or .stage == "bound" or .stage == "action_emitted"
           or .stage == "ack_received" or .stage == "project_recorded"
           or .stage == "scheduler_recorded" or .stage == "completed")
-      then .stage == "action_emitted"
+      then .stage == "action_emitted" and .batch_id == $batch_id
       else error("invalid durable launch action") end
     ' "${launch_action_file}" >/dev/null 2>&1
     launch_action_match_rc=$?
@@ -257,15 +253,16 @@ if [ -d "${LAUNCH_ACTIONS_ROOT}" ]; then
         # the archive check. Retry the canonical live path once before treating
         # the layout as corrupt.
         set +e
-        jq -e '
+        jq -e --arg batch_id "${BATCH_ID}" '
           if type == "object"
             and .version == 1
             and (.job_id | type == "string" and length > 0)
+            and (.batch_id | type == "string" and length > 0)
             and (.stage == "topup_prepared" or .stage == "preparing_claimed"
               or .stage == "bound" or .stage == "action_emitted"
               or .stage == "ack_received" or .stage == "project_recorded"
               or .stage == "scheduler_recorded" or .stage == "completed")
-          then .stage == "action_emitted"
+          then .stage == "action_emitted" and .batch_id == $batch_id
           else error("invalid durable launch action") end
         ' "${launch_action_file}" >/dev/null 2>&1
         launch_action_retry_rc=$?

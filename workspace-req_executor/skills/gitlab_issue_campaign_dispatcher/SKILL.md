@@ -1,6 +1,6 @@
 ---
 name: gitlab_issue_campaign_dispatcher
-description: "[SKILL_VERSION=2026-08-07.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
+description: "[SKILL_VERSION=2026-08-17.1] Run GitLab issue campaigns for req_executor as a thin LLM orchestrator over fixed shell wrappers. Supports scheduled campaigns, child callbacks, durable dispatcher-driven batches including discrete IID lists, explicit automatic merge intent, Issue-declared base-branch inheritance with explicit-request override, repository-wide /mission-stop interruption, same-project dependency DAG v2 plans with immutable predecessor artifacts, fan-out, multi-level and bounded multi-input aggregation, executor batch ticks, runtime /slot, /repo-slot, and /timeout-executor control, and the RUN_SINGLE_ISSUE compatibility shim. Every DAG v2 Issue owns a content-addressed branch and MR; persisted legacy shared-pair states remain recoverable but are not created for new DAG plans. The executor owns GitLab discovery, dependency planning and deferral, transitive reduction, deterministic aggregation, crash-safe claim fencing, project handoffs, exact-SHA MR verification, and per-Issue callback outbox delivery. A server-verified automatic merge ends at finish for ordinary work, while DAG v2 and legacy shared dependency work reject automatic merge and stop at pr. The persisted acpx value also drives future dispatcher-side outer timeouts without modifying the independent OpenClaw global timeout. The LLM only performs serial runtime session enumeration/spawn calls and feeds their strict results back to wrappers; it never queries GitLab, expands batch IIDs, or edits scheduler state."
 allowed-tools: Bash, Read, sessions_history, sessions_spawn, sessions_yield, subagents
 ---
 
@@ -422,14 +422,16 @@ Pass the complete I1 trigger verbatim to the fixed intake wrapper:
    spawned_recorded result, or a launch_failed_recorded result continues to
    step 3 and the public acceptance. A child completion is handled only after
    acceptance as the next protected input, or by a later heartbeat.
-3. If the envelope has no non-empty batch_id, or Path D cannot resolve an
-   action unambiguously, print envelope.chat_summary and EXIT without a public
-   acceptance.
+3. If the envelope has no non-empty batch_id, print envelope.chat_summary and
+   EXIT without a public acceptance. An unresolved reconciliation action stays
+   job-locally fenced; continue to the fixed emitter, which independently
+   rejects only an unacknowledged action owned by this batch.
 4. cd "${SKILL_DIR}" && BATCH_ID="<verbatim envelope.batch_id>" \
      bash scripts/emit_driven_batch_acceptance.sh → acceptance
    # This fixed emitter is the hard runtime-action fence. It exits nonzero if
-   # any hot action is still action_emitted with no durable spawn acknowledgement;
-   # the embedded global tick may have returned a grant for an older batch.
+   # this batch owns a hot action_emitted item with no durable spawn
+   # acknowledgement. Ambiguous actions owned by other batches remain
+   # job-locally isolated and do not suppress this receipt.
    # On nonzero, do not emit a receipt, do not run an ad-hoc tick, and do not
    # reconstruct a manual spawn from private scheduler files.
 5. Return exactly acceptance's sole compact JSON line as the final assistant
@@ -527,7 +529,10 @@ input only and is rejected by req_dispatcher as a public receipt.
        {"job_id":"<action.job_id>","claim_generation":<action.claim_generation>,
         "resolution":"not_found","evidence":"subagents_list_no_matching_label"}
      else:
-       print chat_summary, EXIT  # ambiguous runtime evidence; never guess
+       leave this action unresolved and continue to the next reconciliation
+       action, then process any independent spawn grant
+       # Enumeration failure, duplicate matches, or incomplete runtime identity
+       # freezes only this job. Never guess and never suppress another job.
 4. require envelope.spawn_grants length <= 1. If it contains one grant:
      payload = Read(grant.payload_path)
      call sessions_spawn with the fixed parameters and retry contract below
@@ -580,9 +585,9 @@ never reconstruct it in the LLM.
 An `action_emitted` item gets a dedicated spawn-ack lease (180 seconds by
 default, safely beyond the fixed three 30-second launch attempts plus
 backoff). Once it expires, the tick lets the canonical reservation wrapper
-fence only that exact preparing job back to tokenless `reserved`, then returns
-`reconcile_actions[]` before any project top-up. It is never automatically
-re-spawned.
+fence only that exact preparing job back to tokenless `reserved`, returns its
+`reconcile_actions[]` entry, and excludes that job from top-up while unrelated
+repositories continue. It is never automatically re-spawned.
 `not_found` requires the explicit runtime enumeration evidence above before a
 later tick may allocate the next claim generation. If the child is found, the
 wrapper restores that exact generation and the later tick must not spawn it
@@ -606,10 +611,12 @@ identity, and claim are created through the normal wrappers.
 `RUN_EXECUTOR_BATCH_TICK` is recovery-first: it scans durable project intents,
 imports terminal handoffs, drains the callback outbox, then resumes every
 durable post-spawn coordinator at `ack_received`, `project_recorded`, or
-`scheduler_recorded` before it reserves/refills slots. The original caller does
-not resend a spawn acknowledgement after a crash; the tick rebuilds the strict
-recorder input from the durable coordinator. This includes the two ambiguity
-windows where a downstream project/scheduler commit succeeded but its following
+`scheduler_recorded` before it reserves/refills slots. A coordinator that still
+cannot advance fences only its exact `job_id`; unrelated repositories remain
+eligible for reservation and top-up. The original caller does not resend a
+spawn acknowledgement after a crash; the tick rebuilds the strict recorder
+input from the durable coordinator. This includes the two ambiguity windows
+where a downstream project/scheduler commit succeeded but its following
 coordinator stage write did not. Invoke only the fixed wrapper;
 never edit scheduler JSON, manually bind a claim, or reconstruct
 retry/round-robin logic in the LLM.

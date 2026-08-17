@@ -1972,14 +1972,20 @@ while IFS= read -r orphan_project; do
   fi
 done < <(jq -r '.[]' <<<"${PROJECTS_JSON}")
 
-# A prior sessions_spawn action globally closes the launch gate until its
-# acknowledgement is durable (or explicit runtime reconciliation resolves the
-# ambiguity). Do this independent of the current reservation set: a preparing
-# job already occupies a scheduler slot and therefore may not be returned by
-# reserve_driven_batch_items.sh at all.
-SERIAL_LAUNCH_GATE_CLOSED=false
-SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED=false
-SERIAL_LAUNCH_RECOVERY_JOB_ID=""
+# An unfinished sessions_spawn action fences only its own physical job. The
+# scheduler may continue admitting unrelated repositories while that job waits
+# for its acknowledgement or explicit runtime reconciliation. Every fenced job
+# is removed from both reservation replays and running continuations below, so
+# isolation never permits the ambiguous generation itself to spawn twice.
+ISOLATED_LAUNCH_JOB_IDS='[]'
+LAUNCH_ISOLATION_SCAN_COMPLETE=true
+LAUNCH_ACK_RECOVERY_JOB_ID=""
+isolate_launch_job() {
+  local job_id="$1"
+  ISOLATED_LAUNCH_JOB_IDS="$(jq -c --arg job_id "${job_id}" '
+    if index($job_id) == null then . + [$job_id] else . end
+  ' <<<"${ISOLATED_LAUNCH_JOB_IDS}")"
+}
 append_spawn_reconcile_action() {
   local action_json="$1" job_id="$2"
   RECONCILE_ACTIONS="$(jq -c \
@@ -2004,96 +2010,103 @@ append_spawn_reconcile_action() {
     }]
   ' <<<"${RECONCILE_ACTIONS}")"
 }
-declare -a SERIAL_GATE_ACTION_FILES=()
+declare -a LAUNCH_ISOLATION_ACTION_FILES=()
 shopt -s nullglob
-SERIAL_GATE_ACTION_FILES=("${DLC_ROOT}"/*.json)
+LAUNCH_ISOLATION_ACTION_FILES=("${DLC_ROOT}"/*.json)
 shopt -u nullglob
-if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
-  IFS=$'\n' SERIAL_GATE_ACTION_FILES=($(printf '%s\n' \
-    "${SERIAL_GATE_ACTION_FILES[@]}" | LC_ALL=C sort))
+if [ "${#LAUNCH_ISOLATION_ACTION_FILES[@]}" -gt 0 ]; then
+  IFS=$'\n' LAUNCH_ISOLATION_ACTION_FILES=($(printf '%s\n' \
+    "${LAUNCH_ISOLATION_ACTION_FILES[@]}" | LC_ALL=C sort))
   unset IFS
-  for serial_action_file in "${SERIAL_GATE_ACTION_FILES[@]}"; do
+  for launch_isolation_action_file in "${LAUNCH_ISOLATION_ACTION_FILES[@]}"; do
   if [ "${SECONDS}" -ge "${TOPUP_PHASE_DEADLINE_SECONDS}" ]; then
     TOPUP_PHASE_EXHAUSTED=true
     record_topup_budget deadline
+    LAUNCH_ISOLATION_SCAN_COMPLETE=false
     break
   fi
-  serial_job_id="$(jq -er '
+  launch_isolation_job_id="$(jq -er '
     if type == "object" and (.job_id | type == "string" and length > 0)
     then .job_id else error("missing job_id") end
-  ' "${serial_action_file}")" || tick_die "durable launch action is invalid"
-  if ! serial_lock_timeout="$(remaining_topup_seconds 5)" \
-      || ! DLC_LOCK_WAIT_SECONDS="${serial_lock_timeout}" \
-        dlc_open "${serial_job_id}"; then
-    append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+  ' "${launch_isolation_action_file}")" \
+    || tick_die "durable launch action is invalid"
+  if ! launch_isolation_lock_timeout="$(remaining_topup_seconds 5)" \
+      || ! DLC_LOCK_WAIT_SECONDS="${launch_isolation_lock_timeout}" \
+        dlc_open "${launch_isolation_job_id}"; then
+    append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
       operation:"launch_coordinator",job_id:$job_id,status:"lock_timeout"
     }')"
     HAD_FAILURE=true
-    SERIAL_LAUNCH_GATE_CLOSED=true
-    break
+    isolate_launch_job "${launch_isolation_job_id}"
+    continue
   fi
-  if [ "${DLC_ACTION_FILE}" != "${serial_action_file}" ]; then
+  if [ "${DLC_ACTION_FILE}" != "${launch_isolation_action_file}" ]; then
     dlc_close
     tick_die "durable launch action path does not match job identity"
   fi
-  serial_action="$(dlc_read)" || {
+  launch_isolation_action="$(dlc_read)" || {
     dlc_close
     tick_die "durable launch action is invalid"
   }
-  serial_stage="$(jq -r '.stage' <<<"${serial_action}")"
-  case "${serial_stage}" in
+  launch_isolation_stage="$(jq -r '.stage' <<<"${launch_isolation_action}")"
+  case "${launch_isolation_stage}" in
     legacy_execution_schema)
-      append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+      append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
         operation:"launch_coordinator",job_id:$job_id,
         status:"legacy_execution_schema",action:"drain_required"
       }')"
       HAD_FAILURE=true
-      SERIAL_LAUNCH_GATE_CLOSED=true
+      isolate_launch_job "${launch_isolation_job_id}"
       ;;
     action_emitted)
-      if ! serial_state_lock_timeout="$(remaining_topup_seconds 5)"; then
+      isolate_launch_job "${launch_isolation_job_id}"
+      if ! launch_isolation_state_lock_timeout="$(remaining_topup_seconds 5)"; then
         dlc_close
-        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+        append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
           operation:"spawn_reconcile",job_id:$job_id,status:"lock_timeout"
         }')"
         HAD_FAILURE=true
-        SERIAL_LAUNCH_GATE_CLOSED=true
+        LAUNCH_ISOLATION_SCAN_COMPLETE=false
         record_topup_budget deadline
         break
       fi
-      exec {SERIAL_GATE_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-      if ! flock -w "${serial_state_lock_timeout}" -x \
-          "${SERIAL_GATE_STATE_LOCK_FD}"; then
-        exec {SERIAL_GATE_STATE_LOCK_FD}>&-
+      exec {LAUNCH_ISOLATION_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+      if ! flock -w "${launch_isolation_state_lock_timeout}" -x \
+          "${LAUNCH_ISOLATION_STATE_LOCK_FD}"; then
+        exec {LAUNCH_ISOLATION_STATE_LOCK_FD}>&-
         dlc_close
-        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+        append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
           operation:"spawn_reconcile",job_id:$job_id,status:"lock_timeout"
         }')"
         HAD_FAILURE=true
-        SERIAL_LAUNCH_GATE_CLOSED=true
-        break
+        continue
       fi
-      serial_scheduler_job="$(jq -c --arg job_id "${serial_job_id}" \
+      launch_isolation_scheduler_job="$(jq -c \
+        --arg job_id "${launch_isolation_job_id}" \
         '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
-      flock -u "${SERIAL_GATE_STATE_LOCK_FD}"
-      exec {SERIAL_GATE_STATE_LOCK_FD}>&-
+      flock -u "${LAUNCH_ISOLATION_STATE_LOCK_FD}"
+      exec {LAUNCH_ISOLATION_STATE_LOCK_FD}>&-
       if jq -e \
-          --argjson prior_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" '
+          --argjson prior_generation "$(jq -r \
+            '.claim_generation' <<<"${launch_isolation_action}")" '
           type == "object"
           and .status == "reserved"
           and .claim_generation == $prior_generation
           and .claim_token == null
-        ' <<<"${serial_scheduler_job}" >/dev/null; then
-        append_spawn_reconcile_action "${serial_action}" "${serial_job_id}"
-        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+        ' <<<"${launch_isolation_scheduler_job}" >/dev/null; then
+        append_spawn_reconcile_action \
+          "${launch_isolation_action}" "${launch_isolation_job_id}"
+        append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
           operation:"spawn_reconcile",job_id:$job_id,status:"required"
         }')"
-        SERIAL_LAUNCH_GATE_CLOSED=true
       elif jq -e \
-          --argjson prior_generation "$(jq -r '.claim_generation' <<<"${serial_action}")" \
-          --arg prior_token "$(jq -r '.claim_token' <<<"${serial_action}")" \
+          --argjson prior_generation "$(jq -r \
+            '.claim_generation' <<<"${launch_isolation_action}")" \
+          --arg prior_token "$(jq -r \
+            '.claim_token' <<<"${launch_isolation_action}")" \
           --argjson now "${TICK_NOW_EPOCH}" \
-          --argjson emitted_at "$(jq -r '.updated_at' <<<"${serial_action}")" \
+          --argjson emitted_at "$(jq -r \
+            '.updated_at' <<<"${launch_isolation_action}")" \
           --arg lease_seconds "${SPAWN_ACK_LEASE_SECONDS}" '
           ($lease_seconds | tonumber) as $lease
           | type == "object"
@@ -2103,66 +2116,65 @@ if [ "${#SERIAL_GATE_ACTION_FILES[@]}" -gt 0 ]; then
           and .claim_token == $prior_token
           and $now >= $emitted_at
           and (($now - $emitted_at) >= $lease)
-        ' <<<"${serial_scheduler_job}" >/dev/null; then
+        ' <<<"${launch_isolation_scheduler_job}" >/dev/null; then
         # reserve_driven_batch_items.sh owns the atomic scheduler+batch lease
-        # transition. Let exactly that phase run once, then stop before project
-        # top-up and require explicit runtime enumeration for the emitted
-        # child label. Previously this global gate returned before reserve on
-        # every heartbeat, so the preparing lease could never actually expire.
-        SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED=true
-        SERIAL_LAUNCH_RECOVERY_JOB_ID="${serial_job_id}"
-        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
-          operation:"spawn_ack",job_id:$job_id,status:"lease_expired"
-        }')"
+        # transition. Recover at most one expired acknowledgement per tick;
+        # every other ambiguous job remains isolated while unrelated projects
+        # continue through reservation and top-up.
+        if [ -z "${LAUNCH_ACK_RECOVERY_JOB_ID}" ]; then
+          LAUNCH_ACK_RECOVERY_JOB_ID="${launch_isolation_job_id}"
+          append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
+            operation:"spawn_ack",job_id:$job_id,status:"lease_expired"
+          }')"
+        else
+          append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
+            operation:"spawn_ack",job_id:$job_id,
+            status:"lease_recovery_deferred"
+          }')"
+        fi
       else
-        append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+        append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
           operation:"spawn_ack",job_id:$job_id,status:"pending"
         }')"
-        SERIAL_LAUNCH_GATE_CLOSED=true
       fi
       ;;
     ack_received|project_recorded|scheduler_recorded)
-      append_operation "$(jq -cn --arg job_id "${serial_job_id}" '{
+      append_operation "$(jq -cn --arg job_id "${launch_isolation_job_id}" '{
         operation:"launch_resume",job_id:$job_id,status:"pending"
       }')"
       HAD_FAILURE=true
-      SERIAL_LAUNCH_GATE_CLOSED=true
+      isolate_launch_job "${launch_isolation_job_id}"
       ;;
   esac
   dlc_close
-    if [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ] \
-        || [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
-      break
-    fi
   done
 fi
 
-if [ "${SERIAL_LAUNCH_GATE_CLOSED}" = true ]; then
-  if [ "$(jq -r 'length' <<<"${RECONCILE_ACTIONS}")" -gt 0 ]; then
-    SERIAL_GATE_STATUS=reconcile_required
-    SERIAL_GATE_SUMMARY="executor batch tick requires runtime reconciliation before retry"
-  elif [ "${HAD_FAILURE}" = true ]; then
-    SERIAL_GATE_STATUS=tick_failed
-    SERIAL_GATE_SUMMARY="executor batch tick has durable launch recording pending recovery"
-  else
-    SERIAL_GATE_STATUS=idle
-    SERIAL_GATE_SUMMARY="executor batch tick is waiting for the prior spawn acknowledgement"
-  fi
+if [ "${LAUNCH_ISOLATION_SCAN_COMPLETE}" = false ]; then
+  flock -u "${EXECUTOR_TICK_LOCK_FD}"
+  exec {EXECUTOR_TICK_LOCK_FD}>&-
   jq -cn \
-    --arg status "${SERIAL_GATE_STATUS}" \
     --argjson operations "${OPERATIONS}" \
     --argjson reconcile_actions "${RECONCILE_ACTIONS}" \
-    --arg chat_summary "${SERIAL_GATE_SUMMARY}" '{
-      status:$status,
+    '{
+      status:"tick_failed",
       spawn_grants:[],
       reconcile_actions:$reconcile_actions,
       cleanup_actions:[],
       operation_results:$operations,
       max_launch_retries:3,
       backoff_seconds:2,
-      chat_summary:$chat_summary
+      chat_summary:"executor launch-isolation scan exhausted its phase budget"
     }'
   exit 0
+fi
+
+if [ "$(jq -r 'length' <<<"${ISOLATED_LAUNCH_JOB_IDS}")" -gt 0 ]; then
+  append_operation "$(jq -cn \
+    --argjson job_ids "${ISOLATED_LAUNCH_JOB_IDS}" '{
+    operation:"launch_isolation",status:"active",
+    isolated_job_count:($job_ids | length),isolated_job_ids:$job_ids
+  }')"
 fi
 
 # Phase C: lease recovery + strict round-robin reservation. A hard reserve
@@ -2170,13 +2182,13 @@ fi
 RESERVE_OUTPUT=""
 RESERVE_RC=124
 ACK_RECOVERY_LEASE_OVERRIDE=""
-if [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
+if [ -n "${LAUNCH_ACK_RECOVERY_JOB_ID}" ]; then
   ACK_RECOVERY_LEASE_OVERRIDE="${SPAWN_ACK_LEASE_SECONDS}"
 fi
 if RESERVE_TIMEOUT="$(remaining_topup_seconds 15)"; then
   set +e
   RESERVE_OUTPUT="$(CONFIG_DIR="${CONFIG_DIR}" \
-    DRIVEN_ACK_RECOVERY_JOB_ID="${SERIAL_LAUNCH_RECOVERY_JOB_ID}" \
+    DRIVEN_ACK_RECOVERY_JOB_ID="${LAUNCH_ACK_RECOVERY_JOB_ID}" \
     DRIVEN_ACK_RECOVERY_LEASE_SECONDS="${ACK_RECOVERY_LEASE_OVERRIDE}" \
     timeout --kill-after=1s "${RESERVE_TIMEOUT}s" \
       bash "${RESERVE_CMD}" 2>/dev/null)"
@@ -2232,85 +2244,59 @@ append_operation "$(jq -cn --argjson reserve "${RESERVE_JSON}" '{
   available_slots:$reserve.available_slots
 }')"
 
-# An expired action_emitted claim reached reserve only so the canonical lease
-# recovery could fence preparing -> reserved in both scheduler and batch state.
-# Re-read the coordinator while holding its lock, then the scheduler lock, and
-# expose only the existing runtime-evidence action. Never continue into project
-# top-up or emit the recovered reservation as a new spawn grant.
-if [ "${SERIAL_LAUNCH_LEASE_RECOVERY_REQUIRED}" = true ]; then
-  dlc_open "${SERIAL_LAUNCH_RECOVERY_JOB_ID}"
-  recovered_serial_action="$(dlc_read)" || {
+# An expired action_emitted claim reaches reserve so the canonical wrapper can
+# fence preparing -> reserved in both scheduler and batch state. Re-read that
+# exact job and expose runtime reconciliation, but continue top-up for other
+# repositories. The isolated-job filter below suppresses this reservation.
+if [ -n "${LAUNCH_ACK_RECOVERY_JOB_ID}" ]; then
+  dlc_open "${LAUNCH_ACK_RECOVERY_JOB_ID}"
+  recovered_launch_action="$(dlc_read)" || {
     dlc_close
     tick_die "durable launch action is invalid after lease recovery"
   }
-  exec {RECOVERED_SERIAL_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
-  flock -x "${RECOVERED_SERIAL_STATE_LOCK_FD}"
-  recovered_serial_job="$(jq -c \
-    --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" \
+  exec {RECOVERED_LAUNCH_STATE_LOCK_FD}>"${SCHEDULER_LOCK_FILE}"
+  flock -x "${RECOVERED_LAUNCH_STATE_LOCK_FD}"
+  recovered_launch_job="$(jq -c \
+    --arg job_id "${LAUNCH_ACK_RECOVERY_JOB_ID}" \
     '.active_jobs[$job_id] // null' "${SCHEDULER_STATE_FILE}")"
-  flock -u "${RECOVERED_SERIAL_STATE_LOCK_FD}"
-  exec {RECOVERED_SERIAL_STATE_LOCK_FD}>&-
+  flock -u "${RECOVERED_LAUNCH_STATE_LOCK_FD}"
+  exec {RECOVERED_LAUNCH_STATE_LOCK_FD}>&-
 
   if jq -e \
-      --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" \
-      --argjson generation "$(jq -r '.claim_generation' <<<"${recovered_serial_action}")" '
+      --arg job_id "${LAUNCH_ACK_RECOVERY_JOB_ID}" \
+      --argjson generation "$(jq -r \
+        '.claim_generation' <<<"${recovered_launch_action}")" '
       .job_id == $job_id
       and .stage == "action_emitted"
       and .claim_generation == $generation
       and (.claim_token | type == "string" and length > 0)
       and .outcome == null and .ack == null
-    ' <<<"${recovered_serial_action}" >/dev/null \
+    ' <<<"${recovered_launch_action}" >/dev/null \
       && jq -e \
-        --argjson generation "$(jq -r '.claim_generation' <<<"${recovered_serial_action}")" '
+        --argjson generation "$(jq -r \
+          '.claim_generation' <<<"${recovered_launch_action}")" '
         type == "object"
         and .status == "reserved"
         and .claim_generation == $generation
         and .claim_token == null
-      ' <<<"${recovered_serial_job}" >/dev/null; then
+      ' <<<"${recovered_launch_job}" >/dev/null; then
     append_spawn_reconcile_action \
-      "${recovered_serial_action}" "${SERIAL_LAUNCH_RECOVERY_JOB_ID}"
+      "${recovered_launch_action}" "${LAUNCH_ACK_RECOVERY_JOB_ID}"
     append_operation "$(jq -cn \
-      --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" '{
+      --arg job_id "${LAUNCH_ACK_RECOVERY_JOB_ID}" '{
       operation:"spawn_reconcile",job_id:$job_id,
       status:"required_after_lease_recovery"
     }')"
     dlc_close
-    flock -u "${EXECUTOR_TICK_LOCK_FD}"
-    exec {EXECUTOR_TICK_LOCK_FD}>&-
-    jq -cn \
-      --argjson operations "${OPERATIONS}" \
-      --argjson reconcile_actions "${RECONCILE_ACTIONS}" '{
-      status:"reconcile_required",
-      spawn_grants:[],
-      reconcile_actions:$reconcile_actions,
-      cleanup_actions:[],
-      operation_results:$operations,
-      max_launch_retries:3,
-      backoff_seconds:2,
-      chat_summary:"executor batch tick requires runtime reconciliation after spawn acknowledgement lease expiry"
-    }'
-    exit 0
+  else
+    dlc_close
+    append_operation "$(jq -cn \
+      --arg job_id "${LAUNCH_ACK_RECOVERY_JOB_ID}" '{
+      operation:"spawn_reconcile",job_id:$job_id,
+      status:"lease_recovery_raced"
+    }')"
+    HAD_FAILURE=true
   fi
-
-  dlc_close
-  flock -u "${EXECUTOR_TICK_LOCK_FD}"
-  exec {EXECUTOR_TICK_LOCK_FD}>&-
-  append_operation "$(jq -cn \
-    --arg job_id "${SERIAL_LAUNCH_RECOVERY_JOB_ID}" '{
-    operation:"spawn_reconcile",job_id:$job_id,
-    status:"lease_recovery_raced"
-  }')"
-  jq -cn --argjson operations "${OPERATIONS}" '{
-    status:"tick_failed",
-    spawn_grants:[],
-    reconcile_actions:[],
-    cleanup_actions:[],
-    operation_results:$operations,
-    max_launch_retries:3,
-    backoff_seconds:2,
-    chat_summary:"executor spawn acknowledgement state changed during lease recovery; retry the heartbeat"
-  }'
-  exit 0
 fi
 
 # Running physical jobs already occupy repository-local Issue capacity.
@@ -2358,9 +2344,12 @@ exec {ACTIVE_LOCK_FD}>&-
 
 CANDIDATES_ALL="$(jq -cn \
   --argjson reserved "$(jq -c '.grants' <<<"${RESERVE_JSON}")" \
-  --argjson continuations "${ACTIVE_CONTINUATIONS}" '
+  --argjson continuations "${ACTIVE_CONTINUATIONS}" \
+  --argjson isolated "${ISOLATED_LAUNCH_JOB_IDS}" '
   reduce ($reserved + $continuations)[] as $grant ([];
-    if any(.[]; .job_id == $grant.job_id) then . else . + [$grant] end)
+    if ($isolated | index($grant.job_id)) != null
+      or any(.[]; .job_id == $grant.job_id)
+    then . else . + [$grant] end)
 ')"
 CANDIDATES="$(jq -c --argjson limit "${EXECUTOR_TOPUP_ITEM_LIMIT}" \
   '.[:$limit]' <<<"${CANDIDATES_ALL}")"
@@ -2858,7 +2847,11 @@ while [ "${LAST_IMPORTED_SKIP_COUNT}" -gt 0 ]; do
     grant_count:($reserve.grants | length),active_count:$reserve.active_count,
     available_slots:$reserve.available_slots
   }')"
-  REFILL_GRANTS="$(jq -c '.grants' <<<"${REFILL_JSON}")"
+  REFILL_GRANTS="$(jq -c \
+    --argjson isolated "${ISOLATED_LAUNCH_JOB_IDS}" '
+    [.grants[] | . as $grant
+      | select(($isolated | index($grant.job_id)) == null)]
+  ' <<<"${REFILL_JSON}")"
   [ "$(jq -r 'length' <<<"${REFILL_GRANTS}")" -gt 0 ] || break
   NOVEL_REFILL_GRANTS_ALL="$(jq -cn \
     --argjson existing "${CANDIDATES}" \
@@ -3162,19 +3155,30 @@ while IFS= read -r grant; do
       }')"
     fi
     # A runtime call may already exist and its acknowledgement is not yet
-    # durably recorded. Never expose a later grant in the same tick; explicit
-    # reconciliation must resolve this action first.
+    # durably recorded. Fence only this late-racing job; a later candidate from
+    # another repository remains eligible in the same tick.
+    isolate_launch_job "${job_id}"
+    append_operation "$(jq -cn --arg job_id "${job_id}" '{
+      operation:"launch_isolation",job_id:$job_id,
+      status:"late_action_emitted"
+    }')"
     dlc_close
-    break
+    continue
   fi
   if [ "${action_stage}" = ack_received ] \
       || [ "${action_stage}" = project_recorded ] \
       || [ "${action_stage}" = scheduler_recorded ]; then
-    # resume_durable_launch_actions owns these stages. If it could not finish,
-    # keep the global serial gate closed instead of launching another child.
+    # resume_durable_launch_actions owns these stages. If one races past the
+    # initial isolation snapshot, fence that exact job and keep scanning
+    # unrelated candidates.
     HAD_FAILURE=true
+    isolate_launch_job "${job_id}"
+    append_operation "$(jq -cn --arg job_id "${job_id}" '{
+      operation:"launch_isolation",job_id:$job_id,
+      status:"late_recording_stage"
+    }')"
     dlc_close
-    break
+    continue
   fi
   if [ "${action_stage}" = topup_prepared ]; then
     set +e

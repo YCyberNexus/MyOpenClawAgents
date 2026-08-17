@@ -98,6 +98,8 @@ grep -Fq 'Do not pass JOB_ID, CLAIM_GENERATION' <<<"${PATH_D_SECTION}" \
   || fail "Path D must forbid the unrelated environment-variable recorder contract"
 grep -Fq 'On Path D only' <<<"${PATH_D_SECTION}" \
   || fail "post-recorder sessions_yield must be scoped to Path D"
+grep -Fq 'continue to the next reconciliation' <<<"${PATH_D_SECTION}" \
+  || fail "ambiguous runtime evidence must remain job-local"
 grep -Fq 'MUST NOT call' <<<"${PATH_E_SECTION}" \
   && grep -Fq '`sessions_yield` anywhere in this turn' <<<"${PATH_E_SECTION}" \
   || fail "Path E must absolutely forbid sessions_yield"

@@ -36,7 +36,11 @@ EOF
 cat >"${FAKE_BIN}/resolve.sh" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-printf '%s\n' "${CASE_ROOT}/repos/group/repo"
+case "${PROJECT_FULL}" in
+  group/repo) printf '%s\n' "${CASE_ROOT}/repos/group/repo" ;;
+  group/other) printf '%s\n' "${CASE_ROOT}/repos/group/other" ;;
+  *) exit 2 ;;
+esac
 EOF
 cat >"${FAKE_BIN}/drain_intents.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -84,6 +88,69 @@ jq -cn --arg payload "${CASE_ROOT}/payload.txt" '{
     iid:42,execution_id:1,child_label:"#42-att-001",
     payload_path:$payload,job_id:"A:snapshot-0",batch_id:"A",
     expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000042",
+    expected_task_bytes:7,
+    snapshot_index:0,memberships_source:"scheduler_active_job"
+  }],
+  skipped_entries:[]
+}'
+EOF
+cat >"${FAKE_BIN}/reserve_other.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' reserve:other >>"${CALL_LOG}"
+jq -cn '{
+  status:"ready",active_count:2,available_slots:1,
+  grants:[{
+    job_id:"B:snapshot-0",batch_id:"B",snapshot_index:0,
+    project:"group/other",iid:42,branch:null,entry_mode:"auto",
+    force_rerun_pr:false,auto_merge:false,merge_target_branch:null
+  }]
+}'
+EOF
+cat >"${FAKE_BIN}/reserve_expired_other.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "${DRIVEN_ACK_RECOVERY_JOB_ID:-}" = "A:snapshot-0" ]
+[ "${DRIVEN_ACK_RECOVERY_LEASE_SECONDS:-}" = 180 ]
+state="$(jq -c '
+  .active_jobs["A:snapshot-0"].status = "reserved"
+  | .active_jobs["A:snapshot-0"].claim_token = null
+' "${SCHEDULER_ROOT}/scheduler_state.json")"
+printf '%s\n' "${state}" >"${SCHEDULER_ROOT}/scheduler_state.json"
+printf '%s\n' reserve:expired-other >>"${CALL_LOG}"
+jq -cn '{
+  status:"ready",active_count:2,available_slots:1,
+  grants:[
+    {
+      job_id:"A:snapshot-0",batch_id:"A",snapshot_index:0,
+      project:"group/repo",iid:42,branch:null,entry_mode:"auto",
+      force_rerun_pr:false,auto_merge:false,merge_target_branch:null
+    },
+    {
+      job_id:"B:snapshot-0",batch_id:"B",snapshot_index:0,
+      project:"group/other",iid:42,branch:null,entry_mode:"auto",
+      force_rerun_pr:false,auto_merge:false,merge_target_branch:null
+    }
+  ]
+}'
+EOF
+cat >"${FAKE_BIN}/topup_other.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+request="$(cat)"
+jq -e '
+  .owner_id == "executor-agent-scheduler-v1"
+  and [.grants[] | {job_id,project,iid}] == [{
+    job_id:"B:snapshot-0",project:"group/other",iid:42
+  }]
+' <<<"${request}" >/dev/null
+printf '%s\n' topup:other >>"${CALL_LOG}"
+jq -cn --arg payload "${CASE_ROOT}/payload.txt" '{
+  status:"ready",
+  dispatch_entries:[{
+    iid:42,execution_id:2,child_label:"#42-att-002",
+    payload_path:$payload,job_id:"B:snapshot-0",batch_id:"B",
+    expected_task_sha256:"0000000000000000000000000000000000000000000000000000000000000043",
     expected_task_bytes:7,
     snapshot_index:0,memberships_source:"scheduler_active_job"
   }],
@@ -187,8 +254,25 @@ EOF
 EOF
 }
 
+add_other_repository_reservation() {
+  mkdir -p "${CASE_ROOT}/repos/group/other/.git"
+  local scheduler_state
+  scheduler_state="$(jq -c '
+    .active_jobs["B:snapshot-0"] = {
+      job_id:"B:snapshot-0",project:"group/other",iid:42,
+      branch:null,entry_mode:"auto",force_rerun_pr:false,
+      auto_merge:false,merge_target_branch:null,
+      status:"reserved",claim_generation:0,claim_token:null,
+      owner:{batch_id:"B",snapshot_index:0}
+    }
+  ' "${SCHEDULER_ROOT}/scheduler_state.json")"
+  printf '%s\n' "${scheduler_state}" >"${SCHEDULER_ROOT}/scheduler_state.json"
+}
+
 run_case_tick() {
   local fault="${1:-}" topup_fail="${2:-0}"
+  local reserve_cmd="${3:-${FAKE_BIN}/reserve.sh}"
+  local topup_cmd="${4:-${FAKE_BIN}/topup.sh}"
   CONFIG_DIR="${CONFIG_DIR}" \
   CASE_ROOT="${CASE_ROOT}" SCHEDULER_ROOT="${SCHEDULER_ROOT}" CALL_LOG="${CALL_LOG}" \
   TOPUP_FAIL="${topup_fail}" \
@@ -196,8 +280,8 @@ run_case_tick() {
   RESOLVE_REPO_CMD="${FAKE_BIN}/resolve.sh" \
   DRAIN_HANDOFF_CMD="${FAKE_BIN}/drain_intents.sh" \
   DRAIN_OUTBOX_CMD="${FAKE_BIN}/drain_outbox.sh" \
-  RESERVE_CMD="${FAKE_BIN}/reserve.sh" \
-  TOPUP_CMD="${FAKE_BIN}/topup.sh" \
+  RESERVE_CMD="${reserve_cmd}" \
+  TOPUP_CMD="${topup_cmd}" \
   IMPORT_SKIP_CMD="${FAKE_BIN}/skip.sh" \
   RECORD_LAUNCH_CMD="${FAKE_BIN}/record.sh" \
   BIND_CLAIM_CMD="${FAKE_BIN}/bind.sh" \
@@ -449,5 +533,106 @@ jq -e '.spawn_grants == [] and .reconcile_actions == []' \
 if grep -Eq '^(record|bind):' "${CALL_LOG}"; then
   fail "runtime_found: recovery tick allocated another generation"
 fi
+
+# A lost spawn acknowledgement in repository A must fence only A. Repository B
+# retains its independent scheduler grant and may advance to action_emitted in
+# the same heartbeat while A remains on its original ambiguous generation.
+setup_case cross_repository_isolation
+first_repository_grant="$(run_case_tick)" \
+  || fail "cross_repository_isolation: initial A tick failed"
+jq -e '
+  (.spawn_grants | length) == 1
+  and .spawn_grants[0].job_id == "A:snapshot-0"
+  and .spawn_grants[0].project == "group/repo"
+  and .spawn_grants[0].claim_generation == 1
+' <<<"${first_repository_grant}" >/dev/null \
+  || fail "cross_repository_isolation: A did not reach ambiguous emission"
+
+add_other_repository_reservation
+: >"${CALL_LOG}"
+second_repository_grant="$(run_case_tick '' 0 \
+  "${FAKE_BIN}/reserve_other.sh" "${FAKE_BIN}/topup_other.sh")" \
+  || fail "cross_repository_isolation: B tick failed"
+jq -e '
+  .status == "ready"
+  and (.spawn_grants | length) == 1
+  and .spawn_grants[0].job_id == "B:snapshot-0"
+  and .spawn_grants[0].project == "group/other"
+  and .spawn_grants[0].claim_generation == 1
+  and ([.operation_results[] | select(
+    .operation == "spawn_ack"
+    and .job_id == "A:snapshot-0"
+    and .status == "pending"
+  )] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "launch_isolation"
+    and .status == "active"
+    and (.isolated_job_ids | index("A:snapshot-0") != null)
+  )] | length) == 1
+' <<<"${second_repository_grant}" >/dev/null \
+  || fail "cross_repository_isolation: A suppressed B's independent grant"
+[ "$(cat "${CALL_LOG}")" = $'reserve:other\ntopup:other\nrecord:B:snapshot-0\nbind:B:snapshot-0:1' ] \
+  || fail "cross_repository_isolation: B did not cross reservation/topup exactly once"
+jq -e '
+  .active_jobs["A:snapshot-0"].status == "preparing"
+  and .active_jobs["A:snapshot-0"].claim_generation == 1
+  and .active_jobs["B:snapshot-0"].status == "preparing"
+  and .active_jobs["B:snapshot-0"].claim_generation == 1
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "cross_repository_isolation: either repository lost its claim fence"
+jq -s -e '
+  ([.[] | select(.job_id == "A:snapshot-0"
+    and .stage == "action_emitted" and .claim_generation == 1)] | length) == 1
+  and ([.[] | select(.job_id == "B:snapshot-0"
+    and .stage == "action_emitted" and .claim_generation == 1)] | length) == 1
+' "${SCHEDULER_ROOT}"/launch_actions/*.json >/dev/null \
+  || fail "cross_repository_isolation: launch actions were not independently fenced"
+
+# Lease expiry adds A's explicit reconciliation action but still must not hold
+# B behind that runtime-evidence round trip. The same envelope may safely carry
+# A's reconcile action and B's separately fenced spawn grant.
+setup_case cross_repository_expired_isolation
+expired_first_grant="$(run_case_tick)" \
+  || fail "cross_repository_expired_isolation: initial A tick failed"
+expired_a_label="$(jq -r '.spawn_grants[0].child_label' \
+  <<<"${expired_first_grant}")"
+mapfile -t expired_action_files < <(find "${SCHEDULER_ROOT}/launch_actions" \
+  -maxdepth 1 -type f -name '*.json' -print)
+[ "${#expired_action_files[@]}" -eq 1 ] \
+  || fail "cross_repository_expired_isolation: A action is missing"
+expired_action_state="$(jq -c '.updated_at = 1' "${expired_action_files[0]}")"
+printf '%s\n' "${expired_action_state}" >"${expired_action_files[0]}"
+expired_scheduler_state="$(jq -c '
+  .active_jobs["A:snapshot-0"].updated_at = 1
+' "${SCHEDULER_ROOT}/scheduler_state.json")"
+printf '%s\n' "${expired_scheduler_state}" \
+  >"${SCHEDULER_ROOT}/scheduler_state.json"
+add_other_repository_reservation
+: >"${CALL_LOG}"
+expired_isolation_output="$(run_case_tick '' 0 \
+  "${FAKE_BIN}/reserve_expired_other.sh" "${FAKE_BIN}/topup_other.sh")" \
+  || fail "cross_repository_expired_isolation: mixed recovery tick failed"
+jq -e --arg child_label "${expired_a_label}" '
+  .status == "ready"
+  and (.reconcile_actions | length) == 1
+  and .reconcile_actions[0].job_id == "A:snapshot-0"
+  and .reconcile_actions[0].claim_generation == 1
+  and .reconcile_actions[0].child_label == $child_label
+  and (.spawn_grants | length) == 1
+  and .spawn_grants[0].job_id == "B:snapshot-0"
+  and .spawn_grants[0].project == "group/other"
+  and .spawn_grants[0].claim_generation == 1
+' <<<"${expired_isolation_output}" >/dev/null \
+  || fail "cross_repository_expired_isolation: A recovery suppressed B"
+[ "$(cat "${CALL_LOG}")" = $'reserve:expired-other\ntopup:other\nrecord:B:snapshot-0\nbind:B:snapshot-0:1' ] \
+  || fail "cross_repository_expired_isolation: B did not advance exactly once"
+jq -e '
+  .active_jobs["A:snapshot-0"].status == "reserved"
+  and .active_jobs["A:snapshot-0"].claim_generation == 1
+  and .active_jobs["A:snapshot-0"].claim_token == null
+  and .active_jobs["B:snapshot-0"].status == "preparing"
+  and .active_jobs["B:snapshot-0"].claim_generation == 1
+' "${SCHEDULER_ROOT}/scheduler_state.json" >/dev/null \
+  || fail "cross_repository_expired_isolation: claim fences diverged"
 
 echo "ok tick coordinator recovers launch stages and explicit runtime reconciliation"

@@ -72,14 +72,15 @@ Core contract:
   acceptance emitter. After every resolved runtime action, including a durable
   spawned or launch-failed record, they emit and return the exact five-field
   acceptance. Because the embedded tick is global, the fixed emitter rejects
-  while any hot `action_emitted` spawn acknowledgement is still pending, even
-  when that action belongs to an older batch. A nonzero emitter result must
-  stop the turn and must never be rewritten as a successful receipt.
-  The heartbeat does not leave that gate permanent: after the dedicated
-  spawn-ack lease expires, it atomically fences only the exact emitted claim
-  through the canonical reservation wrapper and returns runtime reconciliation
-  before any new spawn. Explicit child-label enumeration still decides whether
-  to restore the old child or open the next claim generation.
+  only when this batch owns a hot `action_emitted` spawn acknowledgement. An
+  older batch's ambiguous action remains fenced to its own physical job and
+  does not suppress this batch's receipt. A nonzero emitter result must stop
+  the turn and must never be rewritten as a successful receipt. After the
+  dedicated spawn-ack lease expires, the heartbeat atomically fences only the
+  exact emitted claim through the canonical reservation wrapper and returns
+  runtime reconciliation for that job while unrelated repositories continue
+  through top-up. Explicit child-label enumeration still decides whether to
+  restore the old child or open its next claim generation.
 - `record_executor_batch_spawn.sh` accepts its spawned or launch-failed object
   only as strict JSON stdin. Never pass its result fields as environment
   variables; that environment contract belongs only to Path A's
@@ -89,7 +90,9 @@ Core contract:
   explanation, but it never authorizes reading a private spawn payload,
   manually calling `sessions_spawn`, editing launch state, or running a tick.
   An `action_emitted` ambiguity is resolved only from an exact Path D
-  `reconcile_emitted_spawn` action and its prescribed runtime enumeration.
+  `reconcile_emitted_spawn` action and its prescribed runtime enumeration. If
+  enumeration is itself ambiguous, leave only that job unresolved and continue
+  processing independent reconciliation actions and the current spawn grant.
 - The outer subagent receives `references/executor_prompt.md`.
 - The outer subagent makes one long call to `scripts/run_executor_attempt.sh`.
   That wrapper owns the complete acpx-to-finalization sequence and atomically

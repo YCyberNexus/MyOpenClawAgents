@@ -182,8 +182,9 @@ jq -cn "{status:\"reaped\",reaped_entries:[],protected_entries:[],unresolved_iid
 
 write_fake reserve_driven_batch_items.sh '
 if [ "${SERIAL_GATE_RESERVE_SENTINEL:-0}" = 1 ]; then
-  printf "%s\n" reserve-unexpected >>"${ORDER_LOG}"
-  exit 98
+  printf "%s\n" reserve-after-isolation >>"${ORDER_LOG}"
+  jq -cn "{status:\"idle\",grants:[],active_count:1,available_slots:2}"
+  exit 0
 fi
 if [ "${FINALIZATION_GATE_TEST:-0}" = 1 ]; then
   printf "%s\n" reserve-finalization-gate >>"${ORDER_LOG}"
@@ -776,7 +777,7 @@ jq -e '
   || fail "failed reconciliation continued into scheduler operations: $(cat "${ORDER_LOG}")"
 
 serial_gate_output="$(SERIAL_GATE_RESERVE_SENTINEL=1 run_tick)" \
-  || fail "durable emitted-action serial gate failed"
+  || fail "durable emitted-action isolation failed"
 jq -e '
   .status == "idle"
   and .spawn_grants == []
@@ -785,11 +786,14 @@ jq -e '
     .operation == "spawn_ack"
     and .job_id == "A:snapshot-0"
     and .status == "pending")] | length) == 1
+  and ([.operation_results[] | select(
+    .operation == "launch_isolation"
+    and .status == "active"
+    and (.isolated_job_ids | index("A:snapshot-0") != null))] | length) == 1
 ' <<<"${serial_gate_output}" >/dev/null \
-  || fail "a prior unacknowledged spawn did not close the global launch gate"
-if grep -q '^reserve' "${ORDER_LOG}"; then
-  fail "global launch gate reached reservation before recording the prior spawn"
-fi
+  || fail "a prior unacknowledged spawn was not isolated to its physical job"
+[ "$(grep -c '^reserve-after-isolation$' "${ORDER_LOG}")" -eq 1 ] \
+  || fail "job-local launch isolation prevented unrelated reservation"
 
 deferred_callback_output="$(
   DEFER_DRIVEN_CALLBACK_DELIVERY=1 SERIAL_GATE_RESERVE_SENTINEL=1 run_tick
@@ -1414,6 +1418,29 @@ actual_record_order="$(grep '^record-order:' "${ORDER_LOG}" | sed 's/^record-ord
 expected_record_order='A:snapshot-0'
 [ "${actual_record_order}" = "${expected_record_order}" ] \
   || fail "serial preparing/bind did not preserve the first scheduler grant: ${actual_record_order}"
+
+# The cross-project fixture deliberately stops before recording A's spawn ack.
+# Archive its synthetic launch actions before the independent recovery tests
+# below; those tests replace scheduler state and must not inherit unrelated
+# runnable grants now that launch ambiguity is job-local rather than global.
+archive_launch_actions cross_project_order
+cat >"${FAKE_BIN}/reserve_driven_batch_items.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf "%s\n" reserve-recovery-idle >>"${ORDER_LOG}"
+jq -cn '{status:"idle",grants:[],active_count:1,available_slots:2}'
+EOF
+cat >"${FAKE_BIN}/dispatch_driven_topup.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+request="$(cat)"
+printf "topup-recovery:%s\n" \
+  "$(jq -r '.grants | map(.job_id) | join(",")' <<<"${request}")" \
+  >>"${ORDER_LOG}"
+jq -cn '{status:"waiting_for_callbacks",dispatch_entries:[],skipped_entries:[]}'
+EOF
+chmod +x "${FAKE_BIN}/reserve_driven_batch_items.sh" \
+  "${FAKE_BIN}/dispatch_driven_topup.sh"
 
 # A native child can finish while its best-effort OpenClaw completion announce
 # is lost across a gateway restart. The heartbeat must reconcile the exact

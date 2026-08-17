@@ -99,24 +99,25 @@ leaves the action at `ack_received` for safe recovery.
 ## `emit_driven_batch_acceptance.sh`
 
 Rebuilds the exact five-field I1 receipt from durable scheduler state. Before
-emitting success it scans all hot launch actions and rejects any action still
-at `action_emitted`; the embedded global tick may return a grant owned by an
-older batch. This is the deterministic fence between
-the intake wrapper and the OpenClaw-only runtime call: skipping
-`sessions_spawn` or its mandatory recorder can no longer look like successful
-batch acceptance. `ack_received` and later stages are safe because the runtime
-identity is already durable and heartbeat recovery owns the remaining recorder
-stages. A live path that concurrently moves to the cold archive is accepted
-only when the same basename is present there with `stage=completed`; other
-read/layout errors remain fail-closed.
+emitting success it scans all hot launch actions and rejects an
+`action_emitted` item owned by the batch being acknowledged. This is the
+deterministic fence between that intake and the OpenClaw-only runtime call:
+skipping its `sessions_spawn` or mandatory recorder cannot look like successful
+batch acceptance. Another batch's ambiguous action is job-locally isolated and
+does not suppress this receipt. `ack_received` and later stages are safe because
+the runtime identity is already durable and heartbeat recovery owns the
+remaining recorder stages. A live path that concurrently moves to the cold
+archive is accepted only when the same basename is present there with
+`stage=completed`; other read/layout errors remain fail-closed.
 
 The executor heartbeat pairs that fence with bounded recovery. A hot
 `action_emitted` record waits on its dedicated spawn-ack lease (180 seconds by
 default). At expiry, the tick permits `reserve_driven_batch_items.sh` to recover
-only the exact matching preparing job, stops before project top-up, and emits
-the ordinary runtime-evidence reconciliation action. This prevents an
-interrupted older batch from holding every later intake behind a permanent ACK
-gate without weakening the no-duplicate-spawn fence.
+only the exact matching preparing job and emits the ordinary runtime-evidence
+reconciliation action. That job is excluded from reservation replays and
+running continuations until reconciliation, while unrelated repositories may
+continue through top-up. This removes cross-repository head-of-line blocking
+without weakening the no-duplicate-spawn fence.
 
 ## `record_driven_batch_launch.sh`
 
